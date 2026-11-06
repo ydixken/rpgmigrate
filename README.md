@@ -70,6 +70,10 @@ See the [Testing guide](docs/testing.md).
 
 See the [bounded storage pilot](docs/getting-started.md#storage-pilot).
 
+## Storage results
+
+See the [macOS arm64 pilot results](docs/research/2026-11-06-storage-pilot.md).
+
 ## Durability
 
 See the [durability design and runtime gates](docs/durability.md).

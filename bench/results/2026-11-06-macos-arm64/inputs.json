@@ -1,0 +1,12 @@
+{
+  "bench/storage.rs": "00b6bd23633de72a1b02b220ebfbc27d012a1990cb7f4a2430c878fcb760faf8",
+  "bench/storage/config.rs": "b7564ea6105032866c1d6496fe5adbeabb6e5c44fec676a3221cfd8c6e9ea22d",
+  "bench/storage/cases.json": "5f9dd5c84fc46760aa4590bfbcd2f313826533722e9d8e50398152e3c3d9599d",
+  "tests/storage_recovery.rs": "35a558b20cb48bfa293bb8ea14f26a30cd216940e807bfcefc03216d453469e1",
+  "bench/storage/format.rs": "2e277a0c18c06c746ac15ca558bc059059d56b67cc2f4f20b38eb83ef332f737",
+  "bench/storage/sqlite.rs": "580a4612c45f427cdeb6703f8ffbb4176d3c0bfb71e7f94a19e9ef4fcadb2a1b",
+  "bench/storage/journal.rs": "4c5dc2561f18f085d4965a1aea81e280e82557264de0e76139cde3b090b0a309",
+  "bench/storage/redb.rs": "67a9edb861b71984fcd7432b97ce9a981a8a5129c826ecaa6d50bddf7bf6a5a2",
+  "Cargo.toml": "34844ec8ab5d95cc541e007a1a1b3acfaada1f716994c0a654f8b2d709e9b9ed",
+  "Cargo.lock": "33778c3872ebac34b2ce9446067729ce9b45b03ce5d633314b0060810a6a9828"
+}

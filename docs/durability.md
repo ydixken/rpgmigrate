@@ -86,11 +86,15 @@ An oversized transaction must take a durable path before source release.
 
 ## Require a writing barrier
 
-A barrier updates a logged bookkeeping row after all covered target commits, then commits synchronously.
-It must generate WAL and identify the covered contiguous prefix on the fenced target.
+One synchronous COMMIT can cover user changes, their logged checkpoint, and a logged barrier-counter update.
+After positive COMMIT acknowledgment, that transaction can produce the durable proof without a second COMMIT for the group.
+For prior asynchronous commits or no new CDC data, use a standalone synchronous transaction that changes the logged barrier counter.
+Both forms must generate WAL and identify the covered contiguous prefix on the fenced target.
 A read-only transaction, empty COMMIT, or asynchronously visible checkpoint is insufficient.
-The logged target checkpoint shares the transaction that changes user data.
-It is the recovery authority, not replication-origin progress alone.
+
+An empty checkpoint proof covers zero CDC transactions.
+It cannot invent requested end positions or establish COPY snapshot coverage.
+The logged target checkpoint remains the recovery authority, not replication-origin progress alone.
 
 ## Assess failure consequences
 
