@@ -1,0 +1,18 @@
+[
+  "apply::checkpoint::live_tests::atomic_checkpoint",
+  "apply::checkpoint::live_tests::rollback_checkpoint",
+  "apply::checkpoint::live_tests::exact_identity_order",
+  "apply::checkpoint::live_tests::two_owner_fence",
+  "apply::checkpoint::live_tests::lost_commit_reply",
+  "apply::checkpoint::live_tests::async_barrier",
+  "apply::checkpoint::live_tests::metadata_collision",
+  "apply::checkpoint::live_tests::provisioning_recovery",
+  "apply::checkpoint::live_tests::metadata_shape_acl",
+  "apply::checkpoint::live_tests::missing_privileges",
+  "apply::checkpoint::live_tests::foreign_replacement",
+  "apply::checkpoint::live_tests::commit_rollback_tag",
+  "apply::checkpoint::live_tests::deferred_setting_restore",
+  "apply::checkpoint::live_tests::readonly_refusal",
+  "apply::checkpoint::live_tests::standby_refusal",
+  "apply::checkpoint::live_tests::backend_fence_loss"
+]

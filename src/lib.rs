@@ -1,8 +1,10 @@
+mod apply;
 mod catalog;
 mod cli;
 mod config;
 mod contracts;
 mod copy;
+mod identity;
 mod pg;
 mod state;
 

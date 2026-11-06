@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 PG_VERSION = "17.11"
-ENGINE_CASES = 14
+ENGINE_CASES = 30
 INTEGRATION_CASES = 40
 
 
@@ -61,7 +61,10 @@ def validate_output(stage, output):
         full = re.findall(r"^E1 verified (\d+) exact cases on PostgreSQL ([\d.]+)$", output, re.M)
         if engine != [str(ENGINE_CASES)] or full != [(str(INTEGRATION_CASES), PG_VERSION)]:
             raise VerificationError("missing or incorrect E1 inventory/version receipt")
-        return {"engine": ENGINE_CASES, "integration": INTEGRATION_CASES}
+        faults = [line for line in output.splitlines() if line.startswith("Authority faults ")]
+        if faults != ["Authority faults verified 2 held COMMIT replies and observed fence releases"]:
+            raise VerificationError("missing or incorrect authority fault/fence receipt")
+        return {"engine": ENGINE_CASES, "integration": INTEGRATION_CASES, "authority_faults": 2}
     if stage == "test-db-self-check":
         records = [json.loads(line) for line in output.splitlines() if line.startswith('{"fingerprints":')]
         if len(records) != 1 or any(records[0].get(key) != value for key, value in {

@@ -52,12 +52,14 @@ class Cases:
         if not path.exists():
             return
         value = json.loads(path.read_text())
-        assert value["magic"] == "RPGMIGRATE" and value["format_version"] == 1
+        assert value["magic"] == "RPGMIGRATE" and value["format_version"] == 2
+        assert value["target_provenance"] == [], "COPY receipt contains target authority provenance"
         assert value["copy_complete"] is None, "completion published after failure"
 
     def completed(self, tables, rows, output, min_bytes=1):
         value = json.loads((self.state / "manifest.json").read_text())
-        assert value["magic"] == "RPGMIGRATE" and value["format_version"] == 1
+        assert value["magic"] == "RPGMIGRATE" and value["format_version"] == 2
+        assert value["target_provenance"] == [], "COPY receipt contains target authority provenance"
         assert len(value["run"]) == 16
         assert Path(value["canonical_path"]) == self.state.resolve()
         receipt = value["copy_complete"]

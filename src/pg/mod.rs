@@ -15,11 +15,9 @@ mod prepared_live_tests;
 )]
 pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
 
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "E3 applier integration is pending")
-)]
 pub(crate) use ffi::PgParam;
+
+pub(crate) use ffi::TransactionStatus;
 
 use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};
 

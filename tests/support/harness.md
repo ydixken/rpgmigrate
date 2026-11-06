@@ -20,6 +20,7 @@ Run Python with assertions enabled: the shared harness refuses optimized executi
    For example, the PG17 case declares `17.11` and `170011` in its image recipe.
    The harness rejects missing or inconsistent pairs and compares actual versions with the declared expectation.
    It never derives expected versions from the server probe.
+   Authority and full-engine fixtures also require the matching `pg_basebackup` executable.
 
 2. Check the isolation, independent fingerprints, corruption controls, and wire faults with `psql`.
 
@@ -45,17 +46,56 @@ Run Python with assertions enabled: the shared harness refuses optimized executi
    python3 tools/test-db.py --prepared -- cargo test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
    ```
 
-6. Run all fourteen transport, prepared, catalog, and COPY module cases together.
+6. Run the sixteen target authority cases.
+
+   ```sh
+   python3 tools/test-db.py --authority -- cargo test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1
+   ```
+
+7. Run all thirty transport, prepared, authority, catalog, and COPY module cases together.
 
    ```sh
    python3 tools/test-db.py --engine -- cargo test --locked --lib -- --ignored --test-threads=1
    ```
 
-7. Run the actual executable against the complete E1 case inventory.
+8. Run the actual executable against the complete E1 case inventory.
 
    ```sh
    python3 tools/test-db.py -- cargo test --locked --test copy_integration -- --test-threads=1
    ```
+
+9. Prove the authority fixtures and held-COMMIT faults independently with `psql`.
+
+   ```sh
+   python3 tests/support/authority_selfcheck.py
+   ```
+
+Use a separate `CARGO_TARGET_DIR` for each concurrent Rust verification worker.
+
+## Authority fixtures
+
+Authority tests use a separate database through `RPGMIGRATE_TEST_AUTHORITY_TARGET`, leaving the original engine fixtures isolated.
+The context file supplies the private parent directory for native state.
+`RPGMIGRATE_TEST_AUTHORITY_ADMIN` permits setup inside this owned database.
+`RPGMIGRATE_TEST_AUTHORITY_RESTRICTED` has no CREATE privilege; tests grant only the preprovisioned object privileges they exercise.
+The positive preprovisioned case must use `e1_target` as object owner and `e3_restricted` as runtime user, with no ownership membership and only schema USAGE plus table SELECT/INSERT/UPDATE.
+The authority database explicitly denies `pg_control_system()` EXECUTE to PUBLIC and the restricted role.
+`RPGMIGRATE_TEST_AUTHORITY_READONLY` selects a read-only session on the normal primary.
+`RPGMIGRATE_TEST_AUTHORITY_STANDBY` connects to a physical standby copied from this owned primary, with private data and socket directories and TCP disabled.
+`RPGMIGRATE_TEST_AUTHORITY_FSYNC_OFF` connects to a third disposable primary started with `fsync=off` for refusal tests.
+The normal primary and standby retain `fsync=on` throughout.
+The wrapper stops both extra child postmasters before stopping and removing the original cluster.
+
+Launch `RPGMIGRATE_TEST_AUTHORITY_FAULT_HELPER` with `RPGMIGRATE_TEST_PYTHON` and `--case lost_commit_reply` or `--case provisioning_recovery`.
+The first JSON line supplies `ready`, an explicit `conninfo`, and a private `receipt` path.
+Send one JSON object per stdin line with `op` set to `arm`, `status`, `release`, or `quit`.
+Each response includes the operation, observed `fault_hits`, `backend_pid`, `commit_tag`, `holding_backend`, `backend_connection_closed`, `held_fence_observed`, and `released_fence_observed`.
+Receipt `status` remains `pending` until the COMMIT and both fence observations are complete, then becomes `observed`.
+Arming drops the next real positive COMMIT reply, closes the client connection, and retains the old backend until release.
+The release operation queries the actual advisory lock and backend before closing the upstream connection, then waits for their observed disappearance.
+Tests must independently demonstrate failed fence acquisition while that backend remains held.
+Unarmed COMMIT and ROLLBACK messages do not satisfy a fault receipt.
+The relay bounds a held backend to 45 seconds and closes it on helper exit or fixture cleanup.
 
 ## Fixture and oracle
 
@@ -91,11 +131,16 @@ The full wrapper requires one result per manifest case with no duplicates, omiss
 Every fault case requires an observed hit and nonzero exit.
 The transport-only wrapper independently checks its exact five libtest names and rejects ignored cases.
 The prepared wrapper requires the seven exact names in the independent [prepared inventory](prepared_cases.json).
-The engine wrapper requires all five transport, two catalog/COPY, and seven prepared cases.
+The authority wrapper requires the sixteen exact names in the independent [authority inventory](authority_cases.json).
+The engine wrapper requires all five transport, two catalog/COPY, seven prepared, and sixteen authority cases.
 Every module profile rejects empty or duplicate expected names, missing cases, changed names, duplicate results, and ignored or failed tests.
 Running zero tests or an unrelated command cannot satisfy any suite.
+Both authority and full-engine success also require one observed COMMIT fault receipt for each of `lost_commit_reply` and `provisioning_recovery`, including the held and released backend fence evidence.
+Both profiles reject missing receipts, zero fault hits, and pending or ignored receipt status through the same wrapper validation function.
 
 The native completion receipt is `manifest.json` in the explicit run directory.
+E1 receipts require native format version `2` and an empty `target_provenance` array.
+Version `1`, unknown versions, missing provenance, and nonempty provenance fail the COPY receipt oracle.
 Successful full COPY must report two tables and 10,003 rows in `copy_complete`.
 The command's success JSON must match the manifest's run identity, state format version, and counts without publishing private paths.
 Failed or uncertain runs must leave `copy_complete` null, or leave no native manifest when refusal precedes state creation.

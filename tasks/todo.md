@@ -45,14 +45,14 @@ Git initialization reported `feat/bootstrap` and no remotes.
 Context documentation and environment readiness are complete.
 E0 owns package/root contracts, root modules, Makefile, README, and this task status after the documentation handoff.
 Transport, CLI, and native-state implementations are handed off, with their focused review evidence below.
-Harness integration continues for the revised target execution profile.
+Harness integration covers the native version-two and target-authority slice.
 State worker `01a1b228-5b80-7b83-9a6d-d32d77098814` completed its assigned module.
-COPY/catalog worker `01a1b22d-2a70-7321-bd8d-ca3a33441f56` is active.
+COPY/catalog worker `01a1b22d-2a70-7321-bd8d-ca3a33441f56` completed its reviewed handoff.
 Linux/CI worker `01a1b243-2d99-7521-ba4c-9e3912c025b0` owns the workflow, `tools/ci/`, and `docs/testing.md`.
 E2 format worker `01a1b241-49b2-7062-af67-c68dea4b8a1c` owns the isolated experiment codec and its test target.
 The root entry point routes help, native version, and real ping.
 The root COPY route calls native state, connection, planning, and COPY interfaces.
-The COPY coordinator is implemented and its live database verification is active.
+The COPY coordinator passed the recorded 40-case executable gate, including native version-two receipts.
 The bounded E1 profile passed its recorded correctness gates; full migration compatibility and performance remain unverified.
 No GitHub workflow has run because this checkout has no remote.
 The leader approved a Linux fixture profile with explicit expected PostgreSQL `17.11` and numeric version `170011`.
@@ -211,8 +211,8 @@ Separate settings review passed seven focused tests and proved all preexisting b
 SQLite reports queried values, journal nests that catalog evidence, and redb labels configured policies without claiming introspection or RSS limits.
 The 31-package dependency delta passed independent checksums, licenses, advisory, features, and bundled SQLite source review.
 The previous 21 package records were unchanged; the locked graph SHA-256 is `33778c3872ebac34b2ce9446067729ce9b45b03ce5d633314b0060810a6a9828`.
-The driver is frozen for independent review with 86 passing recovery tests: 19 common, 58 backend, and nine driver cases, with no ignored tests.
-The default test gate requires exact discovery of all 86 cases before execution; the reviewed 22-case format gate remains required.
+The reviewed driver passed 86 recovery tests: 19 common, 58 backend, and nine driver cases, with no ignored tests.
+The committed experiment's default gate requires exact discovery of all 86 cases and all 22 format cases before execution; the newer identity slice adds one format/JSON case.
 `make lint` passed after the driver freeze.
 The manifest requires three nonempty workloads, all three candidates, and three repetitions in fresh child processes.
 The runner records storage throughput, checkpoint/reopen/two-pass scan timings, queried or configured settings, and per-child RSS.
@@ -235,21 +235,169 @@ The report contains seven measured phases plus total time, including encoding, c
 Observed giant-transaction child peak RSS ranges were 7274496 bytes for segmented storage, 77266944 to 77283328 for redb, and 94978048 to 94994432 for SQLite, with the same configured 67108864-byte cache budget.
 These are three repetitions on one Mac with warm-after-write reads and do not select a backend or establish production memory or durability bounds.
 The actual release executable rejected `LIBSQLITE3_SYS_USE_PKG_CONFIG=1` with structured exit one before creating an output directory.
+Jason's [research note](../docs/research/2026-11-06-storage-pilot.md) and four audited JSON archives under `bench/results/2026-11-06-macos-arm64` passed Faraday's final read-only review.
+All archived bytes match the originals, all ten input hashes match committed `905c323`, and all nine result rows were independently recomputed.
+The note SHA-256 is `4050f4fd9dd57f420518e3f1321323a60f8203c1334899f424680a83ff0a7f41`; the README now links to it.
+The reviewed six-file documentation/archive set and README pointer are committed as `08a63ebb5ab908b8b3d9ce4e5b5344be9dccb019` directly on the qualified `905c323` source base.
+Only those seven files were staged; review hashes, staged links, Markdown checks, JSON decoding, and whitespace checks passed without runtime reruns.
 
 ## Prepared transport and documentation
 
 The private prepared-transport slice passed independent unit and seven-case live review.
-The full engine inventory is 14 cases, preserving all seven E1 cases; the transport-only inventory remains five and executable COPY remains 40.
+The committed prepared snapshot's full engine inventory is 14 cases, preserving all seven E1 cases; the transport-only inventory remains five and executable COPY remains 40.
 Harness and CI guard review passed 12 and ten offline tests on Python 3.15 and 3.9, including 36 negative checks.
 The prepared API remains unused by a production CDC consumer and does not enable runtime CDC commands.
 Narrow expected-dead-code attributes must be removed when the checkpoint/applier consumer is integrated.
 Canonical codec promotion remains deferred until that consumer and its API are ready.
-The [durability guide](../docs/durability.md) passed independent review at SHA-256 `b152b61874e55f7fd4214c4644aad8dbfa16642898f74b54200b5d03097cb526` and separates the approved design from runtime gates.
+The initial [durability guide](../docs/durability.md) passed independent review at SHA-256 `b152b61874e55f7fd4214c4644aad8dbfa16642898f74b54200b5d03097cb526` and separates the approved design from runtime gates.
+Its later barrier wording passed the same read-only review at SHA-256 `f533ba943ac2a165325419a697d2b4639d428af4dee511cf93b10123e618077c`.
 A concurrent broad test run reported a transient missing `target/debug/rpgmigrate` executable in CLI checks.
 The root worker's serialized gate passed after file freeze and did not reproduce that failure.
 Its original cause remains unproven; no code fix was made on the assumption of a build race.
 Prepared transport, its harness/CI inventories, and the durability guide are committed as `3725c8d`.
 The exact prepared-only staged export passed `make lint` against a byte-identical copy of the verified native artifact and the foundation dependency graph.
+
+## Canonical identity and E3 consumer integration
+
+- [x] Close the reviewed prepared and storage commits: `3725c8d` and `905c323`.
+- [x] Extract the seven reviewed ID/position definitions into private `src/identity.rs` without codec or runtime dependency changes.
+- [x] Re-export canonical `RunId` through runtime contracts and preserve benchmark/test imports through the same source file.
+- [x] Hand off exact `crate::identity` types to the state and authority authors.
+- [x] Close independent state version-two and canonical identity review with 54 state and 23 format tests passing.
+- [x] Close review of the metadata role-name correction and quoted/numeric writer regression.
+- [x] Close independent CI receipt-guard review at the frozen three-file hashes.
+- [x] Close independent harness review at the frozen ten-file hashes.
+- [x] Close independent checkpoint review at its frozen hash.
+- [x] Require the harness owner's final exact 30-case engine receipt after the metadata correction.
+- [x] Resolve staging warnings through the real provenance/authority consumers and narrow expectations on pending stage interfaces only.
+- [x] Integrate state-owned version-two provenance and the internal authority consumer after their independent handoffs.
+- [x] Verify identity/format regressions and the integrated consumer gates before another commit.
+
+The state worker owns native provenance types and operations, with no SQL or authority dependency.
+Canonical `RunId`, `SourceId`, and `StreamId` derive serde for version-two state; named identity objects reject unknown fields.
+The other four type definitions keep their reviewed fields and traits, and all wire codec logic remains experiment-only.
+The new identity JSON regression failed to compile before serialization support existed, then passed with all 23 format/identity and 86 recovery tests.
+The extraction-only check reported six unused-type warnings; real consumers now use these types, and the integrated all-targets warning check passed.
+No lint suppression or redundant construction was added to the identity file.
+The authority's nonempty frontier carries the full `TxId`, `TxSeq`, commit LSN, and end LSN so equal positions and XID reuse cannot alias a descriptor.
+An empty frontier uses sequence zero with no transaction identity; begin ordinal is not commit order.
+The authority worker owns `src/apply/{mod,checkpoint,checkpoint_live_tests}.rs` and imports the state-owned provenance operations without a reverse dependency.
+The metadata helper reuses named prepared statements per connection without adding a generic cache or transaction ownership.
+Carver owns the role-name correction in `src/apply/metadata.rs` and its quoted/numeric writer regression inside the existing `missing_privileges` live case.
+That narrow live-test handoff changes no inventory count or harness fixture; Descartes coordinates the scoped regression and final combined run.
+Its author reports nine focused tests passing at SHA-256 `c713fa39da7cbd4ddad161682ed9630768387ddb60166db61cf0180d0d7fa93d`.
+Independent metadata review reran those nine tests and found a role-name lookup defect: casting raw `CURRENT_USER` through `regrole` reparses quoted or numeric writer names instead of matching the catalog name.
+The metadata owner replaced the two reparsing casts with the OID from an exact `pg_roles.rolname = CURRENT_USER` join.
+The existing `missing_privileges` case reproduced both quoted-name and numeric-name failures, then passed both after that correction on PostgreSQL 14.24.
+The root worker verified the one-case RED and GREEN logs and the new metadata/live-test hashes; this scoped run does not close the 16-case or 30-case gates.
+The corrected metadata hash is `46006ba2cf17418d7f1a1c0e2546359aeca658b6ec981cf175d16af5667f0b8e`, and the live-test hash is `de6fcc1324068fd4fbd1d5fef6a2a7bbeca18a998a2417e43a6a35abadf729e3`.
+The owner reports nine metadata unit tests, formatting, and scoped Clippy with warnings denied passing; the corrected two-file handoff is frozen.
+Carson passed the corrected metadata and independently reran all nine metadata unit tests; reversing the three SQL changes reproduced the prior reviewed file hash exactly.
+Mendel passed the checkpoint implementation without a finding and independently ran its four focused unit tests against the controlled libpq artifact.
+He reviewed the local-error poison regression and held-COMMIT evidence without repeating live tests; metadata SQL remained a separate review.
+Planck passed the frozen harness and closed the read-only review.
+Faraday passed the 30-case CI/footer delta without a blocker.
+Zeno, Goodall, and Carson have closed their author/reviewer handoffs; the root worker retains broad-gate ownership after these remaining scopes freeze.
+Restricted preprovisioned operation binds the actual object owner separately from the migration role and requires explicit schema/table grants without owner-role membership.
+Its production transaction commit is synchronous; asynchronous execution is test-private and does not enable relaxed mode or source ACK policy.
+The same logged checkpoint UPDATE increments its barrier counter, and positive synchronous COMMIT returns an opaque proof without a second COMMIT.
+Standalone barriers use a real logged counter write to cover asynchronous or no-new-data flushes, with the same target and identity checks.
+They also support an empty checkpoint through `Option<Frontier>`; an empty proof covers zero CDC transactions, not a requested end position or COPY snapshot.
+The transport owner adds only the checked transaction-status accessor needed by that authority.
+The accessor passed independent review and two focused tests; its author has frozen the handoff.
+The harness defines 16 authority case names under `apply::checkpoint::live_tests::` and requires all 30 engine cases, including the previous 14.
+The root `test-authority` target uses that exact harness profile and namespace; the default unit filter excludes only the separately gated live namespace.
+The authority bodies, fixtures, and receipt guards passed independent review and the final integrated live gate.
+The authority author reported a 16-case live pass including fsync-off, but the leader then found an uncovered local-error poison gap.
+Successful DML followed by a caught local prepare/execute error could leave PostgreSQL in a committable transaction.
+The authority owner changed only `checkpoint.rs` and `checkpoint_live_tests.rs` for a sticky failed-state fix and a regression inside the existing `commit_rollback_tag` case.
+Explicit rollback remains allowed; the inventory stays 16 authority and 30 combined engine cases.
+The poison regression reproduced successful COMMIT after a caught local error, then passed after a sticky failed-state fix.
+The existing case now covers five local prepare/execute error variants after prior DML and verifies unchanged data/checkpoint state; explicit rollback remains available.
+The corrected author run passed all 16 cases on PostgreSQL 14.24/140024 with both held-COMMIT fault receipts, 13 apply/metadata unit tests, and scoped Clippy.
+The revised checkpoint hash is `315a90c78db6a18a5be308cf705d538bc45a8f9fb79ba9c7503fecd824893596`; that poison run used live-test hash `35f066fe98a8de470ac60adeee8587304603d5641baa868c7c3b33a6b8e5a09b`, before the later role-name regression.
+All independent authority, metadata, harness, and CI reviews passed, followed by the serialized root check/lint/test gate.
+The poison fix left metadata, state, and canonical identity hashes unchanged.
+The state author handed off `src/state.rs` at SHA-256 `16f445d44c593cac570550df770c5ba107068e3eea142b3a8cc21923502f6081` with 54 tests passing and no ignored cases.
+The state handoff includes strict persisted-data checks, a single-record/16 KiB cap, immutable provisioning identity, and publication errors before and after rename.
+The state author's earlier scoped Clippy run encountered unfinished authority staging diagnostics; the later integrated gate passed with warnings denied.
+Planck passed the frozen state version-two implementation and canonical identity extraction review, independently running all 54 state and 23 format/identity tests with no failures or ignored cases.
+The reviewed state and identity hashes matched at the end of review, including unchanged codec golden bytes and strict identity JSON.
+The active authority body was excluded from that focused review and subsequently passed its separate review and integrated gates.
+State and identity owners will make no further edits without a review finding or a concrete integration need.
+The root worker removed fulfilled staging expectations on PG prepared calls, transaction status, and their exports after actual authority call sites landed.
+Only the binary parameter variant retains a narrow pending-serial-applier expectation; PG logic and API bodies are unchanged.
+The attribute-only comparison is recorded in `target/pg-expectation-cleanup-evidence.json`, and the final root lint gate verified the integrated uses.
+The state owner then added one narrow expectation to the internal recovery entry point until the production resume consumer is wired.
+Removing that attribute reproduces the reviewed state hash exactly; the new state hash is `ed3e9ff4caaae7f94432358c65ccdaffe416a6b01d904d25b5ca78f45f7c769b`.
+The owner reports scoped library Clippy with warnings denied and one intent/reload regression passing after that nonbehavioral change.
+No helper, identity, or state behavior changed, and the complete 54-case suite was not repeated for the attribute alone.
+The harness owner updated COPY receipt checks to require literal format version two and empty target provenance, preserving the 40-case inventory.
+The new version oracle failed against the old guard before all 13 harness tests passed.
+The first authority atomic test reached the intended unavailable-provisioning error; this is failing implementation evidence, not a passing authority case.
+The harness owner subsequently passed all 40 COPY cases against native version-two state on controlled PostgreSQL 14.24 using an isolated target directory.
+That 25.40-second run required literal format version two and empty target provenance without changing the expected case inventory.
+The harness owner also reports 14 fixture unit tests and authority self-checks passing for restricted ownership/grants, real standby, isolated fsync-off, and two held-COMMIT faults.
+The fixture checks were followed by the final 30-case engine gate on the reviewed authority/metadata freeze.
+The harness owner's earlier 30-case run preceded the local-error poison fix and is superseded for the final gate.
+The frozen harness rejects missing, zero, ignored, or pending authority-fault receipts in both the authority-only and combined-engine profiles.
+Its owner reports all 14 offline guards passing on Python 3.15 and 3.9, plus a real-psql self-check of the restricted owner, standby, fsync-off server, and both held/released COMMIT faults.
+The root worker verified all ten frozen harness file hashes against `target/verify/harness-authority/harness-freeze.sha256`, SHA-256 `f6470f54aad9e68e018b4f6b4bebf9069f23c6925c45bf268eb0323d33049781`.
+Planck independently passed all 14 offline harness tests on both Python versions and 24 inventory negatives, with all ten frozen files unchanged.
+A 30-case run had started before the metadata finding arrived and passed in 6.00 seconds with both fault receipts; it remains intermediate evidence until the role-name correction is covered.
+That log is `target/verify/harness-authority/engine30-before-role-fix.log`, SHA-256 `9fa2edf095423c73f11178aab046ce4ff8658409224f18e4bd70a37ef6b89058`.
+The leader released the harness owner as sole producer of the final 30-case gate after the corrected metadata freeze, in parallel with independent review.
+The final run passed all 30 cases with zero failures or ignored cases in 8.13 seconds on PostgreSQL 14.24 and verified both held-COMMIT/fence-release receipts.
+Its log is `target/verify/harness-authority/engine30-final.log`, SHA-256 `495fa37920c31a30cde1613fc652ce666710807e4b05708ff2877c6b08267445`.
+The metadata, checkpoint, live-test, and ten harness hashes matched before and after that run; the root worker verified the final log and matching frozen hashes before starting its gate.
+The leader authorized serialized root lint/check/test, documentation and ledger review, and a conventional commit of the reviewed snapshot, with no further PG/apply source edits before commit.
+A fresh Linux gate will use that exact commit; unrelated exports and local proof artifacts stay outside the commit.
+The CI owner froze its 30-case parser and exact two-fault footer requirement after 12 offline tests and shell, YAML, workflow, syntax, and whitespace checks passed.
+The tests reject the old 14-case result and missing, duplicate, wrong-count, unheld, pending, or ignored fault evidence.
+Faraday independently passed all 12 offline CI tests, refused 27 negative receipts, and accepted six valid receipt orders.
+The checked engine inventory is exactly 16 authority, seven prepared, and seven other cases; COPY remains 40 and the Linux profile retains PostgreSQL 17.11.
+The root worker matched the reviewed hashes: `verify.py` is `42f16c256d2b341c8f32d03afff2a7b27de2043821e09dcf4814cac24e014046`, `test_verify.py` is `1fbbd7c8d0656fafbc1bf80bb883f9925d8c0933723c401b7b14cf1f5dc388dc`, and `docs/testing.md` is `6888ab9981c682de5c0a24b492fc048a350c491b274cf375ef8720a48e9608db`.
+No CI review blocker remains; no Linux run was performed for the new slice.
+The serialized root command was `env PATH="/opt/homebrew/bin:$PATH" make -j1 PQ_LIB_DIR="$PWD/target/native/libpq/lib" check lint test`.
+Native artifact verification, all-targets Cargo check, formatting, and all-targets Clippy with warnings denied passed.
+The default gate passed 222 Rust tests (113 unit, 23 format/identity, and 86 storage recovery/driver), plus 24 CLI, 20 native-build, and 14 harness tests.
+The 30 live cases were excluded from the default unit command and passed separately in the exact engine profile; no selected case was ignored.
+The gate log is `target/verify/root-authority/check-lint-test.log`, SHA-256 `15d142b0f2137541c15464d40073ca059da54d68d94431028b70200dc6b00569`.
+The existing native version-two COPY40 evidence remains applicable and was not repeated for authority-only changes.
+Target system identifiers are optional for restricted roles and older PostgreSQL versions; persisted identifiers must be verified when present.
+Receipt-only recovery still requires matching target evidence, and absence without strong binding fails closed.
+No DSN persistence or new privilege requirement is introduced.
+Public CLI resume remains unsupported until the complete authority path is integrated.
+The Linux arm64 worker passed all 11 stages for an ordinary export of committed `905c323`, separately from this newer working slice.
+The frozen run passed 184 Rust checks (76 unit, 22 format, 86 recovery/driver), 24 CLI, 20 native, 12 harness, ten CI guard, 14 engine, and 40 COPY cases on PostgreSQL 17.11/170011.
+Three oracle negatives, two wire faults, SCRAM, and stock-libpq refusal with zero connections also passed.
+The report is `target/ci-905c323-n59hsquu/report.json`, SHA-256 `4b0d82414097a73192c0b7a302162131f1b3b1cecd5bbc528eaf0868607fc7e8`, for source SHA-256 `f90665004d5589457b53864ff4f321ae3c175481abc655a3e9397ed3fcd191cc`.
+The worker verified all 77 committed files and their modes before and after the run.
+This verifies the archived commit, not the subsequent native-state/authority work, amd64, hosted CI, or Linux performance.
+
+## Approved next execution sequence
+
+- [x] Close the authority slice's independent reviews, final live gate, and serialized root checks.
+- [ ] Freeze the existing source CopyBoth transport proposal through the leader and implement it independently of storage selection.
+- [ ] Add E2 complete-transaction readers, storage qualification, and real-slot `test_decoding` ingestion.
+- [ ] Qualify multi-process access, reader pins, pruning, quotas, and recovery before choosing a production storage backend.
+- [ ] Connect `ReadyTxn`/`TxReader` to E3 serial apply and verify actual target effects and recovery.
+
+Beauvoir's focused read-only review covers source frontier semantics across plugins.
+The primary-source review reports that validated `test_decoding` COMMIT envelopes provide a transaction-end LSN but no physical commit-record position on PostgreSQL 9.6 and 18.
+It also records that baseline wal2json omits LSN fields by default, while pgoutput v1 provides both positions.
+The next receiver contract keeps `CommitLsn` physical, represents its absence explicitly with `Option`, requires `SourceEndLsn` for complete COMMIT, and preserves the decoder's envelope context.
+It must not fabricate a commit position from the end position or authorize keepalive ACK advancement.
+That separate tested contract change must address codec versioning if required and metadata shape/CHECK/proof semantics before the first decoder; it does not change this library-only authority snapshot.
+The archived single-writer pilot does not replace full E2 qualification or select a production backend.
+Newton's exact redb 4.5 three-process prerequisite probe passed on macOS with shared MultiWriter modes, live commit visibility, atomic checkpoint/deletion, and reader-pin retention across 16 commits.
+Compaction remained blocked until pin release; this result requires no IPC architecture change.
+Read-only open still skips integrity checks, and role ownership, pruning authority, quotas, crash recovery, Linux, and power-loss qualification remain open.
+The probe wrote only ignored artifacts and selects no backend.
+This sequence stays within the approved architecture; the leader freezes the transport API without a new user approval gate.
+No WAL runtime or applied-throughput result is claimed by the authority slice or storage pilot.
+
+## Retained first-slice limits
 
 The E1 command deadline is 300 seconds in total and does not reset between operations.
 The package declares the verified Rust 1.99.1 toolchain as its minimum.
@@ -266,8 +414,9 @@ Missing expected fixtures, missing test cases, and failed catalog queries remain
 
 ## Handoff
 
-Documentation checks passed across eight owned Markdown files with zero STE100 hard violations.
-Local links, fenced blocks, trailing whitespace, final newlines, and the em-dash prohibition also passed.
+The documentation bootstrap recorded checks across eight owned Markdown files.
+This snapshot's seven-file review passed 37 local links, fenced blocks, trailing whitespace, final newlines, and the em-dash prohibition.
+A supplemental strict STE scan reports prose-style findings, so this snapshot makes no full STE-compliance claim.
 These checks do not establish runtime correctness.
 The integration worker takes ownership of running updates to this file after the documentation handoff.
 E0/E1 signatures stay frozen unless the leader coordinates a change.

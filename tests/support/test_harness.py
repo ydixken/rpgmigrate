@@ -3,15 +3,18 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 
 from db_harness import (clean_environment, conninfo, expected_version, load_manifest, module_cases, run_command, validate_libtest_output,
                         validate_report, validate_success_output)
 from protocol_fault import error_sqlstate
+from e1_cases import Cases
 
 
 class HarnessTests(unittest.TestCase):
@@ -27,7 +30,11 @@ class HarnessTests(unittest.TestCase):
                  "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
                 [str(support.parents[1] / "tools" / "test-db.py"), "--prepared", "--", sys.executable,
                  "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
+                [str(support.parents[1] / "tools" / "test-db.py"), "--authority", "--", sys.executable,
+                 "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
                 [str(support / "e1_cases.py"), sys.executable],
+                [str(support / "authority_fault.py"), "--case", "lost_commit_reply"],
+                [str(support / "authority_selfcheck.py")],
             )
             for flags, optimization in ((["-O"], None), (["-OO"], None), ([], "1"), ([], "2")):
                 for command in commands:
@@ -71,14 +78,16 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0, "zero selected harness tests reported success")
 
-    def test_prepared_profile_requires_an_explicit_command(self):
+    def test_module_profiles_require_an_explicit_command(self):
         wrapper = Path(__file__).resolve().parents[2] / "tools" / "test-db.py"
-        result = subprocess.run(
-            [sys.executable, str(wrapper), "--prepared"], env=clean_environment(os.environ),
-            capture_output=True, text=True, timeout=10,
-        )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("provide --self-check or -- followed by", result.stderr)
+        for profile in ("--prepared", "--authority"):
+            with self.subTest(profile=profile):
+                result = subprocess.run(
+                    [sys.executable, str(wrapper), profile], env=clean_environment(os.environ),
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("provide --self-check or -- followed by", result.stderr)
 
     def test_auth_base_requires_explicit_fixture_connection_without_credentials(self):
         context = {"socket_dir": "/tmp/fixture-only", "port": 25432, "root": "/tmp/fixture-root"}
@@ -91,16 +100,39 @@ class HarnessTests(unittest.TestCase):
         self.assertNotIn("passfile=", result)
 
     def test_success_output_cannot_disagree_with_native_receipt_or_expose_path(self):
-        state = {"format_version": 1, "run": list(range(16)),
+        state = {"format_version": 2, "run": list(range(16)), "target_provenance": [],
                  "copy_complete": {"tables": 2, "rows": 10003, "bytes": 12345678}}
         valid = {"command": "copy table-data", "status": "complete", "run": list(range(16)),
-                 "state_format_version": 1, "tables": 2, "rows": 10003, "bytes": 12345678}
+                 "state_format_version": 2, "tables": 2, "rows": 10003, "bytes": 12345678}
         validate_success_output(json.dumps(valid), state)
-        for changes in ({"run": [0] * 16}, {"state_format_version": 2}, {"tables": 0},
+        for changes in ({"run": [0] * 16}, {"state_format_version": 1}, {"state_format_version": 3}, {"tables": 0},
                         {"rows": 0}, {"bytes": 0}, {"canonical_path": "/private/fixture"},
                         {"status": "running"}, {"command": "ping"}):
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
                 validate_success_output(json.dumps({**valid, **changes}), state)
+
+    def test_copy_receipts_require_v2_and_empty_target_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            case = SimpleNamespace(state=state)
+            for complete in (None, {"tables": 1, "rows": 1, "bytes": 8}):
+                value = {"magic": "RPGMIGRATE", "format_version": 2, "target_provenance": [],
+                         "run": list(range(16)), "canonical_path": str(state.resolve()), "copy_complete": complete}
+                output = json.dumps({"command": "copy table-data", "status": "complete", "run": list(range(16)),
+                                     "state_format_version": 2, "tables": 1, "rows": 1, "bytes": 8})
+                check = (lambda: Cases.no_completion(case)) if complete is None else (
+                    lambda: Cases.completed(case, 1, 1, output))
+                (state / "manifest.json").write_text(json.dumps(value))
+                check()
+                for changes in ({"format_version": 1}, {"format_version": 3}, {"target_provenance": None},
+                                {"target_provenance": [{"phase": "confirmed", "record": {}}]}):
+                    with self.subTest(complete=complete, changes=changes), self.assertRaises(AssertionError):
+                        (state / "manifest.json").write_text(json.dumps({**value, **changes}))
+                        check()
+                del value["target_provenance"]
+                (state / "manifest.json").write_text(json.dumps(value))
+                with self.assertRaises((AssertionError, KeyError)):
+                    check()
 
     def test_timed_out_command_terminates_its_descendant(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,7 +161,7 @@ class HarnessTests(unittest.TestCase):
         manifest = load_manifest()
         previous = manifest["transport_cases"] + manifest["copy_cases"]
         prepared = module_cases(manifest, "Prepared")
-        for subset in (previous, prepared):
+        for subset in (previous, prepared, previous + prepared):
             with self.subTest(subset=subset), self.assertRaises(AssertionError):
                 validate_libtest_output(module_cases(manifest, "Engine"),
                                         "".join(f"test {name} ... ok\n" for name in subset))
@@ -161,6 +193,39 @@ class HarnessTests(unittest.TestCase):
         for changes in ({"fault_hits": 0}, {"returncode": 0}):
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
                 validate_report(manifest, {**valid, "cases": [{**valid["cases"][0], **changes}]})
+
+    def test_authority_and_engine_require_observed_fault_receipts(self):
+        support = Path(__file__).resolve().parent
+        validate = runpy.run_path(str(support.parents[1] / "tools" / "test-db.py"))["validate_module_receipt"]
+        manifest = load_manifest()
+        prepared = json.loads((support / "prepared_cases.json").read_text())
+        authority = json.loads((support / "authority_cases.json").read_text())
+        profiles = {"Authority": authority, "Engine": manifest["transport_cases"] + manifest["copy_cases"] + prepared + authority}
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory, "token": "owned-fixture"}
+            records = []
+            for case in ("lost_commit_reply", "provisioning_recovery"):
+                value = {"owner": "owned-fixture", "case": case, "status": "observed", "fault_hits": 1, "backend_pid": 123,
+                         "commit_tag": "COMMIT", "holding_backend": False, "backend_connection_closed": True,
+                         "held_fence_observed": True, "released_fence_observed": True}
+                path = Path(directory) / f"authority-fault-{case}.json"
+                path.write_text(json.dumps(value))
+                records.append((path, value))
+            path, valid = records[0]
+            for profile, expected in profiles.items():
+                output = "".join(f"test {name} ... ok\n" for name in expected)
+                path.write_text(json.dumps(valid))
+                validate(profile, expected, output, context)
+                path.unlink()
+                with self.subTest(profile=profile, missing=True), self.assertRaises(AssertionError):
+                    validate(profile, expected, output, context)
+                for changes in ({"fault_hits": 0}, {"fault_hits": True}, {"status": "ignored"}, {"status": "pending"},
+                                {"backend_pid": 0}, {"owner": "foreign"}, {"case": "other"}, {"commit_tag": "ROLLBACK"},
+                                {"held_fence_observed": False}, {"released_fence_observed": False},
+                                {"backend_connection_closed": False}, {"holding_backend": True}):
+                    with self.subTest(profile=profile, changes=changes), self.assertRaises(AssertionError):
+                        path.write_text(json.dumps({**valid, **changes}))
+                        validate(profile, expected, output, context)
 
 
 class NonemptyProgram(unittest.TestProgram):

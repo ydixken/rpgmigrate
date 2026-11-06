@@ -56,13 +56,17 @@ def load_manifest():
 def module_cases(manifest, profile):
     if profile == "Transport":
         return manifest["transport_cases"]
-    if profile not in ("Prepared", "Engine"):
+    if profile not in ("Prepared", "Authority", "Engine"):
         raise ValueError("unknown module test profile")
+    if profile == "Authority":
+        authority = json.loads(Path(__file__).with_name("authority_cases.json").read_text())
+        assert isinstance(authority, list) and authority, "missing authority test inventory"
+        return authority
     prepared = json.loads(Path(__file__).with_name("prepared_cases.json").read_text())
     assert isinstance(prepared, list) and prepared, "missing prepared test inventory"
     if profile == "Prepared":
         return prepared
-    return manifest["transport_cases"] + manifest["copy_cases"] + prepared
+    return manifest["transport_cases"] + manifest["copy_cases"] + prepared + module_cases(manifest, "Authority")
 
 
 def run_command(command, *, environment, cwd, timeout, capture_output=False):
@@ -187,8 +191,11 @@ def psql(context, database, sql, *, role=ADMIN, canonical=True, raw=False):
 
 
 class OwnedCluster:
-    def __init__(self, manifest):
+    def __init__(self, manifest, *, fsync=True):
+        if type(fsync) is not bool:
+            raise ValueError("fixture fsync setting must be boolean")
         self.manifest = manifest
+        self.fsync = fsync
         self.bindir = find_bindir(os.environ)
         self.environment = clean_environment(os.environ)
         self.token = secrets.token_hex(16)
@@ -236,6 +243,7 @@ class OwnedCluster:
                 "-p", str(self.port), "-c", "listen_addresses=", "-c", "unix_socket_permissions=0700",
                 "-c", "cluster_name=" + self.token, "-c", "max_connections=30",
                 "-c", "shared_buffers=16MB", "-c", "log_min_error_statement=panic",
+                "-c", "fsync=" + ("on" if self.fsync else "off"),
                 "-c", "log_error_verbosity=terse", "-c", "log_statement=none"],
                 env=self.environment, stdout=self.log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 20
@@ -254,8 +262,8 @@ class OwnedCluster:
             assert (self.data.stat().st_mode & 0o777) == 0o700
             assert (self.socket.stat().st_mode & 0o777) == 0o700
             assert stat.S_IMODE((self.socket / f".s.PGSQL.{self.port}").stat().st_mode) == 0o700
-            settings = psql(self.context, "postgres", "SELECT json_build_array(current_setting('listen_addresses'), current_setting('data_directory'), current_setting('port'));")
-            assert json.loads(settings) == ["", str(self.data), str(self.port)], "fixture isolation settings differ"
+            settings = psql(self.context, "postgres", "SELECT json_build_array(current_setting('listen_addresses'), current_setting('data_directory'), current_setting('port'), current_setting('fsync'));")
+            assert json.loads(settings) == ["", str(self.data), str(self.port), "on" if self.fsync else "off"], "fixture isolation settings differ"
             self.context["server_version_num"] = int(psql(self.context, "postgres", "SHOW server_version_num;"))
             assert self.context["server_version_num"] == self.manifest["server_version_num"], "unexpected server version"
             psql(self.context, "postgres", "CREATE ROLE e1_source LOGIN; CREATE ROLE e1_target LOGIN;")

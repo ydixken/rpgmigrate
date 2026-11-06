@@ -88,7 +88,7 @@ struct CompletedTx {
     tx: TxId, order: TxSeq, commit: CommitLsn, end: SourceEndLsn,
     event_count: u64, encoded_bytes: u64,
 }
-struct Frontier { order: TxSeq, commit: CommitLsn, end: SourceEndLsn }
+struct Frontier { tx: TxId, order: TxSeq, commit: CommitLsn, end: SourceEndLsn }
 enum Plugin { Pgoutput, TestDecoding, Wal2Json }
 enum JournalWrite { Synchronized, Buffered }
 enum TargetCommit { Synchronous, Asynchronous }
@@ -99,6 +99,8 @@ enum Profile { Durable, ReplaySafe, Relaxed(LossCaps) }
 `TxSeq` is local source commit order within a stream, not a WAL position.
 Reserve `TxSeq(0)` and require each completed transaction's sequence to follow its predecessor exactly.
 Commit and transaction-end LSNs are nondecreasing and may be equal; they are not unique event identities.
+Every nonempty frontier includes its full transaction identity; begin ordinal need not increase in commit order.
+An empty checkpoint is represented separately by sequence zero and absent transaction fields.
 `encoded_bytes` counts the complete canonical wire representation before optional storage compression: each frame's 88-byte header and payload plus one 128-byte completion descriptor.
 Include relation context required for replay in the complete transaction's encoded accounting.
 Frames can split one event across segments.
@@ -130,10 +132,15 @@ impl Store {
 }
 impl ReadyTxn { fn descriptor(&self) -> &CompletedTx; }
 impl TxReader { fn next_event(&mut self) -> Result<Option<Event>>; }
-struct Checkpoint { stream: StreamId, applied: Frontier, barrier_epoch: u64 }
+struct Checkpoint {
+    stream: StreamId, applied: Frontier, barrier_epoch: u64, barrier_counter: u64,
+}
 struct DurableProof;
 struct PreparedApply;
-enum CommitOutcome { Acknowledged(Checkpoint), Unknown }
+enum CommitOutcome {
+    Acknowledged { checkpoint: Checkpoint, durable: Option<DurableProof> },
+    Unknown,
+}
 struct Applier;
 impl Applier {
     fn acquire(connection: PgConnection, stream: StreamId, state: &mut NativeState,
@@ -143,7 +150,7 @@ impl Applier {
                io: &IoControl) -> Result<PreparedApply>;
     fn commit(&mut self, tx: PreparedApply, mode: TargetCommit,
               io: &IoControl) -> Result<CommitOutcome>;
-    fn barrier(&mut self, through: &Frontier, epoch: u64,
+    fn barrier(&mut self, through: Option<&Frontier>, epoch: u64,
                io: &IoControl) -> Result<DurableProof>;
 }
 ```
@@ -155,8 +162,15 @@ Keep initial identity/publication operations exclusive and progress reads read-o
 `Buffered` completion is process-local until data and references become durable.
 Never publish durable metadata references to unsynchronized journal files.
 Readers pin required segments until drop.
-`DurableProof` is opaque and can originate only from the fenced primary's positive synchronous writing-barrier result.
-It carries exact stream, covered frontier, epoch, and target identity.
+`DurableProof` is opaque and can originate only from positive synchronous COMMIT evidence for a real logged write on the fenced primary.
+The normal data transaction updates its logged checkpoint and increments the barrier counter in that same UPDATE; its synchronous COMMIT returns the proof without another COMMIT per group.
+An explicit barrier performs a logged counter update and synchronous COMMIT to cover asynchronous work or a flush with no new data.
+Both paths verify the same target and stream identity and carry the exact covered frontier, epoch, barrier counter, and target provenance in the proof.
+An empty checkpoint can receive a writing barrier with `None` as its frontier, for provisioning reconciliation or a final flush with no CDC transactions.
+That proof covers zero CDC transactions and does not claim a requested end position or COPY snapshot coverage.
+Never fabricate an LSN for the empty case; a future COPY snapshot anchor has a separate contract.
+An asynchronous acknowledgment carries no durable proof, and a checkpoint read alone cannot construct one.
+The first E3 production path always commits synchronously; asynchronous execution is test-private until the E4 policy consumer exists.
 Target-local WAL samples are diagnostics, never source feedback values.
 
 ### E2: Decode, journal, and persistence experiment
@@ -207,8 +221,8 @@ This pilot leaves the multi-process, retirement, quota, source-decoding, and wid
 - [ ] Check fingerprints and compare target effects against the serial fixture oracle.
 - [ ] Run V3's end-to-end apply benchmark before optimizing scheduling.
 
-Use one owned checkpoint table with run/source/database/generation identity, applied order, commit LSN, transaction-end LSN, and barrier epoch.
-Add a barrier counter that changes on every barrier so it always writes logged WAL.
+Use one owned checkpoint table with run/source/database/generation identity, last XID, begin ordinal, applied order, commit LSN, transaction-end LSN, barrier epoch, and barrier counter.
+Increment the barrier counter in both synchronous data/checkpoint commits and standalone writing barriers so each proof has positive logged-write evidence.
 Check exact object identity before querying, excluding, reowning, or removing metadata.
 Store checkpoint provenance in the native manifest.
 Do not substitute replication-origin progress for this checkpoint.

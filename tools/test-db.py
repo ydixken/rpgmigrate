@@ -2,6 +2,7 @@
 """Own one private PostgreSQL server, run a DB test suite, and verify its receipt."""
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,13 @@ sys.path.insert(0, str(ROOT / "tests" / "support"))
 from db_harness import (FIXTURES, SETTINGS, OwnedCluster, assert_equal, conninfo, databases, load_manifest,
                         fingerprint, module_cases, psql, reference_copy, run_command, validate_libtest_output, validate_report)
 from protocol_fault import ProtocolFault
+from authority_fixture import authority_fixture, validate_authority_faults
+
+
+def validate_module_receipt(profile, expected, output, context):
+    validate_libtest_output(expected, output)
+    if profile in ("Authority", "Engine"):
+        validate_authority_faults(context)
 
 
 def self_check(cluster, manifest):
@@ -111,18 +119,19 @@ def main():
     modes.add_argument("--self-check", action="store_true")
     modes.add_argument("--transport", action="store_true", help="require the exact transport unit-test inventory")
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
-    modes.add_argument("--engine", action="store_true", help="require the transport, prepared, and catalog/COPY live-test inventories")
+    modes.add_argument("--authority", action="store_true", help="require the exact target authority live-test inventory")
+    modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, and catalog/COPY live tests")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not args.self_check and not command:
         parser.error("provide --self-check or -- followed by the integration test command")
     manifest = load_manifest()
-    module_suite = args.transport or args.engine or args.prepared
+    module_suite = args.transport or args.engine or args.prepared or args.authority
     if module_suite:
-        profile = "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
+        profile = "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
         expected = module_cases(manifest, profile)
-    with OwnedCluster(manifest) as cluster:
+    with OwnedCluster(manifest) as cluster, ExitStack() as fixtures:
         if args.self_check:
             self_check(cluster, manifest)
             return 0
@@ -141,6 +150,8 @@ def main():
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION": manifest["server_version"],
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM": str(manifest["server_version_num"]),
         })
+        if args.authority or args.engine:
+            environment.update(fixtures.enter_context(authority_fixture(cluster)))
         # Cargo keeps its cache/toolchain paths while test clients get a private HOME.
         for key, fallback in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
             if key not in environment:
@@ -153,7 +164,9 @@ def main():
         if result.returncode:
             return result.returncode
         if module_suite:
-            validate_libtest_output(expected, result.stdout)
+            validate_module_receipt(profile, expected, result.stdout, cluster.context)
+            if args.authority or args.engine:
+                print("Authority faults verified 2 held COMMIT replies and observed fence releases")
             print(f"{profile} verified {len(expected)} exact cases; full E1 suite not selected")
             return 0
         if not receipt.is_file():

@@ -34,16 +34,38 @@ class VerificationTests(unittest.TestCase):
                 runner.validate_output("test", output)
 
     def test_database_receipts_require_both_exact_inventories_and_version(self):
-        good = "Engine verified 14 exact cases; full E1 suite not selected\nE1 verified 40 exact cases on PostgreSQL 17.11\n"
-        self.assertEqual(runner.validate_output("test-db", good), {"engine": 14, "integration": 40})
+        good = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                "Engine verified 30 exact cases; full E1 suite not selected\n"
+                "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+        self.assertEqual(runner.validate_output("test-db", good), {"engine": 30, "integration": 40, "authority_faults": 2})
         for output in ("", good.replace("40", "25"), good.replace("40", "38"), good.replace("17.11", "14.24"), good.splitlines()[0]):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test-db", output)
 
     def test_engine_receipt_cannot_omit_the_prepared_profile(self):
-        previous = "Engine verified 7 exact cases; full E1 suite not selected\nE1 verified 40 exact cases on PostgreSQL 17.11\n"
+        previous = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Engine verified 7 exact cases; full E1 suite not selected\n"
+                    "E1 verified 40 exact cases on PostgreSQL 17.11\n")
         with self.assertRaises(runner.VerificationError):
             runner.validate_output("test-db", previous)
+
+    def test_engine_receipt_cannot_omit_the_authority_profile(self):
+        previous = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Engine verified 14 exact cases; full E1 suite not selected\n"
+                    "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+        with self.assertRaises(runner.VerificationError):
+            runner.validate_output("test-db", previous)
+
+    def test_authority_faults_require_one_complete_observed_lifecycle_receipt(self):
+        suites = ("Engine verified 30 exact cases; full E1 suite not selected\n"
+                  "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+        fault = "Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+        for evidence in ("", fault * 2, fault.replace("2", "0"), fault.replace("2", "1"),
+                         fault.replace("2", "3"), fault.replace("held", "unheld"),
+                         fault.replace("observed", "pending"), fault.replace("verified", "ignored"),
+                         fault + fault.replace("2", "0")):
+            with self.subTest(evidence=evidence), self.assertRaises(runner.VerificationError):
+                runner.validate_output("test-db", evidence + suites)
 
     def test_nonzero_child_and_missing_tool_are_safe_failures(self):
         for command in ([sys.executable, "-c", "print('password=do-not-export'); raise SystemExit(9)"], ["/nonexistent-e1-tool"]):

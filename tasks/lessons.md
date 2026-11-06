@@ -100,12 +100,28 @@ Use bounded validation followed by emission under the documented stable single-w
 Enable and test redb integrity checks on reopen, including cleanly closed corrupt files that would otherwise panic before returning an error.
 Measure each candidate and repetition in a fresh child process because `ru_maxrss` retains earlier process peaks.
 Keep configured engine cache budgets separate from RSS and label storage throughput separately from target-applied work.
+Complete multi-process, reader-pin, pruning, quota, and recovery qualification before choosing a production backend; the archived single-writer pilot does not close those gates.
 Label write timing as inclusive generation, encoding, validation, batch setup, and commit work instead of claiming pure synchronization time.
 Validate the exact scheduled child receipts in a fresh private root; do not add unrelated directory-inventory restrictions when enumeration is not used as evidence.
 Use isolated Cargo target directories for parallel scoped checks and reserve broad lint/test execution for one integration worker after file freeze.
 Do not diagnose a transient missing executable as a build race without a clean serialized reproduction check.
 Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
 Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.
+For canonical plain identity values in version-two state, use the approved serde derives and reject unknown named fields instead of adding duplicate conversion types.
+Keep authority proofs and trusted constructors outside that serialization shortcut.
+Keep interim identity warnings visible until real consumers use them; shared benchmark imports can make a runtime-only dead-code expectation unfulfilled.
+Carry full transaction identity with a nonempty authority frontier because equal LSNs and reused XIDs do not identify one completed transaction.
+If a source plugin omits a physical commit-record position, preserve that absence in the receiver contract instead of fabricating it from the transaction-end LSN.
+Do not require begin ordinal to increase in commit order; overlapping source transactions can commit in a different order.
+Return durable proof from the normal synchronous data/checkpoint COMMIT after its logged counter increment; do not add a second COMMIT per group.
+Use a standalone writing barrier for asynchronous work or a flush without new data, and never construct proof from a checkpoint read alone.
+Poison a target transaction after any prepare or execute error, including local binding and validation failures that leave PostgreSQL in an active transaction.
+A caller that catches that error must not commit earlier DML or advance the checkpoint; explicit rollback must remain available.
+Represent an empty checkpoint's durable frontier as `None`; a real logged barrier can prove zero CDC transactions without inventing an LSN or claiming COPY snapshot coverage.
+Treat target system identity as optional where roles or PostgreSQL versions cannot expose it, reverify persisted values, and require matching receipt evidence for restricted recovery.
+Do not equate a preprovisioned metadata object's owner with the migration role; validate the recorded owner and grant only the required schema/table privileges without ownership membership.
+Match a role's literal catalog name without reparsing it as an SQL identifier; mixed-case, quoted, and numeric role names must retain their identity.
+Fresh object creation requires the existing rights needed for the assigned owner; do not alter role membership or elevate privileges.
 
 ## Licensing and readiness
 

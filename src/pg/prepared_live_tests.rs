@@ -1,4 +1,4 @@
-use super::{Conninfo, IoControl, PgConnection, PgParam};
+use super::{Conninfo, IoControl, PgConnection, PgParam, TransactionStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -241,6 +241,10 @@ fn prepared_execution_cancellation_closes_connection() {
 fn prepared_changes_roll_back_with_transaction() {
     let io = control();
     let mut connection = connection(&io);
+    assert_eq!(
+        connection.transaction_status().unwrap(),
+        TransactionStatus::Idle
+    );
     connection
         .query(
             "CREATE TEMP TABLE prepared_effects(value integer PRIMARY KEY)",
@@ -271,6 +275,10 @@ fn prepared_changes_roll_back_with_transaction() {
         .unwrap();
     for commit in [false, true] {
         connection.query("BEGIN", &io).unwrap();
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::InTransaction
+        );
         let inserted = connection
             .execute_prepared("effect", &[PgParam::Text(b"42")], &io)
             .unwrap();
@@ -279,12 +287,20 @@ fn prepared_changes_roll_back_with_transaction() {
             .execute_prepared("checkpoint", &[PgParam::Text(b"42")], &io)
             .unwrap();
         assert_eq!(checkpoint.command_tag().unwrap(), "UPDATE 1");
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::InTransaction
+        );
         if !commit {
             let duplicate = connection
                 .execute_prepared("effect", &[PgParam::Text(b"42")], &io)
                 .err()
                 .expect("duplicate effect was accepted");
             assert!(duplicate.message.contains("23505"));
+            assert_eq!(
+                connection.transaction_status().unwrap(),
+                TransactionStatus::InError
+            );
         }
         let command = if commit { "COMMIT" } else { "ROLLBACK" };
         assert_eq!(
@@ -294,6 +310,10 @@ fn prepared_changes_roll_back_with_transaction() {
                 .command_tag()
                 .unwrap(),
             command
+        );
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::Idle
         );
         let result = connection
             .query(

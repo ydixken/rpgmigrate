@@ -50,6 +50,23 @@ class ProtocolFault:
         self.error_states = []
         self.sockets = []
         self.stopping = threading.Event()
+        self.armed = threading.Event()
+        self.release_requested = threading.Event()
+        self.holding = threading.Event()
+        self.backend_closed = threading.Event()
+        self.backend_pid = None
+
+    def arm(self):
+        if self.mode != "commit_hold" or self.hits:
+            raise ValueError("COMMIT relay cannot be armed in this state")
+        self.armed.set()
+
+    def release_backend(self):
+        if not self.hits:
+            raise ValueError("no held COMMIT backend to release")
+        self.release_requested.set()
+        if not self.backend_closed.wait(timeout=5):
+            raise RuntimeError("held backend connection did not close")
 
     def __enter__(self):
         self.directory = Path(tempfile.mkdtemp(prefix="fault-", dir=self.context["socket_dir"]))
@@ -100,6 +117,10 @@ class ProtocolFault:
             upstream.start()
             while not self.stopping.is_set():
                 kind, frame, payload = packet(server)
+                if kind == b"K":
+                    if len(payload) != 8:
+                        raise ValueError("invalid backend key frame")
+                    self.backend_pid = struct.unpack("!I", payload[:4])[0]
                 if kind == b"d":
                     self.server_copy_bytes += len(payload)
                     self.copy_frames += 1
@@ -115,6 +136,14 @@ class ProtocolFault:
                 if not self.hits and self.mode == "commit_unknown" and kind == b"C" and payload == b"COMMIT\0" and self.client_copy_bytes:
                     self.hits += 1
                     return
+                if not self.hits and self.mode == "commit_hold" and self.armed.is_set() and kind == b"C" and payload == b"COMMIT\0":
+                    self.hits += 1
+                    self.holding.set()
+                    client.shutdown(socket.SHUT_RDWR)
+                    client.close()
+                    if not self.release_requested.wait(timeout=45):
+                        self.errors.append("held backend release deadline exceeded")
+                    return
                 client.sendall(frame)
         except (EOFError, OSError):
             pass
@@ -129,9 +158,11 @@ class ProtocolFault:
                 sock.close()
             if upstream:
                 upstream.join(timeout=2)
+            self.backend_closed.set()
 
     def __exit__(self, *_):
         self.stopping.set()
+        self.release_requested.set()
         self.listener.close()
         for sock in self.sockets:
             try:

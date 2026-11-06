@@ -2,6 +2,8 @@
 pub mod config;
 #[path = "storage/format.rs"]
 pub mod format;
+#[path = "../src/identity.rs"]
+mod identity;
 #[path = "storage/journal.rs"]
 pub mod journal;
 #[path = "storage/redb.rs"]

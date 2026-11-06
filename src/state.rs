@@ -17,26 +17,71 @@ use serde::{Deserialize, Serialize};
 use crate::contracts::{
     CopyReport, Error, ErrorKind, Result, RunId, StateAction, StateIdentity, StateRequest,
 };
+use crate::identity::StreamId;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TargetBinding {
+    pub(crate) stream: StreamId,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) target_system_identifier: Option<u64>,
+    pub(crate) target_database_oid: u32,
+    pub(crate) schema_name: String,
+    pub(crate) table_name: String,
+    pub(crate) owner_oid: u32,
+    pub(crate) metadata_version: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProvisioningIntent {
+    pub(crate) binding: TargetBinding,
+    pub(crate) nonce: [u8; 16],
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConfirmedProvenance {
+    pub(crate) intent: ProvisioningIntent,
+    pub(crate) schema_oid: u32,
+    pub(crate) table_oid: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "phase",
+    content = "record",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum TargetProvenance {
+    Provisioning(ProvisioningIntent),
+    Confirmed(ConfirmedProvenance),
+}
 
 const MANIFEST: &CStr = c"manifest.json";
 const TEMP: &CStr = c".manifest.tmp";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
+const FORMAT_VERSION: u32 = 2;
+const MAX_TARGET_PROVENANCE: usize = 1;
+const TARGET_METADATA_VERSION: u32 = 1;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     magic: String,
     format_version: u32,
-    run: [u8; 16],
+    run: RunId,
     canonical_path: PathBuf,
     directory_device: u64,
     directory_inode: u64,
     #[serde(deserialize_with = "Option::deserialize")]
     copy_complete: Option<Completion>,
+    target_provenance: Vec<TargetProvenance>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Completion {
     tables: u64,
@@ -61,6 +106,26 @@ pub(crate) struct NativeState {
 }
 
 pub(crate) fn open(request: &StateRequest) -> Result<NativeState> {
+    open_native(request, false)
+}
+
+/// Reload local provenance only; the caller must verify fresh fenced target evidence before target use.
+/// An interrupted publication that leaves .manifest.tmp fails closed; this slice does not repair it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "native CDC resume consumer is pending")
+)]
+pub(crate) fn open_for_provenance_recovery(path: &Path) -> Result<NativeState> {
+    open_native(
+        &StateRequest {
+            path: path.into(),
+            action: StateAction::Resume,
+        },
+        true,
+    )
+}
+
+fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<NativeState> {
     let leaf = request.path.file_name().ok_or_else(|| {
         bad_state("state-unsafe: specify a state directory below an existing parent")
     })?;
@@ -116,7 +181,24 @@ pub(crate) fn open(request: &StateRequest) -> Result<NativeState> {
     directory.check()?;
     let path = directory.parent_path.join(leaf);
     if manifest_present(&directory.handle, false)? {
-        read_manifest(&directory, &path)?;
+        let (manifest, manifest_file) = read_manifest(&directory, &path)?;
+        if recover_provenance {
+            if manifest.target_provenance.is_empty() {
+                return Err(bad_state(
+                    "state-provenance: native state has no target provisioning intent",
+                ));
+            }
+            return Ok(NativeState {
+                identity: StateIdentity {
+                    run: manifest.run,
+                    canonical_path: path,
+                    format_version: manifest.format_version,
+                },
+                directory,
+                manifest,
+                manifest_file,
+            });
+        }
         if request.action == StateAction::Create {
             return Err(bad_state(
                 "state-exists: native state already exists; use a fresh directory",
@@ -133,28 +215,23 @@ pub(crate) fn open(request: &StateRequest) -> Result<NativeState> {
         ));
     }
     let meta = metadata(&directory.handle)?;
-    let mut run = [0u8; 16];
-    // SAFETY: run provides exactly 16 writable bytes, below getentropy's 256-byte limit.
-    if unsafe { libc::getentropy(run.as_mut_ptr().cast(), run.len()) } != 0 || run == [0; 16] {
-        return Err(bad_state(
-            "state-random: cannot generate native run identity",
-        ));
-    }
+    let run = RunId(random_identity()?);
     let manifest = Manifest {
         magic: "RPGMIGRATE".into(),
-        format_version: 1,
+        format_version: FORMAT_VERSION,
         run,
         canonical_path: path.clone(),
         directory_device: meta.dev(),
         directory_inode: meta.ino(),
         copy_complete: None,
+        target_provenance: Vec::new(),
     };
     let manifest_file = publish(&directory, &manifest, None)?;
     Ok(NativeState {
         identity: StateIdentity {
-            run: RunId(run),
+            run,
             canonical_path: path,
-            format_version: 1,
+            format_version: FORMAT_VERSION,
         },
         directory,
         manifest,
@@ -167,9 +244,82 @@ impl NativeState {
         &self.identity
     }
 
+    /// Local provenance is neither target authority nor proof of durable target progress.
+    pub(crate) fn target_provenance(&self, stream: &StreamId) -> Option<&TargetProvenance> {
+        self.manifest
+            .target_provenance
+            .iter()
+            .find(|record| record.intent().binding.stream == *stream)
+    }
+
+    /// Return only after the intent is durable; an identical retry synchronizes the same intent again.
+    /// TargetAuthority must separately authorize creation on the acquired physical backend.
+    pub(crate) fn begin_target_provisioning(
+        &mut self,
+        binding: TargetBinding,
+    ) -> Result<ProvisioningIntent> {
+        binding.validate(self.identity.run)?;
+        let mut next = self.checked_manifest()?;
+        if let Some(record) = next.target_provenance.first() {
+            if let TargetProvenance::Provisioning(intent) = record
+                && intent.binding == binding
+            {
+                self.synchronize_manifest()?;
+                return Ok(intent.clone());
+            }
+            return Err(bad_state(
+                "state-provenance: existing target binding or phase cannot be replaced",
+            ));
+        }
+        let intent = ProvisioningIntent {
+            binding,
+            nonce: random_identity()?,
+        };
+        next.target_provenance
+            .push(TargetProvenance::Provisioning(intent.clone()));
+        self.replace_manifest(next)?;
+        Ok(intent)
+    }
+
+    /// The caller must verify the intent receipt, object identities, and synchronous target COMMIT under its fence.
+    /// Stored Some(system ID) must match fresh evidence; None with absent objects cannot authorize recovery after reconnect.
+    pub(crate) fn confirm_target_provisioning(
+        &mut self,
+        confirmed: ConfirmedProvenance,
+    ) -> Result<()> {
+        let replacement = TargetProvenance::Confirmed(confirmed);
+        replacement.validate(self.identity.run)?;
+        let mut next = self.checked_manifest()?;
+        match next.target_provenance.first() {
+            Some(TargetProvenance::Provisioning(intent)) if intent == replacement.intent() => {
+                next.target_provenance[0] = replacement;
+                self.replace_manifest(next)
+            }
+            Some(existing) if existing == &replacement => self.synchronize_manifest(),
+            _ => Err(bad_state(
+                "state-provenance: confirmation does not match the persisted provisioning intent",
+            )),
+        }
+    }
+
     /// Call only after all terminal COPY results and synchronous target COMMIT responses succeed.
     /// This receipt cannot authorize recovery or reuse of target data.
     pub(crate) fn record_copy_complete(&mut self, report: &CopyReport) -> Result<()> {
+        let mut completed = self.checked_manifest()?;
+        if completed.copy_complete.is_some() {
+            return Err(bad_state(
+                "state-complete: COPY completion is already recorded",
+            ));
+        }
+        completed.copy_complete = Some(Completion {
+            tables: report.tables,
+            rows: report.rows,
+            bytes: report.bytes,
+        });
+        self.replace_manifest(completed)
+    }
+
+    fn checked_manifest(&self) -> Result<Manifest> {
         self.directory.check()?;
         if !manifest_present(&self.directory.handle, false)? {
             return Err(bad_state("state-replaced: native manifest disappeared"));
@@ -181,21 +331,107 @@ impl NativeState {
                 "state-replaced: native manifest changed during this run",
             ));
         }
-        if current.copy_complete.is_some() {
-            return Err(bad_state(
-                "state-complete: COPY completion is already recorded",
-            ));
-        }
-        let mut completed = current;
-        completed.copy_complete = Some(Completion {
-            tables: report.tables,
-            rows: report.rows,
-            bytes: report.bytes,
-        });
-        self.manifest_file = publish(&self.directory, &completed, Some((&self.manifest, &file)))?;
-        self.manifest = completed;
+        Ok(current)
+    }
+
+    fn replace_manifest(&mut self, next: Manifest) -> Result<()> {
+        next.validate_provenance()?;
+        self.manifest_file = publish(
+            &self.directory,
+            &next,
+            Some((&self.manifest, &self.manifest_file)),
+        )?;
+        self.manifest = next;
         Ok(())
     }
+
+    fn synchronize_manifest(&self) -> Result<()> {
+        #[cfg(test)]
+        tests::publication_step(tests::PublicationStep::FileSync)?;
+        self.manifest_file.sync_all().map_err(|_| {
+            bad_state("state-sync: cannot synchronize native provisioning metadata")
+        })?;
+        #[cfg(test)]
+        tests::publication_step(tests::PublicationStep::DirectorySync)?;
+        self.directory.handle.sync_all().map_err(|_| {
+            bad_state("state-sync: cannot synchronize native provisioning directory")
+        })?;
+        self.checked_manifest()?;
+        Ok(())
+    }
+}
+
+impl TargetBinding {
+    fn validate(&self, run: RunId) -> Result<()> {
+        if self.stream.run != run
+            || self.stream.source.system_identifier == 0
+            || self.stream.source.database_oid == 0
+            || self.target_system_identifier == Some(0)
+            || self.target_database_oid == 0
+            || self.owner_oid == 0
+            || self.metadata_version != TARGET_METADATA_VERSION
+            || self.schema_name.is_empty()
+            || self.table_name.is_empty()
+            || self.schema_name.contains('\0')
+            || self.table_name.contains('\0')
+        {
+            return Err(bad_state(
+                "state-provenance: target binding has an invalid identity, name, owner, or metadata version",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TargetProvenance {
+    fn intent(&self) -> &ProvisioningIntent {
+        match self {
+            Self::Provisioning(intent) => intent,
+            Self::Confirmed(confirmed) => &confirmed.intent,
+        }
+    }
+
+    fn validate(&self, run: RunId) -> Result<()> {
+        let intent = self.intent();
+        intent.binding.validate(run)?;
+        if intent.nonce == [0; 16] {
+            return Err(bad_state(
+                "state-provenance: provisioning nonce must be nonzero",
+            ));
+        }
+        if let Self::Confirmed(confirmed) = self
+            && (confirmed.schema_oid == 0 || confirmed.table_oid == 0)
+        {
+            return Err(bad_state(
+                "state-provenance: confirmed object OIDs must be nonzero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Manifest {
+    fn validate_provenance(&self) -> Result<()> {
+        if self.target_provenance.len() > MAX_TARGET_PROVENANCE {
+            return Err(bad_state(
+                "state-provenance: this slice permits only one unique target stream",
+            ));
+        }
+        for record in &self.target_provenance {
+            record.validate(self.run)?;
+        }
+        Ok(())
+    }
+}
+
+fn random_identity() -> Result<[u8; 16]> {
+    let mut bytes = [0; 16];
+    // SAFETY: bytes provides 16 writable bytes, below getentropy's 256-byte limit.
+    if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 || bytes == [0; 16]
+    {
+        return Err(bad_state("state-random: cannot generate native identity"));
+    }
+    Ok(bytes)
 }
 
 impl Drop for Directory {
@@ -394,18 +630,26 @@ fn read_manifest(directory: &Directory, path: &Path) -> Result<(Manifest, File)>
             "state-invalid: native manifest exceeds the control metadata limit",
         ));
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes)
+    // Inspect the format before decoding its body so older native manifests cannot be converted implicitly.
+    #[derive(Deserialize)]
+    struct FormatHeader {
+        magic: String,
+        format_version: u32,
+    }
+    let header: FormatHeader = serde_json::from_slice(&bytes)
         .map_err(|_| bad_state("state-invalid: native manifest is corrupt or incomplete"))?;
-    if manifest.magic != "RPGMIGRATE" {
+    if header.magic != "RPGMIGRATE" {
         return Err(bad_state("state-identity: native state magic is invalid"));
     }
-    if manifest.format_version != 1 {
+    if header.format_version != FORMAT_VERSION {
         return Err(bad_state(
             "state-version: native state version is unsupported",
         ));
     }
+    let manifest: Manifest = serde_json::from_slice(&bytes)
+        .map_err(|_| bad_state("state-invalid: native manifest is corrupt or incomplete"))?;
     let meta = metadata(&directory.handle)?;
-    if manifest.run == [0; 16]
+    if manifest.run.0 == [0; 16]
         || manifest.canonical_path != path
         || manifest.directory_device != meta.dev()
         || manifest.directory_inode != meta.ino()
@@ -414,6 +658,7 @@ fn read_manifest(directory: &Directory, path: &Path) -> Result<(Manifest, File)>
             "state-identity: native state identity does not match this directory",
         ));
     }
+    manifest.validate_provenance()?;
     directory.check()?;
     Ok((manifest, file))
 }
@@ -431,6 +676,8 @@ fn publish(
         ));
     }
     check_publication(directory, manifest, previous, false)?;
+    #[cfg(test)]
+    tests::publication_step(tests::PublicationStep::Create)?;
     let mut temporary = open_at(
         &directory.handle,
         TEMP,
@@ -438,12 +685,20 @@ fn publish(
         0o600,
     )
     .map_err(|_| bad_state("state-write: cannot exclusively create temporary native metadata"))?;
+    #[cfg(test)]
+    tests::publication_step(tests::PublicationStep::Write)?;
     temporary
         .write_all(&bytes)
-        .and_then(|_| temporary.sync_all())
+        .map_err(|_| bad_state("state-write: cannot write temporary native metadata"))?;
+    #[cfg(test)]
+    tests::publication_step(tests::PublicationStep::FileSync)?;
+    temporary
+        .sync_all()
         .map_err(|_| bad_state("state-sync: cannot synchronize temporary native metadata"))?;
     check_publication(directory, manifest, previous, true)?;
     check_same(&temporary, &open_metadata(&directory.handle, TEMP)?)?;
+    #[cfg(test)]
+    tests::publication_step(tests::PublicationStep::Rename)?;
     // SAFETY: both names are single components in the same live directory; its advisory lock remains held.
     if unsafe {
         libc::renameat(
@@ -456,10 +711,14 @@ fn publish(
     {
         return Err(bad_state("state-write: cannot publish native manifest"));
     }
+    #[cfg(test)]
+    tests::publication_step(tests::PublicationStep::DirectorySync)?;
     directory
         .handle
         .sync_all()
         .map_err(|_| bad_state("state-sync: cannot synchronize native manifest directory"))?;
+    #[cfg(test)]
+    tests::publication_step(tests::PublicationStep::Published)?;
     directory.check()?;
     let published = open_metadata(&directory.handle, MANIFEST)?;
     check_same(&temporary, &published)?;
@@ -499,11 +758,52 @@ mod tests {
     use super::*;
     use crate::contracts::StateAction;
     use serde_json::{Value, json};
+    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::fs::{self, DirBuilder, File, Permissions};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum PublicationStep {
+        Create,
+        Write,
+        FileSync,
+        Rename,
+        DirectorySync,
+        Published,
+    }
+
+    thread_local! {
+        static FAIL_AT: Cell<Option<PublicationStep>> = const { Cell::new(None) };
+    }
+
+    struct PublicationFailure;
+
+    impl PublicationFailure {
+        fn at(step: PublicationStep) -> Self {
+            FAIL_AT.with(|slot| assert!(slot.replace(Some(step)).is_none()));
+            Self
+        }
+    }
+
+    impl Drop for PublicationFailure {
+        fn drop(&mut self) {
+            FAIL_AT.with(|slot| slot.set(None));
+        }
+    }
+
+    pub(super) fn publication_step(step: PublicationStep) -> Result<()> {
+        FAIL_AT.with(|slot| {
+            if slot.get() == Some(step) {
+                slot.set(None);
+                Err(bad_state("state-test: injected publication failure"))
+            } else {
+                Ok(())
+            }
+        })
+    }
 
     struct TempDir(PathBuf);
 
@@ -614,13 +914,14 @@ mod tests {
         let state = tmp.create();
         let value = manifest(&tmp.path());
         assert_eq!(value["magic"], "RPGMIGRATE");
-        assert_eq!(value["format_version"], 1);
+        assert_eq!(value["format_version"], 2);
         assert_eq!(value["canonical_path"], tmp.path().to_str().unwrap());
         assert_eq!(value["run"].as_array().unwrap().len(), 16);
         assert_ne!(value["run"], json!(vec![0; 16]));
         assert_eq!(value["copy_complete"], Value::Null);
+        assert_eq!(value["target_provenance"], json!([]));
         assert_eq!(state.identity().canonical_path, tmp.path());
-        assert_eq!(state.identity().format_version, 1);
+        assert_eq!(state.identity().format_version, 2);
         assert_eq!(value["run"], json!(state.identity().run.0));
         let directory = fs::metadata(tmp.path()).unwrap();
         assert_eq!(value["directory_inode"], directory.ino());
@@ -738,7 +1039,7 @@ mod tests {
     fn unknown_version_is_rejected_before_restart() {
         let tmp = TempDir::new();
         drop(tmp.create());
-        change_manifest(&tmp.path(), |value| value["format_version"] = json!(2));
+        change_manifest(&tmp.path(), |value| value["format_version"] = json!(3));
         refusal(&tmp.path(), StateAction::Restart, "state-version:");
     }
 
@@ -923,7 +1224,13 @@ mod tests {
 
     #[test]
     fn incomplete_or_extended_manifest_is_rejected_before_restart() {
-        for field in ["copy_complete", "run", "canonical_path", "directory_device"] {
+        for field in [
+            "copy_complete",
+            "target_provenance",
+            "run",
+            "canonical_path",
+            "directory_device",
+        ] {
             let tmp = TempDir::new();
             drop(tmp.create());
             change_manifest(&tmp.path(), |value| {
@@ -1085,5 +1392,602 @@ mod tests {
         assert!(next_owner.try_lock().is_ok());
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
         drop(inherited);
+    }
+
+    fn binding(state: &NativeState) -> TargetBinding {
+        TargetBinding {
+            stream: StreamId {
+                run: state.identity().run,
+                source: crate::identity::SourceId {
+                    system_identifier: 12345,
+                    database_oid: 16384,
+                },
+                generation: 0,
+            },
+            target_system_identifier: Some(67890),
+            target_database_oid: 16385,
+            schema_name: "rpgmigrate_owned".into(),
+            table_name: "checkpoint".into(),
+            owner_oid: 10,
+            metadata_version: 1,
+        }
+    }
+
+    fn confirmed(intent: &ProvisioningIntent) -> ConfirmedProvenance {
+        ConfirmedProvenance {
+            intent: intent.clone(),
+            schema_oid: 20000,
+            table_oid: 20001,
+        }
+    }
+
+    fn recovery_refusal(path: &Path, code: &str) {
+        let before = tree(path);
+        let error = open_for_provenance_recovery(path).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadState);
+        assert!(error.message.starts_with(code), "{error:?}");
+        assert_eq!(tree(path), before);
+    }
+
+    #[test]
+    fn intent_is_published_before_return_and_can_be_reloaded_with_its_nonce() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let expected = binding(&state);
+        let old = fs::read(tmp.path().join("manifest.json")).unwrap();
+        let mut old_file = File::open(tmp.path().join("manifest.json")).unwrap();
+        let intent = state.begin_target_provisioning(expected.clone()).unwrap();
+        assert_eq!(intent.binding, expected);
+        assert_ne!(intent.nonce, [0; 16]);
+        assert_eq!(
+            manifest(&tmp.path())["target_provenance"][0]["phase"],
+            "provisioning"
+        );
+        let mut bytes = Vec::new();
+        old_file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, old);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+        drop(state);
+        let before = tree(&tmp.path());
+        let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(
+            recovered.target_provenance(&expected.stream),
+            Some(&TargetProvenance::Provisioning(intent))
+        );
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn confirmation_preserves_the_exact_intent_and_reloads_object_oids() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let intent = state.begin_target_provisioning(binding(&state)).unwrap();
+        let completed = confirmed(&intent);
+        state
+            .confirm_target_provisioning(completed.clone())
+            .unwrap();
+        assert_eq!(
+            manifest(&tmp.path())["target_provenance"][0]["phase"],
+            "confirmed"
+        );
+        drop(state);
+        let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(
+            recovered.target_provenance(&intent.binding.stream),
+            Some(&TargetProvenance::Confirmed(completed))
+        );
+    }
+
+    #[test]
+    fn repeated_intent_and_confirmation_are_idempotent_without_new_nonce_or_inode() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = binding(&state);
+        let intent = state.begin_target_provisioning(desired.clone()).unwrap();
+        let before = tree(&tmp.path());
+        assert_eq!(state.begin_target_provisioning(desired).unwrap(), intent);
+        assert_eq!(tree(&tmp.path()), before);
+        let completed = confirmed(&intent);
+        state
+            .confirm_target_provisioning(completed.clone())
+            .unwrap();
+        let before = tree(&tmp.path());
+        state.confirm_target_provisioning(completed).unwrap();
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn confirmed_provenance_cannot_return_to_provisioning() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = binding(&state);
+        let intent = state.begin_target_provisioning(desired.clone()).unwrap();
+        state
+            .confirm_target_provisioning(confirmed(&intent))
+            .unwrap();
+        let before = tree(&tmp.path());
+        assert!(state.begin_target_provisioning(desired).is_err());
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn confirmation_requires_a_persisted_matching_intent_and_nonzero_oids() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let synthetic = ProvisioningIntent {
+            binding: binding(&state),
+            nonce: [1; 16],
+        };
+        let before = tree(&tmp.path());
+        assert!(
+            state
+                .confirm_target_provisioning(confirmed(&synthetic))
+                .is_err()
+        );
+        assert_eq!(tree(&tmp.path()), before);
+        let intent = state.begin_target_provisioning(binding(&state)).unwrap();
+        for variant in 0..5 {
+            let mut evidence = confirmed(&intent);
+            match variant {
+                0 => evidence.intent.nonce[0] ^= 1,
+                1 => evidence.schema_oid = 0,
+                2 => evidence.table_oid = 0,
+                3 => evidence.intent.binding.owner_oid += 1,
+                _ => evidence.intent.binding.target_system_identifier = None,
+            }
+            let before = tree(&tmp.path());
+            assert!(state.confirm_target_provisioning(evidence).is_err());
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn target_binding_cannot_be_rewritten_or_downgraded() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = binding(&state);
+        state.begin_target_provisioning(desired.clone()).unwrap();
+        for variant in 0..6 {
+            let mut changed = desired.clone();
+            match variant {
+                0 => changed.target_system_identifier = None,
+                1 => changed.target_system_identifier = Some(98765),
+                2 => changed.target_database_oid += 1,
+                3 => changed.owner_oid += 1,
+                4 => changed.schema_name.push('x'),
+                _ => changed.table_name.push('x'),
+            }
+            let before = tree(&tmp.path());
+            assert!(state.begin_target_provisioning(changed).is_err());
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn optional_target_system_id_round_trips_without_becoming_authority() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let mut desired = binding(&state);
+        desired.target_system_identifier = None;
+        let intent = state.begin_target_provisioning(desired.clone()).unwrap();
+        drop(state);
+        let mut state = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(
+            state.target_provenance(&desired.stream),
+            Some(&TargetProvenance::Provisioning(intent.clone()))
+        );
+        let mut upgraded = desired;
+        upgraded.target_system_identifier = Some(67890);
+        let before = tree(&tmp.path());
+        assert!(state.begin_target_provisioning(upgraded).is_err());
+        assert_eq!(tree(&tmp.path()), before);
+        state
+            .confirm_target_provisioning(confirmed(&intent))
+            .unwrap();
+        assert_eq!(
+            manifest(&tmp.path())["target_provenance"][0]["record"]["intent"]["binding"]["target_system_identifier"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn initial_slice_refuses_a_second_stream_and_duplicate_persisted_streams() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let mut desired = binding(&state);
+        state.begin_target_provisioning(desired.clone()).unwrap();
+        desired.stream.generation += 1;
+        let before = tree(&tmp.path());
+        assert!(state.begin_target_provisioning(desired).is_err());
+        assert_eq!(tree(&tmp.path()), before);
+        drop(state);
+        change_manifest(&tmp.path(), |value| {
+            let first = value["target_provenance"][0].clone();
+            value["target_provenance"]
+                .as_array_mut()
+                .unwrap()
+                .push(first);
+        });
+        recovery_refusal(&tmp.path(), "state-provenance:");
+    }
+
+    #[test]
+    fn invalid_local_binding_is_refused_before_any_publication() {
+        for variant in 0..10 {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let mut desired = binding(&state);
+            match variant {
+                0 => desired.stream.run.0[0] ^= 1,
+                1 => desired.stream.source.system_identifier = 0,
+                2 => desired.stream.source.database_oid = 0,
+                3 => desired.target_system_identifier = Some(0),
+                4 => desired.target_database_oid = 0,
+                5 => desired.owner_oid = 0,
+                6 => desired.metadata_version = 2,
+                7 => desired.schema_name.clear(),
+                8 => desired.table_name.clear(),
+                _ => desired.schema_name.push('\0'),
+            }
+            let before = tree(&tmp.path());
+            let error = state.begin_target_provisioning(desired).unwrap_err();
+            assert!(error.message.starts_with("state-provenance:"), "{error:?}");
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn manifest_limit_is_checked_before_creating_publication_files() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let mut desired = binding(&state);
+        desired.schema_name = "a".repeat(16384);
+        let before = tree(&tmp.path());
+        let error = state.begin_target_provisioning(desired).unwrap_err();
+        assert!(error.message.starts_with("state-invalid:"), "{error:?}");
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn recovery_refuses_missing_empty_and_copy_only_roots_without_creation() {
+        let tmp = TempDir::new();
+        assert!(open_for_provenance_recovery(&tmp.path()).is_err());
+        assert!(!tmp.path().exists());
+        DirBuilder::new().mode(0o700).create(tmp.path()).unwrap();
+        recovery_refusal(&tmp.path(), "state-missing:");
+        drop(tmp.create());
+        recovery_refusal(&tmp.path(), "state-provenance:");
+    }
+
+    #[test]
+    fn recovery_refuses_v1_and_unknown_versions_without_conversion() {
+        for version in [1, 3] {
+            let tmp = TempDir::new();
+            drop(tmp.create());
+            change_manifest(&tmp.path(), |value| {
+                value["format_version"] = json!(version);
+                value.as_object_mut().unwrap().remove("target_provenance");
+            });
+            recovery_refusal(&tmp.path(), "state-version:");
+        }
+    }
+
+    #[test]
+    fn recovered_provenance_does_not_enable_external_copy_resume_or_restart() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        state.begin_target_provisioning(binding(&state)).unwrap();
+        drop(state);
+        for action in [StateAction::Resume, StateAction::Restart] {
+            refusal(&tmp.path(), action, "state-recovery-unsupported:");
+        }
+        let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(recovered.identity().format_version, 2);
+    }
+
+    #[test]
+    fn recovery_keeps_path_permissions_and_exclusive_lock_checks() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        state.begin_target_provisioning(binding(&state)).unwrap();
+        recovery_refusal(&tmp.path(), "state-busy:");
+        drop(state);
+        fs::set_permissions(tmp.path(), Permissions::from_mode(0o750)).unwrap();
+        recovery_refusal(&tmp.path(), "state-permissions:");
+        fs::set_permissions(tmp.path(), Permissions::from_mode(0o700)).unwrap();
+        let alias = tmp.0.join("alias");
+        symlink(tmp.path(), &alias).unwrap();
+        recovery_refusal(&alias, "state-unsafe:");
+    }
+
+    #[test]
+    fn unpublished_temporary_file_blocks_provenance_without_cleanup() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = binding(&state);
+        let intent = state.begin_target_provisioning(desired.clone()).unwrap();
+        fs::write(tmp.path().join(".manifest.tmp"), b"partial confirmation").unwrap();
+        let before = tree(&tmp.path());
+        assert!(
+            state
+                .confirm_target_provisioning(confirmed(&intent))
+                .is_err()
+        );
+        assert_eq!(
+            state.target_provenance(&desired.stream),
+            Some(&TargetProvenance::Provisioning(intent))
+        );
+        assert_eq!(tree(&tmp.path()), before);
+        drop(state);
+        recovery_refusal(&tmp.path(), "state-foreign:");
+    }
+
+    #[test]
+    fn replaced_manifest_blocks_intent_and_confirmation() {
+        for confirming in [false, true] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let desired = binding(&state);
+            let intent = if confirming {
+                Some(state.begin_target_provisioning(desired.clone()).unwrap())
+            } else {
+                None
+            };
+            let original = tmp.0.join("original.json");
+            fs::rename(tmp.path().join("manifest.json"), &original).unwrap();
+            fs::copy(&original, tmp.path().join("manifest.json")).unwrap();
+            let before = tree(&tmp.0);
+            let error = if let Some(intent) = intent {
+                state
+                    .confirm_target_provisioning(confirmed(&intent))
+                    .unwrap_err()
+            } else {
+                state.begin_target_provisioning(desired).unwrap_err()
+            };
+            assert!(error.message.starts_with("state-replaced:"), "{error:?}");
+            assert_eq!(tree(&tmp.0), before);
+        }
+    }
+
+    #[test]
+    fn publication_failure_before_rename_preserves_the_previous_manifest() {
+        for confirming in [false, true] {
+            for step in [
+                PublicationStep::Create,
+                PublicationStep::Write,
+                PublicationStep::FileSync,
+                PublicationStep::Rename,
+            ] {
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let desired = binding(&state);
+                let intent =
+                    confirming.then(|| state.begin_target_provisioning(desired.clone()).unwrap());
+                let previous = state.target_provenance(&desired.stream).cloned();
+                let path = tmp.path().join("manifest.json");
+                let before = tree(&tmp.path());
+                let bytes = fs::read(&path).unwrap();
+                let failure = PublicationFailure::at(step);
+                let result = if let Some(intent) = &intent {
+                    state.confirm_target_provisioning(confirmed(intent))
+                } else {
+                    state.begin_target_provisioning(desired.clone()).map(|_| ())
+                };
+                let error = result.expect_err(&format!("{confirming:?}: {step:?}"));
+                assert!(error.message.starts_with("state-test:"));
+                assert_eq!(state.target_provenance(&desired.stream), previous.as_ref());
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(fs::metadata(&path).unwrap().ino(), before[&path].inode);
+                drop(failure);
+                drop(state);
+                if step == PublicationStep::Create {
+                    assert_eq!(tree(&tmp.path()), before);
+                    if confirming {
+                        let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+                        assert_eq!(
+                            recovered.target_provenance(&desired.stream),
+                            previous.as_ref()
+                        );
+                    } else {
+                        recovery_refusal(&tmp.path(), "state-provenance:");
+                    }
+                } else {
+                    assert!(tmp.path().join(".manifest.tmp").is_file());
+                    recovery_refusal(&tmp.path(), "state-foreign:");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn publication_failure_after_rename_returns_no_success_and_requires_reopen() {
+        for confirming in [false, true] {
+            for step in [PublicationStep::DirectorySync, PublicationStep::Published] {
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let desired = binding(&state);
+                let intent =
+                    confirming.then(|| state.begin_target_provisioning(desired.clone()).unwrap());
+                let previous = state.target_provenance(&desired.stream).cloned();
+                let failure = PublicationFailure::at(step);
+                let result = if let Some(intent) = &intent {
+                    state.confirm_target_provisioning(confirmed(intent))
+                } else {
+                    state.begin_target_provisioning(desired.clone()).map(|_| ())
+                };
+                let error = result.expect_err(&format!("{confirming:?}: {step:?}"));
+                assert!(error.message.starts_with("state-test:"));
+                assert_eq!(state.target_provenance(&desired.stream), previous.as_ref());
+                assert!(!tmp.path().join(".manifest.tmp").exists());
+                assert!(manifest(&tmp.path())["copy_complete"].is_null());
+                let persisted: TargetProvenance =
+                    serde_json::from_value(manifest(&tmp.path())["target_provenance"][0].clone())
+                        .unwrap();
+                if let Some(intent) = &intent {
+                    assert_eq!(persisted, TargetProvenance::Confirmed(confirmed(intent)));
+                } else {
+                    let TargetProvenance::Provisioning(pending) = &persisted else {
+                        panic!("unexpected confirmation");
+                    };
+                    assert_eq!(pending.binding, desired);
+                    assert_ne!(pending.nonce, [0; 16]);
+                }
+                drop(failure);
+                let error = state
+                    .begin_target_provisioning(desired.clone())
+                    .unwrap_err();
+                assert!(error.message.starts_with("state-replaced:"), "{error:?}");
+                drop(state);
+                let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+                assert_eq!(
+                    recovered.target_provenance(&desired.stream),
+                    Some(&persisted)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn identical_transition_retry_must_synchronize_before_returning_success() {
+        for confirming in [false, true] {
+            for step in [PublicationStep::FileSync, PublicationStep::DirectorySync] {
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let desired = binding(&state);
+                let intent = state.begin_target_provisioning(desired.clone()).unwrap();
+                let completed = confirmed(&intent);
+                if confirming {
+                    state
+                        .confirm_target_provisioning(completed.clone())
+                        .unwrap();
+                }
+                let before = tree(&tmp.path());
+                let failure = PublicationFailure::at(step);
+                let result = if confirming {
+                    state.confirm_target_provisioning(completed.clone())
+                } else {
+                    state.begin_target_provisioning(desired.clone()).map(|_| ())
+                };
+                let error = result.expect_err(&format!("{confirming:?}: {step:?}"));
+                assert!(error.message.starts_with("state-test:"));
+                assert_eq!(tree(&tmp.path()), before);
+                drop(failure);
+                if confirming {
+                    state.confirm_target_provisioning(completed).unwrap();
+                } else {
+                    assert_eq!(state.begin_target_provisioning(desired).unwrap(), intent);
+                }
+                assert_eq!(tree(&tmp.path()), before);
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_validates_every_persisted_binding_and_nonzero_nonce() {
+        let invalid = [
+            ("/nonce", json!(vec![0; 16])),
+            ("/binding/stream/run", json!(vec![0; 16])),
+            ("/binding/stream/source/system_identifier", json!(0)),
+            ("/binding/stream/source/database_oid", json!(0)),
+            ("/binding/target_system_identifier", json!(0)),
+            ("/binding/target_database_oid", json!(0)),
+            ("/binding/owner_oid", json!(0)),
+            ("/binding/metadata_version", json!(2)),
+            ("/binding/schema_name", json!("")),
+            ("/binding/table_name", json!("")),
+            ("/binding/schema_name", json!("a\0b")),
+            ("/binding/table_name", json!("a\0b")),
+        ];
+        for (pointer, invalid) in invalid {
+            for confirming in [false, true] {
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let intent = state.begin_target_provisioning(binding(&state)).unwrap();
+                if confirming {
+                    state
+                        .confirm_target_provisioning(confirmed(&intent))
+                        .unwrap();
+                }
+                drop(state);
+                change_manifest(&tmp.path(), |value| {
+                    let record = &mut value["target_provenance"][0]["record"];
+                    let record = if confirming {
+                        &mut record["intent"]
+                    } else {
+                        record
+                    };
+                    *record.pointer_mut(pointer).unwrap() = invalid.clone();
+                });
+                recovery_refusal(&tmp.path(), "state-provenance:");
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_validates_confirmed_object_oids_and_rejects_unknown_fields() {
+        for field in ["schema_oid", "table_oid"] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = state.begin_target_provisioning(binding(&state)).unwrap();
+            state
+                .confirm_target_provisioning(confirmed(&intent))
+                .unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                value["target_provenance"][0]["record"][field] = json!(0)
+            });
+            recovery_refusal(&tmp.path(), "state-provenance:");
+        }
+        for pointer in [
+            "",
+            "/record",
+            "/record/intent",
+            "/record/intent/binding",
+            "/record/intent/binding/stream",
+            "/record/intent/binding/stream/source",
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = state.begin_target_provisioning(binding(&state)).unwrap();
+            state
+                .confirm_target_provisioning(confirmed(&intent))
+                .unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                value["target_provenance"][0]
+                    .pointer_mut(pointer)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unknown".into(), json!(1));
+            });
+            recovery_refusal(&tmp.path(), "state-invalid:");
+        }
+    }
+
+    #[test]
+    fn recovery_refuses_missing_optional_identity_and_duplicate_json_fields() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        state.begin_target_provisioning(binding(&state)).unwrap();
+        drop(state);
+        let path = tmp.path().join("manifest.json");
+        let original = fs::read_to_string(&path).unwrap();
+        change_manifest(&tmp.path(), |value| {
+            value["target_provenance"][0]["record"]["binding"]
+                .as_object_mut()
+                .unwrap()
+                .remove("target_system_identifier");
+        });
+        recovery_refusal(&tmp.path(), "state-invalid:");
+        fs::write(
+            &path,
+            original.replace(
+                "\"metadata_version\":1",
+                "\"metadata_version\":1,\"metadata_version\":1",
+            ),
+        )
+        .unwrap();
+        recovery_refusal(&tmp.path(), "state-invalid:");
     }
 }

@@ -63,14 +63,26 @@ pub(crate) struct CopyBuffer {
     len: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "E3 applier integration is pending")
-)]
 pub(crate) enum PgParam<'a> {
     Null,
     Text(&'a [u8]),
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Binary parameters await serial-applier integration"
+        )
+    )]
     Binary(&'a [u8]),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransactionStatus {
+    Idle,
+    Active,
+    InTransaction,
+    InError,
+    Unknown,
 }
 
 impl PgConnection {
@@ -127,12 +139,17 @@ impl PgConnection {
         })
     }
 
+    /// Reads libpq's last known state without consuming input or checking server liveness.
+    /// A closed connection returns an error rather than a transaction status.
+    pub(crate) fn transaction_status(&self) -> Result<TransactionStatus> {
+        let raw = self.raw()?;
+        // SAFETY: raw() checks that this owner still holds a live PGconn allocation.
+        let status = unsafe { pq::PQtransactionStatus(raw) };
+        Ok(transaction_status_from_libpq(status))
+    }
+
     /// Statements belong to this connection and must be prepared again after reconnecting.
     /// A zero parameter OID asks PostgreSQL to infer that parameter's type.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "E3 applier integration is pending")
-    )]
     pub(crate) fn prepare(
         &mut self,
         name: &str,
@@ -173,10 +190,6 @@ impl PgConnection {
 
     /// Libpq copies inputs during dispatch; returned cells borrow only their result.
     /// Drained SQL errors permit rollback; interrupted protocol closes the connection.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "E3 applier integration is pending")
-    )]
     pub(crate) fn execute_prepared(
         &mut self,
         name: &str,
@@ -626,6 +639,16 @@ fn copy_rows(tag: &str) -> Result<u64> {
         .map_err(|_| error("PostgreSQL COPY row count exceeds u64"))
 }
 
+fn transaction_status_from_libpq(status: pq::PGTransactionStatusType) -> TransactionStatus {
+    match status {
+        pq::PGTransactionStatusType::PQTRANS_IDLE => TransactionStatus::Idle,
+        pq::PGTransactionStatusType::PQTRANS_ACTIVE => TransactionStatus::Active,
+        pq::PGTransactionStatusType::PQTRANS_INTRANS => TransactionStatus::InTransaction,
+        pq::PGTransactionStatusType::PQTRANS_INERROR => TransactionStatus::InError,
+        pq::PGTransactionStatusType::PQTRANS_UNKNOWN => TransactionStatus::Unknown,
+    }
+}
+
 fn parameter_count(count: usize) -> Result<i32> {
     if count > pq::PQ_QUERY_PARAM_MAX_LIMIT as usize {
         return Err(error(
@@ -670,6 +693,45 @@ mod tests {
     #[test]
     fn native_libpq_is_linked() {
         assert!(super::super::libpq_version() >= 180000);
+    }
+
+    #[test]
+    fn transaction_status_maps_every_native_state() {
+        for (native, expected) in [
+            (
+                pq::PGTransactionStatusType::PQTRANS_IDLE,
+                TransactionStatus::Idle,
+            ),
+            (
+                pq::PGTransactionStatusType::PQTRANS_ACTIVE,
+                TransactionStatus::Active,
+            ),
+            (
+                pq::PGTransactionStatusType::PQTRANS_INTRANS,
+                TransactionStatus::InTransaction,
+            ),
+            (
+                pq::PGTransactionStatusType::PQTRANS_INERROR,
+                TransactionStatus::InError,
+            ),
+            (
+                pq::PGTransactionStatusType::PQTRANS_UNKNOWN,
+                TransactionStatus::Unknown,
+            ),
+        ] {
+            assert_eq!(transaction_status_from_libpq(native), expected);
+        }
+    }
+
+    #[test]
+    fn transaction_status_rejects_a_closed_connection() {
+        let connection = PgConnection {
+            raw: None,
+            phase: Phase::Idle,
+        };
+        let failure = connection.transaction_status().unwrap_err();
+        assert_eq!(failure.kind, crate::contracts::ErrorKind::Pgsql);
+        assert!(failure.message.contains("closed"));
     }
 
     #[test]

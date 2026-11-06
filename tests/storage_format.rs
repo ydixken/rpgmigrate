@@ -1,5 +1,7 @@
 #[path = "../bench/storage/format.rs"]
 mod format;
+#[path = "../src/identity.rs"]
+mod identity;
 
 use format::*;
 use std::io::{self, Cursor, Read, Write};
@@ -23,6 +25,31 @@ fn frame() -> Frame {
         last_part: true,
         payload: vec![0, b'x', 255],
     }
+}
+
+#[test]
+fn persisted_identity_json_has_one_exact_version_two_shape() {
+    let stream: identity::StreamId = frame().tx.stream;
+    let encoded = serde_json::to_value(stream).unwrap();
+    assert_eq!(
+        encoded,
+        serde_json::json!({
+            "run": [17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],
+            "source": {"system_identifier": 0x0102_0304_0506_0708u64, "database_oid": 0x1234_5678u32},
+            "generation": 9
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<StreamId>(encoded.clone()).unwrap(),
+        stream
+    );
+    let mut extra = encoded.clone();
+    extra["unexpected"] = true.into();
+    assert!(serde_json::from_value::<StreamId>(extra).is_err());
+    let mut extra_source = encoded;
+    extra_source["source"]["unexpected"] = true.into();
+    assert!(serde_json::from_value::<StreamId>(extra_source).is_err());
+    assert!(serde_json::from_value::<RunId>(serde_json::json!([1, 2])).is_err());
 }
 
 fn completed() -> CompletedTx {

@@ -5,42 +5,12 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
+pub use super::identity::{CommitLsn, RunId, SourceEndLsn, SourceId, StreamId, TxId, TxSeq};
+
 pub const HEADER_BYTES: usize = 88;
 pub const COMPLETED_BYTES: usize = 128;
 pub const VERSION: u16 = 1;
 pub const MAGIC: [u8; 4] = *b"RPGS";
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunId(pub [u8; 16]);
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SourceId {
-    pub system_identifier: u64,
-    pub database_oid: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct StreamId {
-    pub run: RunId,
-    pub source: SourceId,
-    pub generation: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TxId {
-    pub stream: StreamId,
-    pub xid: u32,
-    pub begin_ordinal: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct TxSeq(pub u64);
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct CommitLsn(pub u64);
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct SourceEndLsn(pub u64);
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Frame {

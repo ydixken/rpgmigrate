@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::cli::CommandPath;
+pub(crate) use crate::identity::RunId;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -87,9 +88,6 @@ pub(crate) struct IoControl {
     pub(crate) deadline: Instant,
     pub(crate) cancelled: Arc<AtomicBool>,
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RunId(pub(crate) [u8; 16]);
 
 #[derive(Debug)]
 pub(crate) struct QualifiedTable {
