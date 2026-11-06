@@ -158,3 +158,47 @@ Process-kill tests do not prove power-loss durability or arbitrary failover safe
 > [!caution]
 > A lost target COMMIT response returns exit code 3 with `commit-outcome-unknown` and no completion marker.
 > Do not infer rollback or automatically retry that copy.
+
+## Storage pilot
+
+We compare three experiment-only candidates using one stream, one writer, one active source transaction, and synchronous storage batches.
+The candidates are segmented files with a SQLite locator catalog, redb, and SQLite record storage.
+They are dev dependencies and do not select a runtime journal backend.
+
+1. Run the required format, backend, common recovery, and driver tests.
+
+   ```sh
+   make test-storage-format test-storage-recovery
+   ```
+
+2. Select a new directory below an existing parent and run the release pilot.
+   The runner refuses an existing directory and preserves its generated stores and receipts.
+
+   ```sh
+   STORAGE_ROOT=target/storage-pilot-1 make storage-pilot
+   ```
+
+The fixed [case manifest](../bench/storage/cases.json) supplies the seed, all three candidates, all three workloads, and three repetitions.
+Each candidate/case/repetition uses a fresh child process with a 300-second deadline.
+Seeded case ordering and paired candidate shuffling reduce fixed-order bias.
+The parent requires every exact receipt and compares canonical input checksums and storage-batch boundaries.
+Missing cases, empty workloads, failed children, and missing or inconsistent reports return nonzero.
+
+Each child reports storage completed transactions and encoded bytes, with separate create, write, checkpoint, close, reopen, verified-scan, and finalization timings.
+Write time includes input generation, encoding, common validation, batch setup, and commit overhead; it is not an isolated synchronization measurement.
+Total time includes explicit checkpoints, redb integrity-on-open work, and both bounded scan passes before completion.
+The scan compares each replayed record with the deterministic input stream and requires the workload's external completed-transaction prefix.
+The giant transaction spans storage batches without an early completed descriptor or retained transaction payload.
+These rates measure storage work, not target-applied transactions or PostgreSQL WAL application.
+
+The report records warm-after-write cache conditions; a fresh directory is not cold-cache proof.
+Peak RSS is measured with `RUSAGE_SELF` in each child and normalized to bytes using the [Linux interface](https://man7.org/linux/man-pages/man2/getrusage.2.html) and [Darwin implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c).
+The 64 MiB configured cache budget is separate from RSS, allocator state, transport frames, and SQLite WAL growth.
+SQLite settings and source identity are queried; redb policy is explicitly labeled as configured because its API does not expose those getters.
+The runner refuses captured or active SQLite-specific build overrides and listed CFLAGS overrides, checks the reviewed SQLite source identity, and records compile options.
+Use the checked-in lockfile and the normal Cargo build without those overrides.
+
+> [!important]
+> This pilot does not select a winner or qualify a production backend.
+> Multi-process access, retirement, quotas, crash/fault matrices, power-loss behavior, and target application remain separate gates.
+> Keep exclusive control of the generated private directories; the pilot does not defend against arbitrary mutation by the same user.

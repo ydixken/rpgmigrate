@@ -66,6 +66,10 @@ See the [first-slice limits](docs/getting-started.md#first-slice-limits).
 
 See the [Testing guide](docs/testing.md).
 
+## Storage experiments
+
+See the [bounded storage pilot](docs/getting-started.md#storage-pilot).
+
 ## Durability
 
 See the [durability design and runtime gates](docs/durability.md).

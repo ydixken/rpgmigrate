@@ -176,9 +176,19 @@ Target-local WAL samples are diagnostics, never source feedback values.
 
 The segmented candidate initially uses the same vetted transactional catalog implementation as its control comparator.
 That choice is an experiment input, not a production decision.
-Pin candidate dependency versions only after graph, license, security, and cross-process checks.
+Pin experiment dependencies after graph, license, and security review; require cross-process checks before production selection.
 Assert effective SQLite pragmas and redb lock outcomes instead of trusting configuration requests.
 E2 is incomplete until a real source transaction can survive journal restart and replay through E3.
+
+The approved first pilot uses the [common contract](../../../bench/storage/config.rs) and [fixed workloads](../../../bench/storage/cases.json).
+It permits one stream, one writer, one active source transaction, and synchronous closure-scoped storage batches.
+Reopen requires an external `TxSeq` prefix, with zero meaning no completed transaction is required.
+Canonical wire byte accounting includes frame headers and completed descriptors; unfinished transactions may span batches without becoming visible.
+Errors poison a batch even when its callback swallows an error.
+A bounded validation pass precedes callback emission during complete scans, and both passes count toward scan timing.
+Every candidate exposes an explicit fallible checkpoint and reports queried settings or clearly labeled configured policy.
+Each candidate/case/repetition runs in a fresh child process with paired seeded ordering and warm-after-write cache labeling.
+This pilot leaves the multi-process, retirement, quota, source-decoding, and wider fault gates above unchecked.
 
 ### E3: Fenced target checkpoint and serial apply
 

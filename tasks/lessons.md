@@ -92,8 +92,20 @@ Parse compiler command overrides with the same `shlex.split` rule in production 
 Exercise compiler overrides that include flags, such as `CC='clang -fno-common'`.
 Refuse optimized Python before importing an assert-based test harness; `-O`, `-OO`, and `PYTHONOPTIMIZE` must not turn missing evidence into success.
 Require recovery's minimum transaction prefix from an external caller, never from the candidate's own surviving metadata.
+Expose final synchronization/checkpoint errors explicitly before timing completes; `Drop` cannot report a failed SQLite WAL checkpoint.
 Keep experimental Cargo registration and automatically discovered tests out of a reviewed foundation commit until their dependencies are ready.
 Preserve the pinned upstream license when generated compatibility fixtures retain upstream help prose.
+Validate every required frame and descriptor before exposing a completed transaction through a scan callback.
+Use bounded validation followed by emission under the documented stable single-writer scan contract; include the extra read cost in measurements.
+Enable and test redb integrity checks on reopen, including cleanly closed corrupt files that would otherwise panic before returning an error.
+Measure each candidate and repetition in a fresh child process because `ru_maxrss` retains earlier process peaks.
+Keep configured engine cache budgets separate from RSS and label storage throughput separately from target-applied work.
+Label write timing as inclusive generation, encoding, validation, batch setup, and commit work instead of claiming pure synchronization time.
+Validate the exact scheduled child receipts in a fresh private root; do not add unrelated directory-inventory restrictions when enumeration is not used as evidence.
+Use isolated Cargo target directories for parallel scoped checks and reserve broad lint/test execution for one integration worker after file freeze.
+Do not diagnose a transient missing executable as a build race without a clean serialized reproduction check.
+Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
+Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.
 
 ## Licensing and readiness
 
@@ -103,8 +115,3 @@ Preserve third-party notices.
 Direct crate metadata checks do not replace a locked dependency graph audit.
 Native libpq and target bookkeeping permissions are explicitly approved.
 Do not introduce another approval gate for those decisions.
-
-## Prepared consumer integration
-
-Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
-Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.

@@ -2,9 +2,10 @@ CARGO ?= cargo
 PYTHON ?= python3
 PQ_LIB_DIR ?= $(CURDIR)/target/native/libpq/lib
 export PQ_LIB_DIR
+export STORAGE_ROOT
 UNIT_FILTERS = --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
 
-.PHONY: check fmt-check lint native native-check build test test-unit test-cli test-native test-harness test-storage-format test-db test-engine test-transport test-prepared test-db-self-check
+.PHONY: check fmt-check lint native native-check build test test-unit test-cli test-native test-harness test-storage-format test-storage-recovery storage-pilot test-db test-engine test-transport test-prepared test-db-self-check
 
 check: native-check
 	$(CARGO) check --locked --all-targets
@@ -24,7 +25,7 @@ native-check:
 build: native-check
 	$(CARGO) build --locked
 
-test: test-unit test-cli test-native test-harness test-storage-format
+test: test-unit test-cli test-native test-harness test-storage-format test-storage-recovery
 
 test-unit: native-check
 	$(CARGO) test --locked --lib -- --list $(UNIT_FILTERS) | awk '/: test$$/ { count++ } END { if (count == 0) { print "error: no Rust unit tests discovered"; exit 1 } }'
@@ -42,6 +43,13 @@ test-harness:
 test-storage-format: native-check
 	$(CARGO) test --locked --test storage_format -- --list | awk '/: test$$/ { count++ } END { if (count != 22) { print "error: expected 22 storage format tests"; exit 1 } }'
 	$(CARGO) test --locked --test storage_format -- --include-ignored
+
+test-storage-recovery: native-check
+	$(CARGO) test --locked --test storage_recovery -- --list | awk '/: test$$/ { count++ } END { if (count != 86) { print "error: expected 86 storage recovery and driver tests"; exit 1 } }'
+	$(CARGO) test --locked --test storage_recovery -- --include-ignored --test-threads=1
+
+storage-pilot: native-check
+	$(CARGO) run --locked --release --example storage -- --root "$${STORAGE_ROOT:?set STORAGE_ROOT to a new directory}"
 
 test-db: build test-engine
 	$(PYTHON) tools/test-db.py -- $(CARGO) test --locked --test copy_integration -- --test-threads=1

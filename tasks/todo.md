@@ -158,7 +158,7 @@ Independent COPY review reported two successful executions with incorrect target
 A CHECK function changed client encoding before another table's COPY, causing altered text despite a completion receipt.
 Another CHECK function deleted previously copied rows while the receipt still reported all copied rows.
 The reviewer also reproduced a valid deferrable foreign key failing when lexical COPY order loaded the child first.
-The author implemented the approved target profile and the static reviewer reported no blocker; the expanded live suite is still required before an E1 completion claim.
+The author implemented the approved target profile; the final expanded live evidence and independent review appear below.
 E1 refuses target CHECK/exclusion constraints, expression/partial indexes, and custom table/index access methods or operator classes.
 The six built-in index access methods require matching `pg_catalog` operator classes with OIDs below 16384.
 Deferrable foreign keys require parents inside the COPY set, identical built-in column types, and built-in comparison operators.
@@ -172,7 +172,7 @@ The author added the internal-trigger guard to initial and locked target invento
 After that change, the author reports 73 unit, 22 format, 24 CLI, 20 native, 10 harness, and seven live engine checks passing.
 The independent harness producer passed the final 40 executable cases on PostgreSQL 14.24 with the controlled native artifact: one Rust integration entry, zero failures, zero ignored or filtered tests, and 25.61 seconds elapsed.
 The two new internal-trigger cases use actual orphan input and require exit 2, zero COPY bytes, no marker, and unchanged target tables and trigger states.
-The frozen final inventory is 40 executable cases and seven live engine cases.
+The E1 foundation inventory was 40 executable cases and seven live engine cases.
 Reviewer Planck passed the final static COPY review, and the author confirmed no source changes after the tested final hashes.
 The fresh Linux arm64 report passed all 11 stages on PostgreSQL 17.11 with 95 Rust, 24 CLI, 20 native, 11 harness, nine CI guard, seven live engine, and 40 executable checks.
 It also passed the three oracle controls, two wire-fault controls, SCRAM cases, and stock-libpq refusal with zero connection attempts.
@@ -180,12 +180,76 @@ The report is `target/ci-linux-GaZ46U/report.json`, with source SHA-256 `90add6f
 This is local arm64 evidence, not a GitHub workflow run or Linux amd64 qualification.
 Independent harness review found that optimized Python could remove assert-based validators.
 The shared import guard now refuses optimized execution before fixture creation; the author reports 11 harness tests passing with 12 subprocess probes.
-The executable and live engine inventories remain 40 and seven.
+That foundation snapshot retained 40 executable cases and seven live engine cases.
 The Linux report includes the final optimization guard and all 11 harness regression tests.
-The foundation commit must exclude unregistered E2B driver/common files and retain a compilable reviewed manifest.
+The foundation commit excluded unregistered E2B driver/common files and retained a compilable reviewed manifest.
 The generated CLI fixture includes upstream help prose, so root `NOTICE` now preserves the exact pgcopydb `LICENSE` from the pinned baseline.
 The two E2B files are outside the Linux snapshot; the only subsequent reviewed snapshot changes are the notice addition and this guide's pointer to maintained platform evidence.
-The author reports 73 Rust, 24 CLI, 20 native, and 10 harness checks passing after the profile patch; this does not replace the final live gate.
+The reviewed foundation is committed as `4e7eeccb2da9ba236db1714c9f7b4801a1155189`.
+An exact staged export formatted and compiled without the two unregistered E2B files.
+
+## Bounded persistence experiment
+
+- [x] Approve the common config, finite candidate selection, and closure-scoped batch interface.
+- [x] Freeze the unregistered common interface in `bench/storage/config.rs` and notify the leader.
+- [x] Implement bounded common validation, required-prefix recovery, and explicit checkpoint finalization.
+- [x] Register the driver and recovery tests after the foundation commit and candidate handoffs.
+- [x] Run every required nonempty workload against every delivered candidate.
+- [x] Obtain independent review before accepting E2B results.
+
+The first experiment uses one stream, one writer, one active source transaction, and synchronous storage batches.
+Required recovery progress comes from an external prefix; zero denotes an empty required prefix.
+Candidate completion is not production qualification or a storage-backend selection.
+Multi-process access, retirement, quotas, and broader fault gates remain unchecked.
+The common contract passed independent re-review after a callback-exposure finding.
+Its first bounded scan pass validates all records and the captured frontier before the second pass emits completed transactions.
+Nineteen focused common tests passed independently, including late-frame and descriptor corruption with zero callbacks.
+SQLite passed independent review with 18 backend tests; journal passed with 15 backend and three focused common tests.
+The redb reviewer reproduced a panic on clean-file corruption before integrity-on-open was enabled.
+The corrected backend passed 19 tests and an independent valid control plus seven corruption probes that return structured errors.
+Separate settings review passed seven focused tests and proved all preexisting backend lines unchanged.
+SQLite reports queried values, journal nests that catalog evidence, and redb labels configured policies without claiming introspection or RSS limits.
+The 31-package dependency delta passed independent checksums, licenses, advisory, features, and bundled SQLite source review.
+The previous 21 package records were unchanged; the locked graph SHA-256 is `33778c3872ebac34b2ce9446067729ce9b45b03ce5d633314b0060810a6a9828`.
+The driver is frozen for independent review with 86 passing recovery tests: 19 common, 58 backend, and nine driver cases, with no ignored tests.
+The default test gate requires exact discovery of all 86 cases before execution; the reviewed 22-case format gate remains required.
+`make lint` passed after the driver freeze.
+The manifest requires three nonempty workloads, all three candidates, and three repetitions in fresh child processes.
+The runner records storage throughput, checkpoint/reopen/two-pass scan timings, queried or configured settings, and per-child RSS.
+Faraday passed independent driver review using an isolated Cargo target directory: nine driver tests, scoped Clippy, formatting, native verification, and three fresh-child checks passed.
+The root worker's serialized `make check test` passed, including all 86 storage cases, and `make lint` passed.
+That gate passed 76 runtime unit, 24 CLI, 20 native-builder, 12 harness, 22 format, and 86 storage checks; 14 live tests belong to their separate engine gate.
+The release pilot returned exit zero with all 27 expected receipts from 27 distinct child PIDs on Darwin arm64 with Rust/Cargo 1.99.1, SQLite 3.54.1, and redb 4.5.0.
+Every candidate used the same canonical input and storage-batch boundaries within each workload.
+
+| Workload | Frames | Completed transactions | Encoded bytes | Storage batches |
+| --- | --- | --- | --- | --- |
+| Small commits | 512 | 128 | 126976 | 1 |
+| Wide events | 48 | 4 | 33559168 | 5 |
+| Giant transaction | 258 | 1 | 135289136 | 19 |
+
+The raw report is `target/storage-pilot-20261106/report.json`, SHA-256 `7cd98d68dd17b370b2937d62c38c6ffe95a401e9cdd120af61d36abf258424c1`.
+Its actual input manifest is `target/storage-pilot-20261106/cases.json`, SHA-256 `f1496e15bdf15ac7bb624c0725783be9195c420e4688dbc651e9509d6a9d5e55`.
+`target/storage-pilot-evidence.json` records all 29 JSON file hashes, the executable hash, toolchain versions, and frozen input manifest.
+The report contains seven measured phases plus total time, including encoding, checkpoints, reopen integrity work, and both verified-scan passes.
+Observed giant-transaction child peak RSS ranges were 7274496 bytes for segmented storage, 77266944 to 77283328 for redb, and 94978048 to 94994432 for SQLite, with the same configured 67108864-byte cache budget.
+These are three repetitions on one Mac with warm-after-write reads and do not select a backend or establish production memory or durability bounds.
+The actual release executable rejected `LIBSQLITE3_SYS_USE_PKG_CONFIG=1` with structured exit one before creating an output directory.
+
+## Prepared transport and documentation
+
+The private prepared-transport slice passed independent unit and seven-case live review.
+The full engine inventory is 14 cases, preserving all seven E1 cases; the transport-only inventory remains five and executable COPY remains 40.
+Harness and CI guard review passed 12 and ten offline tests on Python 3.15 and 3.9, including 36 negative checks.
+The prepared API remains unused by a production CDC consumer and does not enable runtime CDC commands.
+Narrow expected-dead-code attributes must be removed when the checkpoint/applier consumer is integrated.
+Canonical codec promotion remains deferred until that consumer and its API are ready.
+The [durability guide](../docs/durability.md) passed independent review at SHA-256 `b152b61874e55f7fd4214c4644aad8dbfa16642898f74b54200b5d03097cb526` and separates the approved design from runtime gates.
+A concurrent broad test run reported a transient missing `target/debug/rpgmigrate` executable in CLI checks.
+The root worker's serialized gate passed after file freeze and did not reproduce that failure.
+Its original cause remains unproven; no code fix was made on the assumption of a build race.
+Prepared transport, its harness/CI inventories, and the durability guide are committed as `3725c8d`.
+The exact prepared-only staged export passed `make lint` against a byte-identical copy of the verified native artifact and the foundation dependency graph.
 
 The E1 command deadline is 300 seconds in total and does not reset between operations.
 The package declares the verified Rust 1.99.1 toolchain as its minimum.
@@ -210,14 +274,3 @@ E0/E1 signatures stay frozen unless the leader coordinates a change.
 Review E2-E4 interfaces before their workers start.
 Expand the E5-E7 and operator/release feature maps before each later milestone.
 Full CLI/operator/release scope remains unfinished after E1.
-
-## Prepared transport and documentation
-
-
-The private prepared-transport slice passed independent unit and seven-case live review.
-The full engine inventory is 14 cases, preserving all seven E1 cases; the transport-only inventory remains five and executable COPY remains 40.
-Harness and CI guard review passed 12 and ten offline tests on Python 3.15 and 3.9, including 36 negative checks.
-The prepared API remains unused by a production CDC consumer and does not enable runtime CDC commands.
-Narrow expected-dead-code attributes must be removed when the checkpoint/applier consumer is integrated.
-Canonical codec promotion remains deferred until that consumer and its API are ready.
-The [durability guide](../docs/durability.md) passed independent review at SHA-256 `b152b61874e55f7fd4214c4644aad8dbfa16642898f74b54200b5d03097cb526` and separates the approved design from runtime gates.

@@ -15,10 +15,20 @@ serde_json = "=1.0.154"
 
 [dev-dependencies]
 crc32fast = "=1.5.4"
+redb = "=4.5.0"
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled"] }
 
 [[test]]
 name = "storage_format"
 path = "tests/storage_format.rs"
+
+[[test]]
+name = "storage_recovery"
+path = "tests/storage_recovery.rs"
+
+[[example]]
+name = "storage"
+path = "bench/storage.rs"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
