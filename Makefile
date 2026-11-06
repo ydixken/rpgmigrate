@@ -3,9 +3,9 @@ PYTHON ?= python3
 PQ_LIB_DIR ?= $(CURDIR)/target/native/libpq/lib
 export PQ_LIB_DIR
 export STORAGE_ROOT
-UNIT_FILTERS = --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip apply::checkpoint::live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
+UNIT_FILTERS = --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip pg::replication_live_tests:: --skip apply::checkpoint::live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
 
-.PHONY: check fmt-check lint native native-check build test test-unit test-cli test-native test-harness test-storage-format test-storage-recovery storage-pilot test-db test-engine test-transport test-prepared test-authority test-db-self-check
+.PHONY: check fmt-check lint native native-check build test test-unit test-cli test-native test-harness test-storage-format test-storage-recovery storage-pilot test-db test-engine test-transport test-prepared test-replication test-authority test-db-self-check
 
 check: native-check
 	$(CARGO) check --locked --all-targets
@@ -62,6 +62,9 @@ test-transport: native-check
 
 test-prepared: native-check
 	$(PYTHON) tools/test-db.py --prepared -- $(CARGO) test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
+
+test-replication: native-check
+	$(PYTHON) tools/test-db.py --replication -- $(CARGO) test --locked --lib pg::replication_live_tests:: -- --ignored --test-threads=1
 
 test-authority: native-check
 	$(PYTHON) tools/test-db.py --authority -- $(CARGO) test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1

@@ -1,10 +1,12 @@
-use super::{error, io};
+use super::replication::{ReplicationState, start_command};
+use super::{IdentifySystem, ReplicationFrame, ReplicationPoll, StandbyStatus, error, io};
 use crate::contracts::{Conninfo, Error, IoControl, Result};
 use pq_sys as pq;
 use std::ffi::{CStr, CString, c_void};
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
+use std::time::Instant;
 
 pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
     let mut diagnostic = ptr::null_mut();
@@ -30,6 +32,14 @@ pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
 pub(crate) struct PgConnection {
     raw: Option<Connection>,
     phase: Phase,
+    mode: Mode,
+    replication: ReplicationState,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Mode {
+    Sql,
+    Logical,
 }
 
 struct Connection {
@@ -39,7 +49,7 @@ struct Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        // SAFETY: this is the sole owner of this live PQconnectStart allocation.
+        // SAFETY: this is the sole owner of this live libpq connection.
         unsafe { pq::PQfinish(self.raw.as_ptr()) };
     }
 }
@@ -50,6 +60,7 @@ enum Phase {
     Query,
     CopyIn,
     CopyOut,
+    CopyBoth,
 }
 
 unsafe extern "C" fn discard_notice(_arg: *mut c_void, _message: *const libc::c_char) {
@@ -87,10 +98,29 @@ pub(crate) enum TransactionStatus {
 
 impl PgConnection {
     pub(crate) fn connect(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
+        Self::connect_mode(conninfo, Mode::Sql, io)
+    }
+
+    fn connect_mode(conninfo: &Conninfo, mode: Mode, io: &IoControl) -> Result<Self> {
         io::check(io)?;
         super::native::check()?;
-        // SAFETY: Conninfo owns a valid NUL-terminated string for this call.
-        let raw = unsafe { pq::PQconnectStart(conninfo.as_c_str().as_ptr()) };
+        let raw = match mode {
+            Mode::Sql => {
+                // SAFETY: Conninfo owns a valid NUL-terminated string for this call.
+                unsafe { pq::PQconnectStart(conninfo.as_c_str().as_ptr()) }
+            }
+            Mode::Logical => {
+                validate_conninfo(conninfo)?;
+                let keys = [c"dbname".as_ptr(), c"replication".as_ptr(), ptr::null()];
+                let values = [
+                    conninfo.as_c_str().as_ptr(),
+                    c"database".as_ptr(),
+                    ptr::null(),
+                ];
+                // SAFETY: terminated arrays/strings stay live while libpq expands and copies them.
+                unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) }
+            }
+        };
         let raw =
             NonNull::new(raw).ok_or_else(|| error("PostgreSQL connection allocation failed"))?;
         let owner = Connection {
@@ -130,9 +160,12 @@ impl PgConnection {
         Ok(Self {
             raw: Some(owner),
             phase: Phase::Idle,
+            mode,
+            replication: ReplicationState::default(),
         })
     }
     pub(crate) fn query(&mut self, sql: &str, io: &IoControl) -> Result<PgResult> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             connection.send(sql, io)?;
             connection.drain(None, io)
@@ -157,6 +190,7 @@ impl PgConnection {
         param_types: &[u32],
         io: &IoControl,
     ) -> Result<()> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             let raw = connection.require(Phase::Idle)?;
             let count = parameter_count(param_types.len())?;
@@ -196,6 +230,7 @@ impl PgConnection {
         params: &[PgParam<'_>],
         io: &IoControl,
     ) -> Result<PgResult> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             let raw = connection.require(Phase::Idle)?;
             let count = parameter_count(params.len())?;
@@ -249,6 +284,7 @@ impl PgConnection {
     }
 
     pub(crate) fn read_copy(&mut self, io: &IoControl) -> Result<Option<CopyBuffer>> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             let raw = connection.require(Phase::CopyOut)?;
             loop {
@@ -292,6 +328,7 @@ impl PgConnection {
     }
 
     pub(crate) fn write_copy(&mut self, data: &[u8], io: &IoControl) -> Result<()> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             let raw = connection.require(Phase::CopyIn)?;
             // Flush each chunk to bound libpq's queue even when the caller holds an oversized row.
@@ -318,6 +355,7 @@ impl PgConnection {
     }
 
     pub(crate) fn finish_copy_in(&mut self, io: &IoControl) -> Result<u64> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             connection.end_copy(None, io)?;
             connection.drain(None, io)?.copy_count()
@@ -325,6 +363,7 @@ impl PgConnection {
     }
 
     pub(crate) fn abort_copy_in(&mut self, _reason: &str, io: &IoControl) -> Result<()> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             // An arbitrary caller reason could contain row values or connection secrets.
             connection.end_copy(Some(c"rpgmigrate aborted COPY"), io)?;
@@ -365,6 +404,322 @@ impl PgConnection {
             .as_ref()
             .map(|owner| owner.raw.as_ptr())
             .ok_or_else(|| error("PostgreSQL connection is closed"))
+    }
+
+    fn require_mode(&self, mode: Mode) -> Result<()> {
+        if self.mode == mode {
+            Ok(())
+        } else {
+            Err(error(
+                "PostgreSQL operation is invalid for this connection mode",
+            ))
+        }
+    }
+
+    /// Opens a dedicated logical session with replication=database overriding conninfo.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Logical source integration is pending")
+    )]
+    pub(crate) fn connect_replication(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
+        Self::connect_mode(conninfo, Mode::Logical, io)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Logical source integration is pending")
+    )]
+    pub(crate) fn identify_system(&mut self, io: &IoControl) -> Result<IdentifySystem> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::Idle)?;
+        self.operation(io, |connection| {
+            connection.send_replication(c"IDENTIFY_SYSTEM", io)?;
+            let result = connection.drain(None, io)?;
+            // SAFETY: the result owns a live PGresult; dimensions are signed nonnegative ints.
+            let columns = unsafe { pq::PQnfields(result.raw.as_ptr()) };
+            if result.status() != pq::ExecStatusType::PGRES_TUPLES_OK
+                || result.rows() != 1
+                || columns != 4
+            {
+                return Err(error(
+                    "PostgreSQL replication identity has an invalid result shape",
+                ));
+            }
+            IdentifySystem::parse(
+                1,
+                &[
+                    result.cell(0, 0)?,
+                    result.cell(0, 1)?,
+                    result.cell(0, 2)?,
+                    result.cell(0, 3)?,
+                ],
+            )
+        })
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Logical source integration is pending")
+    )]
+    pub(crate) fn start_replication(
+        &mut self,
+        slot: &str,
+        start: u64,
+        options: &[(&str, Option<&str>)],
+        io: &IoControl,
+    ) -> Result<()> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::Idle)?;
+        let command = start_command(slot, start, options)?;
+        self.operation(io, |connection| {
+            connection.send_replication(&command, io)?;
+            let result = connection
+                .next_result(io)?
+                .ok_or_else(|| error("PostgreSQL replication startup returned no result"))?;
+            if result.status() == pq::ExecStatusType::PGRES_COPY_BOTH {
+                connection.phase = Phase::CopyBoth;
+                connection.replication = ReplicationState::default();
+                return Ok(());
+            }
+            connection.drain(Some(result), io)?;
+            Err(error(
+                "PostgreSQL replication startup did not enter CopyBoth",
+            ))
+        })
+    }
+
+    /// False means NOT accepted: the existing pending status remains unchanged.
+    /// Positions belong to the caller's durability policy, never to received frames.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Logical source integration is pending")
+    )]
+    pub(crate) fn queue_feedback(&mut self, status: StandbyStatus) -> Result<bool> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::CopyBoth)?;
+        if self.replication.ending {
+            return Err(error("PostgreSQL replication is ending"));
+        }
+        Ok(self.replication.queue(status))
+    }
+
+    /// Begins graceful shutdown; continue polling until End or an error.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Logical source integration is pending")
+    )]
+    pub(crate) fn request_replication_end(&mut self) -> Result<()> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::CopyBoth)?;
+        self.replication.ending = true;
+        Ok(())
+    }
+
+    /// FeedbackDrained leaves all delivery and feedback-position policy with the caller.
+    /// End requires every terminal result; caller wakes preserve the absolute session deadline.
+    /// Streaming errors close the connection.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Logical source integration is pending")
+    )]
+    pub(crate) fn poll_replication(
+        &mut self,
+        wake_at: Instant,
+        io: &IoControl,
+    ) -> Result<ReplicationPoll> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::CopyBoth)?;
+        self.operation(io, |connection| connection.pump_replication(wake_at, io))
+    }
+
+    fn send_replication(&mut self, command: &CStr, io: &IoControl) -> Result<()> {
+        let raw = self.require(Phase::Idle)?;
+        io::check(io)?;
+        self.phase = Phase::Query;
+        // SAFETY: libpq copies the internal terminated command; walsender requires simple query.
+        if unsafe { pq::PQsendQuery(raw, command.as_ptr()) } != 1 {
+            return Err(error("PostgreSQL replication command dispatch failed"));
+        }
+        self.flush(io)
+    }
+
+    fn drained_feedback(&mut self) -> Option<ReplicationPoll> {
+        if self
+            .replication
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.drained)
+        {
+            self.replication
+                .pending
+                .take()
+                .map(|pending| ReplicationPoll::FeedbackDrained(pending.status))
+        } else {
+            None
+        }
+    }
+
+    fn replication_output(&mut self) -> Result<bool> {
+        let raw = self.raw()?;
+        if let Some(pending) = self
+            .replication
+            .pending
+            .as_mut()
+            .filter(|pending| !pending.queued)
+        {
+            let bytes = pending.status.encode();
+            // SAFETY: libpq copies exactly one 34-byte feedback; no second status can queue yet.
+            match unsafe { pq::PQputCopyData(raw, bytes.as_ptr().cast(), 34) } {
+                1 => pending.queued = true,
+                0 => {}
+                _ => return Err(error("PostgreSQL replication feedback output failed")),
+            }
+        }
+        if self.replication.ending
+            && self.replication.pending.is_none()
+            && !self.replication.sent_end
+        {
+            // SAFETY: this exclusive stream is ending; NULL requests a successful CopyDone.
+            match unsafe { pq::PQputCopyEnd(raw, ptr::null()) } {
+                1 => self.replication.sent_end = true,
+                0 => {}
+                _ => return Err(error("PostgreSQL replication termination failed")),
+            }
+        }
+        // SAFETY: the live connection is nonblocking and owned by this thread.
+        let flushing = match unsafe { pq::PQflush(raw) } {
+            0 => {
+                // Libpq may discard write-failed output and still return zero.
+                if let Some(pending) = self
+                    .replication
+                    .pending
+                    .as_mut()
+                    .filter(|pending| pending.queued)
+                {
+                    pending.drained = true;
+                }
+                false
+            }
+            1 => {
+                #[cfg(test)]
+                {
+                    self.replication.flush_pending += 1;
+                }
+                true
+            }
+            _ => return Err(error("PostgreSQL replication output flush failed")),
+        };
+        Ok(flushing
+            || self
+                .replication
+                .pending
+                .as_ref()
+                .is_some_and(|pending| !pending.queued)
+            || (self.replication.ending
+                && !self.replication.sent_end
+                && self.replication.pending.is_none()))
+    }
+
+    fn pump_replication(&mut self, wake_at: Instant, io: &IoControl) -> Result<ReplicationPoll> {
+        let raw = self.raw()?;
+        if Instant::now() >= wake_at {
+            return Ok(ReplicationPoll::Wake);
+        }
+        if let Some(event) = self.drained_feedback() {
+            return Ok(event);
+        }
+        let mut consumed = false;
+        loop {
+            io::check(io)?;
+            if Instant::now() >= wake_at {
+                return Ok(ReplicationPoll::Wake);
+            }
+            let mut complete = false;
+            if self.replication.received_end {
+                // CopyDone leaves libpq in COPY_IN until our CopyDone; ErrorResponse leaves BUSY/READY.
+                // Inspect terminal input before blocked output can hide a server error.
+                // SAFETY: PQisBusy gates nonblocking PQgetResult on this owned connection.
+                if unsafe { pq::PQisBusy(raw) } == 0 {
+                    // SAFETY: a non-null result transfers exclusive ownership to PgResult.
+                    let result =
+                        NonNull::new(unsafe { pq::PQgetResult(raw) }).map(|raw| PgResult { raw });
+                    if let Some(result) = result {
+                        match result.status() {
+                            pq::ExecStatusType::PGRES_COPY_IN if !self.replication.sent_end => {}
+                            pq::ExecStatusType::PGRES_COMMAND_OK if self.replication.sent_end => {
+                                self.replication
+                                    .terminals
+                                    .observe(result.command_tag().ok());
+                                continue;
+                            }
+                            pq::ExecStatusType::PGRES_COPY_IN
+                            | pq::ExecStatusType::PGRES_COPY_OUT
+                            | pq::ExecStatusType::PGRES_COPY_BOTH => {
+                                return Err(error(
+                                    "PostgreSQL replication completion unexpectedly entered COPY",
+                                ));
+                            }
+                            _ => return Err(result.failure()),
+                        }
+                    } else {
+                        self.replication.terminals.finish()?;
+                        complete = true;
+                    }
+                }
+            }
+            let sent_end = self.replication.sent_end;
+            let writing = self.replication_output()?;
+            if complete && !writing && self.replication.pending.is_none() {
+                self.phase = Phase::Idle;
+                return Ok(ReplicationPoll::End);
+            }
+            if !self.replication.received_end {
+                let mut buffer = ptr::null_mut();
+                // SAFETY: asynchronous COPY returns either one owned allocation or a status code.
+                match unsafe { pq::PQgetCopyData(raw, &mut buffer, 1) } {
+                    size @ 1.. => {
+                        let raw = NonNull::new(buffer.cast()).ok_or_else(|| {
+                            error("PostgreSQL returned a missing replication buffer")
+                        })?;
+                        return ReplicationFrame::new(CopyBuffer {
+                            raw,
+                            len: size as usize,
+                        })
+                        .map(ReplicationPoll::Frame);
+                    }
+                    0 if !consumed => {
+                        self.consume()?;
+                        consumed = true;
+                        continue;
+                    }
+                    0 => {}
+                    -1 => {
+                        self.replication.received_end = true;
+                        self.replication.ending = true;
+                        continue;
+                    }
+                    _ => return Err(error("PostgreSQL replication input failed")),
+                }
+            }
+            if let Some(event) = self.drained_feedback() {
+                return Ok(event);
+            }
+            if !sent_end && self.replication.sent_end {
+                continue;
+            }
+            // SAFETY: raw remains owned; poll still observes both directions while output is blocked.
+            let socket = unsafe { pq::PQsocket(raw) };
+            let events = libc::POLLIN | if writing { libc::POLLOUT } else { 0 };
+            match io::wait_until(socket, events, wake_at, io)? {
+                Some(ready) => {
+                    if ready & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                        self.consume()?;
+                        consumed = true;
+                    }
+                }
+                None => return Ok(ReplicationPoll::Wake),
+            }
+        }
     }
 
     fn require(&self, phase: Phase) -> Result<*mut pq::PGconn> {
@@ -509,6 +864,7 @@ impl PgConnection {
         status: pq::ExecStatusType,
         io: &IoControl,
     ) -> Result<()> {
+        self.require_mode(Mode::Sql)?;
         self.operation(io, |connection| {
             connection.send(sql, io)?;
             let result = connection
@@ -677,6 +1033,88 @@ fn prepared_cstring(bytes: &[u8]) -> Result<CString> {
 }
 
 #[cfg(test)]
+pub(super) mod replication_testing {
+    use super::*;
+
+    pub(in crate::pg) fn owned_frame(bytes: &[u8]) -> super::super::ReplicationFrame {
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let text = CString::new(format!("\\x{hex}")).unwrap();
+        let mut len = 0;
+        // SAFETY: libpq owns the decoded allocation; CopyBuffer frees it exactly once.
+        let raw = unsafe { pq::PQunescapeBytea(text.as_ptr().cast(), &mut len) };
+        super::super::ReplicationFrame::new(CopyBuffer {
+            raw: NonNull::new(raw).unwrap(),
+            len,
+        })
+        .unwrap()
+    }
+
+    pub(in crate::pg) fn create_slot(
+        connection: &mut PgConnection,
+        slot: &str,
+        io: &IoControl,
+    ) -> Result<()> {
+        start_command(slot, 0, &[])?;
+        connection.require_mode(Mode::Logical)?;
+        let raw = connection.require(Phase::Idle)?;
+        // SAFETY: version lookup reads this owned live connection without dispatch.
+        let modern = unsafe { pq::PQserverVersion(raw) } >= 100000;
+        let command = if modern {
+            format!(
+                "CREATE_REPLICATION_SLOT \"{slot}\" TEMPORARY LOGICAL test_decoding NOEXPORT_SNAPSHOT"
+            )
+        } else {
+            // PostgreSQL 9.6 lacks temporary slots; its entire test cluster is disposable.
+            format!("CREATE_REPLICATION_SLOT \"{slot}\" LOGICAL test_decoding")
+        };
+        connection.operation(io, |connection| {
+            connection.send_replication(&CString::new(command).unwrap(), io)?;
+            let result = connection.drain(None, io)?;
+            if result.status() != pq::ExecStatusType::PGRES_TUPLES_OK
+                || result.rows() != 1
+                || result.cell(0, 0)? != Some(slot.as_bytes())
+            {
+                return Err(error(
+                    "owned replication slot setup returned an invalid result",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    pub(in crate::pg) fn small_send_buffer(connection: &PgConnection) -> Result<()> {
+        let raw = connection.raw()?;
+        let size: libc::c_int = 4096;
+        // SAFETY: this socket belongs to the test connection; the integer has its exact native size.
+        if unsafe {
+            libc::setsockopt(
+                pq::PQsocket(raw),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        } != 0
+        {
+            return Err(error("owned replication socket setup failed"));
+        }
+        Ok(())
+    }
+
+    pub(in crate::pg) fn flush_pending(connection: &PgConnection) -> usize {
+        connection.replication.flush_pending
+    }
+
+    pub(in crate::pg) fn feedback_waiting_for_drain(connection: &PgConnection) -> bool {
+        connection
+            .replication
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.queued && !pending.drained)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -688,6 +1126,76 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(1),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn replication_mode_errors_dispatch_nothing() {
+        let io = control();
+        let mut connection = PgConnection {
+            raw: None,
+            phase: Phase::Idle,
+            mode: Mode::Sql,
+            replication: ReplicationState::default(),
+        };
+        assert!(
+            connection
+                .identify_system(&io)
+                .unwrap_err()
+                .message
+                .contains("mode")
+        );
+        assert!(
+            connection
+                .start_replication("slot", 0, &[], &io)
+                .unwrap_err()
+                .message
+                .contains("mode")
+        );
+        assert!(
+            connection
+                .request_replication_end()
+                .unwrap_err()
+                .message
+                .contains("mode")
+        );
+        connection.mode = Mode::Logical;
+        assert!(
+            connection
+                .query("SELECT 1", &io)
+                .err()
+                .unwrap()
+                .message
+                .contains("mode")
+        );
+        assert!(
+            connection
+                .prepare("p", "SELECT 1", &[], &io)
+                .unwrap_err()
+                .message
+                .contains("mode")
+        );
+        assert!(
+            connection
+                .execute_prepared("p", &[], &io)
+                .err()
+                .unwrap()
+                .message
+                .contains("mode")
+        );
+        assert!(
+            connection
+                .start_copy_out("COPY t TO STDOUT", &io)
+                .unwrap_err()
+                .message
+                .contains("mode")
+        );
+        assert!(
+            connection
+                .start_copy_in("COPY t FROM STDIN", &io)
+                .unwrap_err()
+                .message
+                .contains("mode")
+        );
     }
 
     #[test]
@@ -728,6 +1236,8 @@ mod tests {
         let connection = PgConnection {
             raw: None,
             phase: Phase::Idle,
+            mode: Mode::Sql,
+            replication: ReplicationState::default(),
         };
         let failure = connection.transaction_status().unwrap_err();
         assert_eq!(failure.kind, crate::contracts::ErrorKind::Pgsql);
@@ -807,6 +1317,8 @@ mod tests {
         let mut connection = PgConnection {
             raw: None,
             phase: Phase::Idle,
+            mode: Mode::Sql,
+            replication: ReplicationState::default(),
         };
         let io = control();
         assert!(connection.query("SELECT 1", &io).is_err());

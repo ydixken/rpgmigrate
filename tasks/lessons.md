@@ -105,7 +105,13 @@ The archived single-writer pilot does not close those gates.
 Label write timing as inclusive generation, encoding, validation, batch setup, and commit work instead of claiming pure synchronization time.
 Validate the exact scheduled child receipts in a fresh private root; do not add unrelated directory-inventory restrictions when enumeration is not used as evidence.
 Use isolated Cargo target directories for parallel scoped checks and reserve broad lint/test execution for one integration worker after file freeze.
+For native test exports, copy and verify the pinned source archive as well as the installed artifact when the suite checks upstream patches.
+Separate concurrent milestones with exact-tree exports that retain their reviewed test inventories and exclude unfinished auto-discovered benchmark tests.
 Track known staging diagnostics under their active owner instead of reporting them as a new component defect or weakening the final lint gate.
+Check each tool's exit code before dependent ledger updates or success reports, especially when another owner can change a handoff file.
+Name transport observations by their proven scope: an empty libpq output buffer can follow a discarded write and cannot prove delivery or source acknowledgment.
+State whether an estimate uses elapsed agent runtime or aggregate worker-hours, together with its remaining scope and confidence.
+Do not substitute human days or present an unmeasured estimate as a commitment.
 Do not diagnose a transient missing executable as a build race without a clean serialized reproduction check.
 Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
 Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.

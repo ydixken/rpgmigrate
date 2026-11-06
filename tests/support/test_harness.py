@@ -4,9 +4,12 @@ import json
 import os
 from pathlib import Path
 import runpy
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -15,9 +18,107 @@ from db_harness import (clean_environment, conninfo, expected_version, load_mani
                         validate_report, validate_success_output)
 from protocol_fault import error_sqlstate
 from e1_cases import Cases
+from protocol_fault import packet
+from replication_fault import ReplicationFault
+
+
+def replication_records(context):
+    feedback = (b'r' + bytes(33)).hex()
+    records = []
+    for case in ("keepalive", "duplex", "terminal_error", "missing_completion"):
+        value = {"owner": context["token"], "case": case, "status": "observed", "fault_hits": 1,
+                 "copyboth_seen": True, "backend_closed": True, "feedback_hex": feedback,
+                 "expected_feedback_hex": feedback, "feedback_count": 1, "keepalive_sent": True,
+                 "post_arm_feedback_count": 1, "feedback_mismatches": 0,
+                 "held": False, "released": True, "server_frames_while_held": 1, "pqflush_pending": 1,
+                 "copydone_seen": True, "terminal_seen": True,
+                 "terminal_fault": "error" if case == "terminal_error" else "missing",
+                 "error_sqlstate": "57014" if case == "terminal_error" else None}
+        if case == "terminal_error":
+            late = dict(value)
+            pending = {**value, "backend_pid": 123, "cancel_requested": True, "owned_backend_verified": True, "server_error_seen": True,
+                       "gate_held_at_error": True, "client_error_sqlstate": "57014", "client_closed_before_release": True,
+                       "client_before_deadline": True, "feedback_drained_after_cancel": 0, "held": True, "released": False}
+            value["phases"] = {"late_error": late, "pending_error": pending}
+            value["fault_hits"] = 2
+        path = Path(context["root"]) / f"replication-fault-{case}.json"
+        path.write_text(json.dumps(value))
+        records.append((path, value))
+    return records
+
+
+def authority_records(context):
+    for case in ("lost_commit_reply", "provisioning_recovery"):
+        value = {"owner": context["token"], "case": case, "status": "observed", "fault_hits": 1, "backend_pid": 123,
+                 "commit_tag": "COMMIT", "holding_backend": False, "backend_connection_closed": True,
+                 "held_fence_observed": True, "released_fence_observed": True}
+        (Path(context["root"]) / f"authority-fault-{case}.json").write_text(json.dumps(value))
+
+
+def keepalive_receipt(before, after):
+    relay = ReplicationFault({"token": "owned-fixture"}, "keepalive")
+    client, frontend = socket.socketpair()
+    backend, server = socket.socketpair()
+    relay.client = client
+    relay.state["copyboth_seen"] = True
+    for connection in (client, frontend, backend, server):
+        connection.settimeout(2)
+    worker = threading.Thread(target=relay.upstream, args=(client, backend))
+    worker.start()
+    try:
+        frontend.sendall(struct.pack("!II", 8, 196608))
+        packet(server, typed=False)
+        for payload in before:
+            frontend.sendall(b'd' + struct.pack("!I", 4 + len(payload)) + payload)
+            packet(server)
+        relay.operate({"op": "arm", "wal_end": 900000, "feedback_hex": (b'r' + bytes(33)).hex()})
+        packet(frontend)
+        for payload in after:
+            frontend.sendall(b'd' + struct.pack("!I", 4 + len(payload)) + payload)
+            packet(server)
+    finally:
+        relay.stopping.set()
+        for connection in (client, frontend, backend, server):
+            connection.close()
+        worker.join(timeout=3)
+    assert not worker.is_alive()
+    relay.backend_closed.set()
+    return relay.snapshot()
 
 
 class HarnessTests(unittest.TestCase):
+    def assert_replication_profiles_reject(self, value):
+        support = Path(__file__).resolve().parent
+        validate = runpy.run_path(str(support.parents[1] / "tools" / "test-db.py"))["validate_module_receipt"]
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory, "token": "owned-fixture"}
+            context["replication"] = dict(context)
+            authority_records(context)
+            for profile in ("Replication", "Engine"):
+                replication_records(context)
+                expected = module_cases(load_manifest(), profile)
+                output = "".join(f"test {name} ... ok\n" for name in expected)
+                validate(profile, expected, output, context)
+                for receipt in (value, {**value, "status": "observed"}):
+                    (Path(directory) / "replication-fault-keepalive.json").write_text(json.dumps(receipt))
+                    with self.subTest(profile=profile, status=receipt["status"]), self.assertRaises(AssertionError):
+                        validate(profile, expected, output, context)
+
+    def test_keepalive_receipt_cannot_use_feedback_from_before_arm(self):
+        correct = b'r' + bytes(33)
+        self.assertEqual(keepalive_receipt([], [correct])["status"], "observed")
+        invalid = keepalive_receipt([correct], [])
+        self.assertEqual(invalid["status"], "pending")
+        self.assert_replication_profiles_reject(invalid)
+
+    def test_keepalive_receipt_rejects_a_later_mismatching_feedback(self):
+        correct = b'r' + bytes(33)
+        mismatch = b'r' + struct.pack("!QQQQB", 900000, 900000, 900000, 0, 0)
+        self.assertEqual(keepalive_receipt([], [correct, correct])["status"], "observed")
+        invalid = keepalive_receipt([], [correct, mismatch])
+        self.assertEqual(invalid["status"], "pending")
+        self.assert_replication_profiles_reject(invalid)
+
     def test_optimized_python_cannot_accept_invalid_receipts(self):
         support = Path(__file__).resolve().parent
         code = ("from db_harness import validate_libtest_output; "
@@ -32,9 +133,13 @@ class HarnessTests(unittest.TestCase):
                  "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
                 [str(support.parents[1] / "tools" / "test-db.py"), "--authority", "--", sys.executable,
                  "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
+                [str(support.parents[1] / "tools" / "test-db.py"), "--replication", "--", sys.executable,
+                 "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
                 [str(support / "e1_cases.py"), sys.executable],
                 [str(support / "authority_fault.py"), "--case", "lost_commit_reply"],
                 [str(support / "authority_selfcheck.py")],
+                [str(support / "replication_fault.py"), "--case", "keepalive"],
+                [str(support / "replication_selfcheck.py")],
             )
             for flags, optimization in ((["-O"], None), (["-OO"], None), ([], "1"), ([], "2")):
                 for command in commands:
@@ -80,7 +185,7 @@ class HarnessTests(unittest.TestCase):
 
     def test_module_profiles_require_an_explicit_command(self):
         wrapper = Path(__file__).resolve().parents[2] / "tools" / "test-db.py"
-        for profile in ("--prepared", "--authority"):
+        for profile in ("--prepared", "--authority", "--replication"):
             with self.subTest(profile=profile):
                 result = subprocess.run(
                     [sys.executable, str(wrapper), profile], env=clean_environment(os.environ),
@@ -200,9 +305,12 @@ class HarnessTests(unittest.TestCase):
         manifest = load_manifest()
         prepared = json.loads((support / "prepared_cases.json").read_text())
         authority = json.loads((support / "authority_cases.json").read_text())
-        profiles = {"Authority": authority, "Engine": manifest["transport_cases"] + manifest["copy_cases"] + prepared + authority}
+        replication = json.loads((support / "replication_cases.json").read_text())
+        profiles = {"Authority": authority, "Engine": manifest["transport_cases"] + manifest["copy_cases"] + prepared + authority + replication}
         with tempfile.TemporaryDirectory() as directory:
             context = {"root": directory, "token": "owned-fixture"}
+            context["replication"] = dict(context)
+            replication_records(context["replication"])
             records = []
             for case in ("lost_commit_reply", "provisioning_recovery"):
                 value = {"owner": "owned-fixture", "case": case, "status": "observed", "fault_hits": 1, "backend_pid": 123,
@@ -226,6 +334,95 @@ class HarnessTests(unittest.TestCase):
                     with self.subTest(profile=profile, changes=changes), self.assertRaises(AssertionError):
                         path.write_text(json.dumps({**valid, **changes}))
                         validate(profile, expected, output, context)
+
+    def test_replication_and_engine_require_observed_wire_receipts(self):
+        support = Path(__file__).resolve().parent
+        validate = runpy.run_path(str(support.parents[1] / "tools" / "test-db.py"))["validate_module_receipt"]
+        manifest = load_manifest()
+        replication = json.loads((support / "replication_cases.json").read_text())
+        old = manifest["transport_cases"] + manifest["copy_cases"]
+        old += json.loads((support / "prepared_cases.json").read_text()) + json.loads((support / "authority_cases.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory, "token": "owned-fixture"}
+            context["replication"] = dict(context)
+            authority_records(context)
+            records = replication_records(context)
+            for profile, expected in (("Replication", replication), ("Engine", old + replication)):
+                output = "".join(f"test {name} ... ok\n" for name in expected)
+                validate(profile, expected, output, context)
+                for path, valid in records:
+                    path.unlink()
+                    with self.subTest(profile=profile, case=valid["case"], missing=True), self.assertRaises(AssertionError):
+                        validate(profile, expected, output, context)
+                    for changes in ({"fault_hits": 0}, {"fault_hits": True}, {"status": "pending"}, {"status": "ignored"},
+                                    {"case": "other"}, {"owner": "foreign"}, {"copyboth_seen": False}, {"backend_closed": False}):
+                        path.write_text(json.dumps({**valid, **changes}))
+                        with self.subTest(profile=profile, case=valid["case"], changes=changes), self.assertRaises(AssertionError):
+                            validate(profile, expected, output, context)
+                    path.write_text(json.dumps(valid))
+                for case, changes in (("duplex", {"pqflush_pending": 0}), ("duplex", {"pqflush_pending": True}),
+                                      ("duplex", {"server_frames_while_held": 0}), ("duplex", {"released": False}),
+                                      ("keepalive", {"feedback_hex": (b'r' + bytes(32) + b'\1').hex()}),
+                                      ("keepalive", {"post_arm_feedback_count": 0}),
+                                      ("keepalive", {"feedback_mismatches": 1}),
+                                      ("keepalive", {"keepalive_sent": False}), ("terminal_error", {"error_sqlstate": "23505"}),
+                                      ("missing_completion", {"terminal_seen": False})):
+                    path, valid = next(item for item in records if item[1]["case"] == case)
+                    path.write_text(json.dumps({**valid, **changes}))
+                    with self.subTest(profile=profile, case=case, changes=changes), self.assertRaises(AssertionError):
+                        validate(profile, expected, output, context)
+                    path.write_text(json.dumps(valid))
+                extra = Path(directory) / "replication-fault-unexpected.json"
+                extra.write_text("{}")
+                with self.subTest(profile=profile, extra=True), self.assertRaises(AssertionError):
+                    validate(profile, expected, output, context)
+                extra.unlink()
+
+    def test_replication_inventory_is_exact_and_preserves_old_thirty(self):
+        support = Path(__file__).resolve().parent
+        manifest = load_manifest()
+        replication = json.loads((support / "replication_cases.json").read_text())
+        old = manifest["transport_cases"] + manifest["copy_cases"]
+        old += json.loads((support / "prepared_cases.json").read_text()) + json.loads((support / "authority_cases.json").read_text())
+        self.assertEqual(len(replication), 9)
+        self.assertEqual(len(old), 30)
+        self.assertEqual(module_cases(manifest, "Engine"), old + replication)
+        self.assertEqual(module_cases(manifest, "Replication"), replication)
+        for expected in (replication, old + replication):
+            good = "".join(f"test {name} ... ok\n" for name in expected)
+            for bad in ("", good.replace(" ... ok", " ... ignored", 1), "\n".join(good.splitlines()[1:]),
+                        good + good, good.replace(expected[0], "unlisted_case")):
+                with self.subTest(expected=len(expected), output=bad), self.assertRaises(AssertionError):
+                    validate_libtest_output(expected, bad)
+
+    def test_terminal_error_requires_both_independent_phase_proofs(self):
+        support = Path(__file__).resolve().parent
+        validate = runpy.run_path(str(support.parents[1] / "tools" / "test-db.py"))["validate_module_receipt"]
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory, "token": "owned-fixture"}
+            context["replication"] = dict(context)
+            authority_records(context)
+            records = replication_records(context)
+            path, valid = next(item for item in records if item[1]["case"] == "terminal_error")
+            for profile in ("Replication", "Engine"):
+                expected = module_cases(load_manifest(), profile)
+                output = "".join(f"test {name} ... ok\n" for name in expected)
+                path.write_text(json.dumps(valid))
+                validate(profile, expected, output, context)
+                for phase in ("late_error", "pending_error"):
+                    bad = {**valid, "phases": {key: value for key, value in valid["phases"].items() if key != phase}}
+                    path.write_text(json.dumps(bad))
+                    with self.subTest(profile=profile, missing=phase), self.assertRaises(AssertionError):
+                        validate(profile, expected, output, context)
+                for changes in ({"pqflush_pending": 0}, {"cancel_requested": False}, {"backend_pid": 0},
+                                {"gate_held_at_error": False}, {"client_error_sqlstate": "57013"},
+                                {"client_closed_before_release": False}, {"client_before_deadline": False},
+                                {"feedback_drained_after_cancel": 1}, {"released": True}, {"backend_closed": False}):
+                    pending = {**valid["phases"]["pending_error"], **changes}
+                    path.write_text(json.dumps({**valid, "phases": {**valid["phases"], "pending_error": pending}}))
+                    with self.subTest(profile=profile, changes=changes), self.assertRaises(AssertionError):
+                        validate(profile, expected, output, context)
+                path.write_text(json.dumps(valid))
 
 
 class NonemptyProgram(unittest.TestProgram):

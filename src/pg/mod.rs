@@ -1,6 +1,7 @@
 mod ffi;
 mod io;
 mod native;
+mod replication;
 
 #[cfg(test)]
 mod live_tests;
@@ -8,6 +9,8 @@ mod live_tests;
 mod passfile_tests;
 #[cfg(test)]
 mod prepared_live_tests;
+#[cfg(test)]
+mod replication_live_tests;
 
 #[allow(
     unused_imports,
@@ -18,6 +21,14 @@ pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
 pub(crate) use ffi::PgParam;
 
 pub(crate) use ffi::TransactionStatus;
+
+pub(crate) use replication::{IdentifySystem, ReplicationFrame, ReplicationPoll, StandbyStatus};
+
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "Logical source integration is pending")
+)]
+pub(crate) use replication::ReplicationEnvelope;
 
 use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};
 

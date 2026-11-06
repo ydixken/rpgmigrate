@@ -18,12 +18,28 @@ pub(super) fn wait(
     events: libc::c_short,
     io: &IoControl,
 ) -> Result<libc::c_short> {
+    wait_until(fd, events, io.deadline, io)?
+        .ok_or_else(|| error("PostgreSQL operation deadline exceeded"))
+}
+
+pub(super) fn wait_until(
+    fd: libc::c_int,
+    events: libc::c_short,
+    wake_at: Instant,
+    io: &IoControl,
+) -> Result<Option<libc::c_short>> {
     if fd < 0 {
         return Err(error("PostgreSQL connection has no socket"));
     }
     loop {
         check(io)?;
-        let remaining = io.deadline.saturating_duration_since(Instant::now());
+        if Instant::now() >= wake_at {
+            return Ok(None);
+        }
+        let remaining = io
+            .deadline
+            .min(wake_at)
+            .saturating_duration_since(Instant::now());
         // The atomic cancellation flag has no descriptor, so bound its observation latency.
         let timeout = remaining.as_millis().clamp(1, 50) as libc::c_int;
         let mut descriptor = libc::pollfd {
@@ -43,8 +59,11 @@ pub(super) fn wait(
         if descriptor.revents & libc::POLLNVAL != 0 {
             return Err(error("PostgreSQL socket is invalid"));
         }
+        if Instant::now() >= wake_at {
+            return Ok(None);
+        }
         if ready > 0 {
-            return Ok(descriptor.revents);
+            return Ok(Some(descriptor.revents));
         }
     }
 }
@@ -64,6 +83,62 @@ mod tests {
             deadline: Instant::now() + duration,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn replication_wakeup_preserves_absolute_deadline() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let io = control(Duration::from_millis(30));
+        let deadline = io.deadline;
+        assert!(
+            wait_until(
+                reader.as_raw_fd(),
+                libc::POLLIN,
+                Instant::now() + Duration::from_millis(5),
+                &io
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(io.deadline, deadline);
+        let failure = wait_until(
+            reader.as_raw_fd(),
+            libc::POLLIN,
+            deadline + Duration::from_secs(1),
+            &io,
+        )
+        .unwrap_err();
+        assert!(failure.message.contains("deadline"));
+    }
+
+    #[test]
+    fn replication_wait_honors_cancellation_and_readiness() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let io = control(Duration::from_secs(1));
+        writer.write_all(b"ready").unwrap();
+        assert_ne!(
+            wait_until(reader.as_raw_fd(), libc::POLLIN, io.deadline, &io)
+                .unwrap()
+                .unwrap()
+                & libc::POLLIN,
+            0
+        );
+        io.cancelled.store(true, Ordering::Release);
+        assert!(
+            wait_until(reader.as_raw_fd(), libc::POLLIN, io.deadline, &io)
+                .unwrap_err()
+                .message
+                .contains("cancel")
+        );
+        assert!(
+            wait_until(
+                -1,
+                libc::POLLIN,
+                io.deadline,
+                &control(Duration::from_secs(1))
+            )
+            .is_err()
+        );
     }
 
     #[test]

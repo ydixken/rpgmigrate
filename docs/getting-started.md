@@ -143,7 +143,11 @@ It does not resume, restart, import, or clean pgcopydb state.
 New manifests use native format version two and require a target-provenance field, which remains empty for the COPY command.
 Version-one and unknown-version manifests are rejected without conversion.
 The internal provenance recovery API does not expose public CLI resume or authorize target reuse without the fenced authority's checks.
-Target checkpoint and barrier APIs are internal library interfaces; this slice exposes no CDC receiver or serial-applier command.
+Target checkpoint and barrier APIs are internal library interfaces.
+This slice exposes no CDC receiver or serial-applier command.
+The private CopyBoth transport preserves replication envelopes and accepts externally supplied feedback positions.
+Its `FeedbackDrained` event means libpq output is no longer pending, including when libpq discarded that output after a write failure.
+The event proves neither delivery nor source acknowledgment or durability.
 
 > [!important]
 > Retain exclusive control of the active private `0700` state directory.

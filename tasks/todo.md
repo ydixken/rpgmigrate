@@ -414,7 +414,7 @@ This verifies the archived commit, not the subsequent native-state/authority wor
 ## Approved next execution sequence
 
 - [x] Close the authority slice's independent reviews, final live gate, and serialized root checks.
-- [ ] Freeze the existing source CopyBoth transport proposal through the leader and implement it independently of storage selection.
+- [x] Freeze the existing source CopyBoth transport proposal through the leader and implement it independently of storage selection.
 - [ ] Add E2 complete-transaction readers, storage qualification, and real-slot `test_decoding` ingestion.
 - [ ] Qualify multi-process access, reader pins, pruning, quotas, and recovery before choosing a production storage backend.
 - [ ] Connect `ReadyTxn`/`TxReader` to E3 serial apply and verify actual target effects and recovery.
@@ -439,23 +439,24 @@ No WAL runtime or applied-throughput result is claimed by the authority slice or
 ## Source transport and optional commit positions
 
 - [x] Commit the reviewed private authority slice as `eaf7517f3ef4e77144d81c9aac1d8b819833c851`.
-- [ ] Freeze and review the source CopyBoth implementation and its fixture contract.
+- [x] Freeze and review the source CopyBoth implementation and its fixture contract.
 - [x] Freeze and review the experiment codec's optional physical commit position and version-two wire format.
 - [x] Freeze and review target authority and state metadata-version-two semantics for an optional physical commit position.
 - [x] Close independent review of the state's metadata-version-two constant and refusal fixtures.
+- [x] Close independent review of the source slice's CI inventories, fault receipts, and testing guide.
 - [ ] Integrate the frozen inventories and run the next serialized root gate after component reviews.
-- [ ] Verify the reviewed contract-only tree against stable `eaf7517` PG/harness code before a separate fix commit.
+- [x] Verify the reviewed contract-only tree against stable `eaf7517` PG/harness code before a separate fix commit.
 
 Herschel owns the source CopyBoth transport implementation.
-Its 12 unit and nine live cases are planned inventories, not passing results.
+The frozen source fixture requires exactly nine replication cases within the 39-case engine inventory.
 Descartes owns the corresponding fixture and receipt integration.
 Dewey owns the approved five-file codec extension, including the bounded constructor changes.
 The codec author froze five files after 31 format and 87 recovery tests passed with no ignored cases.
 The RED phase produced 15 format failures and one recovery failure before the codec change.
 The root worker matched all five frozen hashes, including format `06a46ac128bd48482c31138aa40cf84deb10f74f2329046c97b1db6758439432`.
 Owned formatting and whitespace checks passed, and the driver/redb edits change constructors only.
-Scoped Clippy waits for the known PG staging work because 16 unused-item diagnostics stop the check before the codec targets.
-Those diagnostics remain pending integration work and do not establish a new codec defect.
+The first codec Clippy attempt encountered 16 known PG staging diagnostics before reaching the codec targets.
+The separate contract-only export later passed strict all-targets Clippy against stable PG code.
 The codec author added no suppressions or edits outside ownership.
 Faraday independently passed all five codec files, 31 format tests, the new cross-candidate recovery case, and four Python golden checks.
 The root Makefile now requires exactly 31 format and 87 recovery tests after that accepted review.
@@ -463,7 +464,7 @@ Zeno owns `Option<CommitLsn>` in the authority frontier and target metadata vers
 The existing 19-column layout and 26-parameter comparison remain unchanged.
 Zeno froze four authority files after 13 unit tests passed.
 Mendel independently passed those 13 units and the optional-position semantics with no finding.
-Zeno will produce the exact 16-case authority result against the contract-only export with stable PG and harness files.
+Zeno passed the exact 16-case authority run against the contract-only export with stable PG and harness files.
 Meitner owns only `src/state.rs` and exposes `TARGET_METADATA_VERSION = 2` as the crate-private single source for authority imports.
 Native manifest `FORMAT_VERSION` remains two.
 Meitner froze the one-line production change and its literal-version fixtures at SHA-256 `121e7a80a4c7b83611e72c0b74935defa424b25c74160be85f1c732401a41d94`.
@@ -484,7 +485,30 @@ The reviewed optional-position contract uses a separate temporary Git index and 
 Its check/lint/test and authority16 gates exclude active PG and replication-harness edits while preserving those working files.
 The native verifier rejects external or symlinked prefixes, so the export uses a byte-identical copy of the verified artifact with unchanged guards.
 This contract-only change adds no client ABI or dependency change and does not require another Linux run before the later source snapshot.
-The active PG/harness work targets nine replication cases and 39 combined engine cases, with final inventories subject to their frozen handoff.
+The optional-position fix is committed as `0dbae0d6d2f7017711f51b07554604cccca83706`, with exact tested tree `6884fb58197a61ce5e366043160b433f37611429` and 16 selected paths.
+Its isolated check/fmt/strict-Clippy/test gate passed 232 Rust tests, 24 CLI tests, 20 native tests, and 14 harness tests.
+Authority16 passed with both real positive-COMMIT fault receipts.
+All 91 exported files retained their exact Git blobs and modes, and the commit preserved other workers' changes.
+The [contract handoff](../target/verify/contract-only-ype27e06/handoff.json) records commands, counts, hashes, and the copied native artifact's main-prefix install-name dependency.
+This local macOS result makes no relocation or later-source qualification claim.
+
+The source transport, paired harness, and CI changes have completed independent review.
+Carson closed the PostgreSQL 9.6 option-name finding after predispatch refusal of embedded quotes, then passed the renamed pure protocol module and nine focused unit tests.
+Mendel closed the FFI/pump review after a public-libpq probe showed that `PQflush` can report an empty buffer after discarding a failed write.
+The private event is `FeedbackDrained`: it preserves supplied positions but proves no sending, peer receipt, acknowledgment, or durability.
+Error-first handling, one pending status update, and positive all-results completion remain required.
+Planck passed the paired terminal-error and keepalive harness semantics, including blocked `PQflush`, SQLSTATE `57014`, closure before deadline, and the exact fault inventory.
+The [independent rename proof](../target/verify/replication-harness/rename-proof-86fmz_e9/proof.json) reverses the two names and one declared no-delivery sentence to recover all eight reviewed old hashes.
+It also records the author's 19 passing offline tests on each Python version without claiming a root rerun.
+Faraday passed the three-file CI delta, 14 offline tests, 33 rejected invalid receipts, 24 valid receipt orders, and the documentation links.
+
+The source-only snapshot selects 20 paths over `0dbae0d` and excludes all C1 code, test-count changes, and its uncommitted ledger section.
+It retains 31 format and 87 storage-recovery tests from the committed baseline.
+`make test-replication` runs the existing wrapper profile and exact `pg::replication_live_tests::` namespace.
+The default unit filter excludes that separately gated live namespace, while the combined engine target retains every ignored live case.
+Descartes is the sole engine39/COPY40 producer, followed sequentially by the root check/lint/test gate on the same export.
+The [source handoff](../target/verify/source-only-0x48g1ar/handoff.json) records the final tree, native receipts, commands, and gate results before a path-scoped commit.
+No source CLI, decoder completion, ACK policy, production storage selection, or WAL throughput result follows from this transport milestone.
 
 Goodall captured an ordinary export of exact commit `eaf7517` before starting its separate Linux arm64 gate.
 All 91 committed files matched their Git blobs and modes, and the worker hashed 86 pipeline inputs before execution.

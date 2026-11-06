@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 PG_VERSION = "17.11"
-ENGINE_CASES = 30
+ENGINE_CASES = 39
 INTEGRATION_CASES = 40
 
 
@@ -64,7 +64,11 @@ def validate_output(stage, output):
         faults = [line for line in output.splitlines() if line.startswith("Authority faults ")]
         if faults != ["Authority faults verified 2 held COMMIT replies and observed fence releases"]:
             raise VerificationError("missing or incorrect authority fault/fence receipt")
-        return {"engine": ENGINE_CASES, "integration": INTEGRATION_CASES, "authority_faults": 2}
+        replication_faults = [line for line in output.splitlines() if line.startswith("Replication faults ")]
+        if replication_faults != ["Replication faults verified 4 wire cases and observed PQflush backpressure"]:
+            raise VerificationError("missing or incorrect replication fault/backpressure receipt")
+        return {"engine": ENGINE_CASES, "integration": INTEGRATION_CASES,
+                "authority_faults": 2, "replication_faults": 4}
     if stage == "test-db-self-check":
         records = [json.loads(line) for line in output.splitlines() if line.startswith('{"fingerprints":')]
         if len(records) != 1 or any(records[0].get(key) != value for key, value in {

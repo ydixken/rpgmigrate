@@ -47,13 +47,18 @@ The normal native library must pass the live authentication and COPY checks.
 
 `make test-db-self-check` exercises the independent data oracle, protocol fault injection, and SCRAM controls.
 `make test-db` runs the live engine tests followed by the complete COPY integration harness.
-The engine profile requires all 30 ignored library tests, including the seven prepared-transport cases in [the prepared inventory](../tests/support/prepared_cases.json) and the 16 target-authority cases in [the authority inventory](../tests/support/authority_cases.json).
+The engine profile requires all 39 ignored library tests.
+Its focused inventories cover [seven prepared transport cases](../tests/support/prepared_cases.json), [16 target authority cases](../tests/support/authority_cases.json), and [nine raw CopyBoth cases](../tests/support/replication_cases.json).
 The transport-only profile retains five cases, and the COPY profile retains 40 cases.
 The COPY harness requires version-two native state receipts with empty target provenance.
 The harness compares exact case names, full data fingerprints, server versions, and required fault hits against [the E1 fixture manifest](../tests/fixtures/e1/manifest.json) and the focused inventories.
 The authority and engine profiles each require two observed COMMIT-reply drops, with the old backend fence observed held and then released for each fault.
 Their private authority database keeps metadata fixtures separate from the COPY fixtures.
-The CI runner requires exactly one authority-fault footer and records its two verified faults in the report.
+The replication and engine profiles each require four source observations: `keepalive`, `duplex`, `terminal_error`, and `missing_completion`.
+The duplex receipt requires observed `PQflush == 1` backpressure while incoming traffic continues.
+These profiles use a separate owned logical source, a non-superuser replication role, and temporary `test_decoding` slots.
+The CI runner requires exactly one authority-fault footer and one replication-fault footer.
+Its report records two authority faults and four replication observations.
 It also rejects absent or incorrect suite receipts and empty or skipped unit suites.
 Missing tools and failed commands are failures.
 
@@ -68,6 +73,7 @@ A failed report identifies the failed stage; reproduce that target in the dispos
 Use the [native build guide](../native/libpq/docs/build.md) for compiler and dependency prerequisites.
 These commands need Rust 1.99.1, Python 3.12 or newer, and the reviewed native artifact.
 Database targets also need a complete PostgreSQL utility bundle selected through `PG_BINDIR` or `PG_CONFIG`.
+The replication profile also requires the `test_decoding` plugin from that PostgreSQL installation.
 
 1. Build and verify the controlled native dependency.
 
@@ -112,8 +118,23 @@ For focused live tests, choose one of these **examples**:
      cargo test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1
    ```
 
+- Run the nine raw CopyBoth cases.
+
+   ```sh
+   make test-replication
+   ```
+
+- Run the same replication profile through the wrapper with an isolated Cargo target directory.
+
+   ```sh
+   CARGO_TARGET_DIR="$PWD/target/replication-dev" \
+     PQ_LIB_DIR="$PWD/target/native/libpq/lib" \
+     python3 tools/test-db.py --replication -- \
+     cargo test --locked --lib pg::replication_live_tests:: -- --ignored --test-threads=1
+   ```
+
 Each focused profile requires every name in its inventory.
-Use `make test-db` for the complete 30-case engine profile and 40-case COPY profile.
+Use `make test-db` for the complete 39-case engine profile and 40-case COPY profile.
 The engine command selects all ignored library tests without skips.
 
 The default database fixture expects PostgreSQL 14.24 and numeric version 140024.

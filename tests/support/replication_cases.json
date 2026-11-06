@@ -1,0 +1,11 @@
+[
+  "pg::replication_live_tests::logical_connection_identifies_database_and_rejects_sql_mode",
+  "pg::replication_live_tests::start_failure_is_redacted_and_not_copyboth",
+  "pg::replication_live_tests::test_decoding_preserves_data_and_oversize_frame",
+  "pg::replication_live_tests::keepalive_feedback_uses_only_supplied_positions",
+  "pg::replication_live_tests::duplex_backpressure_keeps_input_live",
+  "pg::replication_live_tests::graceful_stop_drains_then_reidentifies",
+  "pg::replication_live_tests::terminal_error_or_missing_completion_never_returns_end",
+  "pg::replication_live_tests::replication_deadline_closes_connection",
+  "pg::replication_live_tests::replication_cancellation_closes_connection"
+]

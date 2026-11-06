@@ -35,15 +35,18 @@ class VerificationTests(unittest.TestCase):
 
     def test_database_receipts_require_both_exact_inventories_and_version(self):
         good = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
-                "Engine verified 30 exact cases; full E1 suite not selected\n"
+                "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
+                "Engine verified 39 exact cases; full E1 suite not selected\n"
                 "E1 verified 40 exact cases on PostgreSQL 17.11\n")
-        self.assertEqual(runner.validate_output("test-db", good), {"engine": 30, "integration": 40, "authority_faults": 2})
+        self.assertEqual(runner.validate_output("test-db", good),
+                         {"engine": 39, "integration": 40, "authority_faults": 2, "replication_faults": 4})
         for output in ("", good.replace("40", "25"), good.replace("40", "38"), good.replace("17.11", "14.24"), good.splitlines()[0]):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test-db", output)
 
     def test_engine_receipt_cannot_omit_the_prepared_profile(self):
         previous = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
                     "Engine verified 7 exact cases; full E1 suite not selected\n"
                     "E1 verified 40 exact cases on PostgreSQL 17.11\n")
         with self.assertRaises(runner.VerificationError):
@@ -51,19 +54,42 @@ class VerificationTests(unittest.TestCase):
 
     def test_engine_receipt_cannot_omit_the_authority_profile(self):
         previous = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
                     "Engine verified 14 exact cases; full E1 suite not selected\n"
                     "E1 verified 40 exact cases on PostgreSQL 17.11\n")
         with self.assertRaises(runner.VerificationError):
             runner.validate_output("test-db", previous)
 
+    def test_engine_receipt_cannot_omit_the_replication_profile(self):
+        previous = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
+                    "Engine verified 30 exact cases; full E1 suite not selected\n"
+                    "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+        with self.assertRaises(runner.VerificationError):
+            runner.validate_output("test-db", previous)
+
     def test_authority_faults_require_one_complete_observed_lifecycle_receipt(self):
-        suites = ("Engine verified 30 exact cases; full E1 suite not selected\n"
+        suites = ("Replication faults verified 4 wire cases and observed PQflush backpressure\n"
+                  "Engine verified 39 exact cases; full E1 suite not selected\n"
                   "E1 verified 40 exact cases on PostgreSQL 17.11\n")
         fault = "Authority faults verified 2 held COMMIT replies and observed fence releases\n"
         for evidence in ("", fault * 2, fault.replace("2", "0"), fault.replace("2", "1"),
                          fault.replace("2", "3"), fault.replace("held", "unheld"),
                          fault.replace("observed", "pending"), fault.replace("verified", "ignored"),
                          fault + fault.replace("2", "0")):
+            with self.subTest(evidence=evidence), self.assertRaises(runner.VerificationError):
+                runner.validate_output("test-db", evidence + suites)
+
+    def test_replication_faults_require_one_complete_backpressure_receipt(self):
+        suites = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                  "Engine verified 39 exact cases; full E1 suite not selected\n"
+                  "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+        fault = "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
+        for evidence in ("", fault * 2, fault.replace("4", "0"), fault.replace("4", "3"),
+                         fault.replace("4", "5"), fault.replace("verified", "ignored"),
+                         fault.replace("observed", "pending"), fault.replace("PQflush", "socket"),
+                         fault.replace(" and observed PQflush backpressure", ""),
+                         fault + fault.replace("4", "0")):
             with self.subTest(evidence=evidence), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test-db", evidence + suites)
 

@@ -16,12 +16,15 @@ from db_harness import (FIXTURES, SETTINGS, OwnedCluster, assert_equal, conninfo
                         fingerprint, module_cases, psql, reference_copy, run_command, validate_libtest_output, validate_report)
 from protocol_fault import ProtocolFault
 from authority_fixture import authority_fixture, validate_authority_faults
+from replication_fixture import replication_fixture, validate_replication_faults
 
 
 def validate_module_receipt(profile, expected, output, context):
     validate_libtest_output(expected, output)
     if profile in ("Authority", "Engine"):
         validate_authority_faults(context)
+    if profile in ("Replication", "Engine"):
+        validate_replication_faults(context["replication"])
 
 
 def self_check(cluster, manifest):
@@ -120,16 +123,17 @@ def main():
     modes.add_argument("--transport", action="store_true", help="require the exact transport unit-test inventory")
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
     modes.add_argument("--authority", action="store_true", help="require the exact target authority live-test inventory")
-    modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, and catalog/COPY live tests")
+    modes.add_argument("--replication", action="store_true", help="require the exact raw CopyBoth live-test inventory")
+    modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, replication, and catalog/COPY live tests")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not args.self_check and not command:
         parser.error("provide --self-check or -- followed by the integration test command")
     manifest = load_manifest()
-    module_suite = args.transport or args.engine or args.prepared or args.authority
+    module_suite = args.transport or args.engine or args.prepared or args.authority or args.replication
     if module_suite:
-        profile = "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
+        profile = "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
         expected = module_cases(manifest, profile)
     with OwnedCluster(manifest) as cluster, ExitStack() as fixtures:
         if args.self_check:
@@ -152,6 +156,10 @@ def main():
         })
         if args.authority or args.engine:
             environment.update(fixtures.enter_context(authority_fixture(cluster)))
+        if args.replication or args.engine:
+            context, source_environment = fixtures.enter_context(replication_fixture(manifest))
+            cluster.context["replication"] = context
+            environment.update(source_environment)
         # Cargo keeps its cache/toolchain paths while test clients get a private HOME.
         for key, fallback in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
             if key not in environment:
@@ -167,6 +175,8 @@ def main():
             validate_module_receipt(profile, expected, result.stdout, cluster.context)
             if args.authority or args.engine:
                 print("Authority faults verified 2 held COMMIT replies and observed fence releases")
+            if args.replication or args.engine:
+                print("Replication faults verified 4 wire cases and observed PQflush backpressure")
             print(f"{profile} verified {len(expected)} exact cases; full E1 suite not selected")
             return 0
         if not receipt.is_file():
