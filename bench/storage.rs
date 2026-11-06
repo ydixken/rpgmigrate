@@ -186,7 +186,7 @@ impl<'a> Input<'a> {
             let completed = CompletedTx {
                 tx,
                 order: TxSeq(self.transaction),
-                commit: CommitLsn(self.transaction * 2),
+                commit: Some(CommitLsn(self.transaction * 2)),
                 end: SourceEndLsn(self.transaction * 2 + 1),
                 event_count: self.event,
                 encoded_bytes: self.tx_bytes,

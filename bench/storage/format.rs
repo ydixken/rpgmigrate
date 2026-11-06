@@ -9,8 +9,9 @@ pub use super::identity::{CommitLsn, RunId, SourceEndLsn, SourceId, StreamId, Tx
 
 pub const HEADER_BYTES: usize = 88;
 pub const COMPLETED_BYTES: usize = 128;
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const MAGIC: [u8; 4] = *b"RPGS";
+const COMMIT_PRESENT: u8 = 0x02;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Frame {
@@ -37,7 +38,8 @@ impl fmt::Debug for Frame {
 pub struct CompletedTx {
     pub tx: TxId,
     pub order: TxSeq,
-    pub commit: CommitLsn,
+    // Some source plugins expose only the transaction-end position.
+    pub commit: Option<CommitLsn>,
     pub end: SourceEndLsn,
     pub event_count: u64,
     pub encoded_bytes: u64,
@@ -170,14 +172,19 @@ pub fn encode_completed(tx: &CompletedTx, limits: Limits) -> Result<Vec<u8>> {
     let mut payload = [0; 40];
     for (slot, value) in payload.as_chunks_mut::<8>().0.iter_mut().zip([
         tx.order.0,
-        tx.commit.0,
+        tx.commit.map_or(0, |commit| commit.0),
         tx.end.0,
         tx.event_count,
         tx.encoded_bytes,
     ]) {
         slot.copy_from_slice(&value.to_le_bytes());
     }
-    pack(&encode_header(tx.tx, 2, 0, 0, 0, &payload), &payload)
+    let flags = if tx.commit.is_some() {
+        COMMIT_PRESENT
+    } else {
+        0
+    };
+    pack(&encode_header(tx.tx, 2, flags, 0, 0, &payload), &payload)
 }
 
 pub fn decode_completed(bytes: &[u8], limits: Limits) -> Result<CompletedTx> {
@@ -281,7 +288,10 @@ fn check_frame(payload_len: usize, part: u32, last: bool, limits: Limits) -> Res
 }
 
 fn check_completed(tx: &CompletedTx) -> Result<()> {
-    if tx.order.0 == 0 || tx.commit.0 > tx.end.0 || tx.encoded_bytes < COMPLETED_BYTES as u64 {
+    if tx.order.0 == 0
+        || tx.commit.is_some_and(|commit| commit.0 > tx.end.0)
+        || tx.encoded_bytes < COMPLETED_BYTES as u64
+    {
         return Err(Error::InvalidRecord);
     }
     Ok(())
@@ -322,6 +332,7 @@ struct Header {
     ordinal: u64,
     part: u32,
     last: bool,
+    commit_present: bool,
     payload_len: usize,
     payload_crc: u32,
 }
@@ -348,10 +359,18 @@ impl Header {
         if self.kind != 2 {
             return Err(Error::InvalidRecord);
         }
+        let raw_commit = u64::from_le_bytes(field(payload, 8));
+        let commit = if self.commit_present {
+            Some(CommitLsn(raw_commit))
+        } else if raw_commit == 0 {
+            None
+        } else {
+            return Err(Error::InvalidRecord);
+        };
         let tx = CompletedTx {
             tx: self.tx,
             order: TxSeq(u64::from_le_bytes(field(payload, 0))),
-            commit: CommitLsn(u64::from_le_bytes(field(payload, 8))),
+            commit,
             end: SourceEndLsn(u64::from_le_bytes(field(payload, 16))),
             event_count: u64::from_le_bytes(field(payload, 24)),
             encoded_bytes: u64::from_le_bytes(field(payload, 32)),
@@ -383,9 +402,10 @@ fn decode_header(raw: &[u8; HEADER_BYTES], limits: Limits) -> Result<Header> {
     if kind != 1 && kind != 2 {
         return Err(Error::UnknownKind(kind));
     }
+    let allowed_flags = if kind == 1 { 1 } else { COMMIT_PRESENT };
     if u32::from_le_bytes(field(raw, 8)) != HEADER_BYTES as u32
         || u32::from_le_bytes(field(raw, 76)) != 0
-        || raw[7] & !1 != 0
+        || raw[7] & !allowed_flags != 0
     {
         return Err(Error::InvalidRecord);
     }
@@ -406,6 +426,7 @@ fn decode_header(raw: &[u8; HEADER_BYTES], limits: Limits) -> Result<Header> {
         ordinal: u64::from_le_bytes(field(raw, 64)),
         part: u32::from_le_bytes(field(raw, 72)),
         last: raw[7] == 1,
+        commit_present: raw[7] & COMMIT_PRESENT != 0,
         payload_len: usize::try_from(u32::from_le_bytes(field(raw, 12)))
             .map_err(|_| Error::Overflow)?,
         payload_crc: u32::from_le_bytes(field(raw, 80)),
@@ -527,7 +548,11 @@ pub fn validate_next(previous: &CompletedTx, next: &CompletedTx) -> Result<()> {
         return Err(Error::IdentityMismatch);
     }
     let order = previous.order.0.checked_add(1).ok_or(Error::Overflow)?;
-    if next.order.0 != order || next.commit < previous.commit || next.end < previous.end {
+    let commit_regressed = matches!(
+        (previous.commit, next.commit),
+        (Some(previous), Some(next)) if next < previous
+    );
+    if next.order.0 != order || commit_regressed || next.end < previous.end {
         return Err(Error::OrderMismatch);
     }
     Ok(())

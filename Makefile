@@ -41,11 +41,11 @@ test-harness:
 	$(PYTHON) tests/support/test_harness.py
 
 test-storage-format: native-check
-	$(CARGO) test --locked --test storage_format -- --list | awk '/: test$$/ { count++ } END { if (count != 23) { print "error: expected 23 storage format and identity tests"; exit 1 } }'
+	$(CARGO) test --locked --test storage_format -- --list | awk '/: test$$/ { count++ } END { if (count != 31) { print "error: expected 31 storage format and identity tests"; exit 1 } }'
 	$(CARGO) test --locked --test storage_format -- --include-ignored
 
 test-storage-recovery: native-check
-	$(CARGO) test --locked --test storage_recovery -- --list | awk '/: test$$/ { count++ } END { if (count != 86) { print "error: expected 86 storage recovery and driver tests"; exit 1 } }'
+	$(CARGO) test --locked --test storage_recovery -- --list | awk '/: test$$/ { count++ } END { if (count != 87) { print "error: expected 87 storage recovery and driver tests"; exit 1 } }'
 	$(CARGO) test --locked --test storage_recovery -- --include-ignored --test-threads=1
 
 storage-pilot: native-check

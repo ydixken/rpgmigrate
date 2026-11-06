@@ -13,7 +13,7 @@ use checkpoint::DurableProof;
 pub(crate) struct Frontier {
     pub(crate) tx: TxId,
     pub(crate) order: TxSeq,
-    pub(crate) commit: CommitLsn,
+    pub(crate) commit: Option<CommitLsn>,
     pub(crate) end: SourceEndLsn,
 }
 

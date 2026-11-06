@@ -937,7 +937,7 @@ mod tests {
         let completed = CompletedTx {
             tx: frame.tx,
             order: TxSeq(1),
-            commit: CommitLsn(10),
+            commit: Some(CommitLsn(10)),
             end: SourceEndLsn(11),
             event_count: 1,
             encoded_bytes: 248,

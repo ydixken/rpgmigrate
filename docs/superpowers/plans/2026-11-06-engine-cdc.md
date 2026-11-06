@@ -38,7 +38,7 @@ Read the [E0/E1 plan](2026-11-06-engine.md) and [verification plan](2026-11-06-v
 
 ## Files, ownership, and dependencies
 
-The integration worker owns new shared declarations in `src/cdc/contracts.rs` and changes to root manifests/modules.
+The integration worker owns canonical identities in `src/identity.rs`, planned CDC contract extensions, and changes to root manifests/modules.
 The decoder worker owns `src/cdc/decode.rs`, `src/cdc/codec.rs`, and `src/cdc/plugins/`.
 The storage worker owns `src/state/journal.rs`, `src/state/catalog.rs`, `src/state/recovery.rs`, and private candidate modules.
 The apply worker owns `src/apply/serial.rs`, `src/apply/checkpoint.rs`, and `src/apply/recovery.rs`.
@@ -56,10 +56,14 @@ Benchmark workload generation can proceed while these workers implement their mo
 
 ## Shared interfaces for E2-E4
 
-These are declarations for the next milestone's review, not changes to the frozen E0/E1 interfaces.
+Authority commit `eaf7517f3ef4e77144d81c9aac1d8b819833c851` contains private checkpoint infrastructure with mandatory physical commit positions and target metadata version 1.
+The declarations below include the approved source-frontier extension after that baseline.
+They do not establish runtime CDC, source ACK policy, or backend qualification.
+The `Decoder` and `Applier` declarations remain planned interfaces.
 Reuse E0's `Result`, `RunId`, `PgConnection`, and `IoControl`.
+Reuse the canonical identity types in `src/identity.rs` rather than defining another identity representation.
 Use crate-private plain fields and opaque storage/transport handles.
-Require the leader to accept these declarations before parallel E2 implementation.
+Use the frozen owner contracts for the codec and target authority.
 
 ```rust
 struct SourceId { system_identifier: u64, database_oid: u32 }
@@ -85,10 +89,10 @@ struct Frame {
     last_part: bool, payload: Vec<u8>,
 }
 struct CompletedTx {
-    tx: TxId, order: TxSeq, commit: CommitLsn, end: SourceEndLsn,
+    tx: TxId, order: TxSeq, commit: Option<CommitLsn>, end: SourceEndLsn,
     event_count: u64, encoded_bytes: u64,
 }
-struct Frontier { tx: TxId, order: TxSeq, commit: CommitLsn, end: SourceEndLsn }
+struct Frontier { tx: TxId, order: TxSeq, commit: Option<CommitLsn>, end: SourceEndLsn }
 enum Plugin { Pgoutput, TestDecoding, Wal2Json }
 enum JournalWrite { Synchronized, Buffered }
 enum TargetCommit { Synchronous, Asynchronous }
@@ -98,24 +102,55 @@ enum Profile { Durable, ReplaySafe, Relaxed(LossCaps) }
 
 `TxSeq` is local source commit order within a stream, not a WAL position.
 Reserve `TxSeq(0)` and require each completed transaction's sequence to follow its predecessor exactly.
-Commit and transaction-end LSNs are nondecreasing and may be equal; they are not unique event identities.
-Every nonempty frontier includes its full transaction identity; begin ordinal need not increase in commit order.
-An empty checkpoint is represented separately by sequence zero and absent transaction fields.
+`CommitLsn` means the physical commit-record position, which some plugins do not expose.
+Use `None` when that evidence is absent and never substitute the transaction-end LSN.
+`SourceEndLsn` is mandatory for a source COMMIT that passes all terminal checks.
+Always check stream identity, exact positive sequence continuity, and nondecreasing transaction-end LSNs.
+Require nondecreasing physical commit positions when both adjacent values are `Some`.
+A present physical position must not exceed its transaction-end position.
+Equal LSNs do not merge distinct transactions or events.
+Every nonempty frontier includes its full transaction identity.
+Begin ordinal need not increase in commit order.
+An empty checkpoint uses sequence zero and absent transaction fields, separately from a nonempty frontier whose physical position is unknown.
 `encoded_bytes` counts the complete canonical wire representation before optional storage compression: each frame's 88-byte header and payload plus one 128-byte completion descriptor.
 Include relation context required for replay in the complete transaction's encoded accounting.
 Frames can split one event across segments.
 Keep one oversize event bounded by the documented exception and never collect a whole transaction in memory.
 Relation definitions outside source transactions must attach to the first dependent transaction's recoverable context.
 Version the codec and reject unknown required tags, broken ordinals, or conflicting relation generations.
-`TailPolicy::Unpublished` applies only to an externally proven unpublished suffix; codec tolerance does not authorize pruning.
+`TailPolicy::Unpublished` applies only to an externally proven unpublished suffix.
+Codec tolerance does not authorize pruning.
 Persist source identity and generation before decoding can publish complete transactions.
+
+### Source COMMIT evidence and codec version
+
+The [source-frontier review](../../research/2026-11-06-context.md#source-transaction-frontier-evidence) records the plugin-specific evidence and primary sources.
+For `test_decoding`, use the original COMMIT envelope's `data_start` as `SourceEndLsn` after terminal checks.
+It supplies no physical `CommitLsn`.
+Baseline wal2json format 2 uses the same terminal-envelope evidence.
+With `include-lsn=true`, its COMMIT object supplies physical `lsn` and terminal `nextlsn`.
+Pin the actual wal2json version and options before qualifying that behavior.
+For pgoutput v1, retain the BEGIN XID because COMMIT supplies both positions but no XID.
+
+Preserve each plugin message's original boundary, payload, `data_start`, and envelope context until terminal validation finishes.
+Generic `wal_end`, keepalive positions, and replication-origin positions are not terminal source transaction evidence.
+Do not calculate a missing end position from payload length or a physical position.
+Do not drop individual messages merely because their envelope LSN precedes the last completed frontier.
+Complete only after the active transaction and terminal COMMIT pass validation.
+An interrupted incomplete transaction is not evidence of a source abort.
+
+The codec extension uses RPGS version 2 with descriptor flag `0x02` named `COMMIT_PRESENT`.
+Descriptor flags are `0` or `0x02`, while frame flags remain `0` or `1`.
+For `None`, the physical-position slot must contain canonical zero bytes.
+`Some(CommitLsn(0))` sets the presence flag and remains distinct from `None`.
+Frame headers remain 88 bytes and completion descriptors remain 128 bytes, with their CRCs intact.
+Reject version 1 instead of inferring presence or converting old records.
+Keep the archived version-1 pilot bytes and their historical provenance unchanged.
 
 ```rust
 struct Decoder;
 impl Decoder {
     fn new(plugin: Plugin, stream: StreamId, frame_bytes: usize) -> Result<Self>;
-    fn feed(&mut self, input: &[u8],
-            emit: &mut dyn FnMut(Frame) -> Result<()>) -> Result<()>;
     fn take_completed(&mut self) -> Option<CompletedTx>;
 }
 struct Store;
@@ -155,6 +190,11 @@ impl Applier {
 }
 ```
 
+The former payload-only `Decoder::feed` declaration is withdrawn because it discards required envelope evidence.
+The receiver and decoder owners must freeze an envelope-aware input signature before decoder implementation.
+Raw transport owns an opaque `ReplicationFrame` with byte, envelope, and payload access.
+Its feedback queue accepts externally supplied positions and does not implement decoder completion or ACK policy.
+
 `Store::open` uses the candidate recorded in native experiment configuration, then the selected production backend after measurement.
 Its input is E1's checked `NativeState`, and it must not reopen foreign paths.
 E2 replaces E1's exclusive whole-run access with role/stream locks for the approved overlapping-process topology.
@@ -163,14 +203,18 @@ Keep initial identity/publication operations exclusive and progress reads read-o
 Never publish durable metadata references to unsynchronized journal files.
 Readers pin required segments until drop.
 `DurableProof` is opaque and can originate only from positive synchronous COMMIT evidence for a real logged write on the fenced primary.
-The normal data transaction updates its logged checkpoint and increments the barrier counter in that same UPDATE; its synchronous COMMIT returns the proof without another COMMIT per group.
+The normal data transaction updates its logged checkpoint and increments the barrier counter in that same UPDATE.
+Its synchronous COMMIT returns the proof without another COMMIT per group.
 An explicit barrier performs a logged counter update and synchronous COMMIT to cover asynchronous work or a flush with no new data.
-Both paths verify the same target and stream identity and carry the exact covered frontier, epoch, barrier counter, and target provenance in the proof.
+Both paths check the same target and stream identity.
+Each proof carries the exact covered frontier, epoch, barrier counter, and target provenance.
 An empty checkpoint can receive a writing barrier with `None` as its frontier, for provisioning reconciliation or a final flush with no CDC transactions.
 That proof covers zero CDC transactions and does not claim a requested end position or COPY snapshot coverage.
-Never fabricate an LSN for the empty case; a future COPY snapshot anchor has a separate contract.
+Never fabricate an LSN for the empty case.
+A future COPY snapshot anchor has a separate contract.
 An asynchronous acknowledgment carries no durable proof, and a checkpoint read alone cannot construct one.
-The first E3 production path always commits synchronously; asynchronous execution is test-private until the E4 policy consumer exists.
+The first E3 production path always commits synchronously.
+Asynchronous execution is test-private until the E4 policy consumer exists.
 Target-local WAL samples are diagnostics, never source feedback values.
 
 ### E2: Decode, journal, and persistence experiment
@@ -180,6 +224,9 @@ Target-local WAL samples are diagnostics, never source feedback values.
 - [ ] Check that the intended assertions fail before implementation.
 - [ ] Implement the codec and `test_decoding` ingestion from a real source slot first.
 - [ ] Implement pgoutput and wal2json adapters against the same event representation and plugin-specific transaction-end evidence.
+- [ ] Test missing physical positions, retained BEGIN identity, malformed terminal messages, and missing envelope or transaction-end evidence.
+- [ ] Test that keepalives, generic WAL end, origin positions, and row text containing COMMIT cannot complete a transaction.
+- [ ] Test RPGSv2 presence flags, canonical absence, distinct `Some(0)`, version-1 refusal, and unchanged wire-byte accounting.
 - [ ] Persist decoder context before acknowledging dependent input.
 - [ ] Implement synchronized publication, transaction descriptors, pinned readers, and retirement synchronization.
 - [ ] Exercise separate receive/apply/status processes with real locks and transactional control updates for each candidate.
@@ -190,14 +237,16 @@ Target-local WAL samples are diagnostics, never source feedback values.
 
 The segmented candidate initially uses the same vetted transactional catalog implementation as its control comparator.
 That choice is an experiment input, not a production decision.
-Pin experiment dependencies after graph, license, and security review; require cross-process checks before production selection.
+Pin experiment dependencies after graph, license, and security review.
+Require cross-process checks before production selection.
 Assert effective SQLite pragmas and redb lock outcomes instead of trusting configuration requests.
 E2 is incomplete until a real source transaction can survive journal restart and replay through E3.
 
 The approved first pilot uses the [common contract](../../../bench/storage/config.rs) and [fixed workloads](../../../bench/storage/cases.json).
 It permits one stream, one writer, one active source transaction, and synchronous closure-scoped storage batches.
 Reopen requires an external `TxSeq` prefix, with zero meaning no completed transaction is required.
-Canonical wire byte accounting includes frame headers and completed descriptors; unfinished transactions may span batches without becoming visible.
+Canonical wire byte accounting includes frame headers and completed descriptors.
+Unfinished transactions may span batches without becoming visible.
 Errors poison a batch even when its callback swallows an error.
 A bounded validation pass precedes callback emission during complete scans, and both passes count toward scan timing.
 Every candidate exposes an explicit fallible checkpoint and reports queried settings or clearly labeled configured policy.
@@ -215,13 +264,25 @@ This pilot leaves the multi-process, retirement, quota, source-decoding, and wid
 - [ ] Apply INSERT/UPDATE/DELETE/TRUNCATE with relation generations, replica identity FULL, NULL, unchanged TOAST, and key changes.
 - [ ] Update one logged progress row per stream inside each applied transaction/group.
 - [ ] Resolve `Unknown` by reacquiring the fence and reading the target PRIMARY checkpoint.
+- [ ] Test nonempty checkpoints with absent physical positions separately from empty checkpoints and known physical zero.
+- [ ] Test metadata-version refusal and NULL-safe compare-and-swap with optional physical positions.
 - [ ] Replay only complete required input beyond that checkpoint, otherwise return a nonzero gap failure.
 - [ ] Add logged COPY checkpoint recovery under a valid plan/snapshot and unlogged-table revalidation after target crash.
 - [ ] Reconcile actual state for nontransactional phases, sequences, and vacuum.
 - [ ] Check fingerprints and compare target effects against the serial fixture oracle.
 - [ ] Run V3's end-to-end apply benchmark before optimizing scheduling.
 
-Use one owned checkpoint table with run/source/database/generation identity, last XID, begin ordinal, applied order, commit LSN, transaction-end LSN, barrier epoch, and barrier counter.
+Use one owned checkpoint table with run/source/database/generation identity, last XID, begin ordinal, applied order, optional physical LSN, and mandatory transaction-end LSN.
+Retain barrier epoch and barrier counter in that table.
+The approved extension uses target metadata version 2 and preserves the existing 19 SQL columns.
+`source_commit_lsn` is already nullable, so this extension adds no SQL CHECK constraint or table-schema change.
+For a nonempty checkpoint, XID, begin ordinal, and transaction-end position remain mandatory.
+For an empty checkpoint, sequence is zero and all four transaction columns are NULL.
+`Checkpoint.applied` remains a nonempty `Frontier`, while the internal control row and durable proof can carry `Option<Frontier>`.
+Preserve the existing 26-parameter `IS NOT DISTINCT FROM` compare-and-swap.
+Use the shared `src/state.rs` constant `TARGET_METADATA_VERSION = 2` with crate visibility as the canonical version.
+Native state `FORMAT_VERSION = 2` does not change.
+Refuse version-1 target objects or provenance without DDL, conversion, or adoption.
 Increment the barrier counter in both synchronous data/checkpoint commits and standalone writing barriers so each proof has positive logged-write evidence.
 Check exact object identity before querying, excluding, reowning, or removing metadata.
 Store checkpoint provenance in the native manifest.

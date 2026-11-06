@@ -56,7 +56,7 @@ fn completed() -> CompletedTx {
     CompletedTx {
         tx: frame().tx,
         order: TxSeq(1),
-        commit: CommitLsn(700),
+        commit: Some(CommitLsn(700)),
         end: SourceEndLsn(800),
         event_count: 1,
         encoded_bytes: 219,
@@ -65,11 +65,38 @@ fn completed() -> CompletedTx {
 
 // Python struct and zlib produced this fixture independently of the codec.
 fn golden_frame() -> Vec<u8> {
-    let hex = concat!(
-        "5250475301000101580000000300000011111111111111111111111111111111",
+    from_hex(concat!(
+        "5250475302000101580000000300000011111111111111111111111111111111",
         "08070605040302017856341209000000000000002a0000004d00000000000000",
-        "0000000000000000000000000000000061c5a53540f09b3b0078ff"
-    );
+        "0000000000000000000000000000000061c5a5357f58f31f0078ff"
+    ))
+}
+
+fn golden_completed(commit: Option<CommitLsn>) -> Vec<u8> {
+    from_hex(match commit {
+        Some(CommitLsn(700)) => concat!(
+            "5250475302000202580000002800000011111111111111111111111111111111",
+            "08070605040302017856341209000000000000002a0000004d00000000000000",
+            "00000000000000000000000000000000c5a8f579b743d65e0100000000000000",
+            "bc0200000000000020030000000000000100000000000000db00000000000000"
+        ),
+        None => concat!(
+            "5250475302000200580000002800000011111111111111111111111111111111",
+            "08070605040302017856341209000000000000002a0000004d00000000000000",
+            "000000000000000000000000000000006a93843beb90b9950100000000000000",
+            "000000000000000020030000000000000100000000000000db00000000000000"
+        ),
+        Some(CommitLsn(0)) => concat!(
+            "5250475302000202580000002800000011111111111111111111111111111111",
+            "08070605040302017856341209000000000000002a0000004d00000000000000",
+            "000000000000000000000000000000006a93843b9e2816cd0100000000000000",
+            "000000000000000020030000000000000100000000000000db00000000000000"
+        ),
+        _ => panic!("no independent fixture for this commit"),
+    })
+}
+
+fn from_hex(hex: &str) -> Vec<u8> {
     hex.as_bytes()
         .as_chunks::<2>()
         .0
@@ -174,7 +201,7 @@ fn incomplete_input_requires_an_external_unpublished_assertion() {
 #[test]
 fn unknown_version_kind_flags_and_reserved_bytes_fail_closed() {
     for (offset, value, expected) in [
-        (4, 2, Error::UnsupportedVersion(2)),
+        (4, 3, Error::UnsupportedVersion(3)),
         (6, 3, Error::UnknownKind(3)),
         (7, 3, Error::InvalidRecord),
         (8, 87, Error::InvalidRecord),
@@ -423,7 +450,7 @@ fn descriptor_checks_identity_and_source_positions() {
     assert_eq!(validator.finish(&descriptor), Err(Error::IdentityMismatch));
     for descriptor in [
         CompletedTx {
-            commit: CommitLsn(801),
+            commit: Some(CommitLsn(801)),
             ..completed()
         },
         CompletedTx {
@@ -460,7 +487,7 @@ fn consecutive_sequences_allow_equal_lsns_but_require_same_stream() {
         Err(Error::IdentityMismatch)
     );
     next.tx.stream = previous.tx.stream;
-    next.commit = CommitLsn(699);
+    next.commit = Some(CommitLsn(699));
     assert_eq!(validate_next(&previous, &next), Err(Error::OrderMismatch));
     next.commit = previous.commit;
     next.end = SourceEndLsn(799);
@@ -576,6 +603,248 @@ fn giant_transaction_streams_through_one_reused_frame_buffer() {
         wrong_total.finish(&CompletedTx {
             encoded_bytes: 67_469_439,
             ..descriptor
+        }),
+        Err(Error::DescriptorMismatch)
+    );
+}
+
+#[test]
+fn optional_commit_roundtrips_without_replacing_unknown_with_end() {
+    for commit in [Some(CommitLsn(700)), None, Some(CommitLsn(0))] {
+        let descriptor = CompletedTx {
+            commit,
+            ..completed()
+        };
+        let bytes = encode_completed(&descriptor, Limits::default()).unwrap();
+        assert_eq!(bytes.len(), 128);
+        let decoded = decode_completed(&bytes, Limits::default()).unwrap();
+        assert_eq!(decoded.commit, commit);
+        assert_eq!(decoded.end, SourceEndLsn(800));
+        assert_eq!(decoded.encoded_bytes, 219);
+    }
+    let unknown = encode_completed(
+        &CompletedTx {
+            commit: None,
+            ..completed()
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let known_zero = encode_completed(
+        &CompletedTx {
+            commit: Some(CommitLsn(0)),
+            ..completed()
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    assert_ne!(unknown, known_zero);
+}
+
+#[test]
+fn v2_descriptor_goldens_match_slice_and_stream_readers() {
+    for commit in [Some(CommitLsn(700)), None, Some(CommitLsn(0))] {
+        let descriptor = CompletedTx {
+            commit,
+            ..completed()
+        };
+        let expected = golden_completed(commit);
+        assert_eq!(
+            encode_completed(&descriptor, Limits::default()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            decode_completed(&expected, Limits::default()).unwrap(),
+            descriptor
+        );
+        for policy in [TailPolicy::Required, TailPolicy::Unpublished] {
+            assert_eq!(
+                read_record(&mut Cursor::new(&expected), Limits::default(), policy).unwrap(),
+                ReadRecord::Record(Record::Completed(descriptor))
+            );
+        }
+    }
+}
+
+#[test]
+fn v2_flags_are_kind_specific_and_descriptor_reserved_fields_stay_zero() {
+    for (mut bytes, offset, value) in [
+        (golden_frame(), 7, 2),
+        (golden_frame(), 7, 3),
+        (golden_completed(None), 7, 1),
+        (golden_completed(Some(CommitLsn(700))), 7, 3),
+        (golden_completed(None), 7, 4),
+        (golden_completed(None), 7, 128),
+        (golden_completed(None), 64, 1),
+        (golden_completed(None), 72, 1),
+        (golden_completed(None), 76, 1),
+    ] {
+        bytes[offset] = value;
+        fix_header_crc(&mut bytes);
+        let decoded = if bytes[6] == 1 {
+            decode_frame(&bytes, Limits::default()).map(Record::Frame)
+        } else {
+            decode_completed(&bytes, Limits::default()).map(Record::Completed)
+        };
+        assert_eq!(decoded, Err(Error::InvalidRecord));
+        assert_eq!(
+            read_record(
+                &mut Cursor::new(&bytes),
+                Limits::default(),
+                TailPolicy::Required
+            ),
+            Err(Error::InvalidRecord)
+        );
+    }
+}
+
+#[test]
+fn unknown_commit_requires_zero_payload_even_with_valid_checksums() {
+    let mut bytes = golden_completed(None);
+    bytes[96] = 1;
+    let payload_crc = crc32fast::hash(&bytes[88..]);
+    bytes[80..84].copy_from_slice(&payload_crc.to_le_bytes());
+    fix_header_crc(&mut bytes);
+    assert_eq!(
+        decode_completed(&bytes, Limits::default()),
+        Err(Error::InvalidRecord)
+    );
+    for policy in [TailPolicy::Required, TailPolicy::Unpublished] {
+        assert_eq!(
+            read_record(&mut Cursor::new(&bytes), Limits::default(), policy),
+            Err(Error::InvalidRecord)
+        );
+    }
+}
+
+#[test]
+fn v1_frame_and_descriptor_are_refused_with_valid_checksums() {
+    for mut bytes in [golden_frame(), golden_completed(Some(CommitLsn(700)))] {
+        bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        if bytes[6] == 2 {
+            bytes[7] = 0;
+        }
+        fix_header_crc(&mut bytes);
+        let decoded = if bytes[6] == 1 {
+            decode_frame(&bytes, Limits::default()).map(Record::Frame)
+        } else {
+            decode_completed(&bytes, Limits::default()).map(Record::Completed)
+        };
+        assert_eq!(decoded, Err(Error::UnsupportedVersion(1)));
+        for policy in [TailPolicy::Required, TailPolicy::Unpublished] {
+            assert_eq!(
+                read_record(&mut Cursor::new(&bytes), Limits::default(), policy),
+                Err(Error::UnsupportedVersion(1))
+            );
+        }
+    }
+}
+
+#[test]
+fn commit_presence_and_value_bits_cannot_bypass_crc() {
+    for commit in [Some(CommitLsn(700)), None, Some(CommitLsn(0))] {
+        for (offset, expected) in [(7, Error::CorruptHeader), (96, Error::CorruptPayload)] {
+            let mut bytes = golden_completed(commit);
+            bytes[offset] ^= 2;
+            assert_eq!(
+                decode_completed(&bytes, Limits::default()),
+                Err(expected.clone())
+            );
+            for policy in [TailPolicy::Required, TailPolicy::Unpublished] {
+                assert_eq!(
+                    read_record(&mut Cursor::new(&bytes), Limits::default(), policy),
+                    Err(expected.clone())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn optional_commit_comparisons_use_only_present_evidence() {
+    for (previous_commit, next_commit) in [
+        (None, None),
+        (None, Some(CommitLsn(0))),
+        (Some(CommitLsn(700)), None),
+        (Some(CommitLsn(700)), Some(CommitLsn(700))),
+        (Some(CommitLsn(700)), Some(CommitLsn(701))),
+    ] {
+        let previous = CompletedTx {
+            commit: previous_commit,
+            ..completed()
+        };
+        let next = CompletedTx {
+            commit: next_commit,
+            order: TxSeq(2),
+            ..completed()
+        };
+        assert_eq!(validate_next(&previous, &next), Ok(()));
+        assert_eq!(
+            validate_next(
+                &previous,
+                &CompletedTx {
+                    end: SourceEndLsn(799),
+                    ..next
+                }
+            ),
+            Err(Error::OrderMismatch)
+        );
+        assert_eq!(
+            validate_next(
+                &previous,
+                &CompletedTx {
+                    order: TxSeq(3),
+                    ..next
+                }
+            ),
+            Err(Error::OrderMismatch)
+        );
+        let mut foreign = next;
+        foreign.tx.stream.generation += 1;
+        assert_eq!(
+            validate_next(&previous, &foreign),
+            Err(Error::IdentityMismatch)
+        );
+    }
+    let previous = completed();
+    let next = CompletedTx {
+        commit: Some(CommitLsn(699)),
+        order: TxSeq(2),
+        ..previous
+    };
+    assert_eq!(validate_next(&previous, &next), Err(Error::OrderMismatch));
+}
+
+#[test]
+fn unknown_commit_still_requires_sequence_and_exact_wire_totals() {
+    let unknown = CompletedTx {
+        commit: None,
+        ..completed()
+    };
+    for invalid in [
+        CompletedTx {
+            order: TxSeq(0),
+            ..unknown
+        },
+        CompletedTx {
+            encoded_bytes: 127,
+            ..unknown
+        },
+    ] {
+        assert_eq!(
+            encode_completed(&invalid, Limits::default()),
+            Err(Error::InvalidRecord)
+        );
+    }
+    let mut validator = TxValidator::new(unknown.tx, Limits::default()).unwrap();
+    validator.push(&frame()).unwrap();
+    validator.finish(&unknown).unwrap();
+    let mut validator = TxValidator::new(unknown.tx, Limits::default()).unwrap();
+    validator.push(&frame()).unwrap();
+    assert_eq!(
+        validator.finish(&CompletedTx {
+            encoded_bytes: 3,
+            ..unknown
         }),
         Err(Error::DescriptorMismatch)
     );

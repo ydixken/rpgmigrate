@@ -5,7 +5,7 @@ use super::{ControlRow, Frontier};
 use crate::contracts::{Error, ErrorKind, IoControl, Result};
 use crate::identity::{CommitLsn, SourceEndLsn, TxId, TxSeq};
 use crate::pg::{PgConnection, PgParam, PgResult, TransactionStatus};
-use crate::state::{ConfirmedProvenance, ProvisioningIntent};
+use crate::state::{ConfirmedProvenance, ProvisioningIntent, TARGET_METADATA_VERSION};
 
 const CATALOG: &str = "rpgmigrate_metadata_catalog";
 const READ: &str = "rpgmigrate_metadata_read";
@@ -434,9 +434,9 @@ fn decode_row(cells: &[Option<&[u8]>], confirmed: &ConfirmedProvenance) -> Resul
         let xid = u32::try_from(decimal(required(cells[13])?)?)
             .map_err(|_| refusal("target-metadata: invalid transaction identity"))?;
         let begin_ordinal = decimal(required(cells[14])?)?;
-        let commit = lsn(required(cells[15])?)?;
+        let commit = cells[15].map(lsn).transpose()?.map(CommitLsn);
         let end = lsn(required(cells[16])?)?;
-        if end < commit {
+        if commit.is_some_and(|commit| end < commit.0) {
             return Err(refusal(
                 "target-metadata: source positions are inconsistent",
             ));
@@ -448,7 +448,7 @@ fn decode_row(cells: &[Option<&[u8]>], confirmed: &ConfirmedProvenance) -> Resul
                 begin_ordinal,
             },
             order: TxSeq(order),
-            commit: CommitLsn(commit),
+            commit,
             end: SourceEndLsn(end),
         })
     };
@@ -498,7 +498,9 @@ fn row_values(confirmed: &ConfirmedProvenance, row: &ControlRow) -> Result<Vec<O
     if row.applied.is_some_and(|frontier| {
         frontier.tx.stream != binding.stream
             || frontier.order.0 == 0
-            || frontier.end.0 < frontier.commit.0
+            || frontier
+                .commit
+                .is_some_and(|commit| frontier.end.0 < commit.0)
     }) {
         return Err(refusal("target-metadata: invalid source frontier"));
     }
@@ -521,7 +523,8 @@ fn row_values(confirmed: &ConfirmedProvenance, row: &ControlRow) -> Result<Vec<O
         row.applied.map(|value| value.tx.xid.to_string()),
         row.applied.map(|value| value.tx.begin_ordinal.to_string()),
         row.applied
-            .map(|value| format!("{:X}/{:X}", value.commit.0 >> 32, value.commit.0 as u32)),
+            .and_then(|value| value.commit)
+            .map(|value| format!("{:X}/{:X}", value.0 >> 32, value.0 as u32)),
         row.applied
             .map(|value| format!("{:X}/{:X}", value.end.0 >> 32, value.end.0 as u32)),
         Some(row.barrier_epoch.to_string()),
@@ -568,7 +571,7 @@ fn validate_intent(intent: &ProvisioningIntent) -> Result<()> {
         || binding.target_system_identifier == Some(0)
         || binding.target_database_oid == 0
         || binding.owner_oid == 0
-        || binding.metadata_version != 1
+        || binding.metadata_version != TARGET_METADATA_VERSION
         || [&binding.schema_name, &binding.table_name]
             .iter()
             .any(|name| name.is_empty() || name.len() > 63 || name.contains('\0'))
@@ -771,7 +774,7 @@ mod tests {
                     schema_name: "private_metadata".into(),
                     table_name: "checkpoint".into(),
                     owner_oid: 19,
-                    metadata_version: 1,
+                    metadata_version: TARGET_METADATA_VERSION,
                 },
                 nonce: [0x22; 16],
             },
@@ -783,7 +786,7 @@ mod tests {
     fn empty_cells() -> [Option<&'static [u8]>; 19] {
         [
             Some(b"rpgmigrate"),
-            Some(b"1"),
+            Some(b"2"),
             Some(b"11111111111111111111111111111111"),
             Some(b"22222222222222222222222222222222"),
             Some(b"7"),
@@ -879,17 +882,50 @@ mod tests {
                         begin_ordinal: u64::MAX
                     },
                     order: TxSeq(u64::MAX),
-                    commit: CommitLsn(u64::MAX),
+                    commit: Some(CommitLsn(u64::MAX)),
                     end: SourceEndLsn(u64::MAX),
                 }),
                 barrier_epoch: u64::MAX,
                 barrier_counter: u64::MAX,
             }
         );
+        cells[15] = None;
+        assert!(
+            decode_row(&cells, &confirmed).is_ok(),
+            "a complete source transaction can lack a physical commit LSN"
+        );
+        let unknown = decode_row(&cells, &confirmed).unwrap().applied.unwrap();
+        assert_eq!(unknown.commit, None);
+        assert_eq!(unknown.end, SourceEndLsn(u64::MAX));
+        assert_eq!(unknown.order, TxSeq(u64::MAX));
+        assert_eq!(unknown.tx.begin_ordinal, u64::MAX);
+        cells[15] = Some(b"0/0");
+        assert_eq!(
+            decode_row(&cells, &confirmed)
+                .unwrap()
+                .applied
+                .unwrap()
+                .commit,
+            Some(CommitLsn(0))
+        );
+        for column in [13, 14, 16] {
+            let mut partial = cells;
+            partial[15] = None;
+            partial[column] = None;
+            assert!(decode_row(&partial, &confirmed).is_err());
+        }
+        cells[15] = Some(b"invalid");
+        assert!(decode_row(&cells, &confirmed).is_err());
     }
 
     #[test]
     fn partial_transaction_identity_and_invalid_receipts_fail_closed() {
+        let mut old = provenance();
+        old.intent.binding.metadata_version = 1;
+        assert!(row_values(&old, &empty_row()).is_err());
+        let mut old_cells = empty_cells();
+        old_cells[1] = Some(b"1");
+        assert!(decode_row(&old_cells, &provenance()).is_err());
         for column in 0..12 {
             let mut cells = empty_cells();
             cells[column] = Some(b"9");
@@ -941,13 +977,30 @@ mod tests {
                 begin_ordinal: 0,
             },
             order: TxSeq(1),
-            commit: CommitLsn(0x1_0000_0010),
+            commit: Some(CommitLsn(0x1_0000_0010)),
             end: SourceEndLsn(u64::MAX),
         });
         let values = row_values(&confirmed, &row).unwrap();
         assert_eq!(values[13].as_deref(), Some("4294967295"));
         assert_eq!(values[15].as_deref(), Some("1/10"));
         assert_eq!(values[16].as_deref(), Some("FFFFFFFF/FFFFFFFF"));
+        row.applied.as_mut().unwrap().commit = None;
+        let values = row_values(&confirmed, &row).unwrap();
+        assert_eq!(
+            &values[12..17],
+            &[
+                Some("1".into()),
+                Some("4294967295".into()),
+                Some("0".into()),
+                None,
+                Some("FFFFFFFF/FFFFFFFF".into())
+            ]
+        );
+        row.applied.as_mut().unwrap().commit = Some(CommitLsn(0));
+        assert_eq!(
+            row_values(&confirmed, &row).unwrap()[15].as_deref(),
+            Some("0/0")
+        );
         row.applied.as_mut().unwrap().tx.stream.generation += 1;
         assert!(row_values(&confirmed, &row).is_err());
     }
@@ -960,6 +1013,7 @@ mod tests {
         assert!(sql.contains("table_oid IS NOT DISTINCT FROM $12::pg_catalog.oid"));
         assert!(sql.contains("applied_order IS NOT DISTINCT FROM $20::pg_catalog.numeric"));
         assert!(sql.contains("last_xid IS NOT DISTINCT FROM $21::pg_catalog.oid"));
+        assert!(sql.contains("source_commit_lsn IS NOT DISTINCT FROM $23::pg_catalog.pg_lsn"));
         assert!(sql.contains("source_end_lsn IS NOT DISTINCT FROM $24::pg_catalog.pg_lsn"));
         assert!(sql.contains("barrier_counter IS NOT DISTINCT FROM $26::pg_catalog.numeric"));
         assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 19);

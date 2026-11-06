@@ -60,7 +60,7 @@ fn frontier(stream: StreamId, order: u64) -> Frontier {
             begin_ordinal: 100 - order,
         },
         order: TxSeq(order),
-        commit: CommitLsn(100),
+        commit: Some(CommitLsn(100)),
         end: SourceEndLsn(120),
     }
 }
@@ -81,7 +81,10 @@ fn atomic_checkpoint() {
     let mut authority =
         TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
     assert_eq!(authority.checkpoint(&io).unwrap(), None);
-    let next = frontier(stream, 1);
+    let next = Frontier {
+        commit: None,
+        ..frontier(stream, 1)
+    };
     let mut tx = authority.begin(next, &io).unwrap();
     tx.prepare(
         "insert_effect",
@@ -106,7 +109,21 @@ fn atomic_checkpoint() {
     assert_eq!(proof.barrier_epoch(), checkpoint.barrier_epoch);
     assert_eq!(proof.barrier_counter(), checkpoint.barrier_counter);
     assert_eq!(proof.target().intent.binding.stream, stream);
+    assert_eq!(
+        proof.target().intent.binding.metadata_version,
+        TARGET_METADATA_VERSION
+    );
     assert_eq!(authority.checkpoint(&io).unwrap(), Some(checkpoint));
+    let table = qualified(&mut setup, &owned_provenance(&native, stream));
+    let position = setup.query(&format!(
+        "SELECT applied_order, last_xid, begin_ordinal, source_commit_lsn, source_end_lsn FROM {table}"
+    ), &io).unwrap();
+    assert_eq!(position.rows(), 1);
+    assert_eq!(position.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+    assert_eq!(position.cell(0, 1).unwrap(), Some(b"99".as_slice()));
+    assert_eq!(position.cell(0, 2).unwrap(), Some(b"99".as_slice()));
+    assert_eq!(position.cell(0, 3).unwrap(), None);
+    assert_eq!(position.cell(0, 4).unwrap(), Some(b"0/78".as_slice()));
     let rows = setup
         .query("SELECT value FROM public.authority_atomic", &io)
         .unwrap();
@@ -124,7 +141,11 @@ fn rollback_checkpoint() {
     observer.query("CREATE TABLE public.authority_rollback (value integer UNIQUE DEFERRABLE INITIALLY DEFERRED)", &io).unwrap();
     let mut authority =
         TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
-    let mut tx = authority.begin(frontier(stream, 1), &io).unwrap();
+    let next = Frontier {
+        commit: None,
+        ..frontier(stream, 1)
+    };
+    let mut tx = authority.begin(next, &io).unwrap();
     tx.prepare(
         "insert_rollback",
         "INSERT INTO public.authority_rollback VALUES ($1)",
@@ -136,7 +157,7 @@ fn rollback_checkpoint() {
         .unwrap();
     tx.rollback(&io).unwrap();
     assert_eq!(authority.checkpoint(&io).unwrap(), None);
-    let mut tx = authority.begin(frontier(stream, 1), &io).unwrap();
+    let mut tx = authority.begin(next, &io).unwrap();
     tx.execute_prepared("insert_rollback", &[PgParam::Text(b"2")], &io)
         .unwrap();
     tx.execute_prepared("insert_rollback", &[PgParam::Text(b"2")], &io)
@@ -167,7 +188,7 @@ fn exact_identity_order() {
         frontier(stream, 1),
         frontier(stream, 3),
         Frontier {
-            commit: CommitLsn(99),
+            commit: Some(CommitLsn(99)),
             ..next
         },
         Frontier {
@@ -189,6 +210,47 @@ fn exact_identity_order() {
     }
     authority.begin(next, &io).unwrap().commit(&io).unwrap();
     assert_eq!(authority.checkpoint(&io).unwrap().unwrap().applied, next);
+    for (index, commit) in [None, None, Some(CommitLsn(99)), Some(CommitLsn(99))]
+        .into_iter()
+        .enumerate()
+    {
+        let next = Frontier {
+            commit,
+            ..frontier(stream, index as u64 + 3)
+        };
+        for invalid in [
+            Frontier {
+                end: SourceEndLsn(119),
+                ..next
+            },
+            Frontier {
+                order: TxSeq(next.order.0 + 1),
+                ..next
+            },
+            Frontier {
+                tx: TxId {
+                    stream: StreamId {
+                        generation: 2,
+                        ..stream
+                    },
+                    ..next.tx
+                },
+                ..next
+            },
+        ] {
+            assert!(authority.begin(invalid, &io).is_err());
+        }
+        let CommitOutcome::Acknowledged {
+            checkpoint,
+            durable: Some(proof),
+        } = authority.begin(next, &io).unwrap().commit(&io).unwrap()
+        else {
+            panic!("optional position transaction produced no durable proof")
+        };
+        assert_eq!(checkpoint.applied, next);
+        assert_eq!(proof.frontier(), Some(&next));
+        assert_eq!(authority.checkpoint(&io).unwrap().unwrap().applied, next);
+    }
 }
 
 #[test]
@@ -267,7 +329,10 @@ fn async_barrier() {
     assert_eq!(empty.frontier(), None);
     assert_eq!(empty.barrier_epoch(), 3);
     assert_eq!(empty.barrier_counter(), 2);
-    let first = frontier(stream, 1);
+    let first = Frontier {
+        commit: None,
+        ..frontier(stream, 1)
+    };
     let CommitOutcome::Acknowledged {
         checkpoint,
         durable,
@@ -293,6 +358,19 @@ fn async_barrier() {
         .query("SHOW synchronous_commit", &io)
         .unwrap();
     assert_eq!(setting.cell(0, 0).unwrap(), Some(&b"remote_apply"[..]));
+    let fabricated = Frontier {
+        commit: Some(CommitLsn(100)),
+        ..first
+    };
+    assert!(authority.barrier(Some(&fabricated), 4, &io).is_err());
+    assert_eq!(
+        authority.reacquire(connection(&io), &io).unwrap().unwrap(),
+        Checkpoint {
+            barrier_epoch: 4,
+            barrier_counter: 3,
+            ..checkpoint
+        }
+    );
     assert!(authority.barrier(None, 4, &io).is_err());
     authority.reacquire(connection(&io), &io).unwrap();
     assert!(authority.barrier(Some(&first), 3, &io).is_err());
@@ -414,7 +492,7 @@ fn metadata_shape_acl() {
         "CREATE RULE foreign_rule AS ON UPDATE TO @ DO INSTEAD NOTHING",
         "CREATE TRIGGER foreign_trigger BEFORE UPDATE ON @ FOR EACH ROW EXECUTE PROCEDURE public.authority_metadata_trigger()",
         "CREATE TABLE $.foreign_child () INHERITS (@)",
-        "UPDATE @ SET version = 2",
+        "UPDATE @ SET version = 1",
         "UPDATE @ SET nonce = pg_catalog.decode('00000000000000000000000000000000', 'hex')",
         "DELETE FROM @",
     ] {
@@ -433,6 +511,90 @@ fn metadata_shape_acl() {
             TargetAuthority::acquire(connection(&io), stream, &mut native, &io).is_err(),
             "unsafe metadata accepted for case {alteration}"
         );
+        if alteration == "UPDATE @ SET version = 1" {
+            let version = setup
+                .query(&format!("SELECT version FROM {table}"), &io)
+                .unwrap();
+            assert_eq!(version.rows(), 1);
+            assert_eq!(version.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+        }
+    }
+    for alteration in [
+        "last_xid = NULL",
+        "begin_ordinal = NULL",
+        "source_end_lsn = NULL",
+        "source_commit_lsn = '0/79'",
+        "applied_order = 0",
+    ] {
+        let mut native = state();
+        let stream = stream_for(&native);
+        let mut authority =
+            TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+        let next = Frontier {
+            commit: None,
+            ..frontier(stream, 1)
+        };
+        authority.begin(next, &io).unwrap().commit(&io).unwrap();
+        drop(authority);
+        let table = qualified(&mut setup, &owned_provenance(&native, stream));
+        setup
+            .query(&format!("UPDATE {table} SET {alteration}"), &io)
+            .unwrap();
+        assert!(
+            TargetAuthority::acquire(connection(&io), stream, &mut native, &io).is_err(),
+            "invalid nonempty frontier accepted: {alteration}"
+        );
+    }
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut authority =
+        TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+    authority
+        .begin(
+            Frontier {
+                commit: None,
+                ..frontier(stream, 1)
+            },
+            &io,
+        )
+        .unwrap()
+        .commit(&io)
+        .unwrap();
+    let checkpoint = authority.checkpoint(&io).unwrap();
+    let provenance = owned_provenance(&native, stream);
+    for commit in [None, Some(CommitLsn(0))] {
+        authority.session.begin(&io).unwrap();
+        let old = authority.read_row(&io).unwrap();
+        let mut stored = old;
+        stored.applied.as_mut().unwrap().commit = commit;
+        metadata::update(
+            authority.session.connection().unwrap(),
+            &provenance,
+            &old,
+            &stored,
+            &io,
+        )
+        .unwrap();
+        let mut stale = stored;
+        stale.applied.as_mut().unwrap().commit = if commit.is_some() {
+            None
+        } else {
+            Some(CommitLsn(0))
+        };
+        let next = increment_barrier(stored, stored.barrier_epoch).unwrap();
+        assert!(
+            metadata::update(
+                authority.session.connection().unwrap(),
+                &provenance,
+                &stale,
+                &next,
+                &io
+            )
+            .is_err()
+        );
+        assert_eq!(authority.read_row(&io).unwrap(), stored);
+        authority.session.rollback(&io).unwrap();
+        assert_eq!(authority.checkpoint(&io).unwrap(), checkpoint);
     }
 }
 
@@ -932,7 +1094,10 @@ fn lost_commit_reply() {
     let mut fault = Fault::start("lost_commit_reply");
     let mut authority =
         TargetAuthority::acquire(fault.connect(&io), stream, &mut native, &io).unwrap();
-    let first = frontier(stream, 1);
+    let first = Frontier {
+        commit: None,
+        ..frontier(stream, 1)
+    };
     let mut tx = authority.begin(first, &io).unwrap();
     tx.prepare(
         "insert_once",

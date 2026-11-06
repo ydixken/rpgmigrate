@@ -512,7 +512,7 @@ fn completed(sequence: u64, events: u64) -> CompletedTx {
     CompletedTx {
         tx: frame(sequence, 0).tx,
         order: TxSeq(sequence),
-        commit: CommitLsn(10),
+        commit: Some(CommitLsn(10)),
         end: SourceEndLsn(11),
         event_count: events,
         encoded_bytes: events * 89 + 128,
@@ -789,5 +789,54 @@ fn scan_filters_after_prefix_and_never_exposes_incomplete_tail() {
             Err(Error::Gap)
         );
         assert_eq!(calls, 0);
+    }
+}
+
+#[test]
+fn optional_physical_commit_evidence_survives_each_candidate_reader_and_reopen() {
+    for candidate in [Candidate::Segmented, Candidate::Redb, Candidate::Sqlite] {
+        let root = Scratch::new();
+        let cfg = root.config();
+        let mut store = Store::create(candidate, &cfg).unwrap();
+        let mut expected = Vec::new();
+        for (index, commit) in [Some(CommitLsn(10)), None, Some(CommitLsn(0))]
+            .into_iter()
+            .enumerate()
+        {
+            let seq = index as u64 + 1;
+            let descriptor = CompletedTx {
+                commit,
+                ..completed(seq, 1)
+            };
+            let item = frame(seq, 0);
+            let stats = store
+                .with_batch(|batch| {
+                    batch.append(&item)?;
+                    batch.complete(&descriptor)
+                })
+                .unwrap();
+            assert_eq!(stats.encoded_bytes, 217);
+            assert_eq!(stats.durable_frontier, TxSeq(seq));
+            expected.extend([Record::Frame(item), Record::Completed(descriptor)]);
+        }
+        let mut actual = Vec::new();
+        store
+            .scan_complete(TxSeq(0), |record| {
+                actual.push(record.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(actual, expected);
+        store.checkpoint().unwrap();
+        drop(store);
+        let reopened = Store::reopen(candidate, &cfg, TxSeq(3)).unwrap();
+        actual.clear();
+        reopened
+            .scan_complete(TxSeq(0), |record| {
+                actual.push(record.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(actual, expected);
     }
 }

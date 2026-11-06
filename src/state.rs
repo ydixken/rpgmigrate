@@ -64,7 +64,7 @@ const TEMP: &CStr = c".manifest.tmp";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const FORMAT_VERSION: u32 = 2;
 const MAX_TARGET_PROVENANCE: usize = 1;
-const TARGET_METADATA_VERSION: u32 = 1;
+pub(crate) const TARGET_METADATA_VERSION: u32 = 2;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1409,7 +1409,7 @@ mod tests {
             schema_name: "rpgmigrate_owned".into(),
             table_name: "checkpoint".into(),
             owner_oid: 10,
-            metadata_version: 1,
+            metadata_version: 2,
         }
     }
 
@@ -1427,6 +1427,45 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::BadState);
         assert!(error.message.starts_with(code), "{error:?}");
         assert_eq!(tree(path), before);
+    }
+
+    #[test]
+    fn metadata_version_one_is_refused_without_rewrite() {
+        for confirming in [false, true] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let mut old_binding = binding(&state);
+            old_binding.metadata_version = 1;
+            let before = tree(&tmp.path());
+            let error = state.begin_target_provisioning(old_binding).unwrap_err();
+            assert!(error.message.starts_with("state-provenance:"), "{error:?}");
+            assert_eq!(tree(&tmp.path()), before);
+            let intent = state.begin_target_provisioning(binding(&state)).unwrap();
+            if confirming {
+                state
+                    .confirm_target_provisioning(confirmed(&intent))
+                    .unwrap();
+            }
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                let record = &mut value["target_provenance"][0]["record"];
+                let intent = if confirming {
+                    &mut record["intent"]
+                } else {
+                    record
+                };
+                intent["binding"]["metadata_version"] = json!(1);
+            });
+            assert_eq!(manifest(&tmp.path())["format_version"], 2);
+            recovery_refusal(&tmp.path(), "state-provenance:");
+            for action in [
+                StateAction::Create,
+                StateAction::Resume,
+                StateAction::Restart,
+            ] {
+                refusal(&tmp.path(), action, "state-provenance:");
+            }
+        }
     }
 
     #[test]
@@ -1624,7 +1663,7 @@ mod tests {
                 3 => desired.target_system_identifier = Some(0),
                 4 => desired.target_database_oid = 0,
                 5 => desired.owner_oid = 0,
-                6 => desired.metadata_version = 2,
+                6 => desired.metadata_version = 1,
                 7 => desired.schema_name.clear(),
                 8 => desired.table_name.clear(),
                 _ => desired.schema_name.push('\0'),
@@ -1892,7 +1931,7 @@ mod tests {
             ("/binding/target_system_identifier", json!(0)),
             ("/binding/target_database_oid", json!(0)),
             ("/binding/owner_oid", json!(0)),
-            ("/binding/metadata_version", json!(2)),
+            ("/binding/metadata_version", json!(1)),
             ("/binding/schema_name", json!("")),
             ("/binding/table_name", json!("")),
             ("/binding/schema_name", json!("a\0b")),
@@ -1983,8 +2022,8 @@ mod tests {
         fs::write(
             &path,
             original.replace(
-                "\"metadata_version\":1",
-                "\"metadata_version\":1,\"metadata_version\":1",
+                "\"metadata_version\":2",
+                "\"metadata_version\":2,\"metadata_version\":2",
             ),
         )
         .unwrap();

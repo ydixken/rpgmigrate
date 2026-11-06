@@ -28,9 +28,20 @@ Keep these positions separate when assessing progress or cutover readiness.
 
 Logical target commit can precede durable target commit when asynchronous commit is in use.
 A visible checkpoint row alone does not prove target durability.
-Source commit-order LSN, source transaction-end LSN, and target-local WAL LSN have different meanings.
+Physical source commit-record LSN, source transaction-end LSN, and target-local WAL LSN have different meanings.
 An LSN is a WAL position, not a transaction identity.
 Do not compare source positions with target-local WAL, or combine separate database streams into one scalar position.
+
+The [source-frontier contract](superpowers/plans/2026-11-06-engine-cdc.md#source-commit-evidence-and-codec-version) permits an unknown physical commit position.
+A source COMMIT must pass terminal checks and retain its actual transaction-end position and transaction identity.
+For example, `test_decoding` provides terminal transaction-end evidence without exposing the physical commit-record position.
+An unknown physical position does not mean an empty checkpoint.
+Generic WAL end, keepalives, and replication-origin positions cannot substitute for terminal COMMIT evidence.
+Preserving the original plugin message boundary and envelope is necessary before the decoder can establish that evidence.
+
+Check stream identity, transaction sequence, and transaction-end order regardless of whether physical positions are known.
+Compare adjacent physical positions only when both are known, and never invent a missing one.
+These rules describe the approved extension and do not establish implemented decoding or source ACK support.
 
 ## Choose a profile
 

@@ -3,7 +3,9 @@ use crate::catalog::{command, configure_durability, confirm_durability};
 use crate::contracts::{Error, ErrorKind, IoControl, Result};
 use crate::identity::StreamId;
 use crate::pg::{PgConnection, PgParam, PgResult, TransactionStatus};
-use crate::state::{ConfirmedProvenance, NativeState, TargetBinding, TargetProvenance};
+use crate::state::{
+    ConfirmedProvenance, NativeState, TARGET_METADATA_VERSION, TargetBinding, TargetProvenance,
+};
 use std::collections::BTreeSet;
 
 // Stable database-wide session fence: ASCII RPGM, serial writer slot 1, across all runs.
@@ -111,7 +113,7 @@ impl TargetAuthority {
                     schema_name: schema_name(stream),
                     table_name: "checkpoint".into(),
                     owner_oid: session.role,
-                    metadata_version: 1,
+                    metadata_version: TARGET_METADATA_VERSION,
                 };
                 state.begin_target_provisioning(binding)?
             }
@@ -726,9 +728,14 @@ fn validate_next(stream: StreamId, previous: Option<Frontier>, next: Frontier) -
     let expected = previous.map_or(Some(1), |value| value.order.0.checked_add(1));
     if next.tx.stream != stream
         || Some(next.order.0) != expected
-        || next.end.0 < next.commit.0
+        || next.commit.is_some_and(|commit| next.end.0 < commit.0)
         || previous.is_some_and(|value| {
-            value.tx.stream != stream || next.commit < value.commit || next.end < value.end
+            value.tx.stream != stream
+                || next
+                    .commit
+                    .zip(value.commit)
+                    .is_some_and(|(next, previous)| next < previous)
+                || next.end < value.end
         })
     {
         return Err(refusal(
@@ -769,7 +776,7 @@ mod tests {
                 begin_ordinal: 23,
             },
             order: TxSeq(order),
-            commit: CommitLsn(commit),
+            commit: Some(CommitLsn(commit)),
             end: SourceEndLsn(end),
         }
     }
@@ -781,6 +788,38 @@ mod tests {
         let mut next = frontier(2, 100, 120);
         next.tx.begin_ordinal = 3;
         assert!(validate_next(first.tx.stream, Some(first), next).is_ok());
+        for (previous, commit, accepted) in [
+            (None, None, true),
+            (Some(100), None, true),
+            (None, Some(99), true),
+            (Some(100), Some(99), false),
+            (Some(100), Some(100), true),
+            (Some(100), Some(101), true),
+        ] {
+            let first = Frontier {
+                commit: previous.map(CommitLsn),
+                ..first
+            };
+            let next = Frontier {
+                commit: commit.map(CommitLsn),
+                ..next
+            };
+            assert_eq!(
+                validate_next(first.tx.stream, Some(first), next).is_ok(),
+                accepted
+            );
+            assert!(
+                validate_next(
+                    first.tx.stream,
+                    Some(first),
+                    Frontier {
+                        end: SourceEndLsn(119),
+                        ..next
+                    }
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
