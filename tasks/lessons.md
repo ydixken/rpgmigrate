@@ -112,6 +112,9 @@ Check each tool's exit code before dependent ledger updates or success reports, 
 Name transport observations by their proven scope: an empty libpq output buffer can follow a discarded write and cannot prove delivery or source acknowledgment.
 State whether an estimate uses elapsed agent runtime or aggregate worker-hours, together with its remaining scope and confidence.
 Do not substitute human days or present an unmeasured estimate as a commitment.
+Separate healthy coordination evidence from fault qualification for each storage candidate.
+A candidate can remain useful for development comparisons after failing a production requirement.
+Preserve the failed probe and its exact scope instead of weakening read-only roles, catching library panics, or inventing a file validator.
 Do not diagnose a transient missing executable as a build race without a clean serialized reproduction check.
 Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
 Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.

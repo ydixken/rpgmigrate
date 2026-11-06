@@ -444,7 +444,7 @@ No WAL runtime or applied-throughput result is claimed by the authority slice or
 - [x] Freeze and review target authority and state metadata-version-two semantics for an optional physical commit position.
 - [x] Close independent review of the state's metadata-version-two constant and refusal fixtures.
 - [x] Close independent review of the source slice's CI inventories, fault receipts, and testing guide.
-- [ ] Integrate the frozen inventories and run the next serialized root gate after component reviews.
+- [x] Integrate the frozen inventories and run the next serialized root gate after component reviews.
 - [x] Verify the reviewed contract-only tree against stable `eaf7517` PG/harness code before a separate fix commit.
 
 Herschel owns the source CopyBoth transport implementation.
@@ -521,6 +521,52 @@ All 91 exported files and 86 pipeline inputs remained unchanged after the run.
 The root worker verified the report SHA-256 `ca39b1f77e2a9c4f051bccc4cf6d93b8dacb68f205cd2db303bee2a946e22917` and manifest SHA-256 `2bb9446ad00f697d1f513d1ca509d910f7df22cb218ab30fdd19c822b9ea0f31`.
 Evidence is under `target/ci-eaf7517-28qtnuzg`, and the worker removed its owned container.
 This result qualifies only committed `eaf7517` on that fixture, not later working-tree changes, CopyBoth, codec version two, amd64, hosted CI, or performance.
+
+## C1 development-only storage milestone
+
+- [x] Freeze the seven implementation/test files and the common role/catalog contracts.
+- [x] Add persistent revisions, bounded record numbering, completion indexes, and stable two-pass read views.
+- [x] Verify the healthy nine-process Receive, Apply, and Status schedule against external input and prefix oracles.
+- [x] Close component reviews, including the role-lock and trailing-output corrections, with redb's negative qualification recorded separately.
+- [ ] Run the exact C1 integration snapshot's required gates and preserve the final receipt.
+- [ ] Commit the tested C1 snapshot before releasing its protected files for codec promotion.
+
+The [C1 report](../docs/research/2026-11-06-storage-concurrency.md) records the reviewed sources, healthy proof, negative probe, and remaining qualification gates.
+Common/catalog, SQLite, segmented journal, and driver reviews passed within their stated scopes.
+The redb healthy checks passed, but its Status corruption probe panicked before returning a controlled error.
+The pinned redb 4.5.0 API has no adequate public read-only integrity check, so it is not qualified for production selection under that requirement.
+Its blocking-open limitation is a separate C2 gap.
+We retain redb only as a development comparison and preserve the negative evidence.
+
+Root discovery found 141 recovery/driver tests, and the Make guard requires that exact nonempty inventory.
+The format inventory remains 31.
+The [C1 integration handoff](../target/verify/c1-integration-h6s1tz_m/handoff.json) records the final snapshot and gate results.
+The snapshot excludes new tooling files and retains the existing Make-based gate.
+No runtime source, codec wire format, or Cargo dependency change belongs to C1.
+Its consumer cursor measures benchmark progress only, with all history retained and one active source transaction.
+Pruning, quotas, target proof integration, broader faults, power-loss behavior, Linux qualification, and backend selection remain open.
+
+## Publication and tooling boundary
+
+The [public repository](https://github.com/ydixken/rpgmigrate) contains verified source commit `55ac7d4a3907be09d951f9f356975c29133afb8d`.
+Its exact tested tree is `21a0f7aa7ac4b6146fa501b38296fe318ca50964`.
+The source gate includes 244 Rust, 24 CLI, 20 native, and 19 harness tests, a fresh engine39 result, and explicitly retained prior COPY40 evidence.
+The [source handoff](../target/verify/source-only-0x48g1ar/handoff.json) preserves the actual execution order, commands, hashes, and input-equivalence proof.
+Local and remote main point to that verified commit, and GitHub main is the default branch.
+Implementation stays on feat/bootstrap, whose checkout and upstream remain intact.
+The one-time main creation does not authorize later direct implementation pushes to main.
+
+- [ ] Replace repository Make orchestration and active commands with one root Taskfile, preserving the 21 task names, default check, and help.
+- [ ] Use one standard-library bootstrap helper and canonical Task 3.54.0 pins across local, CI, and container execution.
+- [ ] Integrate native amd64 and arm64 CI gates against the same exported runtime image artifacts.
+- [ ] Build the current-CLI runtime image without unused PostgreSQL utilities and verify its native dependency, OAuth module loading, ping, and stock-libpq refusal.
+- [ ] Configure version-tag-only publication to ghcr.io/ydixken/rpgmigrate after exact-artifact gates, without creating a tag or release now.
+
+Preserve archived command/evidence bytes and the native dependency's upstream GNU Make build.
+Routine future implementation and tooling workers use high effort, while recovery, durability, concurrency, and critical reviews use max effort.
+The in-flight C1 integration scope does not change with that effort split.
+Tooling writers use disjoint paths until the C1 export releases existing CI and harness paths.
+Canonical codec promotion and its consumers must respect the protected C1 files until their commit.
 
 ## Retained first-slice limits
 

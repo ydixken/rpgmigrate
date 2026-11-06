@@ -293,6 +293,197 @@ fn driver_invalid_routes_and_existing_root_fail_before_candidate_creation() {
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
 
+#[test]
+fn c1_driver_requires_exact_nonempty_role_receipts_and_external_oracle() {
+    use storage::c1::{self, Head, Receipt};
+    let pids: Vec<_> = (100..109).collect();
+    let receipts: Vec<_> = c1::CANDIDATES
+        .into_iter()
+        .flat_map(|candidate| {
+            c1::ROLES
+                .into_iter()
+                .zip([c1::RECEIVE_CHECKS, c1::APPLY_CHECKS, c1::STATUS_CHECKS])
+                .map(move |(role, checks)| (candidate, role, checks))
+        })
+        .enumerate()
+        .map(|(index, (candidate, role, checks))| Receipt {
+            version: 1,
+            candidate: candidate.into(),
+            role: role.into(),
+            pid: pids[index],
+            required_prefix: 4,
+            head: Head {
+                receive_revision: 5,
+                apply_revision: 3,
+                next_record: 9,
+                published: 4,
+                consumer_cursor: 4,
+            },
+            counts: storage::Counts {
+                frames: 4,
+                completed: 4,
+                encoded_bytes: 1024,
+            },
+            input_crc32: 123,
+            checks: checks.iter().map(|value| (*value).into()).collect(),
+        })
+        .collect();
+    c1::validate_receipts(&receipts, &pids, 123).unwrap();
+    assert!(c1::validate_receipts(&[], &[], 123).is_err());
+    assert!(c1::validate_receipts(&receipts, &pids, 124).is_err());
+    for index in 0..9 {
+        let mut missing = receipts.clone();
+        missing.remove(index);
+        assert!(c1::validate_receipts(&missing, &pids, 123).is_err());
+    }
+    for mutation in 0..13 {
+        let mut wrong = receipts.clone();
+        match mutation {
+            0 => wrong[0].checks.clear(),
+            1 => wrong[0].checks.push("unobserved".into()),
+            2 => wrong[0].checks[1] = wrong[0].checks[0].clone(),
+            3 => wrong[0].candidate = "sqlite".into(),
+            4 => wrong[0].role = "status".into(),
+            5 => wrong[0].pid = 0,
+            6 => wrong[0].head.next_record = 8,
+            7 => wrong[0].head.consumer_cursor = 3,
+            8 => wrong[0].counts.encoded_bytes -= 1,
+            9 => wrong[0].required_prefix = 3,
+            10 => wrong[0].input_crc32 ^= 1,
+            11 => wrong[1] = wrong[0].clone(),
+            12 => wrong.swap(0, 1),
+            _ => unreachable!(),
+        }
+        assert!(
+            c1::validate_receipts(&wrong, &pids, 123).is_err(),
+            "{mutation}"
+        );
+    }
+    let mut duplicate_pids = pids;
+    duplicate_pids[1] = duplicate_pids[0];
+    assert!(c1::validate_receipts(&receipts, &duplicate_pids, 123).is_err());
+}
+
+#[test]
+fn c1_driver_pipe_bounds_messages_rejects_eof_and_enforces_deadlines() {
+    use std::{
+        io::Write,
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        time::{Duration, Instant},
+    };
+    use storage::c1::Channel;
+    let (mut left, right) = UnixStream::pair().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let sender = Channel::new(left.as_raw_fd(), left.as_raw_fd(), deadline).unwrap();
+    let receiver = Channel::new(right.as_raw_fd(), right.as_raw_fd(), deadline).unwrap();
+    sender.send(&"ready").unwrap();
+    assert_eq!(receiver.receive::<String>().unwrap(), "ready");
+    assert!(sender.send(&"x".repeat(4097)).is_err());
+    sender.send(&"still-ready").unwrap();
+    assert_eq!(receiver.receive::<String>().unwrap(), "still-ready");
+    left.write_all(&4097u32.to_le_bytes()).unwrap();
+    assert!(receiver.receive::<String>().is_err());
+    let (left, right) = UnixStream::pair().unwrap();
+    let receiver = Channel::new(
+        right.as_raw_fd(),
+        right.as_raw_fd(),
+        Instant::now() + Duration::from_millis(25),
+    )
+    .unwrap();
+    let start = Instant::now();
+    assert!(receiver.receive::<String>().is_err());
+    assert!(start.elapsed() < Duration::from_secs(2));
+    let receiver = Channel::new(
+        right.as_raw_fd(),
+        right.as_raw_fd(),
+        Instant::now() + Duration::from_secs(2),
+    )
+    .unwrap();
+    drop(left);
+    assert_eq!(
+        receiver.receive::<String>(),
+        Err(Error::Workload("C1 pipe closed before its receipt"))
+    );
+    for bytes in [
+        0u32.to_le_bytes().to_vec(),
+        vec![1, 0, 0, 0, b'{'],
+        vec![2, 0, 0, 0, b'"'],
+    ] {
+        let (mut left, right) = UnixStream::pair().unwrap();
+        let receiver = Channel::new(
+            right.as_raw_fd(),
+            right.as_raw_fd(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        left.write_all(&bytes).unwrap();
+        drop(left);
+        assert!(receiver.receive::<String>().is_err());
+    }
+}
+
+#[test]
+fn c1_driver_terminal_stdout_requires_clean_eof() {
+    use std::{
+        io::Write,
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        time::{Duration, Instant},
+    };
+    use storage::c1::Channel;
+    let mut outcomes = Vec::new();
+    for trailing in 0..3 {
+        let (mut left, right) = UnixStream::pair().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let sender = Channel::new(left.as_raw_fd(), left.as_raw_fd(), deadline).unwrap();
+        let receiver = Channel::new(right.as_raw_fd(), right.as_raw_fd(), deadline).unwrap();
+        sender.send(&"finished").unwrap();
+        match trailing {
+            0 => (),
+            1 => sender.send(&"unexpected-after-finished").unwrap(),
+            2 => left.write_all(&[0]).unwrap(),
+            _ => unreachable!(),
+        }
+        assert_eq!(receiver.receive::<String>().unwrap(), "finished");
+        drop(left);
+        outcomes.push(receiver.require_eof());
+    }
+    assert_eq!(
+        outcomes,
+        [
+            Ok(()),
+            Err(Error::Workload("C1 child wrote after finished")),
+            Err(Error::Workload("C1 child wrote after finished"))
+        ]
+    );
+}
+
+#[test]
+fn c1_driver_terminal_stdout_uses_the_original_deadline() {
+    use std::{
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        time::{Duration, Instant},
+    };
+    use storage::c1::Channel;
+    let (left, right) = UnixStream::pair().unwrap();
+    let start = Instant::now();
+    let receiver = Channel::new(
+        right.as_raw_fd(),
+        right.as_raw_fd(),
+        start + Duration::from_millis(25),
+    )
+    .unwrap();
+    assert_eq!(
+        receiver.require_eof(),
+        Err(Error::Workload("C1 child exceeded its deadline"))
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+    drop(left);
+    assert_eq!(
+        receiver.require_eof(),
+        Err(Error::Workload("C1 child exceeded its deadline"))
+    );
+}
+
 use std::{io, path::PathBuf};
 use storage::config::*;
 use storage::format::{
@@ -366,7 +557,7 @@ fn store_identity_matches_independent_fixed_width_layout() {
     let cfg = config();
     let identity = cfg.identity();
     assert_eq!(identity.len(), 48);
-    assert_eq!(&identity[..12], b"RPGEXP01\x01\x00\x00\x00");
+    assert_eq!(&identity[..12], b"RPGEXP02\x02\x00\x00\x00");
     assert_eq!(&identity[12..28], &[0x11; 16]);
     assert_eq!(&identity[28..36], &[2, 1, 0, 0, 0, 0, 0, 0]);
     assert_eq!(&identity[36..40], &[42, 0, 0, 0]);
@@ -436,7 +627,13 @@ fn native_identity_exists_before_candidate_database_creation() {
         0o600
     );
     cfg.verify_directory().unwrap();
-    assert_eq!(std::fs::read_dir(&cfg.dir).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&cfg.dir).unwrap().count(), 3);
+    for name in ["receive.lock", "apply.lock"] {
+        let file = std::fs::metadata(cfg.dir.join(name)).unwrap();
+        assert!(file.is_file());
+        assert_eq!(file.len(), 0);
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+    }
 }
 
 #[test]
@@ -570,17 +767,120 @@ fn first_slice_refuses_interleaved_source_transactions() {
 }
 
 #[test]
-fn repeated_lsns_are_valid_but_transaction_identity_cannot_repeat() {
+fn repeated_lsns_and_reverse_begin_order_require_only_constant_progress_state() {
     let mut state = Progress::new(&config()).unwrap();
-    for sequence in 1..=2 {
-        state.observe(&Record::Frame(frame(sequence, 0))).unwrap();
-        state
-            .observe(&Record::Completed(completed(sequence, 1)))
+    for (sequence, begin, xid) in [(1, 20, 7), (2, 10, 8), (3, 30, 7)] {
+        let mut item = frame(sequence, 0);
+        item.tx.begin_ordinal = begin;
+        item.tx.xid = xid;
+        let descriptor = CompletedTx {
+            tx: item.tx,
+            ..completed(sequence, 1)
+        };
+        state.observe(&Record::Frame(item)).unwrap();
+        state.observe(&Record::Completed(descriptor)).unwrap();
+    }
+    assert_eq!(state.frontier(), TxSeq(3));
+    assert_eq!(state.check_after(TxSeq(3)), Ok(()));
+    assert!(std::mem::size_of::<Progress>() <= 512);
+}
+
+#[test]
+fn c1_store_completion_index_owns_full_transaction_uniqueness() {
+    for candidate in [Candidate::Segmented, Candidate::Redb, Candidate::Sqlite] {
+        let root = Scratch::new();
+        let cfg = root.config();
+        let mut store = Store::create(candidate, &cfg).unwrap();
+        for (sequence, begin, xid) in [(1, 20, 7), (2, 10, 8), (3, 30, 7)] {
+            let mut item = frame(sequence, 0);
+            item.tx.begin_ordinal = begin;
+            item.tx.xid = xid;
+            let descriptor = CompletedTx {
+                tx: item.tx,
+                ..completed(sequence, 1)
+            };
+            let stats = store
+                .with_receive(sequence - 1, |batch| {
+                    batch.append(&item)?;
+                    batch.complete(&descriptor)
+                })
+                .unwrap();
+            assert_eq!(
+                (stats.receive_revision, stats.durable_frontier),
+                (sequence, TxSeq(sequence))
+            );
+        }
+        let mut duplicate = frame(4, 0);
+        duplicate.tx.begin_ordinal = 20;
+        duplicate.tx.xid = 7;
+        assert_eq!(
+            store.with_receive(3, |batch| {
+                batch.append(&duplicate)?;
+                batch.complete(&CompletedTx {
+                    tx: duplicate.tx,
+                    ..completed(4, 1)
+                })
+            }),
+            Err(Error::IdentityMismatch),
+            "{candidate:?}"
+        );
+        assert_eq!(store.with_receive(3, |_| Ok(())), Err(Error::Poisoned));
+        drop(store);
+        let store = Store::reopen(candidate, &cfg, TxSeq(3)).unwrap();
+        store
+            .with_read_view(|view| {
+                assert_eq!(view.head().receive_revision, 3);
+                assert_eq!(view.head().next_record.get(), 7);
+                let mut identities = Vec::new();
+                view.scan_complete(TxSeq(0), |record| {
+                    if let Record::Completed(tx) = record {
+                        identities.push((tx.order.0, tx.tx.begin_ordinal, tx.tx.xid));
+                    }
+                    Ok(())
+                })?;
+                assert_eq!(identities, [(1, 20, 7), (2, 10, 8), (3, 30, 7)]);
+                Ok(())
+            })
             .unwrap();
     }
-    assert_eq!(state.frontier(), TxSeq(2));
-    assert_eq!(state.check_after(TxSeq(2)), Ok(()));
-    assert!(state.observe(&Record::Frame(frame(1, 0))).is_err());
+}
+
+#[test]
+fn c1_restart_recovers_partial_transaction_record_number() {
+    for candidate in [Candidate::Segmented, Candidate::Redb, Candidate::Sqlite] {
+        let root = Scratch::new();
+        let cfg = root.config();
+        let mut store = Store::create(candidate, &cfg).unwrap();
+        store
+            .with_receive(0, |batch| batch.append(&frame(1, 0)))
+            .unwrap();
+        store
+            .with_read_view(|view| {
+                assert_eq!(view.head().next_record.get(), 2);
+                assert_eq!(view.head().published, None);
+                view.scan_complete(TxSeq(0), |_| panic!("partial transaction escaped"))
+            })
+            .unwrap();
+        drop(store);
+        let mut store = Store::reopen(candidate, &cfg, TxSeq(0)).unwrap();
+        store
+            .with_receive(1, |batch| batch.complete(&completed(1, 1)))
+            .unwrap();
+        store
+            .with_read_view(|view| {
+                assert_eq!(view.head().next_record.get(), 3);
+                assert_eq!(view.head().receive_revision, 2);
+                assert_eq!(view.head().published, Some(completed(1, 1)));
+                let mut seen = 0;
+                view.scan_complete(TxSeq(0), |_| {
+                    seen += 1;
+                    Ok(())
+                })?;
+                assert_eq!(seen, 2);
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]
@@ -598,7 +898,8 @@ fn real_candidates_publish_only_complete_source_transactions() {
                 frames: 1,
                 completed: 0,
                 encoded_bytes: 89,
-                durable_frontier: TxSeq(0)
+                durable_frontier: TxSeq(0),
+                receive_revision: 1,
             }
         );
         let mut seen = 0;
@@ -618,7 +919,8 @@ fn real_candidates_publish_only_complete_source_transactions() {
                 frames: 0,
                 completed: 1,
                 encoded_bytes: 128,
-                durable_frontier: TxSeq(1)
+                durable_frontier: TxSeq(1),
+                receive_revision: 2,
             }
         );
         store.checkpoint().unwrap();

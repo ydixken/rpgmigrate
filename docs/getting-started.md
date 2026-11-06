@@ -210,3 +210,10 @@ Use the checked-in lockfile and the normal Cargo build without those overrides.
 > This pilot does not select a winner or qualify a production backend.
 > Multi-process access, retirement, quotas, crash/fault matrices, power-loss behavior, and target application remain separate gates.
 > Keep exclusive control of the generated private directories; the pilot does not defend against arbitrary mutation by the same user.
+
+## Storage role checks
+
+See the [C1 concurrency report](research/2026-11-06-storage-concurrency.md) for the Receive, Apply, and Status schedule and its runnable command.
+The healthy schedule is a development experiment with all history retained and one active source transaction.
+The report also records redb 4.5.0's read-only corruption failure, which excludes it from production selection under that requirement.
+The benchmark consumer cursor does not authorize source acknowledgment, pruning, or target recovery.

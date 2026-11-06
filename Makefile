@@ -45,7 +45,7 @@ test-storage-format: native-check
 	$(CARGO) test --locked --test storage_format -- --include-ignored
 
 test-storage-recovery: native-check
-	$(CARGO) test --locked --test storage_recovery -- --list | awk '/: test$$/ { count++ } END { if (count != 87) { print "error: expected 87 storage recovery and driver tests"; exit 1 } }'
+	$(CARGO) test --locked --test storage_recovery -- --list | awk '/: test$$/ { count++ } END { if (count != 141) { print "error: expected 141 storage recovery and driver tests"; exit 1 } }'
 	$(CARGO) test --locked --test storage_recovery -- --include-ignored --test-threads=1
 
 storage-pilot: native-check

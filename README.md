@@ -74,6 +74,10 @@ See the [bounded storage pilot](docs/getting-started.md#storage-pilot).
 
 See the [macOS arm64 pilot results](docs/research/2026-11-06-storage-pilot.md).
 
+## Storage concurrency
+
+See the [C1 role checks and qualification limits](docs/research/2026-11-06-storage-concurrency.md).
+
 ## Durability
 
 See the [durability design and runtime gates](docs/durability.md).
