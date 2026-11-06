@@ -1,0 +1,43 @@
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
+
+ENV E1_BASE_IMAGE=docker.io/library/rust@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
+# Snapshot pins transitive packages; APT still verifies Debian's signatures.
+RUN rm /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261106T000000Z trixie main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security main' > /etc/apt/sources.list \
+    && printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+    && chmod 755 /usr/sbin/policy-rc.d \
+    && mkdir -p /etc/postgresql-common \
+    && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      postgresql-17=17.11-0+deb13u1 shellcheck=0.10.0-1 yamllint=1.37.1-1 \
+      bison flex clang python3 libssl-dev libkrb5-dev libcurl4-openssl-dev pkg-config \
+    && mkdir -p /opt/e1 \
+    && dpkg-query -W -f='${Package}=${Version}\n' > /opt/e1/packages.txt \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add --toolchain 1.99.1 rustfmt clippy
+RUN set -eu; case "$(dpkg --print-architecture)" in \
+      amd64) checksum=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757 ;; \
+      arm64) checksum=401942f9c24ed71e4fe71b76c7d638f66d8633575c4016efd2977ce7c28317d0 ;; \
+      *) exit 1 ;; \
+    esac; \
+    curl --fail --location --proto '=https' --tlsv1.2 \
+      "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_$(dpkg --print-architecture).tar.gz" -o /tmp/actionlint.tgz; \
+    printf '%s  /tmp/actionlint.tgz\n' "$checksum" | sha256sum -c -; \
+    tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint; \
+    tar -xzf /tmp/actionlint.tgz -C /opt/e1 LICENSE.txt; \
+    rm /tmp/actionlint.tgz
+
+RUN useradd --uid 1000 --create-home verifier && mkdir /work && chown verifier:verifier /work
+ENV PG_BINDIR=/usr/lib/postgresql/17/bin \
+    RPGMIGRATE_TEST_EXPECTED_PG_VERSION=17.11 \
+    RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM=170011 \
+    PQ_LIB_DIR=/work/target/native/libpq/lib \
+    CARGO_TERM_COLOR=never \
+    PYTHONDONTWRITEBYTECODE=1
+USER verifier
+WORKDIR /work
+CMD ["python3", "/source/tools/ci/verify.py"]

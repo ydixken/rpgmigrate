@@ -1,0 +1,2499 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "86bf908adca02d87063849dae775a02c1659c829",
+  "evidence": "source",
+  "runtime_verified": false,
+  "argv_includes_executable": true,
+  "policy": "Fixtures describe source control flow. No baseline handler or database was executed. Replace argv[0] only when selecting the target executable. Null target expectations require contract review before adoption.",
+  "cases": [
+    {
+      "id": "missing-command",
+      "argv": [
+        "pgcopydb"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/lib/subcommands.c/commandline.c",
+          "start": 75,
+          "end": 111
+        },
+        {
+          "path": "src/bin/pgcopydb/main.c",
+          "start": 154,
+          "end": 158
+        }
+      ]
+    },
+    {
+      "id": "removed-stream-transform",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "transform"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 188,
+          "end": 204
+        }
+      ]
+    },
+    {
+      "id": "removed-stream-init",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "init"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 188,
+          "end": 204
+        }
+      ]
+    },
+    {
+      "id": "root-help",
+      "argv": [
+        "pgcopydb",
+        "--help"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "help",
+        "exit": 0,
+        "stdout": "empty",
+        "stderr_contains": [
+          "usage: pgcopydb"
+        ]
+      },
+      "target_expectation": {
+        "outcome": "help",
+        "exit": 0,
+        "stderr_contains": [
+          "rpgmigrate"
+        ]
+      },
+      "delta": "native-identity",
+      "at": [
+        {
+          "path": "src/bin/lib/subcommands.c/commandline.c",
+          "start": 44,
+          "end": 52
+        }
+      ]
+    },
+    {
+      "id": "help-tree",
+      "argv": [
+        "pgcopydb",
+        "help"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "help",
+        "exit": 0,
+        "stdout_contains": [
+          "pgcopydb stream sentinel"
+        ],
+        "stderr": "startup-log-permitted"
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 37,
+          "end": 41
+        }
+      ]
+    },
+    {
+      "id": "version-text",
+      "argv": [
+        "pgcopydb",
+        "version"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "version",
+        "exit": 0,
+        "stdout_contains": [
+          "pgcopydb version",
+          "compiled with",
+          "compatible with Postgres"
+        ]
+      },
+      "target_expectation": {
+        "outcome": "version",
+        "exit": 0,
+        "stdout_contains": [
+          "rpgmigrate"
+        ],
+        "version_source": "target build metadata"
+      },
+      "delta": "native-identity",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 109,
+          "end": 132
+        }
+      ]
+    },
+    {
+      "id": "version-json",
+      "argv": [
+        "pgcopydb",
+        "version",
+        "--json"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "version",
+        "exit": 0,
+        "json_keys": [
+          "pgcopydb",
+          "pg_major",
+          "pg_version",
+          "pg_version_str",
+          "pg_version_num"
+        ]
+      },
+      "target_expectation": {
+        "outcome": "version",
+        "exit": 0,
+        "json_product_identity": "rpgmigrate",
+        "version_source": "target build metadata"
+      },
+      "delta": "native-identity",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 111,
+          "end": 123
+        }
+      ]
+    },
+    {
+      "id": "version-unknown-option",
+      "argv": [
+        "pgcopydb",
+        "version",
+        "--unknown"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "version",
+        "exit": 0,
+        "stderr": "getopt-diagnostic"
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "invalid-option-failure",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 89,
+          "end": 100
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 131,
+          "end": 131
+        }
+      ]
+    },
+    {
+      "id": "dump-unknown-option",
+      "argv": [
+        "pgcopydb",
+        "dump",
+        "schema",
+        "--unknown"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "help",
+        "exit": 0
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "invalid-option-failure",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 263,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "root-unknown-before-version",
+      "argv": [
+        "pgcopydb",
+        "--unknown",
+        "--version"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_root.c",
+          "start": 158,
+          "end": 170
+        }
+      ]
+    },
+    {
+      "id": "global-placement",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "--verbose",
+        "receive"
+      ],
+      "env": {},
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 201,
+          "end": 204
+        },
+        {
+          "path": "src/bin/lib/subcommands.c/commandline.c",
+          "start": 56,
+          "end": 99
+        }
+      ]
+    },
+    {
+      "id": "dump-short-filter-missing",
+      "argv": [
+        "pgcopydb",
+        "dump",
+        "schema",
+        "-F"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "do-not-run",
+      "baseline_observation": {
+        "outcome": "unsafe",
+        "exit": null
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "dump-short-values",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 110,
+          "end": 110
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 155,
+          "end": 166
+        }
+      ]
+    },
+    {
+      "id": "dump-short-snapshot-value",
+      "argv": [
+        "pgcopydb",
+        "dump",
+        "schema",
+        "--source",
+        "dbname=source",
+        "-N",
+        "snapshot-id"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "do-not-run",
+      "baseline_observation": {
+        "outcome": "unsafe",
+        "exit": null
+      },
+      "target_expectation": {
+        "outcome": "accept",
+        "parsed": {
+          "snapshot": "snapshot-id"
+        }
+      },
+      "delta": "dump-short-values",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 110,
+          "end": 110
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 197,
+          "end": 201
+        }
+      ]
+    },
+    {
+      "id": "list-short-k-ignored-operand",
+      "argv": [
+        "pgcopydb",
+        "list",
+        "tables",
+        "--source",
+        "dbname=source",
+        "-k",
+        "ignored"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "skipCtidSplit": true
+        },
+        "remaining": []
+      },
+      "target_expectation": {
+        "outcome": "accept",
+        "parsed": {
+          "skipCtidSplit": true
+        },
+        "remaining": []
+      },
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 301,
+          "end": 301
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 402,
+          "end": 406
+        }
+      ]
+    },
+    {
+      "id": "list-short-k-missing",
+      "argv": [
+        "pgcopydb",
+        "list",
+        "tables",
+        "--source",
+        "dbname=source",
+        "-k"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 301,
+          "end": 301
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 538,
+          "end": 568
+        }
+      ]
+    },
+    {
+      "id": "list-long-ctid-flag",
+      "argv": [
+        "pgcopydb",
+        "list",
+        "tables",
+        "--source",
+        "dbname=source",
+        "--skip-split-by-ctid"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "skipCtidSplit": true
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 273,
+          "end": 273
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 402,
+          "end": 406
+        }
+      ]
+    },
+    {
+      "id": "fresh-job-defaults",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {},
+      "scope": "defaults",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 4,
+          "indexJobs": 4,
+          "lObjectJobs": 4,
+          "restoreOptions.jobs": 4,
+          "splitMaxParts": 0,
+          "splitTablesLargerThan.bytes": 0
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 212,
+          "end": 348
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 772,
+          "end": 780
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1282,
+          "end": 1327
+        }
+      ]
+    },
+    {
+      "id": "restore-inherits-index-jobs",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--index-jobs",
+        "7"
+      ],
+      "env": {},
+      "scope": "defaults",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "indexJobs": 7,
+          "restoreOptions.jobs": 7
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1282,
+          "end": 1287
+        }
+      ]
+    },
+    {
+      "id": "explicit-restore-overrides-fallback",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--index-jobs",
+        "7",
+        "--restore-jobs",
+        "3"
+      ],
+      "env": {},
+      "scope": "defaults",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "indexJobs": 7,
+          "restoreOptions.jobs": 3
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 944,
+          "end": 954
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1282,
+          "end": 1287
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-below-minimum",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "0"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-minimum",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "1"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 1
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-maximum",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "128"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 128
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-above-maximum",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "129"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-leading-plus",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "+1"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 1
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-leading-space",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        " 1"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 1
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-trailing-space",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "1 "
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "table-jobs-int32-overflow",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "2147483648"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        },
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        }
+      ]
+    },
+    {
+      "id": "jobs-alias",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--jobs",
+        "3"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 3
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 712,
+          "end": 713
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 823,
+          "end": 833
+        }
+      ]
+    },
+    {
+      "id": "cli-over-valid-job-env",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "8"
+      ],
+      "env": {
+        "PGCOPYDB_TABLE_JOBS": "2"
+      },
+      "scope": "environment",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 8
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 212,
+          "end": 348
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 772,
+          "end": 780
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1282,
+          "end": 1327
+        }
+      ]
+    },
+    {
+      "id": "invalid-job-env-before-cli",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--table-jobs",
+        "8"
+      ],
+      "env": {
+        "PGCOPYDB_TABLE_JOBS": "0"
+      },
+      "scope": "environment",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 212,
+          "end": 348
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 772,
+          "end": 780
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1282,
+          "end": 1327
+        }
+      ]
+    },
+    {
+      "id": "valid-job-env",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {
+        "PGCOPYDB_TABLE_JOBS": "9"
+      },
+      "scope": "environment",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "tableJobs": 9
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 212,
+          "end": 348
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 772,
+          "end": 780
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1282,
+          "end": 1327
+        }
+      ]
+    },
+    {
+      "id": "boolean-env-true",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {
+        "PGCOPYDB_SKIP_VACUUM": "true"
+      },
+      "scope": "environment",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "skipVacuum": false
+        }
+      },
+      "target_expectation": {
+        "outcome": "accept",
+        "parsed": {
+          "skipVacuum": true
+        }
+      },
+      "delta": "boolean-environment",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 265,
+          "end": 266
+        },
+        {
+          "path": "src/bin/pgcopydb/env_utils.c",
+          "start": 252,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "boolean-env-invalid",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {
+        "PGCOPYDB_SKIP_VACUUM": "garbage"
+      },
+      "scope": "environment",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "skipVacuum": false
+        }
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "boolean-environment",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/env_utils.c",
+          "start": 252,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "list-ignores-snapshot-env",
+      "argv": [
+        "pgcopydb",
+        "list",
+        "tables",
+        "--source",
+        "dbname=source"
+      ],
+      "env": {
+        "PGCOPYDB_SNAPSHOT": "ignored-id"
+      },
+      "scope": "environment",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "snapshot": ""
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 209,
+          "end": 246
+        }
+      ]
+    },
+    {
+      "id": "sentinel-ignores-host-env",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "sentinel",
+        "get"
+      ],
+      "env": {
+        "PGCOPYDB_HOST": "localhost",
+        "PGCOPYDB_PORT": "5449"
+      },
+      "scope": "environment",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "host": "",
+          "port": 0
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 163,
+          "end": 172
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 212,
+          "end": 348
+        }
+      ]
+    },
+    {
+      "id": "coordinator-cli-over-env",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--host",
+        "localhost",
+        "--port",
+        "5449"
+      ],
+      "env": {
+        "PGCOPYDB_HOST": "127.0.0.1",
+        "PGCOPYDB_PORT": "5442"
+      },
+      "scope": "environment",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "host": "localhost",
+          "port": 5449
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 665,
+          "end": 695
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 779,
+          "end": 780
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1159,
+          "end": 1175
+        }
+      ]
+    },
+    {
+      "id": "invalid-log-env-before-help",
+      "argv": [
+        "pgcopydb",
+        "--help"
+      ],
+      "env": {
+        "PGCOPYDB_LOG_JSON": "garbage"
+      },
+      "scope": "process",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 12
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/main.c",
+          "start": 185,
+          "end": 208
+        }
+      ]
+    },
+    {
+      "id": "split-10kB",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--split-tables-larger-than",
+        "10kB"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "splitTablesLargerThan.bytes": 10240
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 410,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "split-10-kB",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--split-tables-larger-than",
+        "10 kB"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "splitTablesLargerThan.bytes": 10240
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 410,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "unknown-byte-unit",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--split-at",
+        "1MiB"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "diagnostic": "unknown unit"
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "byte-validation",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 486,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "trailing-byte-junk",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--split-at",
+        "1MB!"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "splitTablesLargerThan.bytes": 1048576
+        }
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "byte-validation",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 477,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "byte-overflow",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--split-at",
+        "16EB"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "do-not-run",
+      "baseline_observation": {
+        "outcome": "unsafe",
+        "exit": null,
+        "behavior": "Unchecked uint64 multiplication wraps."
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "numeric-overflow",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 496,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "split-max-zero",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--split-max-parts",
+        "0"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 882,
+          "end": 893
+        }
+      ]
+    },
+    {
+      "id": "valid-lsn",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--endpos",
+        "FFFFFFFF/abcdef12"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "endpos": "FFFFFFFF/ABCDEF12"
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 228,
+          "end": 253
+        }
+      ]
+    },
+    {
+      "id": "invalid-lsn-0_",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--endpos",
+        "0/"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 228,
+          "end": 253
+        }
+      ]
+    },
+    {
+      "id": "invalid-lsn-_0",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--endpos",
+        "/0"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 228,
+          "end": 253
+        }
+      ]
+    },
+    {
+      "id": "invalid-lsn-100000000_0",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--endpos",
+        "100000000/0"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 228,
+          "end": 253
+        }
+      ]
+    },
+    {
+      "id": "invalid-lsn-0_1junk",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--endpos",
+        "0/1junk"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 228,
+          "end": 253
+        }
+      ]
+    },
+    {
+      "id": "invalid-lsn-_0_1",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--endpos",
+        " 0/1"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 228,
+          "end": 253
+        }
+      ]
+    },
+    {
+      "id": "default-plugin",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {},
+      "scope": "defaults",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "slot.plugin": "pgoutput",
+          "slot.slotName": "pgcopydb",
+          "origin": "pgcopydb",
+          "slot.publicationName": "pgcopydb"
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/defaults.h",
+          "start": 91,
+          "end": 95
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 410,
+          "end": 595
+        }
+      ]
+    },
+    {
+      "id": "unknown-cli-plugin",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--plugin",
+        "unknown"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "slot.plugin": "pgoutput"
+        }
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "unknown-plugin",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 504,
+          "end": 519
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1079,
+          "end": 1085
+        }
+      ]
+    },
+    {
+      "id": "unknown-env-plugin",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {
+        "PGCOPYDB_OUTPUT_PLUGIN": "unknown"
+      },
+      "scope": "environment",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 326,
+          "end": 346
+        }
+      ]
+    },
+    {
+      "id": "wal2json-required",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--plugin",
+        "pgoutput",
+        "--wal2json-numeric-as-string"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1296,
+          "end": 1302
+        }
+      ]
+    },
+    {
+      "id": "restart-resume-conflict",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "--restart",
+        "--resume",
+        "--not-consistent"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "restart": true,
+          "resume": true
+        }
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "delta": "restart-resume-conflict",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1034,
+          "end": 1056
+        }
+      ]
+    },
+    {
+      "id": "sentinel-duplicate-selector",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "sentinel",
+        "get",
+        "--startpos",
+        "--startpos"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 216,
+          "end": 221
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 360,
+          "end": 365
+        }
+      ]
+    },
+    {
+      "id": "sentinel-current-source-required",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "sentinel",
+        "set",
+        "endpos",
+        "--current"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 367,
+          "end": 387
+        }
+      ]
+    },
+    {
+      "id": "sentinel-setup-missing-lsn",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "sentinel",
+        "setup",
+        "0/1"
+      ],
+      "env": {},
+      "scope": "dispatch",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 439,
+          "end": 460
+        }
+      ]
+    },
+    {
+      "id": "sentinel-endpos-xor",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "sentinel",
+        "set",
+        "endpos",
+        "--source",
+        "dbname=source",
+        "--current",
+        "0/1"
+      ],
+      "env": {},
+      "scope": "dispatch",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 552,
+          "end": 588
+        }
+      ]
+    },
+    {
+      "id": "sentinel-option-after-operand",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "sentinel",
+        "set",
+        "startpos",
+        "0/1",
+        "--json"
+      ],
+      "env": {},
+      "scope": "dispatch",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/main.c",
+          "start": 86,
+          "end": 99
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_sentinel.c",
+          "start": 489,
+          "end": 500
+        }
+      ]
+    },
+    {
+      "id": "stream-real-target-needs-source",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "apply",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 518,
+          "end": 536
+        }
+      ]
+    },
+    {
+      "id": "stream-target-stdout",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "apply",
+        "--target",
+        "-"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "connStrings.target_pguri": "-"
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 277,
+          "end": 288
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 518,
+          "end": 550
+        }
+      ]
+    },
+    {
+      "id": "stream-apply-stdin-operand",
+      "argv": [
+        "pgcopydb",
+        "stream",
+        "apply",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "-"
+      ],
+      "env": {},
+      "scope": "dispatch",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "branch",
+        "handler_mode": "sql-stdin"
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 1319,
+          "end": 1409
+        }
+      ]
+    },
+    {
+      "id": "restore-parse-list-needs-target",
+      "argv": [
+        "pgcopydb",
+        "restore",
+        "parse-list",
+        "pre.list"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 401,
+          "end": 418
+        }
+      ]
+    },
+    {
+      "id": "restore-parse-list-extra-operands",
+      "argv": [
+        "pgcopydb",
+        "restore",
+        "parse-list",
+        "--target",
+        "dbname=target",
+        "a",
+        "b"
+      ],
+      "env": {},
+      "scope": "dispatch",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "branch",
+        "handler_mode": "work-directory"
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 12,
+        "error": "BadConfig",
+        "side_effects": "none"
+      },
+      "delta": "ignored-operands",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 575,
+          "end": 619
+        }
+      ]
+    },
+    {
+      "id": "restore-no-tablespaces",
+      "argv": [
+        "pgcopydb",
+        "restore",
+        "schema",
+        "--target",
+        "dbname=target",
+        "--no-tablespaces"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "reject",
+        "exit": 1
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 155,
+          "end": 192
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 393,
+          "end": 418
+        }
+      ]
+    },
+    {
+      "id": "cli-over-malformed-conninfo-env",
+      "argv": [
+        "pgcopydb",
+        "clone",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname='unterminated",
+        "PGCOPYDB_TARGET_PGURI": "dbname='unterminated"
+      },
+      "scope": "environment",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "parsed": {
+          "connStrings.source_pguri": "dbname=source",
+          "connStrings.target_pguri": "dbname=target"
+        }
+      },
+      "target_expectation": null,
+      "delta": null,
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 155,
+          "end": 168
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 304,
+          "end": 318
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 790,
+          "end": 814
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1304,
+          "end": 1308
+        }
+      ]
+    },
+    {
+      "id": "ignored-operand-copy-table-data",
+      "argv": [
+        "pgcopydb",
+        "copy",
+        "table-data",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "ignored"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "remaining": [
+          "ignored"
+        ]
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 12,
+        "error": "BadConfig",
+        "side_effects": "none"
+      },
+      "delta": "ignored-operands",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1317,
+          "end": 1327
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_copy.c",
+          "start": 344,
+          "end": 384
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_ping.c",
+          "start": 177,
+          "end": 205
+        }
+      ]
+    },
+    {
+      "id": "ignored-operand-ping",
+      "argv": [
+        "pgcopydb",
+        "ping",
+        "--source",
+        "dbname=source",
+        "--target",
+        "dbname=target",
+        "ignored"
+      ],
+      "env": {},
+      "scope": "parser",
+      "conditions": [
+        "Fresh empty state. This is a parsed-value fixture, not permission to execute a handler."
+      ],
+      "evidence": "source",
+      "oracle": "not-run",
+      "baseline_observation": {
+        "outcome": "accept",
+        "remaining": [
+          "ignored"
+        ]
+      },
+      "target_expectation": {
+        "outcome": "reject",
+        "exit": 12,
+        "error": "BadConfig",
+        "side_effects": "none"
+      },
+      "delta": "ignored-operands",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1317,
+          "end": 1327
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_copy.c",
+          "start": 344,
+          "end": 384
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_ping.c",
+          "start": 177,
+          "end": 205
+        }
+      ]
+    }
+  ],
+  "target_policy": "Target expectations describe reviewed semantics after implementation. Unsupported commands and features must fail before side effects. Parser acceptance does not prove runtime support.",
+  "environment_policy": "Use a cleared PGCOPYDB_* and libpq environment plus the explicit env map. No case authorizes a handler, database, or filesystem operation."
+}

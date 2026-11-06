@@ -1,0 +1,73 @@
+{
+  "format_version": 1,
+  "seed": "e1-paired-buckets-v1",
+  "server_version": "14.24",
+  "server_version_num": 140024,
+  "schemas": ["E1 space", "public"],
+  "relations": [
+    {"schema":"E1 space","name":"empty table","kind":"r","persistence":"p","columns":[["nullable value","text"],["bytes","bytea"]]},
+    {"schema":"E1 space","name":"row \"payload","kind":"r","persistence":"p","columns":[["bucket","integer"],["text value","text"],["bytes","bytea"],["wide","text"],["calendar","date"],["elapsed","interval"],["instant","timestamp with time zone"],["wall","timestamp without time zone"],["floating","double precision"],["exact","numeric(20,6)"],["flag","boolean"]]}
+  ],
+  "row_counts": {"empty table":0,"row \"payload":10003},
+  "foreign_key_fixture": {
+    "schemas": ["public"],
+    "relations": [
+      {"schema":"public","name":"a_child","kind":"r","persistence":"p","columns":[["id","integer"],["parent_id","integer"]]},
+      {"schema":"public","name":"z_parent","kind":"r","persistence":"p","columns":[["id","integer"]]}
+    ],
+    "row_counts": {"a_child":2,"z_parent":2}
+  },
+  "transport_cases": [
+    "pg::live_tests::query_drains_errors_rejects_multiple_statements_and_remains_usable",
+    "pg::live_tests::raw_copy_handles_empty_null_escaped_bytes_and_one_oversize_frame",
+    "pg::live_tests::late_copy_error_and_copy_abort_leave_transactions_rollbackable",
+    "pg::live_tests::query_deadline_and_cancellation_stop_waiting",
+    "pg::live_tests::passfile_and_service_authentication_preserve_security_checks"
+  ],
+  "copy_cases": [
+    "catalog::tests::live_preflight_retains_target_locks_and_source_snapshot",
+    "copy::tests::live_copy_preserves_remote_apply"
+  ],
+  "cases": [
+    {"id":"ping","outcome":"success"},
+    {"id":"ping_unreachable","outcome":"failure"},
+    {"id":"copy_contents","outcome":"success"},
+    {"id":"copy_deferrable_fk","outcome":"success"},
+    {"id":"empty_catalog","outcome":"success"},
+    {"id":"oracle_missing_table","outcome":"oracle"},
+    {"id":"oracle_changed_schema","outcome":"oracle"},
+    {"id":"oracle_changed_value","outcome":"oracle"},
+    {"id":"preflight_missing_table","outcome":"failure"},
+    {"id":"preflight_changed_schema","outcome":"failure"},
+    {"id":"preflight_nonempty_target","outcome":"failure"},
+    {"id":"preflight_target_check_encoding","outcome":"failure"},
+    {"id":"preflight_target_check_delete","outcome":"failure"},
+    {"id":"preflight_nondeferrable_fk","outcome":"failure"},
+    {"id":"preflight_target_expression_index","outcome":"failure"},
+    {"id":"preflight_target_partial_index","outcome":"failure"},
+    {"id":"preflight_target_custom_opclass","outcome":"failure"},
+    {"id":"preflight_target_custom_am","outcome":"failure"},
+    {"id":"preflight_target_exclusion","outcome":"failure"},
+    {"id":"preflight_fk_external_parent","outcome":"failure"},
+    {"id":"preflight_fk_mixed_types","outcome":"failure"},
+    {"id":"preflight_fk_disabled_triggers","outcome":"failure"},
+    {"id":"preflight_fk_replica_triggers","outcome":"failure"},
+    {"id":"preflight_target_replica","outcome":"failure"},
+    {"id":"preflight_source_rls","outcome":"failure"},
+    {"id":"preflight_target_rls","outcome":"failure"},
+    {"id":"preflight_source_trigger","outcome":"failure"},
+    {"id":"preflight_target_trigger","outcome":"failure"},
+    {"id":"preflight_source_unlogged","outcome":"failure"},
+    {"id":"preflight_target_unlogged","outcome":"failure"},
+    {"id":"preflight_source_partition","outcome":"failure"},
+    {"id":"preflight_generated_column","outcome":"failure"},
+    {"id":"preflight_source_non_utf8","outcome":"failure"},
+    {"id":"preflight_target_non_utf8","outcome":"failure"},
+    {"id":"fault_source_terminal","outcome":"failure","fault":true},
+    {"id":"fault_target_constraint","outcome":"failure","fault":true},
+    {"id":"fault_deferrable_fk","outcome":"failure","fault":true},
+    {"id":"fault_commit_unknown","outcome":"failure","fault":true},
+    {"id":"signal_sigint","outcome":"failure","fault":true},
+    {"id":"signal_sigterm","outcome":"failure","fault":true}
+  ]
+}

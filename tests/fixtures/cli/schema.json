@@ -1,0 +1,559 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pinned pgcopydb CLI source evidence, version 1",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "generated_by": {
+      "const": "tools/extract-cli-contract.py"
+    },
+    "baseline": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "const": "ydixken/pgcopydb"
+        },
+        "ref": {
+          "const": "origin/v0.18-fixes"
+        },
+        "commit": {
+          "const": "86bf908adca02d87063849dae775a02c1659c829"
+        },
+        "executable": {
+          "const": "pgcopydb"
+        },
+        "evidence": {
+          "const": "source"
+        },
+        "runtime_verified": {
+          "const": false
+        }
+      },
+      "required": [
+        "repository",
+        "ref",
+        "commit",
+        "executable",
+        "evidence",
+        "runtime_verified"
+      ],
+      "additionalProperties": false
+    },
+    "inventory": {
+      "type": "object",
+      "properties": {
+        "nodes": {
+          "const": 59
+        },
+        "leaves": {
+          "const": 50
+        },
+        "groups_excluding_root": {
+          "const": 8
+        },
+        "parsers": {
+          "const": 11
+        },
+        "long_option_rows": {
+          "const": 220
+        },
+        "long_option_names": {
+          "const": 77
+        },
+        "parser_actions": {
+          "const": 199
+        },
+        "short_bindings": {
+          "const": 188
+        },
+        "help_documents": {
+          "const": 57
+        }
+      },
+      "required": [
+        "nodes",
+        "leaves",
+        "groups_excluding_root",
+        "parsers",
+        "long_option_rows",
+        "long_option_names",
+        "parser_actions",
+        "short_bindings",
+        "help_documents"
+      ],
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/source"
+      },
+      "minProperties": 1
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/command"
+      },
+      "minItems": 59,
+      "maxItems": 59
+    },
+    "parsers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/parser"
+      },
+      "minProperties": 11,
+      "maxProperties": 11
+    },
+    "constants": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/constant"
+      },
+      "minProperties": 1
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "common": {
+          "$ref": "#/$defs/settings"
+        },
+        "list": {
+          "$ref": "#/$defs/settings"
+        },
+        "coordinator": {
+          "$ref": "#/$defs/settings"
+        },
+        "startup": {
+          "$ref": "#/$defs/settings"
+        }
+      },
+      "required": [
+        "common",
+        "list",
+        "coordinator",
+        "startup"
+      ],
+      "additionalProperties": false
+    },
+    "help_documents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/help"
+      },
+      "minItems": 57,
+      "maxItems": 57
+    },
+    "license": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "const": "LICENSE"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "generated_by",
+    "baseline",
+    "inventory",
+    "sources",
+    "commands",
+    "parsers",
+    "constants",
+    "settings",
+    "help_documents",
+    "license"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "at": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "path",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "option": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "arity": {
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "action": {
+          "type": "string"
+        },
+        "at": {
+          "$ref": "#/$defs/at"
+        }
+      },
+      "required": [
+        "name",
+        "arity",
+        "action",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "command": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0
+        },
+        "kind": {
+          "enum": [
+            "group",
+            "leaf"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "help": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "advertised_options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0
+        },
+        "parser": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handler": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "at": {
+          "$ref": "#/$defs/at"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "children_at": {
+          "$ref": "#/$defs/at"
+        }
+      },
+      "required": [
+        "symbol",
+        "name",
+        "path",
+        "kind",
+        "description",
+        "usage",
+        "help",
+        "advertised_options",
+        "parser",
+        "handler",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "parser": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/at"
+        },
+        "optstring": {
+          "type": "string"
+        },
+        "optstring_at": {
+          "$ref": "#/$defs/at"
+        },
+        "short_options": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              0,
+              1,
+              2
+            ]
+          }
+        },
+        "duplicate_short_options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0
+        },
+        "long_options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/option"
+          },
+          "minItems": 1
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2
+          },
+          "minItems": 0
+        },
+        "ordering": {
+          "enum": [
+            "permute",
+            "stop_at_operand"
+          ]
+        },
+        "environment": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "at",
+        "optstring",
+        "optstring_at",
+        "short_options",
+        "duplicate_short_options",
+        "long_options",
+        "aliases",
+        "ordering",
+        "environment"
+      ],
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "int",
+            "bool",
+            "string",
+            "conninfo",
+            "bytes",
+            "plugin",
+            "path"
+          ]
+        },
+        "at": {
+          "$ref": "#/$defs/at"
+        },
+        "size": {
+          "type": "string"
+        },
+        "minimum": {
+          "type": "integer"
+        },
+        "maximum": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "field",
+        "type",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "default": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "constant": {
+          "type": "string"
+        },
+        "value": {
+          "type": "integer"
+        },
+        "at": {
+          "$ref": "#/$defs/at"
+        }
+      },
+      "required": [
+        "field",
+        "constant",
+        "value",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "environment": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/binding"
+          },
+          "minItems": 1
+        },
+        "defaults": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/default"
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "environment",
+        "defaults"
+      ],
+      "additionalProperties": false
+    },
+    "constant": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "at": {
+          "$ref": "#/$defs/at"
+        }
+      },
+      "required": [
+        "value",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "git_blob": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lines": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "sha256",
+        "git_blob",
+        "bytes",
+        "lines"
+      ],
+      "additionalProperties": false
+    },
+    "help": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0
+        },
+        "source": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "source",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

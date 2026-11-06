@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "86bf908adca02d87063849dae775a02c1659c829",
+  "target_executable": "rpgmigrate",
+  "review_note": "The approved design defines identity, native state, and additive controls. The leader reviewed hardening through the CLI worker.",
+  "deltas": [
+    {
+      "id": "native-identity",
+      "status": "reviewed",
+      "baseline_observation": "The baseline uses pgcopydb identity and legacy state.",
+      "target_expectation": "Use rpgmigrate identity and native state. Reject legacy state without adoption, conversion, cleanup, or mutation.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06",
+        "design": "docs/superpowers/specs/2026-11-06-rpgmigrate-design.md"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_root.c",
+          "start": 42,
+          "end": 46
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 410,
+          "end": 595
+        }
+      ]
+    },
+    {
+      "id": "additive-controls",
+      "status": "reviewed",
+      "baseline_observation": "The baseline has no durability, loss-cap, or apply-jobs options.",
+      "target_expectation": "Add durable, replay-safe, relaxed, explicit finite relaxed loss caps, and apply-jobs. Default durability is durable. Default apply-jobs is 1.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06",
+        "design": "docs/superpowers/specs/2026-11-06-rpgmigrate-design.md"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 708,
+          "end": 768
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 217,
+          "end": 245
+        }
+      ]
+    },
+    {
+      "id": "dump-short-values",
+      "status": "reviewed",
+      "baseline_observation": "Dump -F and -N consume no value but their handlers dereference optarg.",
+      "target_expectation": "Require a value for dump -F and -N, matching their long forms. Return BadArgs for a missing value.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 79,
+          "end": 110
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 155,
+          "end": 166
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 197,
+          "end": 201
+        }
+      ]
+    },
+    {
+      "id": "numeric-overflow",
+      "status": "reviewed",
+      "baseline_observation": "Integer parsing checks int32 bounds. Byte multiplication does not check overflow.",
+      "target_expectation": "Reject numeric overflow without wrapping, truncation, or unsafe memory access. Preserve valid unusual integer spellings.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/string_utils.c",
+          "start": 45,
+          "end": 82
+        },
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 449,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "byte-validation",
+      "status": "reviewed",
+      "baseline_observation": "Unknown units return true after an error. Suffix scanning discards trailing nonletters.",
+      "target_expectation": "Reject unknown units and malformed trailing bytes. Preserve valid integer quantities and binary multipliers.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 410,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "boolean-environment",
+      "status": "reviewed",
+      "baseline_observation": "Typed boolean environment bindings do not parse their values.",
+      "target_expectation": "Parse boolean environment values. Reject invalid values. Preserve valid CLI-over-environment precedence.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/env_utils.c",
+          "start": 252,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "unknown-plugin",
+      "status": "reviewed",
+      "baseline_observation": "An unknown CLI plugin becomes STREAM_PLUGIN_UNKNOWN and can fall back to pgoutput.",
+      "target_expectation": "Reject an unknown explicit plugin. Preserve the pgoutput default when no plugin is supplied.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 504,
+          "end": 519
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1079,
+          "end": 1085
+        },
+        {
+          "path": "src/bin/pgcopydb/pgsql.c",
+          "start": 3825,
+          "end": 3840
+        }
+      ]
+    },
+    {
+      "id": "invalid-option-failure",
+      "status": "reviewed",
+      "baseline_observation": "The version and dump parsers can exit successfully after invalid options.",
+      "target_expectation": "Return BadArgs for invalid options instead of a successful version or help result.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 89,
+          "end": 100
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 263,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "restart-resume-conflict",
+      "status": "reviewed",
+      "baseline_observation": "The common and stream parsers only log the restart/resume conflict.",
+      "target_expectation": "Reject simultaneous restart and resume before runtime work.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1034,
+          "end": 1056
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_stream.c",
+          "start": 397,
+          "end": 419
+        }
+      ]
+    },
+    {
+      "id": "ignored-operands",
+      "status": "reviewed",
+      "baseline_observation": "Several handlers ignore trailing operands. Restore parse-list uses the work directory when its operand count differs from one.",
+      "target_expectation": "Reject ignored trailing operational operands with BadConfig before connections or state changes. Preserve operands that the command actually uses.",
+      "review": {
+        "reviewer": "leader",
+        "thread": "01a1b1cb-dce5-7872-aea0-68a854acfcd1",
+        "reported_by": "01a1b225-5d93-7992-bc73-f7e9ee6d20e4",
+        "recorded_on": "2026-11-06"
+      },
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1317,
+          "end": 1327
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_copy.c",
+          "start": 344,
+          "end": 384
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_ping.c",
+          "start": 177,
+          "end": 205
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 575,
+          "end": 619
+        }
+      ]
+    }
+  ],
+  "implementation_policy": "Preserve recognition of supported syntax. Fail unsupported runtime behavior before side effects. Do not return success for an unfinished handler."
+}

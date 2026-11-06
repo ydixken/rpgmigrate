@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "86bf908adca02d87063849dae775a02c1659c829",
+  "evidence": "source",
+  "runtime_verified": false,
+  "policy": "Observations are evidence, not unsafe target requirements. Only reviewed deltas define changed target behavior.",
+  "anomalies": [
+    {
+      "id": "dump-short-null-optarg",
+      "unsafe": true,
+      "summary": "Dump short -F/-N have no-argument arity but handlers use optarg.",
+      "baseline_observation": {
+        "outcome": "unsafe"
+      },
+      "target_requirement": null,
+      "delta": "dump-short-values",
+      "oracle": "do-not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 110,
+          "end": 110
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 155,
+          "end": 166
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 197,
+          "end": 201
+        }
+      ]
+    },
+    {
+      "id": "list-short-k-operand",
+      "unsafe": false,
+      "summary": "List -k requires an ignored operand. Its long form takes no argument.",
+      "baseline_observation": {
+        "outcome": "accept"
+      },
+      "target_requirement": null,
+      "delta": null,
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 273,
+          "end": 273
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 301,
+          "end": 304
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 402,
+          "end": 406
+        }
+      ]
+    },
+    {
+      "id": "typed-env-booleans-ignored",
+      "unsafe": false,
+      "summary": "Non-null boolean binding targets prevent parse_bool from running.",
+      "baseline_observation": {
+        "outcome": "ignored"
+      },
+      "target_requirement": null,
+      "delta": "boolean-environment",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/env_utils.c",
+          "start": 252,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "byte-overflow-and-buffer",
+      "unsafe": true,
+      "summary": "Byte parsing uses a fixed digit buffer with an input-derived copy size and unchecked multiplication.",
+      "baseline_observation": {
+        "outcome": "unsafe"
+      },
+      "target_requirement": null,
+      "delta": "numeric-overflow",
+      "oracle": "do-not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 449,
+          "end": 455
+        },
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 496,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "unknown-byte-unit-success",
+      "unsafe": false,
+      "summary": "An unknown unit logs an error and still returns true.",
+      "baseline_observation": {
+        "outcome": "accept"
+      },
+      "target_requirement": null,
+      "delta": "byte-validation",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 486,
+          "end": 519
+        }
+      ]
+    },
+    {
+      "id": "byte-trailing-junk",
+      "unsafe": false,
+      "summary": "The byte parser terminates the suffix at the first nonletter and ignores the remainder.",
+      "baseline_observation": {
+        "outcome": "accept"
+      },
+      "target_requirement": null,
+      "delta": "byte-validation",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/parsing_utils.c",
+          "start": 477,
+          "end": 483
+        }
+      ]
+    },
+    {
+      "id": "unknown-cli-plugin-default",
+      "unsafe": false,
+      "summary": "Fresh-state initialization can replace an unknown explicit plugin with pgoutput.",
+      "baseline_observation": {
+        "outcome": "fallback"
+      },
+      "target_requirement": null,
+      "delta": "unknown-plugin",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 504,
+          "end": 519
+        },
+        {
+          "path": "src/bin/pgcopydb/pgsql.c",
+          "start": 3825,
+          "end": 3840
+        }
+      ]
+    },
+    {
+      "id": "restart-resume-log-only",
+      "unsafe": false,
+      "summary": "A conflict message does not increment errors or terminate the parser.",
+      "baseline_observation": {
+        "outcome": "accept"
+      },
+      "target_requirement": null,
+      "delta": "restart-resume-conflict",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1034,
+          "end": 1056
+        },
+        {
+          "path": "src/bin/lib/log/src/log.h",
+          "start": 36,
+          "end": 44
+        }
+      ]
+    },
+    {
+      "id": "version-invalid-option-success",
+      "unsafe": false,
+      "summary": "Version ignores getopt errors and exits zero.",
+      "baseline_observation": {
+        "outcome": "version"
+      },
+      "target_requirement": null,
+      "delta": "invalid-option-failure",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 89,
+          "end": 100
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 109,
+          "end": 132
+        }
+      ]
+    },
+    {
+      "id": "dump-invalid-option-success",
+      "unsafe": false,
+      "summary": "Dump handles '?' like help and exits zero.",
+      "baseline_observation": {
+        "outcome": "help"
+      },
+      "target_requirement": null,
+      "delta": "invalid-option-failure",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_dump.c",
+          "start": 263,
+          "end": 268
+        }
+      ]
+    },
+    {
+      "id": "restore-help-no-tablespaces",
+      "unsafe": false,
+      "summary": "Three restore help strings advertise no-tablespaces, absent from their parser.",
+      "baseline_observation": {
+        "outcome": "reject"
+      },
+      "target_requirement": null,
+      "delta": null,
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 34,
+          "end": 98
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 155,
+          "end": 192
+        }
+      ]
+    },
+    {
+      "id": "parse-list-extra-operands",
+      "unsafe": false,
+      "summary": "Exactly one operand selects a file. Zero or multiple operands select work-directory processing.",
+      "baseline_observation": {
+        "outcome": "branch"
+      },
+      "target_requirement": null,
+      "delta": "ignored-operands",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_restore.c",
+          "start": 575,
+          "end": 619
+        }
+      ]
+    },
+    {
+      "id": "client-port-fallback",
+      "unsafe": false,
+      "summary": "Client endpoint ports outside 1..65535 become 5442.",
+      "baseline_observation": {
+        "outcome": "fallback"
+      },
+      "target_requirement": null,
+      "delta": null,
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/ld_service.c",
+          "start": 16,
+          "end": 32
+        }
+      ]
+    },
+    {
+      "id": "summary-help-json",
+      "unsafe": false,
+      "summary": "List progress help says summary requires JSON, but the handler also supports text summary.",
+      "baseline_observation": {
+        "outcome": "accept"
+      },
+      "target_requirement": null,
+      "delta": null,
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 171,
+          "end": 181
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_list.c",
+          "start": 1995,
+          "end": 2039
+        }
+      ]
+    },
+    {
+      "id": "early-help-bypass",
+      "unsafe": false,
+      "summary": "The first help argument at a node returns success before parsing trailing arguments.",
+      "baseline_observation": {
+        "outcome": "help"
+      },
+      "target_requirement": null,
+      "delta": null,
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/lib/subcommands.c/commandline.c",
+          "start": 44,
+          "end": 52
+        }
+      ]
+    },
+    {
+      "id": "ignored-operational-operands",
+      "unsafe": false,
+      "summary": "Handlers can ignore trailing operands before starting runtime work.",
+      "baseline_observation": {
+        "outcome": "accept"
+      },
+      "target_requirement": null,
+      "delta": "ignored-operands",
+      "oracle": "not-run",
+      "at": [
+        {
+          "path": "src/bin/pgcopydb/cli_common.c",
+          "start": 1317,
+          "end": 1327
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_copy.c",
+          "start": 344,
+          "end": 384
+        },
+        {
+          "path": "src/bin/pgcopydb/cli_ping.c",
+          "start": 177,
+          "end": 205
+        }
+      ]
+    }
+  ]
+}
