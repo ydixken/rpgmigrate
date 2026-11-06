@@ -187,7 +187,7 @@ E2 is incomplete until a real source transaction can survive journal restart and
 - [ ] Assert one committed target effect after reconnect when the first COMMIT reply was lost.
 - [ ] Check expected failing assertions before implementation.
 - [ ] Create or check owned logged metadata, target privileges, and the target writer fence.
-- [ ] Implement parameter binding and prepared reuse through the existing libpq boundary.
+- [x] Implement parameter binding and prepared reuse through the existing libpq boundary.
 - [ ] Apply INSERT/UPDATE/DELETE/TRUNCATE with relation generations, replica identity FULL, NULL, unchanged TOAST, and key changes.
 - [ ] Update one logged progress row per stream inside each applied transaction/group.
 - [ ] Resolve `Unknown` by reacquiring the fence and reading the target PRIMARY checkpoint.

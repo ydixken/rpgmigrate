@@ -53,6 +53,18 @@ def load_manifest():
     return manifest
 
 
+def module_cases(manifest, profile):
+    if profile == "Transport":
+        return manifest["transport_cases"]
+    if profile not in ("Prepared", "Engine"):
+        raise ValueError("unknown module test profile")
+    prepared = json.loads(Path(__file__).with_name("prepared_cases.json").read_text())
+    assert isinstance(prepared, list) and prepared, "missing prepared test inventory"
+    if profile == "Prepared":
+        return prepared
+    return manifest["transport_cases"] + manifest["copy_cases"] + prepared
+
+
 def run_command(command, *, environment, cwd, timeout, capture_output=False):
     process = subprocess.Popen(command, env=environment, cwd=cwd, text=True,
                                stdout=subprocess.PIPE if capture_output else None,
@@ -91,7 +103,8 @@ def run_command(command, *, environment, cwd, timeout, capture_output=False):
 
 def validate_libtest_output(expected, output):
     actual = re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored[^\n]*)$", output, flags=re.MULTILINE)
-    assert expected and len(actual) == len(expected), "missing, duplicate, or zero module tests"
+    assert expected and len(expected) == len(set(expected)), "empty or duplicate expected module tests"
+    assert len(actual) == len(expected), "missing, duplicate, or zero module tests"
     assert {name for name, _ in actual} == set(expected), "wrong module test selection"
     assert all(status == "ok" for _, status in actual), "failed or ignored module tests"
 

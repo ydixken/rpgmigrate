@@ -34,11 +34,16 @@ class VerificationTests(unittest.TestCase):
                 runner.validate_output("test", output)
 
     def test_database_receipts_require_both_exact_inventories_and_version(self):
-        good = "Engine verified 7 exact cases; full E1 suite not selected\nE1 verified 40 exact cases on PostgreSQL 17.11\n"
-        self.assertEqual(runner.validate_output("test-db", good), {"engine": 7, "integration": 40})
+        good = "Engine verified 14 exact cases; full E1 suite not selected\nE1 verified 40 exact cases on PostgreSQL 17.11\n"
+        self.assertEqual(runner.validate_output("test-db", good), {"engine": 14, "integration": 40})
         for output in ("", good.replace("40", "25"), good.replace("40", "38"), good.replace("17.11", "14.24"), good.splitlines()[0]):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test-db", output)
+
+    def test_engine_receipt_cannot_omit_the_prepared_profile(self):
+        previous = "Engine verified 7 exact cases; full E1 suite not selected\nE1 verified 40 exact cases on PostgreSQL 17.11\n"
+        with self.assertRaises(runner.VerificationError):
+            runner.validate_output("test-db", previous)
 
     def test_nonzero_child_and_missing_tool_are_safe_failures(self):
         for command in ([sys.executable, "-c", "print('password=do-not-export'); raise SystemExit(9)"], ["/nonexistent-e1-tool"]):

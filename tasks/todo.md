@@ -210,3 +210,14 @@ E0/E1 signatures stay frozen unless the leader coordinates a change.
 Review E2-E4 interfaces before their workers start.
 Expand the E5-E7 and operator/release feature maps before each later milestone.
 Full CLI/operator/release scope remains unfinished after E1.
+
+## Prepared transport and documentation
+
+
+The private prepared-transport slice passed independent unit and seven-case live review.
+The full engine inventory is 14 cases, preserving all seven E1 cases; the transport-only inventory remains five and executable COPY remains 40.
+Harness and CI guard review passed 12 and ten offline tests on Python 3.15 and 3.9, including 36 negative checks.
+The prepared API remains unused by a production CDC consumer and does not enable runtime CDC commands.
+Narrow expected-dead-code attributes must be removed when the checkpoint/applier consumer is integrated.
+Canonical codec promotion remains deferred until that consumer and its API are ready.
+The [durability guide](../docs/durability.md) passed independent review at SHA-256 `b152b61874e55f7fd4214c4644aad8dbfa16642898f74b54200b5d03097cb526` and separates the approved design from runtime gates.

@@ -103,3 +103,8 @@ Preserve third-party notices.
 Direct crate metadata checks do not replace a locked dependency graph audit.
 Native libpq and target bookkeeping permissions are explicitly approved.
 Do not introduce another approval gate for those decisions.
+
+## Prepared consumer integration
+
+Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
+Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.

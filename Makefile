@@ -2,9 +2,9 @@ CARGO ?= cargo
 PYTHON ?= python3
 PQ_LIB_DIR ?= $(CURDIR)/target/native/libpq/lib
 export PQ_LIB_DIR
-UNIT_FILTERS = --skip pg::live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
+UNIT_FILTERS = --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
 
-.PHONY: check fmt-check lint native native-check build test test-unit test-cli test-native test-harness test-storage-format test-db test-engine test-transport test-db-self-check
+.PHONY: check fmt-check lint native native-check build test test-unit test-cli test-native test-harness test-storage-format test-db test-engine test-transport test-prepared test-db-self-check
 
 check: native-check
 	$(CARGO) check --locked --all-targets
@@ -51,6 +51,9 @@ test-engine: native-check
 
 test-transport: native-check
 	$(PYTHON) tools/test-db.py --transport -- $(CARGO) test --locked --lib pg::live_tests:: -- --ignored --test-threads=1
+
+test-prepared: native-check
+	$(PYTHON) tools/test-db.py --prepared -- $(CARGO) test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
 
 test-db-self-check:
 	$(PYTHON) tools/test-db.py --self-check

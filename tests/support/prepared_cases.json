@@ -1,0 +1,9 @@
+[
+  "pg::prepared_live_tests::prepared_parameters_preserve_null_empty_binary_and_changed_values",
+  "pg::prepared_live_tests::prepared_invalid_inputs_do_not_dispatch",
+  "pg::prepared_live_tests::prepared_errors_never_return_stale_results",
+  "pg::prepared_live_tests::prepared_execution_deadline_closes_connection",
+  "pg::prepared_live_tests::prepared_execution_cancellation_closes_connection",
+  "pg::prepared_live_tests::prepared_changes_roll_back_with_transaction",
+  "pg::prepared_live_tests::prepared_execution_rejects_copy_results"
+]

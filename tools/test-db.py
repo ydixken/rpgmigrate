@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Own one private PostgreSQL server, run the E1 suite, and verify its receipt."""
+"""Own one private PostgreSQL server, run a DB test suite, and verify its receipt."""
 
 import argparse
 import json
@@ -12,7 +12,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests" / "support"))
 from db_harness import (FIXTURES, SETTINGS, OwnedCluster, assert_equal, conninfo, databases, load_manifest,
-                        fingerprint, psql, reference_copy, run_command, validate_libtest_output, validate_report)
+                        fingerprint, module_cases, psql, reference_copy, run_command, validate_libtest_output, validate_report)
 from protocol_fault import ProtocolFault
 
 
@@ -110,13 +110,18 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--self-check", action="store_true")
     modes.add_argument("--transport", action="store_true", help="require the exact transport unit-test inventory")
-    modes.add_argument("--engine", action="store_true", help="require the transport and catalog/COPY live-test inventories")
+    modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
+    modes.add_argument("--engine", action="store_true", help="require the transport, prepared, and catalog/COPY live-test inventories")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not args.self_check and not command:
         parser.error("provide --self-check or -- followed by the integration test command")
     manifest = load_manifest()
+    module_suite = args.transport or args.engine or args.prepared
+    if module_suite:
+        profile = "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
+        expected = module_cases(manifest, profile)
     with OwnedCluster(manifest) as cluster:
         if args.self_check:
             self_check(cluster, manifest)
@@ -140,7 +145,6 @@ def main():
         for key, fallback in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
             if key not in environment:
                 environment[key] = str(Path.home() / fallback)
-        module_suite = args.transport or args.engine
         result = run_command(command, cwd=ROOT, environment=environment, timeout=600,
                              capture_output=module_suite)
         if module_suite:
@@ -149,9 +153,8 @@ def main():
         if result.returncode:
             return result.returncode
         if module_suite:
-            expected = manifest["transport_cases"] + (manifest["copy_cases"] if args.engine else [])
             validate_libtest_output(expected, result.stdout)
-            print(f"{'Engine' if args.engine else 'Transport'} verified {len(expected)} exact cases; full E1 suite not selected")
+            print(f"{profile} verified {len(expected)} exact cases; full E1 suite not selected")
             return 0
         if not receipt.is_file():
             raise AssertionError("no E1 receipt: zero tests or wrong test selection")

@@ -47,7 +47,9 @@ The normal native library must pass the live authentication and COPY checks.
 
 `make test-db-self-check` exercises the independent data oracle, protocol fault injection, and SCRAM controls.
 `make test-db` runs the live engine tests followed by the complete COPY integration harness.
-The harness compares exact case names, full data fingerprints, server versions, and required fault hits against [its fixture manifest](../tests/fixtures/e1/manifest.json).
+The engine profile requires all 14 ignored library tests, including the seven prepared-transport cases in [the prepared inventory](../tests/support/prepared_cases.json).
+The transport-only profile retains five cases, and the COPY profile retains 40 cases.
+The harness compares exact case names, full data fingerprints, server versions, and required fault hits against [the E1 fixture manifest](../tests/fixtures/e1/manifest.json) and the prepared inventory.
 The CI runner also rejects absent or incorrect suite receipts and empty or skipped unit suites.
 Missing tools and failed commands are failures.
 
@@ -80,6 +82,18 @@ Database targets also need a complete PostgreSQL utility bundle selected through
    ```sh
    make test-db-self-check test-db
    ```
+
+4. Run the focused seven-case prepared-transport profile during development.
+
+   ```sh
+   PQ_LIB_DIR="$PWD/target/native/libpq/lib" \
+     python3 tools/test-db.py --prepared -- \
+     cargo test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
+   ```
+
+The focused profile requires every name in the prepared inventory.
+Use `make test-db` for the complete 14-case engine profile and 40-case COPY profile.
+The engine command selects all ignored library tests without skips.
 
 The default database fixture expects PostgreSQL 14.24 and numeric version 140024.
 The container supplies `RPGMIGRATE_TEST_EXPECTED_PG_VERSION=17.11` and `RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM=170011` from its pinned package recipe.

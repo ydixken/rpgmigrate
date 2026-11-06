@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 
-from db_harness import (clean_environment, conninfo, expected_version, run_command, validate_libtest_output,
+from db_harness import (clean_environment, conninfo, expected_version, load_manifest, module_cases, run_command, validate_libtest_output,
                         validate_report, validate_success_output)
 from protocol_fault import error_sqlstate
 
@@ -24,6 +24,8 @@ class HarnessTests(unittest.TestCase):
             commands = (
                 ["-c", code],
                 [str(support.parents[1] / "tools" / "test-db.py"), "--engine", "--", sys.executable,
+                 "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
+                [str(support.parents[1] / "tools" / "test-db.py"), "--prepared", "--", sys.executable,
                  "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
                 [str(support / "e1_cases.py"), sys.executable],
             )
@@ -69,6 +71,15 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0, "zero selected harness tests reported success")
 
+    def test_prepared_profile_requires_an_explicit_command(self):
+        wrapper = Path(__file__).resolve().parents[2] / "tools" / "test-db.py"
+        result = subprocess.run(
+            [sys.executable, str(wrapper), "--prepared"], env=clean_environment(os.environ),
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("provide --self-check or -- followed by", result.stderr)
+
     def test_auth_base_requires_explicit_fixture_connection_without_credentials(self):
         context = {"socket_dir": "/tmp/fixture-only", "port": 25432, "root": "/tmp/fixture-root"}
         result = conninfo(context, "auth_fixture", "e1_auth", include_passfile=False)
@@ -104,13 +115,24 @@ class HarnessTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertTrue(marker.exists(), "owned grandchild was not terminated with the timed-out command")
 
-    def test_transport_selection_cannot_be_empty_missing_or_ignored(self):
+    def test_module_selection_cannot_be_empty_missing_or_ignored(self):
         expected = ["pg::live_tests::copy", "pg::live_tests::query"]
         good = "test pg::live_tests::copy ... ok\ntest pg::live_tests::query ... ok\n"
         validate_libtest_output(expected, good)
-        for output in ("", good.replace(" ... ok", " ... ignored", 1), good.splitlines()[0], good + good):
+        for output in ("", good.replace(" ... ok", " ... ignored", 1), good.splitlines()[0], good + good,
+                       good.replace("::copy", "::unexpected"), good.replace(" ... ok", " ... FAILED", 1)):
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate_libtest_output(expected, output)
+        for inventory, output in (([], ""), ([expected[0]] * 2, good.splitlines()[0] + "\n" + good.splitlines()[0])):
+            with self.subTest(inventory=inventory), self.assertRaises(AssertionError):
+                validate_libtest_output(inventory, output)
+        manifest = load_manifest()
+        previous = manifest["transport_cases"] + manifest["copy_cases"]
+        prepared = module_cases(manifest, "Prepared")
+        for subset in (previous, prepared):
+            with self.subTest(subset=subset), self.assertRaises(AssertionError):
+                validate_libtest_output(module_cases(manifest, "Engine"),
+                                        "".join(f"test {name} ... ok\n" for name in subset))
 
     def test_child_environment_drops_database_context(self):
         environment = {

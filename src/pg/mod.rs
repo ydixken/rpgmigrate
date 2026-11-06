@@ -6,12 +6,20 @@ mod native;
 mod live_tests;
 #[cfg(test)]
 mod passfile_tests;
+#[cfg(test)]
+mod prepared_live_tests;
 
 #[allow(
     unused_imports,
     reason = "The opaque handles are the crate's transport interface."
 )]
 pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
+
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "E3 applier integration is pending")
+)]
+pub(crate) use ffi::PgParam;
 
 use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};
 

@@ -1,4 +1,4 @@
-# E1 disposable PostgreSQL tests
+# Disposable PostgreSQL tests
 
 We run each command in a new owned PostgreSQL cluster with TCP disabled, private Unix sockets, and an explicit nondefault port.
 Only that child postmaster and its owned temporary directories are cleaned up.
@@ -39,13 +39,19 @@ Run Python with assertions enabled: the shared harness refuses optimized executi
    python3 tools/test-db.py --transport -- cargo test --locked --lib pg::live_tests:: -- --ignored --test-threads=1
    ```
 
-5. Run all seven transport, catalog, and COPY module cases together.
+5. Run the seven prepared transport cases.
+
+   ```sh
+   python3 tools/test-db.py --prepared -- cargo test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
+   ```
+
+6. Run all fourteen transport, prepared, catalog, and COPY module cases together.
 
    ```sh
    python3 tools/test-db.py --engine -- cargo test --locked --lib -- --ignored --test-threads=1
    ```
 
-6. Run the actual executable against the complete E1 case inventory.
+7. Run the actual executable against the complete E1 case inventory.
 
    ```sh
    python3 tools/test-db.py -- cargo test --locked --test copy_integration -- --test-threads=1
@@ -84,8 +90,10 @@ An orphan child row must produce an observed `23503` after all COPY input and ro
 The full wrapper requires one result per manifest case with no duplicates, omissions, skips, or unexpected case IDs.
 Every fault case requires an observed hit and nonzero exit.
 The transport-only wrapper independently checks its exact five libtest names and rejects ignored cases.
-The engine wrapper requires those five cases plus the two catalog and COPY cases in the same manifest.
-Running zero tests or an unrelated command cannot satisfy either suite.
+The prepared wrapper requires the seven exact names in the independent [prepared inventory](prepared_cases.json).
+The engine wrapper requires all five transport, two catalog/COPY, and seven prepared cases.
+Every module profile rejects empty or duplicate expected names, missing cases, changed names, duplicate results, and ignored or failed tests.
+Running zero tests or an unrelated command cannot satisfy any suite.
 
 The native completion receipt is `manifest.json` in the explicit run directory.
 Successful full COPY must report two tables and 10,003 rows in `copy_complete`.

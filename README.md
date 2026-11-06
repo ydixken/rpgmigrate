@@ -66,6 +66,10 @@ See the [first-slice limits](docs/getting-started.md#first-slice-limits).
 
 See the [Testing guide](docs/testing.md).
 
+## Durability
+
+See the [durability design and runtime gates](docs/durability.md).
+
 ## Compatibility
 
 See the [CLI compatibility guide](docs/cli-compatibility.md).

@@ -63,6 +63,16 @@ pub(crate) struct CopyBuffer {
     len: usize,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "E3 applier integration is pending")
+)]
+pub(crate) enum PgParam<'a> {
+    Null,
+    Text(&'a [u8]),
+    Binary(&'a [u8]),
+}
+
 impl PgConnection {
     pub(crate) fn connect(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
         io::check(io)?;
@@ -113,6 +123,110 @@ impl PgConnection {
     pub(crate) fn query(&mut self, sql: &str, io: &IoControl) -> Result<PgResult> {
         self.operation(io, |connection| {
             connection.send(sql, io)?;
+            connection.drain(None, io)
+        })
+    }
+
+    /// Statements belong to this connection and must be prepared again after reconnecting.
+    /// A zero parameter OID asks PostgreSQL to infer that parameter's type.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "E3 applier integration is pending")
+    )]
+    pub(crate) fn prepare(
+        &mut self,
+        name: &str,
+        sql: &str,
+        param_types: &[u32],
+        io: &IoControl,
+    ) -> Result<()> {
+        self.operation(io, |connection| {
+            let raw = connection.require(Phase::Idle)?;
+            let count = parameter_count(param_types.len())?;
+            let name = prepared_cstring(name.as_bytes())?;
+            let sql = prepared_cstring(sql.as_bytes())?;
+            io::check(io)?;
+            connection.phase = Phase::Query;
+            // SAFETY: libpq copies the terminated strings and the checked count of OIDs.
+            let sent = unsafe {
+                pq::PQsendPrepare(
+                    raw,
+                    name.as_ptr(),
+                    sql.as_ptr(),
+                    count,
+                    param_types.as_ptr(),
+                )
+            };
+            if sent != 1 {
+                return Err(error("PostgreSQL prepared statement dispatch failed"));
+            }
+            connection.flush(io)?;
+            let result = connection.drain(None, io)?;
+            if result.status() != pq::ExecStatusType::PGRES_COMMAND_OK {
+                return Err(error(
+                    "PostgreSQL statement preparation did not complete successfully",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Libpq copies inputs during dispatch; returned cells borrow only their result.
+    /// Drained SQL errors permit rollback; interrupted protocol closes the connection.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "E3 applier integration is pending")
+    )]
+    pub(crate) fn execute_prepared(
+        &mut self,
+        name: &str,
+        params: &[PgParam<'_>],
+        io: &IoControl,
+    ) -> Result<PgResult> {
+        self.operation(io, |connection| {
+            let raw = connection.require(Phase::Idle)?;
+            let count = parameter_count(params.len())?;
+            let name = prepared_cstring(name.as_bytes())?;
+            let mut text = Vec::new();
+            let mut values = Vec::with_capacity(params.len());
+            let mut lengths = Vec::with_capacity(params.len());
+            let mut formats = Vec::with_capacity(params.len());
+            for param in params {
+                let (value, length, format) = match param {
+                    PgParam::Null => (ptr::null(), 0, 0),
+                    PgParam::Text(bytes) => {
+                        let value = prepared_cstring(bytes)?;
+                        let pointer = value.as_ptr();
+                        // Moving a CString leaves its allocation stable until dispatch completes.
+                        text.push(value);
+                        (pointer, 0, 0)
+                    }
+                    PgParam::Binary(bytes) => {
+                        (bytes.as_ptr().cast(), parameter_length(bytes.len())?, 1)
+                    }
+                };
+                values.push(value);
+                lengths.push(length);
+                formats.push(format);
+            }
+            io::check(io)?;
+            connection.phase = Phase::Query;
+            // SAFETY: arrays have count entries; text and borrowed binary storage stay live for copying.
+            let sent = unsafe {
+                pq::PQsendQueryPrepared(
+                    raw,
+                    name.as_ptr(),
+                    count,
+                    values.as_ptr(),
+                    lengths.as_ptr(),
+                    formats.as_ptr(),
+                    0,
+                )
+            };
+            if sent != 1 {
+                return Err(error("PostgreSQL prepared execution dispatch failed"));
+            }
+            connection.flush(io)?;
             connection.drain(None, io)
         })
     }
@@ -512,6 +626,33 @@ fn copy_rows(tag: &str) -> Result<u64> {
         .map_err(|_| error("PostgreSQL COPY row count exceeds u64"))
 }
 
+fn parameter_count(count: usize) -> Result<i32> {
+    if count > pq::PQ_QUERY_PARAM_MAX_LIMIT as usize {
+        return Err(error(
+            "PostgreSQL parameter count exceeds the protocol limit",
+        ));
+    }
+    i32::try_from(count).map_err(|_| error("PostgreSQL parameter count exceeds the protocol limit"))
+}
+
+fn parameter_length(length: usize) -> Result<i32> {
+    i32::try_from(length)
+        .map_err(|_| error("PostgreSQL parameter length exceeds the protocol limit"))
+}
+
+fn prepared_cstring_length(length: usize) -> Result<usize> {
+    let terminated = length
+        .checked_add(1)
+        .ok_or_else(|| error("PostgreSQL prepared input length exceeds the protocol limit"))?;
+    parameter_length(terminated)?;
+    Ok(terminated)
+}
+
+fn prepared_cstring(bytes: &[u8]) -> Result<CString> {
+    prepared_cstring_length(bytes.len())?;
+    CString::new(bytes).map_err(|_| error("PostgreSQL prepared input contains a NUL byte"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +748,8 @@ mod tests {
         };
         let io = control();
         assert!(connection.query("SELECT 1", &io).is_err());
+        assert!(connection.prepare("p", "SELECT 1", &[], &io).is_err());
+        assert!(connection.execute_prepared("p", &[], &io).is_err());
         assert!(connection.start_copy_out("COPY t TO STDOUT", &io).is_err());
         assert!(connection.read_copy(&io).is_err());
         assert!(connection.start_copy_in("COPY t FROM STDIN", &io).is_err());
@@ -614,6 +757,33 @@ mod tests {
         assert!(connection.finish_copy_in(&io).is_err());
         assert!(connection.abort_copy_in("secret reason", &io).is_err());
         assert!(connection.quote_identifier("t").is_err());
+    }
+
+    #[test]
+    fn prepared_parameter_counts_respect_the_protocol_limit() {
+        assert_eq!(parameter_count(0).unwrap(), 0);
+        assert_eq!(parameter_count(65_535).unwrap(), 65_535);
+        assert!(parameter_count(65_536).is_err());
+        assert!(parameter_count(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn prepared_parameter_lengths_do_not_wrap() {
+        assert_eq!(parameter_length(0).unwrap(), 0);
+        assert_eq!(parameter_length(i32::MAX as usize).unwrap(), i32::MAX);
+        assert!(parameter_length(i32::MAX as usize + 1).is_err());
+        assert!(parameter_length(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn prepared_text_length_reserves_its_terminator_without_overflow() {
+        assert_eq!(prepared_cstring_length(0).unwrap(), 1);
+        assert_eq!(
+            prepared_cstring_length(i32::MAX as usize - 1).unwrap(),
+            i32::MAX as usize
+        );
+        assert!(prepared_cstring_length(i32::MAX as usize).is_err());
+        assert!(prepared_cstring_length(usize::MAX).is_err());
     }
 
     #[test]

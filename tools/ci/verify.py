@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 PG_VERSION = "17.11"
-ENGINE_CASES = 7
+ENGINE_CASES = 14
 INTEGRATION_CASES = 40
 
 
