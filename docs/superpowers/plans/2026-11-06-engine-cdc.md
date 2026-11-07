@@ -275,7 +275,8 @@ A parser, resolver, or sink error poisons the unfinished transaction and prevent
 
 The first qualified profile uses DEFAULT replica identity with a verified primary key, static logged metadata, and E1 builtin restrictions.
 Keep streaming and two-phase plugin output disabled, and refuse unsupported paths explicitly.
-Full CLI support and all three plugins remain required later milestones.
+The accepted operator contract requires default `pgoutput` and full semantics for selected plugin configurations; staged unsupported configurations must fail explicitly.
+The current `test_decoding` baseline remains unchanged, and full CLI parity outside the [operator matrix](../../operator-compatibility.md) is deferred.
 `CopyPlan` does not retain enough metadata for CDC.
 Extract relation OID, caller-established generation, qualified name, effective identity, ordered eligible columns, numeric type OIDs/typmods, and verified PK membership.
 Reuse E1 validation and session settings, with version-aware catalog queries before claiming older-server coverage.
@@ -450,6 +451,6 @@ Require differential and adversarial scheduling tests before raising apply concu
 E2 covers persistence selection, journal recovery, context, reader pins, capacity, and process topology.
 E3 covers checkpoint authority, target ownership, serial apply, and actual applied throughput.
 E4 covers all profile resolutions, global reservations, durability proofs, and final success.
-E5-E7 retain the rest of full CLI and engine scope without speculative implementation bodies.
+E5-E7 retain the selected operator/general-use contract and its complete engine semantics; unused CLI-family expansion is deferred.
 Shared transaction identity, frontier, reader, checkpoint, and risk types use the same names across tasks.
 The production backend remains a measured decision and cannot block the already approved E0/E1 slice.

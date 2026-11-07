@@ -7,6 +7,8 @@ The target executable is `rpgmigrate`.
 
 This evidence describes registrations, parser descriptors, and selected control flow.
 It does not prove that the target implements the corresponding migration operations.
+The accepted [operator compatibility contract](operator-compatibility.md) selects eight production operator paths and their required options, plus general controls; the other 40 behavioral paths are deferred parity requirements.
+Keep the complete parser baseline as regression evidence without treating it as a universal runtime compatibility promise.
 
 ## Artifacts
 

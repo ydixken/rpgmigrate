@@ -12,6 +12,7 @@ Compare the pinned fork and Rust candidates under the same workload and durabili
 **Tech Stack:** Existing Rust checks, Python standard-library harness tools, libpq/PostgreSQL utilities, and isolated container or local database fixtures.
 
 **Spec:** [Approved design](../specs/2026-11-06-rpgmigrate-design.md).
+The accepted [operator compatibility matrix](../../operator-compatibility.md) defines the runtime release scope; full parser coverage remains regression evidence, not a requirement to implement every CLI family.
 The [engine plan](2026-11-06-engine.md) defines E0/E1 assertions.
 The [CDC plan](2026-11-06-engine-cdc.md) defines E2-E7 coverage.
 
@@ -62,6 +63,9 @@ Depends on E0 contracts and E1 runtime behavior.
 - [ ] Prove failures for omitted tables, changed schema, same-count value changes, wrong versions, missing cases, and exit-zero mismatch.
 - [ ] Extend fingerprints to sequences, large objects, ownership, and partitions with E6.
 - [ ] Publish a generated feature map whose unfinished entries remain explicit.
+- [ ] Check all eight operator paths and 43 emitted behavioral options against actual job/helper callers, including default `pgoutput`, binary/parallel/split COPY, and included large objects.
+- [ ] Require full semantics for every admitted CRD feature and explicit pre-mutation refusal for unsupported staged configurations.
+- [ ] Reject missing native version/progress/drain/verification proof and preserve the legacy backend's behavior in separate golden fixtures.
 
 ## V2: Crash, corruption, and recovery
 
@@ -106,7 +110,7 @@ Candidate selection requires correctness and repeatable value without material a
 - [ ] V5: Add serial/parallel differential and adversarial tests when E7 starts.
 - [ ] V6: Build Linux amd64/arm64 artifacts and record exact binary/image digests.
 - [ ] V6: Run isolated operator E2E on those published candidate artifacts.
-- [ ] V6: Promote the same tested digests without rebuilding after all full-scope checks pass.
+- [ ] V6: Promote the same tested digests without rebuilding after every declared operator-profile, recovery, quality, and artifact gate passes.
 
 Expand V4-V6 into release-specific steps after E1 and before their implementation.
 macOS results prove development behavior only.
@@ -114,7 +118,7 @@ The operator's own current instructions govern its CI-first functional tests.
 
 ## Self-review
 
-V1 covers parser parity and false-positive fingerprints.
+V1 retains parser regression coverage and proves the selected operator contract and rejection of false-positive fingerprints.
 V2 covers every durability boundary and relaxed refusal.
 V3 requires target apply evidence beyond storage throughput.
 V4-V6 retain cross-version, FFI, dependencies, operator, and exact-artifact release gates.
