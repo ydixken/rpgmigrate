@@ -149,7 +149,7 @@ with open(os.environ["CALL_LOG"], "a") as out:
 if args and args[0].endswith(".py") and not pathlib.Path(args[0]).is_file():
     sys.exit(2)
 if "--list" in args:
-    default = "31" if "storage_format" in args else "165" if "storage_recovery" in args else "1"
+    default = "31" if "storage_format" in args else "171" if "storage_recovery" in args else "1"
     count = int(os.environ.get("DISCOVERY_COUNT", default))
     for number in range(count):
         print(f"case_{number}: test")
@@ -367,7 +367,7 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
         self.assertEqual(len(self.calls()), 2)
 
     def test_exact_storage_inventory(self):
-        for name, count in (("storage-format", 31), ("storage-recovery", 165)):
+        for name, count in (("storage-format", 31), ("storage-recovery", 171)):
             for actual in (0, count - 1, count, count + 1):
                 with self.subTest(name=name, actual=actual):
                     result = self.run_task("test-" + name, env={"DISCOVERY_COUNT": str(actual)})

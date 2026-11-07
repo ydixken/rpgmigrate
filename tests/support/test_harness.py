@@ -1,6 +1,8 @@
 """Run with python3 tests/support/test_harness.py."""
 
 import json
+import io
+from contextlib import redirect_stderr, redirect_stdout
 import os
 from pathlib import Path
 import runpy
@@ -13,6 +15,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from db_harness import (clean_environment, conninfo, expected_version, load_manifest, module_cases, run_command, validate_libtest_output,
                         validate_report, validate_success_output)
@@ -87,6 +90,97 @@ def keepalive_receipt(before, after):
 
 
 class HarnessTests(unittest.TestCase):
+    def run_reporter(self, load_manifest, context=None):
+        wrapper = Path(__file__).resolve().parents[2] / "tools" / "test-db.py"
+        environment = dict(os.environ)
+        environment.pop("RPGMIGRATE_CI_FAILURE_CONTEXT", None)
+        if context is not None:
+            environment["RPGMIGRATE_CI_FAILURE_CONTEXT"] = str(context)
+        with patch.dict(os.environ, environment, clear=True), \
+                patch("db_harness.load_manifest", load_manifest), patch("db_harness.OwnedCluster") as cluster, \
+                patch("signal.signal"), patch.object(sys, "argv", [str(wrapper), "--self-check"]), \
+                redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaises(SystemExit) as error:
+            runpy.run_path(str(wrapper), run_name="__main__")
+        cluster.assert_not_called()
+        return error.exception.code, stdout.getvalue(), stderr.getvalue()
+
+    def test_reporter_locates_empty_and_nonempty_exceptions_without_local_data(self):
+        for error_type in (AssertionError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            for nonempty in (False, True):
+                with self.subTest(error_type=error_type.__name__, nonempty=nonempty):
+                    lines = []
+                    message = "postgresql://private:context-sentinel@invalid/db?sql=private" if nonempty else ""
+
+                    def fail_from_helper():
+                        private_local = "local-context-sentinel"
+                        lines.append(sys._getframe().f_lineno + 1)
+                        raise error_type(message)
+
+                    def failing_manifest():
+                        return fail_from_helper()
+
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "context"
+                        path.touch(mode=0o600)
+                        status, stdout, stderr = self.run_reporter(failing_manifest, path)
+                        context = path.read_text()
+                    self.assertEqual(status, 1)
+                    self.assertEqual(stdout, "")
+                    self.assertTrue(stderr == f"test-db: {message}\n", "human diagnostic changed")
+                    self.assertEqual(context, f"test-db-context: {error_type.__name__} at test_harness.py:{lines[0]} in fail_from_helper\n")
+                    self.assertTrue("local-context-sentinel" not in stderr, "local data escaped")
+                    self.assertTrue("context-sentinel" not in context, "exception data escaped")
+                    self.assertNotIn(str(Path(__file__).resolve().parent), context)
+
+    def test_reporter_preserves_whitespace_messages(self):
+        def failing_manifest():
+            raise RuntimeError(" ")
+
+        status, stdout, stderr = self.run_reporter(failing_manifest)
+        self.assertEqual((status, stdout), (1, ""))
+        self.assertEqual(stderr, "test-db:  \n")
+
+    def test_reporter_refuses_links_without_writing_the_linked_file(self):
+        def failing_manifest():
+            raise RuntimeError("known failure")
+
+        for symbolic in (False, True):
+            with self.subTest(symbolic=symbolic), tempfile.TemporaryDirectory() as directory:
+                victim = Path(directory) / "victim"
+                victim.touch(mode=0o600)
+                victim.write_text("unchanged")
+                channel = Path(directory) / "context"
+                if symbolic:
+                    channel.symlink_to(victim)
+                else:
+                    os.link(victim, channel)
+                self.assertEqual(self.run_reporter(failing_manifest, channel), (1, "", "test-db: known failure\n"))
+                self.assertEqual(victim.read_text(), "unchanged")
+
+    def test_reporter_preserves_interrupt_and_explicit_exit_behavior(self):
+        for exception, expected in ((KeyboardInterrupt(), 130), (SystemExit(0), 0), (SystemExit(23), 23)):
+            with self.subTest(exception=type(exception).__name__, expected=expected):
+                def failing_manifest():
+                    raise exception
+
+                status, stdout, stderr = self.run_reporter(failing_manifest)
+                self.assertEqual((status, stdout, stderr), (expected, "", ""))
+
+    def test_notifier_failure_preserves_the_uncaught_exception(self):
+        error = TypeError("known failure")
+
+        def failing_manifest():
+            raise error
+
+        with tempfile.TemporaryDirectory() as directory:
+            channel = Path(directory) / "context"
+            channel.touch(mode=0o600)
+            with patch("os.open", side_effect=OSError()), self.assertRaises(TypeError) as observed:
+                self.run_reporter(failing_manifest, channel)
+            self.assertIs(observed.exception, error)
+            self.assertEqual(channel.read_bytes(), b"")
+
     def assert_replication_profiles_reject(self, value):
         support = Path(__file__).resolve().parent
         validate = runpy.run_path(str(support.parents[1] / "tools" / "test-db.py"))["validate_module_receipt"]

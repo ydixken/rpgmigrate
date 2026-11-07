@@ -78,7 +78,20 @@ Each run exports one JSON report capped at 64 KiB.
 It contains stage results, observed suite counts, the source snapshot hash, image ID and base digest, package and tool versions, native build identity, and executable hash.
 We export structured evidence instead of raw command output because failing database tests can expose connection strings or fixture passwords.
 Raw database logs, environment dumps, DSNs, and cluster directories are not uploaded.
-A failed report identifies the failed stage; reproduce that target in the disposable fixture to investigate it.
+A failed report identifies the failed stage and retains recognized failing test names.
+For `test-db-self-check` and `test-db`, the CI runner creates a fresh private context file (0600) in its own private directory (0700) and retains the file descriptor.
+It passes the path through an internal environment key that `tools/test-db.py` consumes before calling `main()` or starting children.
+Other CI commands receive no channel, and successful harness invocations write no context.
+The harness records only exception class and deepest traceback basename, function, and line in one ASCII record.
+Known failures retain their human stderr and exit code; ordinary uncaught exceptions record metadata and re-raise unchanged.
+Interrupts, explicit exits, and forced process exits produce no record.
+The runner exports context only after a nonzero command exit and validates the retained descriptor against the path, ownership, permissions, link count, and file identity before and after reading.
+The complete file, including its final newline, must contain exactly one strict record of at most 256 bytes; the read limit is 257 bytes to detect overflow.
+Missing, unusable, replaced, malformed, path-bearing, oversized, trailing, or duplicate metadata keeps the existing failed-command summary.
+Notification failure does not change command behavior.
+We ignore context-shaped stdout and stderr because exception text and neighboring output do not establish producer provenance.
+Exception text, arguments, SQL, connection data, locals, full paths, and source lines stay out of the context file and CI report.
+Reproduce the failed target in the disposable fixture to investigate its cause; synthetic context fixtures do not identify a hosted failure.
 
 ## Run individual tasks
 

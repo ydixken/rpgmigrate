@@ -1100,10 +1100,14 @@ mod tests {
         DirBuilder::new().mode(0o700).create(tmp.path()).unwrap();
         let competing = File::open(tmp.path()).unwrap();
         competing.try_lock().unwrap();
+        // A forked child can retain this description until exec.
+        let inherited = competing.try_clone().unwrap();
         refusal(&tmp.path(), StateAction::Create, "state-busy:");
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+        competing.unlock().unwrap();
         drop(competing);
         let state = tmp.create();
+        drop(inherited);
         refusal(&tmp.path(), StateAction::Create, "state-busy:");
         drop(state);
         let released = File::open(tmp.path()).unwrap();

@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -29,23 +30,85 @@ class VerificationError(RuntimeError):
     pass
 
 
-def execute(command, *, timeout=900, environment=None):
+CONTEXT_KEY = "RPGMIGRATE_CI_FAILURE_CONTEXT"
+
+
+def failure_context(descriptor, path):
     try:
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, env=environment, start_new_session=True) as child:
+        parent = path.parent.lstat()
+        before = os.fstat(descriptor)
+        named = path.lstat()
+        if not 1 <= before.st_size <= 256:
+            return None
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        encoded = os.read(descriptor, 257)
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        directory = path.parent.lstat()
+        if (not 1 <= len(encoded) <= 256 or len(encoded) != before.st_size
+                or any(not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                       or info.st_uid != os.geteuid() or info.st_nlink != 1
+                       for info in (before, named, after, current))
+                or len({(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                        for info in (before, named, after, current)}) != 1
+                or any(not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
+                       or info.st_uid != os.geteuid() for info in (parent, directory))
+                or (parent.st_dev, parent.st_ino) != (directory.st_dev, directory.st_ino)):
+            return None
+        context = encoded.decode("ascii")
+        if re.fullmatch(
+                r"test-db-context: [A-Za-z_][A-Za-z0-9_]{0,63} at [A-Za-z0-9_][A-Za-z0-9_.-]{0,63}\.py:"
+                r"[1-9][0-9]{0,6} in (?:[A-Za-z_][A-Za-z0-9_]{0,63}|<(?:module|lambda|listcomp|dictcomp|setcomp|genexpr)>)\n",
+                context):
+            return context[:-1]
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def execute(command, *, timeout=900, environment=None, harness_context=False):
+    environment = dict(os.environ if environment is None else environment)
+    environment.pop(CONTEXT_KEY, None)
+    directory = context = None
+    try:
+        if harness_context:
             try:
-                output, _ = child.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.communicate()
-                raise VerificationError("command deadline exceeded") from None
-    except OSError:
-        raise VerificationError("required command unavailable") from None
-    if child.returncode:
-        names = re.findall(r"^test ([A-Za-z0-9_:.-]{1,200}) \.\.\. FAILED$|^(?:FAIL|ERROR): ([A-Za-z0-9_]{1,200}) \(", output, re.M)
-        failures = ", ".join(first or second for first, second in names[:12]) or "no test failure names"
-        raise VerificationError(f"command failed (exit {child.returncode}; {failures}); raw output withheld")
-    return output
+                directory = tempfile.TemporaryDirectory(prefix="e1-failure-")
+                descriptor, path = tempfile.mkstemp(dir=directory.name)
+                context = (descriptor, Path(path))
+                environment[CONTEXT_KEY] = path
+            except OSError:
+                pass
+        try:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, env=environment, start_new_session=True) as child:
+                try:
+                    output, _ = child.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.communicate()
+                    raise VerificationError("command deadline exceeded") from None
+        except OSError:
+            raise VerificationError("required command unavailable") from None
+        if child.returncode:
+            names = re.findall(r"^test ([A-Za-z0-9_:.-]{1,200}) \.\.\. FAILED$|^(?:FAIL|ERROR): ([A-Za-z0-9_]{1,200}) \(", output, re.M)
+            failures = ", ".join(first or second for first, second in names[:12]) or "no test failure names"
+            metadata = failure_context(*context) if context is not None else None
+            if metadata is not None:
+                failures += "; " + metadata
+            raise VerificationError(f"command failed (exit {child.returncode}; {failures}); raw output withheld")
+        return output
+    finally:
+        if context is not None:
+            try:
+                os.close(context[0])
+            except OSError:
+                pass
+        if directory is not None:
+            try:
+                directory.cleanup()
+            except OSError:
+                pass
 
 
 def ci_unit_inventory(root=None):
@@ -248,7 +311,7 @@ def main():
             ("test-db", task_command("test-db")),
         ):
             print(f"E1: {stage}", flush=True)
-            counts = stock_refusal(Path.cwd() / "target/debug/rpgmigrate") if command is None else validate_output(stage, execute(command))
+            counts = stock_refusal(Path.cwd() / "target/debug/rpgmigrate") if command is None else validate_output(stage, execute(command, harness_context=stage in ("test-db-self-check", "test-db")))
             report["stages"].append({"name": stage, "status": "passed", **counts})
             if stage == "native-check":
                 native = json.loads(execute(["python3", "tools/build-libpq.py", "--verify"]))

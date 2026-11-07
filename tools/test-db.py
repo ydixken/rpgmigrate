@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 
@@ -191,7 +192,37 @@ def interrupted(_signum, _frame):
     raise KeyboardInterrupt
 
 
+def notify_failure(error, path):
+    if path is None:
+        return
+    try:
+        path = Path(path)
+        parent = path.parent.lstat()
+        if (not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != 0o700
+                or parent.st_uid != os.geteuid()):
+            return
+        origin = error.__traceback__
+        while origin.tb_next is not None:
+            origin = origin.tb_next
+        code = origin.tb_frame.f_code
+        context = (f"test-db-context: {type(error).__name__} at {Path(code.co_filename).name}:{origin.tb_lineno} in {code.co_name}\n").encode("ascii")
+        if len(context) > 256:
+            return
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(descriptor)
+            if (stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+                    and info.st_uid == os.geteuid() and info.st_nlink == 1):
+                os.write(descriptor, context)
+        finally:
+            os.close(descriptor)
+    except Exception:
+        # Diagnostic failure must preserve the original exception and exit behavior.
+        pass
+
+
 if __name__ == "__main__":
+    context_path = os.environ.pop("RPGMIGRATE_CI_FAILURE_CONTEXT", None)
     signal.signal(signal.SIGTERM, interrupted)
     try:
         sys.exit(main())
@@ -199,4 +230,8 @@ if __name__ == "__main__":
         sys.exit(130)
     except (AssertionError, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(f"test-db: {error}", file=sys.stderr)
+        notify_failure(error, context_path)
         sys.exit(1)
+    except Exception as error:
+        notify_failure(error, context_path)
+        raise

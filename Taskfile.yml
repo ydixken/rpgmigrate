@@ -149,7 +149,7 @@ tasks:
       - >-
         {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery -- --list |
         awk '/: test$/ { count++ } END {
-        if (count != 165) { print "error: expected 165 storage recovery and driver tests"; exit 1 } }'
+        if (count != 171) { print "error: expected 171 storage recovery and driver tests"; exit 1 } }'
       - >-
         {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery --
         --include-ignored --test-threads=1
