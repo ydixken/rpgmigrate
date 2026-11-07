@@ -252,9 +252,13 @@ class VerificationTests(unittest.TestCase):
                 record = context.replace("helper", function)
                 summary = self.failure_summary([sys.executable, "-B", "-c", code, record.encode().hex()], harness_context=True)
                 self.assertEqual(summary, "command failed (exit 7; no test failure names; " + record[:-1] + "); raw output withheld")
+        file_code = "import os,sys; from pathlib import Path; open(os.environ['RPGMIGRATE_CI_FAILURE_CONTEXT'],'ab').write(Path(sys.argv[1]).read_bytes()); sys.exit(7)"
         for number, value in enumerate(invalid):
-            with self.subTest(case=number):
-                summary = self.failure_summary([sys.executable, "-B", "-c", code, value.hex()], harness_context=True)
+            with self.subTest(case=number), tempfile.TemporaryDirectory() as directory:
+                payload = Path(directory) / "payload.bin"
+                payload.touch(mode=0o600)
+                payload.write_bytes(value)
+                summary = self.failure_summary([sys.executable, "-B", "-c", file_code, str(payload)], harness_context=True)
                 self.assertEqual(summary, "command failed (exit 7; no test failure names); raw output withheld")
 
     def test_channel_rechecks_owner_and_metadata_after_the_read(self):
