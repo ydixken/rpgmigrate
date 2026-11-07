@@ -30,32 +30,7 @@ pub(crate) fn run_copy(
             "SET CONSTRAINTS",
             io,
         )?;
-        let mut report = CopyReport {
-            tables: 0,
-            rows: 0,
-            bytes: 0,
-        };
-        for table in &plan.tables {
-            let source_sql = copy_sql(source, table, "TO STDOUT")?;
-            let target_sql = copy_sql(target, table, "FROM STDIN")?;
-            target.start_copy_in(&target_sql, io)?;
-            target_copy_active = true;
-            source.start_copy_out(&source_sql, io)?;
-            // libpq owns one complete row, including rows larger than the forwarding budget.
-            while let Some(buffer) = source.read_copy(io)? {
-                report.bytes = add(
-                    report.bytes,
-                    buffer.as_bytes().len().try_into().map_err(|_| overflow())?,
-                )?;
-                for chunk in buffer.as_bytes().chunks(plan.buffer_bytes.min(64 * 1024)) {
-                    target.write_copy(chunk, io)?;
-                }
-            }
-            // read_copy(None) proves the final source COPY result passed transport validation.
-            target_copy_active = false;
-            report.rows = add(report.rows, target.finish_copy_in(io)?)?;
-            report.tables = add(report.tables, 1)?;
-        }
+        let report = transfer_tables(source, target, plan, &mut target_copy_active, io)?;
         command(
             target,
             "SET CONSTRAINTS ALL IMMEDIATE",
@@ -84,13 +59,75 @@ pub(crate) fn run_copy(
     Ok(report)
 }
 
-fn copy_sql(connection: &mut PgConnection, table: &CopyTable, direction: &str) -> Result<String> {
+fn transfer_tables(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    plan: &CopyPlan,
+    target_copy_active: &mut bool,
+    io: &IoControl,
+) -> Result<CopyReport> {
+    let mut report = CopyReport {
+        tables: 0,
+        rows: 0,
+        bytes: 0,
+    };
+    for table in &plan.tables {
+        transfer_table(
+            source,
+            target,
+            table,
+            plan.buffer_bytes,
+            &mut report,
+            target_copy_active,
+            io,
+        )?;
+    }
+    Ok(report)
+}
+
+pub(crate) fn transfer_table(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    table: &CopyTable,
+    buffer_bytes: usize,
+    report: &mut CopyReport,
+    target_copy_active: &mut bool,
+    io: &IoControl,
+) -> Result<()> {
+    let source_sql = copy_sql(source, table, "TO STDOUT")?;
+    let target_sql = copy_sql(target, table, "FROM STDIN")?;
+    target.start_copy_in(&target_sql, io)?;
+    *target_copy_active = true;
+    source.start_copy_out(&source_sql, io)?;
+    // libpq owns one complete row, including rows larger than the forwarding budget.
+    while let Some(buffer) = source.read_copy(io)? {
+        report.bytes = add(
+            report.bytes,
+            buffer.as_bytes().len().try_into().map_err(|_| overflow())?,
+        )?;
+        for chunk in buffer.as_bytes().chunks(buffer_bytes.min(64 * 1024)) {
+            target.write_copy(chunk, io)?;
+        }
+    }
+    // read_copy(None) proves the final source COPY result passed transport validation.
+    *target_copy_active = false;
+    report.rows = add(report.rows, target.finish_copy_in(io)?)?;
+    report.tables = add(report.tables, 1)?;
+    Ok(())
+}
+
+pub(crate) fn validate_copy_table(table: &CopyTable) -> Result<()> {
     if table.format != CopyFormat::Text || table.columns.is_empty() {
         return Err(failure(
             ErrorKind::BadConfig,
             "COPY requires text format and explicit columns",
         ));
     }
+    Ok(())
+}
+
+fn copy_sql(connection: &mut PgConnection, table: &CopyTable, direction: &str) -> Result<String> {
+    validate_copy_table(table)?;
     let name = qualified(connection, &table.name.schema, &table.name.table)?;
     let columns = table
         .columns
@@ -159,6 +196,46 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    #[test]
+    fn text_copy_validation_preserves_ordered_columns() {
+        let table = CopyTable {
+            name: crate::contracts::QualifiedTable {
+                schema: "Mixed Schema".into(),
+                table: "Quoted Table".into(),
+            },
+            columns: vec!["second".into(), "first".into()],
+            format: CopyFormat::Text,
+        };
+        validate_copy_table(&table).unwrap();
+        assert_eq!(table.format, CopyFormat::Text);
+        assert_eq!(table.columns, ["second", "first"]);
+    }
+
+    #[test]
+    fn copy_validation_refuses_binary_and_empty_columns_without_rewriting_format() {
+        for (format, columns) in [
+            (CopyFormat::Binary, vec!["payload".to_owned()]),
+            (CopyFormat::Text, Vec::new()),
+            (CopyFormat::Binary, Vec::new()),
+        ] {
+            let table = CopyTable {
+                name: crate::contracts::QualifiedTable {
+                    schema: "public".into(),
+                    table: "copy_validation".into(),
+                },
+                columns,
+                format,
+            };
+            let error = validate_copy_table(&table).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadConfig);
+            assert_eq!(
+                error.message,
+                "COPY requires text format and explicit columns"
+            );
+            assert_eq!(table.format, format);
+        }
+    }
 
     #[test]
     fn only_positive_commit_tag_proves_target_completion() {
