@@ -1523,3 +1523,136 @@ fn c2_reopened_receive_continues_the_parent_identity_and_record_oracle() {
         }
     }
 }
+
+#[test]
+fn checked_close_preserves_published_cut_unfinished_tail_and_role_frontiers() {
+    for candidate in [Candidate::Segmented, Candidate::Sqlite] {
+        let root = Scratch::new();
+        let cfg = root.config();
+        let mut receiver = Store::create(candidate, &cfg).unwrap();
+        receiver
+            .with_batch(|batch| {
+                batch.append(&frame(1, 0))?;
+                batch.complete(&completed(1, 1))
+            })
+            .unwrap();
+        receiver
+            .with_batch(|batch| batch.append(&frame(2, 0)))
+            .unwrap();
+        let mut apply = Store::open_role(candidate, &cfg, Role::Apply, TxSeq(1)).unwrap();
+        apply.advance_consumer(0, TxSeq(1)).unwrap();
+        let status = Store::open_role(candidate, &cfg, Role::Status, TxSeq(1)).unwrap();
+        let mut expected = None;
+        status
+            .with_read_view(|view| {
+                expected = Some(*view.head());
+                Ok(())
+            })
+            .unwrap();
+        let expected = expected.unwrap();
+        assert_eq!(expected.published, Some(completed(1, 1)));
+        assert_eq!(expected.consumer_cursor, TxSeq(1));
+        assert_eq!(expected.receive_revision, 2);
+        assert_eq!(expected.apply_revision, 1);
+        assert_eq!(expected.next_record.get(), 4);
+        assert!(status.close().is_ok());
+        assert!(apply.close().is_ok());
+        assert!(receiver.close().is_ok());
+        assert!(matches!(
+            Store::reopen(candidate, &cfg, TxSeq(2)),
+            Err(Error::Gap)
+        ));
+        let reopened = Store::reopen(candidate, &cfg, TxSeq(1)).unwrap();
+        let mut records = Vec::new();
+        reopened
+            .with_read_view(|view| {
+                assert_eq!(view.head(), &expected);
+                view.scan_complete(TxSeq(0), |record| {
+                    records.push(record.clone());
+                    Ok(())
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            records,
+            [
+                Record::Frame(frame(1, 0)),
+                Record::Completed(completed(1, 1))
+            ]
+        );
+        assert!(reopened.close().is_ok());
+    }
+}
+
+#[test]
+fn checked_close_busy_checkpoint_retains_receiver_and_does_not_close_read_roles() {
+    for candidate in [Candidate::Segmented, Candidate::Sqlite] {
+        let root = Scratch::new();
+        let cfg = root.config();
+        let mut receiver = Store::create(candidate, &cfg).unwrap();
+        receiver
+            .with_batch(|batch| {
+                batch.append(&frame(1, 0))?;
+                batch.complete(&completed(1, 1))
+            })
+            .unwrap();
+        let path = cfg.dir.join(if candidate == Candidate::Segmented {
+            "catalog/records.sqlite3"
+        } else {
+            "records.sqlite3"
+        });
+        let reader = rusqlite::Connection::open(path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT * FROM catalog_head;")
+            .unwrap();
+        receiver
+            .with_batch(|batch| {
+                batch.append(&frame(2, 0))?;
+                batch.complete(&completed(2, 1))
+            })
+            .unwrap();
+        let apply = Store::open_role(candidate, &cfg, Role::Apply, TxSeq(2)).unwrap();
+        let status = Store::open_role(candidate, &cfg, Role::Status, TxSeq(2)).unwrap();
+        assert!(
+            status.close().is_ok(),
+            "Status must close without checkpointing"
+        );
+        assert!(
+            apply.close().is_ok(),
+            "Apply must close without checkpointing"
+        );
+        let (receiver, error) = receiver
+            .close()
+            .expect_err("pinned WAL must prevent Receive close");
+        assert_eq!(
+            error,
+            Error::Backend("SQLite WAL checkpoint did not finish truncating")
+        );
+        assert!(matches!(
+            Store::reopen(candidate, &cfg, TxSeq(2)),
+            Err(Error::Busy)
+        ));
+        reader.execute_batch("ROLLBACK;").unwrap();
+        drop(reader);
+        let (_, error) = receiver
+            .close()
+            .expect_err("failed checkpoint stays poisoned");
+        assert_eq!(error, Error::Poisoned);
+    }
+}
+
+#[test]
+fn checked_close_refuses_unqualified_redb_and_retains_its_role() {
+    let root = Scratch::new();
+    let cfg = root.config();
+    let store = Store::create(Candidate::Redb, &cfg).unwrap();
+    let (store, error) = store
+        .close()
+        .expect_err("redb has no qualified checked-close contract");
+    assert_eq!(error, Error::Config("checked close does not qualify redb"));
+    assert!(matches!(
+        Store::reopen(Candidate::Redb, &cfg, TxSeq(0)),
+        Err(Error::Busy)
+    ));
+    drop(store);
+}

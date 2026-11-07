@@ -378,6 +378,19 @@ impl Store {
         }
     }
 
+    pub(super) fn close(mut self) -> std::result::Result<(), (Box<Self>, Error)> {
+        match self.connection.close() {
+            Ok(()) => Ok(()),
+            Err((connection, _)) => {
+                self.connection = connection;
+                Err((
+                    Box::new(self),
+                    Error::Backend("SQLite close failed; store remains open"),
+                ))
+            }
+        }
+    }
+
     pub(super) fn checkpoint(&mut self) -> Result<()> {
         self.healthy()?;
         if self.role == Role::Status {
@@ -758,13 +771,53 @@ fn sqlite_error(_: rusqlite::Error) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::format::{Limits, RunId, SourceId, StreamId};
     use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(in super::super) struct RetainedStatement(*mut rusqlite::ffi::sqlite3_stmt);
+
+    impl Drop for RetainedStatement {
+        fn drop(&mut self) {
+            // SAFETY: the test retains the failed-close connection until this statement is finalized.
+            assert_eq!(unsafe { rusqlite::ffi::sqlite3_finalize(self.0) }, 0);
+        }
+    }
+
+    pub(in super::super) fn retain_statement(store: &Store) -> RetainedStatement {
+        std::mem::forget(store.connection.prepare("SELECT 1").unwrap());
+        // SAFETY: the live connection owns the single deliberately retained statement.
+        let statement = unsafe {
+            rusqlite::ffi::sqlite3_next_stmt(store.connection.handle(), std::ptr::null_mut())
+        };
+        assert!(!statement.is_null());
+        RetainedStatement(statement)
+    }
+
+    #[test]
+    fn checked_close_returns_live_connection_until_statement_is_finalized() {
+        let fixture = Fixture::new();
+        let store = Store::create(&fixture.cfg).unwrap();
+        let statement = retain_statement(&store);
+        let (store, error) = store
+            .close()
+            .expect_err("unfinalized statement must prevent close");
+        assert_eq!(
+            error,
+            Error::Backend("SQLite close failed; store remains open")
+        );
+        assert_eq!(head(&store), CatalogHead::empty());
+        drop(statement);
+        assert!(store.close().is_ok());
+        assert_eq!(
+            head(&Store::reopen(&fixture.cfg).unwrap()),
+            CatalogHead::empty()
+        );
+    }
 
     struct Fixture {
         root: PathBuf,
@@ -1463,24 +1516,45 @@ mod tests {
         let mut receiver = Store::create(&fixture.cfg).unwrap();
         publish(&mut receiver, &fixture.cfg, 0, 1);
         let status = Store::open_role(&fixture.cfg, Role::Status).unwrap();
-        status.with_read_view(|view| {
-            let cut = *view.head();
-            let mut before = Vec::new();
-            view.scan_records(RecordNo::FIRST, cut.next_record, &mut |b| { before.push(b.to_vec()); Ok(()) })?;
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "storage::sqlite::tests::c1_read_view_keeps_one_cut_while_a_child_process_commits", "--nocapture"])
-                .env(CHILD, &fixture.cfg.dir).output().unwrap();
-            assert!(output.status.success(), "child failed: {}", String::from_utf8_lossy(&output.stderr));
-            assert_eq!(head(&receiver).receive_revision, 2);
-            assert_eq!(*view.head(), cut);
-            assert_eq!(view.completion(TxSeq(2))?, None);
-            let mut after = Vec::new();
-            view.scan_records(RecordNo::FIRST, cut.next_record, &mut |b| { after.push(b.to_vec()); Ok(()) })?;
-            assert_eq!(before, after);
-            assert_eq!(before, vec![b"opaque locator".to_vec()]);
-            assert_eq!(view.scan_records(RecordNo::FIRST, cut.next_record.next()?, &mut |_| Ok(())), Err(Error::Gap));
-            Ok(())
-        }).unwrap();
+        status
+            .with_read_view(|view| {
+                let cut = *view.head();
+                let mut before = Vec::new();
+                view.scan_records(RecordNo::FIRST, cut.next_record, &mut |b| {
+                    before.push(b.to_vec());
+                    Ok(())
+                })?;
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        std::thread::current().name().unwrap(),
+                        "--nocapture",
+                    ])
+                    .env(CHILD, &fixture.cfg.dir)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "child failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(head(&receiver).receive_revision, 2);
+                assert_eq!(*view.head(), cut);
+                assert_eq!(view.completion(TxSeq(2))?, None);
+                let mut after = Vec::new();
+                view.scan_records(RecordNo::FIRST, cut.next_record, &mut |b| {
+                    after.push(b.to_vec());
+                    Ok(())
+                })?;
+                assert_eq!(before, after);
+                assert_eq!(before, vec![b"opaque locator".to_vec()]);
+                assert_eq!(
+                    view.scan_records(RecordNo::FIRST, cut.next_record.next()?, &mut |_| Ok(())),
+                    Err(Error::Gap)
+                );
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(head(&status).receive_revision, 2);
     }
 

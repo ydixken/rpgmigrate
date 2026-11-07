@@ -224,6 +224,17 @@ impl Store {
         })
     }
 
+    pub(super) fn close(mut self) -> std::result::Result<(), (Box<Self>, Error)> {
+        // The caller finishes fallible synchronization before consuming the catalog.
+        match self.catalog.close() {
+            Ok(()) => Ok(()),
+            Err((catalog, error)) => {
+                self.catalog = *catalog;
+                Err((Box::new(self), error))
+            }
+        }
+    }
+
     pub(super) fn checkpoint(&mut self) -> Result<()> {
         self.check_healthy()?;
         if self.role == Role::Status {
@@ -527,7 +538,7 @@ impl Locator {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::format::{Limits, RunId, SourceId, StreamId};
     use std::cell::RefCell;
@@ -577,6 +588,30 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).expect("remove owned journal fixture");
         }
+    }
+
+    pub(in super::super) fn retain_statement(store: &Store) -> sqlite::tests::RetainedStatement {
+        sqlite::tests::retain_statement(&store.catalog)
+    }
+
+    #[test]
+    fn checked_close_returns_live_catalog_and_active_segment_on_busy_statement() {
+        let (_fixture, cfg, store) = c2_baseline(256);
+        let statement = retain_statement(&store);
+        let expected = c1_head(&store);
+        let (store, error) = store.close().expect_err("busy catalog must prevent close");
+        assert_eq!(
+            error,
+            Error::Backend("SQLite close failed; store remains open")
+        );
+        assert!(store.active.is_some());
+        assert_eq!(c1_head(&store), expected);
+        drop(statement);
+        assert!(store.close().is_ok());
+        let reopened = Store::reopen(&cfg).unwrap();
+        assert_eq!(c1_head(&reopened), expected);
+        assert_eq!(records(&reopened).unwrap(), [vec![11; 128], vec![22; 128]]);
+        assert!(reopened.close().is_ok());
     }
 
     fn records(store: &Store) -> Result<Vec<Vec<u8>>> {
