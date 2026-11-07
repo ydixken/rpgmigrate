@@ -1,6 +1,7 @@
 # Testing
 
-We use the root Make targets for local development and the E1 Linux workflow.
+We use the root Taskfile for local development and the Linux workflow.
+Install the pinned Task binary with the [getting-started procedure](getting-started.md#run-the-checks).
 The [verification plan](superpowers/plans/2026-11-06-verification-performance.md) defines the broader compatibility, durability, and release gates.
 
 ## Run the Linux fixture
@@ -17,7 +18,7 @@ The entrypoint installs packages only while building its container image.
 2. Run the same entrypoint as CI from the repository root.
 
    ```sh
-   bash tools/ci/linux.sh
+   task ci:linux
    ```
 
 3. Find the report at the path printed by the entrypoint.
@@ -37,7 +38,10 @@ Image layers remain in Podman's build cache; reports remain under `target/ci-lin
 ## Checks and evidence
 
 The entrypoint runs its Python regression tests, ShellCheck, yamllint, and actionlint before compiling.
-It then runs `make native`, `make native-check`, `make lint`, and `make test`.
+Its Python inventory includes the CI receipt validator, publisher, launcher, Task/bootstrap tests, and image build/runtime/smoke tests, with one nonempty result footer.
+It then runs `task native`, `task native-check`, `task lint`, and `task test`.
+The shared bootstrap helper supplies Task 3.54.0 to local shells, CI hosts, and the fixture container.
+Verification rejects `TASK_DRY` instead of accepting a command preview as a test result.
 The native checks verify the reviewed PostgreSQL 18.6 source, patches, installed hashes, and capability marker.
 They also require OpenSSL, GSSAPI, and libcurl OAuth support in the native receipt.
 
@@ -45,8 +49,8 @@ After building, the runner forces the executable to load Debian's stock libpq.
 It requires the exact safe configuration diagnostic, exit code 2, and no connection attempt to its owned socket listener.
 The normal native library must pass the live authentication and COPY checks.
 
-`make test-db-self-check` exercises the independent data oracle, protocol fault injection, and SCRAM controls.
-`make test-db` runs the live engine tests followed by the complete COPY integration harness.
+`task test-db-self-check` exercises the independent data oracle, protocol fault injection, and SCRAM controls.
+`task test-db` runs the live engine tests followed by the complete COPY integration harness.
 The engine profile requires all 39 ignored library tests.
 Its focused inventories cover [seven prepared transport cases](../tests/support/prepared_cases.json), [16 target authority cases](../tests/support/authority_cases.json), and [nine raw CopyBoth cases](../tests/support/replication_cases.json).
 The transport-only profile retains five cases, and the COPY profile retains 40 cases.
@@ -62,13 +66,21 @@ Its report records two authority faults and four replication observations.
 It also rejects absent or incorrect suite receipts and empty or skipped unit suites.
 Missing tools and failed commands are failures.
 
+`task test` also runs `test-storage-publication` after the format and recovery suites.
+This development-only check starts 22 fresh child processes: 20 publication-boundary kills and two complete traces across SQLite and the segmented journal.
+Each killed case must reopen against an external required prefix, append the next transaction, and verify the full retained history.
+The task creates a private directory under `target/storage-publication.*` and requires its nonempty `run/report.json` before emitting the receipt.
+The existing CI test stage requires exactly one 22-case, 20-continuation receipt in addition to the Rust and three Python suite receipts.
+Redb remains a development comparison with a known read-only corruption qualification failure; it is outside this publication matrix.
+Process kills do not qualify power-loss durability, pruning, quotas, target acknowledgements, or production backend selection.
+
 Each run exports one JSON report capped at 64 KiB.
 It contains stage results, observed suite counts, the source snapshot hash, image ID and base digest, package and tool versions, native build identity, and executable hash.
 We export structured evidence instead of raw command output because failing database tests can expose connection strings or fixture passwords.
 Raw database logs, environment dumps, DSNs, and cluster directories are not uploaded.
 A failed report identifies the failed stage; reproduce that target in the disposable fixture to investigate it.
 
-## Run individual targets
+## Run individual tasks
 
 Use the [native build guide](../native/libpq/docs/build.md) for compiler and dependency prerequisites.
 These commands need Rust 1.99.1, Python 3.12 or newer, and the reviewed native artifact.
@@ -78,19 +90,25 @@ The replication profile also requires the `test_decoding` plugin from that Postg
 1. Build and verify the controlled native dependency.
 
    ```sh
-   make native native-check
+   task native native-check
    ```
 
 2. Run formatting, lint, units, CLI checks, and native/harness regression tests.
 
    ```sh
-   make lint test
+   task lint test
    ```
 
 3. Check the disposable database harness and run E1.
 
    ```sh
-   make test-db-self-check test-db
+   task test-db-self-check test-db
+   ```
+
+4. Run only the development publication/recovery matrix in fresh storage.
+
+   ```sh
+   task test-storage-publication
    ```
 
 For focused live tests, choose one of these **examples**:
@@ -106,7 +124,7 @@ For focused live tests, choose one of these **examples**:
 - Run the 16-case target-authority profile.
 
    ```sh
-   make test-authority
+   task test-authority
    ```
 
 - Run the same authority profile through the wrapper with an isolated Cargo target directory.
@@ -121,7 +139,7 @@ For focused live tests, choose one of these **examples**:
 - Run the nine raw CopyBoth cases.
 
    ```sh
-   make test-replication
+   task test-replication
    ```
 
 - Run the same replication profile through the wrapper with an isolated Cargo target directory.
@@ -134,7 +152,7 @@ For focused live tests, choose one of these **examples**:
    ```
 
 Each focused profile requires every name in its inventory.
-Use `make test-db` for the complete 39-case engine profile and 40-case COPY profile.
+Use `task test-db` for the complete 39-case engine profile and 40-case COPY profile.
 The engine command selects all ignored library tests without skips.
 
 The default database fixture expects PostgreSQL 14.24 and numeric version 140024.
@@ -154,17 +172,23 @@ The image retains Debian copyright and license files under `/usr/share/doc`.
 Actionlint 1.7.7 comes from its [upstream release](https://github.com/rhysd/actionlint/releases/tag/v1.7.7), with separate SHA-256 pins for amd64 and arm64 and its MIT license retained in the image.
 ShellCheck 0.10.0 and yamllint 1.37.1 are Debian packages under GPL-3+.
 The Rust image's source uses MIT/Apache-2.0 licensing, and the reviewed native library retains the PostgreSQL notices.
-These tools form a test environment; this workflow does not publish a runtime image or release artifact.
+These tools form the fixture image, which is separate from the [runtime image](container.md).
+The runtime image contains the implemented CLI and its dependencies, without the fixture's PostgreSQL utilities.
 
 ## CI scope
 
 [The workflow](../.github/workflows/ci.yml) schedules the same container on hosted Ubuntu 24.04 amd64 and arm64 runners.
-It uses `contents: read`, commit-pinned checkout and artifact actions, no persisted checkout credentials, and seven-day report retention.
-It requires no repository secrets.
+Verification jobs use `contents: read`, commit-pinned checkout and artifact actions, no persisted checkout credentials, and seven-day report retention.
+They require no repository secrets.
+Each native job builds one runtime OCI artifact and smoke-tests that exact archive after the source fixture passes.
+The version-tag publication job requires both native jobs and uses `packages: write` only to publish the tested index to `ghcr.io/ydixken/rpgmigrate`.
+It does not create a tag or release, and ordinary branch or pull-request runs do not publish images.
+The [container guide](container.md) describes artifact identity, smoke checks, and publication limits.
 
 > [!important]
 > A successful local report qualifies only its recorded architecture, PostgreSQL fixture, and source snapshot.
 > Configured workflow jobs do not prove a successful GitHub run.
-> This E1 fixture does not qualify the PostgreSQL 14–18 operator matrix, PG9.6/test_decoding, TimescaleDB, CDC, recovery, power-loss durability, performance, or release packaging.
+> The source fixture does not qualify the PostgreSQL 14–18 operator matrix, PG9.6/test_decoding, TimescaleDB, runtime CDC, production recovery, power-loss durability, or performance.
+> Runtime packaging requires its separate exact-artifact smoke and publication gates.
 
 Run those gates under their approved plans before claiming the corresponding support.

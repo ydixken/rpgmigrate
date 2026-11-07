@@ -1,37 +1,156 @@
-name: E1 verification
+name: Native verification and packaging
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: e1-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
   linux:
-    name: Linux E1 (${{ matrix.runner }}, PostgreSQL 17)
+    name: Native Linux (${{ matrix.architecture }}, PostgreSQL 17)
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Build and verify in a disposable Linux container
-        run: bash tools/ci/linux.sh
+      - name: Check installed native container tools
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          python3 tools/ci/image-publish.py preflight
+          --architecture "$ARCHITECTURE" --report target/ci-host/report.json
+      - name: Install and verify Task from the shared checksum pin
+        run: |
+          task_bin=$(python3 tools/bootstrap-task.py)
+          dirname "$task_bin" >> "$GITHUB_PATH"
+      - name: Verify source in the disposable Linux fixture
+        id: source
+        run: task --silent --output=interleaved --color=false ci:linux
+      - name: Build the native runtime artifact once
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          task --silent --output=interleaved --color=false image:build --
+          --engine podman --platform "linux/$ARCHITECTURE" --output target/image
+      - name: Smoke the exact exported runtime artifact
+        env:
+          FIXTURE_IMAGE: ${{ steps.source.outputs.fixture_image }}
+        run: >-
+          task --silent --output=interleaved --color=false image:smoke --
+          --engine podman --receipt target/image/receipt.json
+          --fixture-image "$FIXTURE_IMAGE" --output target/image-smoke
+      - name: Bind source and smoke receipts to this run
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          VERIFICATION_REPORT: ${{ steps.source.outputs.report }}
+        run: >-
+          python3 tools/ci/image-publish.py seal --directory target/image
+          --source "$SOURCE_REVISION" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
+          --architecture "$ARCHITECTURE" --smoke target/image-smoke/smoke.json
+          --verification "$VERIFICATION_REPORT"
+      - name: Transfer tested native artifact for version publication
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: native-${{ matrix.architecture }}
+          path: |
+            target/image/image.oci.tar
+            target/image/receipt.json
+            target/image/smoke.json
+            target/image/verification.json
+            target/image/ci.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Finish bounded host evidence
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 tools/ci/image-publish.py report --report target/ci-host/report.json --status "$JOB_STATUS"
       - name: Keep bounded verification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: e1-${{ matrix.runner }}
-          path: target/ci-linux-*/report.json
+          name: verification-${{ matrix.architecture }}
+          path: |
+            target/ci-linux-*/report.json
+            target/ci-host/report.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish the verified version index
+    needs: linux
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      github.repository == 'ydixken/rpgmigrate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check installed publication tools
+        run: >-
+          python3 tools/ci/image-publish.py preflight
+          --architecture amd64 --report target/ci-publish/report.json
+      - name: Download only this run's two native artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: native-*
+          path: target/publish-input
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Validate receipts and preserve the tested index digests
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          SOURCE_REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          VERSION_TAG: ${{ github.ref_name }}
+          IMAGE_REPOSITORY: ghcr.io/ydixken/rpgmigrate
+        run: >-
+          python3 tools/ci/image-publish.py publish --directory target/publish-input
+          --source "$SOURCE_REVISION" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
+          --repository "$IMAGE_REPOSITORY" --tag "$VERSION_TAG"
+          --report target/ci-publish/report.json
+      - name: Finish bounded publication evidence
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: python3 tools/ci/image-publish.py report --report target/ci-publish/report.json --status "$JOB_STATUS"
+      - name: Keep bounded publication evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: publication
+          path: target/ci-publish/report.json
           if-no-files-found: error
           retention-days: 7

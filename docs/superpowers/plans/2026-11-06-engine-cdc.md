@@ -38,8 +38,10 @@ Read the [E0/E1 plan](2026-11-06-engine.md) and [verification plan](2026-11-06-v
 
 ## Files, ownership, and dependencies
 
-The integration worker owns canonical identities in `src/identity.rs`, planned CDC contract extensions, and changes to root manifests/modules.
-The decoder worker owns `src/cdc/decode.rs`, `src/cdc/codec.rs`, and `src/cdc/plugins/`.
+The integration worker owns canonical identities in `src/identity.rs`, `src/cdc/mod.rs`, `src/cdc/contracts.rs`, and changes to root manifests/modules.
+The codec worker owns promotion of `bench/storage/format.rs` to the single canonical `src/cdc/codec.rs` and the new `src/cdc/event_codec.rs`.
+The decoder worker owns `src/cdc/decode.rs` and `src/cdc/plugins/test_decoding.rs`.
+The catalog worker owns the required metadata extraction in `src/catalog.rs`.
 The storage worker owns `src/state/journal.rs`, `src/state/catalog.rs`, `src/state/recovery.rs`, and private candidate modules.
 The apply worker owns `src/apply/serial.rs`, `src/apply/checkpoint.rs`, and `src/apply/recovery.rs`.
 The durability worker owns `src/state/risk.rs`, `src/apply/durability.rs`, and `src/cdc/feedback.rs` after E3.
@@ -47,6 +49,9 @@ The transport worker owns prepared/parameter execution additions under `src/pg/`
 The verification worker owns `tests/cdc/`, `tests/faults/`, `bench/`, and fixture tooling.
 The documentation worker owns `docs/durability.md`, `docs/recovery.md`, and `docs/performance.md`.
 Do not let multiple workers edit a shared declaration or manifest at once.
+The integration worker coordinates existing test imports and visibility during the codec handoff.
+Do not retain a second framing implementation or duplicate canonical identity types.
+Integrate E2 after the C1 snapshot releases the relevant file ownership.
 
 E2 requires E1's connection and native-state ownership.
 E3 requires complete transaction readers from E2 and prepared execution from the transport worker.
@@ -126,6 +131,7 @@ Persist source identity and generation before decoding can publish complete tran
 
 The [source-frontier review](../../research/2026-11-06-context.md#source-transaction-frontier-evidence) records the plugin-specific evidence and primary sources.
 For `test_decoding`, use the original COMMIT envelope's `data_start` as `SourceEndLsn` after terminal checks.
+The transport exposes that position as `ReplicationEnvelope::XLogData.wal_start`.
 It supplies no physical `CommitLsn`.
 Baseline wal2json format 2 uses the same terminal-envelope evidence.
 With `include-lsn=true`, its COMMIT object supplies physical `lsn` and terminal `nextlsn`.
@@ -148,9 +154,17 @@ Reject version 1 instead of inferring presence or converting old records.
 Keep the archived version-1 pilot bytes and their historical provenance unchanged.
 
 ```rust
+struct DecoderPosition { next_begin_ordinal: u64, next_order: TxSeq }
+trait RelationResolver {
+    fn resolve(&mut self, table: &QualifiedTable) -> Result<&Event>;
+}
 struct Decoder;
 impl Decoder {
-    fn new(plugin: Plugin, stream: StreamId, frame_bytes: usize) -> Result<Self>;
+    fn new(plugin: Plugin, stream: StreamId, limits: codec::Limits,
+           position: DecoderPosition) -> Result<Self>;
+    fn feed(&mut self, input: &ReplicationFrame,
+            resolver: &mut impl RelationResolver,
+            emit: &mut impl FnMut(&Frame) -> Result<()>) -> Result<()>;
     fn take_completed(&mut self) -> Option<CompletedTx>;
 }
 struct Store;
@@ -190,8 +204,18 @@ impl Applier {
 }
 ```
 
-The former payload-only `Decoder::feed` declaration is withdrawn because it discards required envelope evidence.
-The receiver and decoder owners must freeze an envelope-aware input signature before decoder implementation.
+The frozen decoder declarations above replace the earlier payload-only feed and separate `frame_bytes` argument.
+They define the next implementation slice, not an implemented runtime API.
+The resolver borrows verified `Event::Relation` context without cloning its columns for each row.
+Check the returned variant, qualified name, and supported relation shape before using that context.
+The pure decoder performs no database lookup and owns no persistent catalog or cache policy.
+`DecoderPosition` is local control state, not another wire variant.
+The receiver supplies it from checked restart context and must not derive begin-ordinal allocation from the last committed transaction alone.
+Require a positive `next_order` and use checked counter increments.
+The first constructor creates an idle decoder and does not restore an unfinished transaction.
+The receiver retains responsibility for unfinished input, replay reconciliation, and durable context.
+Keep one pending completion, with no completion queue.
+The receiver must consume and publish it before supplying more transaction data.
 Raw transport owns an opaque `ReplicationFrame` with byte, envelope, and payload access.
 Its feedback queue accepts externally supplied positions and does not implement decoder completion or ACK policy.
 
@@ -217,8 +241,61 @@ The first E3 production path always commits synchronously.
 Asynchronous execution is test-private until the E4 policy consumer exists.
 Target-local WAL samples are diagnostics, never source feedback values.
 
+### First decoder slice: payload, metadata, and limits
+
+Promote the existing RPGSv2 record codec without changing its wire representation.
+Move the exact `crc32fast = 1.5.4` dependency into runtime use after root verifies the manifest, lock graph, and features.
+Reuse its prior license, MSRV, and security audit because this introduces no new package or version.
+Add no binary serialization dependency or JSON byte-array representation.
+
+Each canonical event payload begins with version `u8 = 1` and an event tag `u8`.
+Tags `1` through `5` mean `Relation`, `Insert`, `Update`, `Delete`, and `Truncate`, in that order.
+Encode variant fields in their declaration order above.
+Encode fixed-width integers in little endian, including signed `i32` typmods.
+Use checked `u32` byte lengths for strings and byte values, and checked `u32` counts for vectors.
+Value tags are `0 = Null`, `1 = UnchangedToast`, `2 = Text`, and `3 = Binary`.
+Text and binary values retain their raw bytes.
+Booleans use exactly `0` or `1`.
+Options use `0` for absent and `1` followed by the value for present.
+Reject unknown or reserved tags, invalid UTF8 names, overflow, truncated fields, impossible counts, and trailing bytes.
+
+Reuse `codec::Limits { max_frame_bytes: usize, max_event_bytes: u64, max_parts: u32 }` without another frame-size control.
+Its existing valid ranges are 128 bytes through 64 MiB per frame, 1 byte through 1 GiB per event, and 1 through 1,048,576 parts.
+Reuse the existing limit validator at construction, with visibility coordinated by integration.
+Check lengths and available input before allocation.
+Emit frames synchronously and account for their 88-byte headers within `max_frame_bytes`.
+Keep event bytes and part counts within their limits, without collecting a whole transaction.
+The borrowed libpq message can exceed a nominal frame budget and remains part of memory accounting.
+
+The record codec retains `codec::Result<T> = std::result::Result<T, codec::Error>`.
+Decoder and resolver interfaces use the existing `crate::contracts::Result<T>` and `Error { kind: ErrorKind, message: String }`.
+Map codec errors at the consuming boundary into existing error categories, with diagnostics that omit row contents.
+Propagate resolver and sink errors without replacing their categories.
+A parser, resolver, or sink error poisons the unfinished transaction and prevents completion.
+
+The first qualified profile uses DEFAULT replica identity with a verified primary key, static logged metadata, and E1 builtin restrictions.
+Keep streaming and two-phase plugin output disabled, and refuse unsupported paths explicitly.
+Full CLI support and all three plugins remain required later milestones.
+`CopyPlan` does not retain enough metadata for CDC.
+Extract relation OID, caller-established generation, qualified name, effective identity, ordered eligible columns, numeric type OIDs/typmods, and verified PK membership.
+Reuse E1 validation and session settings, with version-aware catalog queries before claiming older-server coverage.
+Do not infer historical relation identity from a fresh name lookup after DDL.
+
+INSERT and UPDATE new values follow all persisted `Relation.columns` in order.
+Old PK values follow the `key = true` subset of that same order, never index-column order.
+Keep `Update.old = None` when the plugin omits `old-key`, then derive the predicate keys from the new values.
+Reject missing, NULL, or unchanged-TOAST key evidence.
+Future FULL images use all columns in that order and reconstruct omitted NULLs only with verified FULL metadata.
+Use the existing `Value` variants without another canonical representation.
+
 ### E2: Decode, journal, and persistence experiment
 
+- [ ] Integrate canonical contracts and the codec promotion after the C1 ownership handoff, with existing framing goldens unchanged.
+- [ ] Write failing payload goldens and malformed-length/tag tests before implementing the event codec.
+- [ ] Develop bounded metadata extraction and pure decoder tests independently against the frozen borrowed resolver.
+- [ ] Test quoted names, embedded newlines, literal backslashes, NULL versus empty values, key changes, TOAST, split frames, and sink failure.
+- [ ] Test checked position counters, one pending completion, and caller-supplied restart positions that differ from the last committed begin ordinal.
+- [ ] After transport qualification, connect actual slot messages to canonical frames and the C2 journal/E3 recovery tests.
 - [ ] Add tests `interleaved_xid_reuse`, `relation_generation_restart`, `split_event`, `truncated_tail`, and `corrupt_required_segment`.
 - [ ] Assert unique `(StreamId, TxId, event_ordinal, part)` identity and exact replay order across restart.
 - [ ] Check that the intended assertions fail before implementation.
@@ -241,6 +318,10 @@ Pin experiment dependencies after graph, license, and security review.
 Require cross-process checks before production selection.
 Assert effective SQLite pragmas and redb lock outcomes instead of trusting configuration requests.
 E2 is incomplete until a real source transaction can survive journal restart and replay through E3.
+The pure decoder does not close that gate or establish source ACK authority.
+C2 integration must recover relation context and replay identity, make required context durable before ACK, and test target effects after journal restart.
+C1 and parser tests do not select a production storage backend.
+PostgreSQL 9.6 through 10 cannot supply `test_decoding` TRUNCATE output, which remains an explicit qualification limitation.
 
 The approved first pilot uses the [common contract](../../../bench/storage/config.rs) and [fixed workloads](../../../bench/storage/cases.json).
 It permits one stream, one writer, one active source transaction, and synchronous closure-scoped storage batches.
@@ -339,8 +420,8 @@ Expose reserved risk separately from actual sent feedback.
 
 ## Verification and commit gate
 
-Extend the E0 Make targets only through the integration worker.
-The verification worker defines `make test-cdc`, `make test-faults`, and `make bench-apply` before they appear in runnable guides.
+Extend the E0 Taskfile tasks only through the integration worker.
+The verification worker defines `task test-cdc`, `task test-faults`, and `task bench-apply` before they appear in runnable guides.
 Tests require exact fixture inventories, observed injection, independent fingerprints, and positive target commit evidence.
 Run format, lint, unit, database, CDC, and relevant fault checks before requesting a commit.
 Record actual commands, case counts, server versions, and results in `tasks/todo.md`.

@@ -697,6 +697,10 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 pub fn read_report(path: &Path) -> Result<Report> {
+    read_json(path)
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -759,16 +763,1661 @@ fn run_parent(root: &Path, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+pub mod c1 {
+    use super::*;
+    use std::os::fd::RawFd;
+
+    pub const CANDIDATES: [&str; 3] = ["segmented", "redb", "sqlite"];
+    pub const ROLES: [&str; 3] = ["receive", "apply", "status"];
+    pub const RECEIVE_CHECKS: &[&str] = &[
+        "duplicate-role",
+        "partial-hidden",
+        "reverse-begin",
+        "reused-xid",
+        "peer-preserved",
+        "stale-cas",
+        "restart-ordinal",
+        "duplicate-identity-rollback",
+    ];
+    pub const APPLY_CHECKS: &[&str] = &[
+        "duplicate-role",
+        "commits-visible",
+        "peer-preserved",
+        "stale-cas",
+        "cursor-persisted",
+    ];
+    pub const STATUS_CHECKS: &[&str] = &[
+        "multiple-status",
+        "cross-process-role-refusal",
+        "partial-hidden",
+        "stable-two-pass",
+        "new-view-sees-publish",
+        "after-exclusive",
+        "readonly",
+        "visitor-abort-reusable",
+        "required-prefix-gap",
+    ];
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Head {
+        pub receive_revision: u64,
+        pub apply_revision: u64,
+        pub next_record: u64,
+        pub published: u64,
+        pub consumer_cursor: u64,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Receipt {
+        pub version: u32,
+        pub candidate: String,
+        pub role: String,
+        pub pid: u32,
+        pub required_prefix: u64,
+        pub head: Head,
+        pub counts: Counts,
+        pub input_crc32: u32,
+        pub checks: Vec<String>,
+    }
+
+    const FINAL_HEAD: Head = Head {
+        receive_revision: 5,
+        apply_revision: 3,
+        next_record: 9,
+        published: 4,
+        consumer_cursor: 4,
+    };
+    const COUNTS: Counts = Counts {
+        frames: 4,
+        completed: 4,
+        encoded_bytes: 1024,
+    };
+
+    fn checks(role: &str) -> Result<&'static [&'static str]> {
+        match role {
+            "receive" => Ok(RECEIVE_CHECKS),
+            "apply" => Ok(APPLY_CHECKS),
+            "status" => Ok(STATUS_CHECKS),
+            _ => Err(Error::Workload("unknown C1 role")),
+        }
+    }
+
+    pub fn validate_receipts(receipts: &[Receipt], pids: &[u32], input_crc32: u32) -> Result<()> {
+        if receipts.len() != 9 || pids.len() != 9 {
+            return Err(Error::Workload("C1 omitted required role receipts"));
+        }
+        for (index, receipt) in receipts.iter().enumerate() {
+            let role = ROLES[index % 3];
+            if receipt.version != 1
+                || receipt.candidate != CANDIDATES[index / 3]
+                || receipt.role != role
+                || receipt.pid == 0
+                || receipt.pid != pids[index]
+                || pids[..index].contains(&receipt.pid)
+                || receipt.required_prefix != 4
+                || receipt.head != FINAL_HEAD
+                || receipt.counts != COUNTS
+                || receipt.input_crc32 != input_crc32
+                || receipt.checks != checks(role)?
+            {
+                return Err(Error::Workload(
+                    "C1 role receipt differs from the scheduled proof",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub struct Channel {
+        input: RawFd,
+        output: RawFd,
+        deadline: Instant,
+    }
+
+    impl Channel {
+        pub fn new(input: RawFd, output: RawFd, deadline: Instant) -> Result<Self> {
+            for fd in [input, output] {
+                // SAFETY: these borrowed descriptors remain open for the channel's lifetime.
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                // SAFETY: F_SETFL takes an integer flag value for the same open descriptor.
+                let changed = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+                if changed < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            Ok(Self {
+                input,
+                output,
+                deadline,
+            })
+        }
+        fn wait_ready(&self, fd: RawFd, events: libc::c_short) -> Result<()> {
+            loop {
+                let remaining = self
+                    .deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(Error::Workload("C1 child exceeded its deadline"))?;
+                let mut poll = libc::pollfd {
+                    fd,
+                    events,
+                    revents: 0,
+                };
+                let timeout = remaining
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(i32::MAX as u128) as i32;
+                // SAFETY: poll points to one initialized pollfd for the duration of the call.
+                let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
+                if ready == 0 {
+                    continue;
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                return Ok(());
+            }
+        }
+        fn transfer(&self, fd: RawFd, bytes: &mut [u8], writing: bool) -> Result<()> {
+            let mut offset = 0;
+            while offset < bytes.len() {
+                self.wait_ready(fd, if writing { libc::POLLOUT } else { libc::POLLIN })?;
+                let tail = &mut bytes[offset..];
+                // SAFETY: tail is a live, exclusive buffer of the supplied length; fd remains open.
+                let transferred = unsafe {
+                    if writing {
+                        libc::write(fd, tail.as_ptr().cast(), tail.len())
+                    } else {
+                        libc::read(fd, tail.as_mut_ptr().cast(), tail.len())
+                    }
+                };
+                if transferred == 0 {
+                    return Err(Error::Workload("C1 pipe closed before its receipt"));
+                }
+                if transferred < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) {
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                offset += transferred as usize;
+            }
+            Ok(())
+        }
+        pub fn send(&self, value: &impl Serialize) -> Result<()> {
+            let mut bytes = [0; 4096];
+            let mut output = std::io::Cursor::new(bytes.as_mut_slice());
+            serde_json::to_writer(&mut output, value)
+                .map_err(|_| Error::Workload("C1 pipe message exceeds its bound"))?;
+            let length = output.position() as usize;
+            self.transfer(self.output, &mut (length as u32).to_le_bytes(), true)?;
+            self.transfer(self.output, &mut bytes[..length], true)
+        }
+        pub fn receive<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
+            let mut length = [0; 4];
+            self.transfer(self.input, &mut length, false)?;
+            let length = u32::from_le_bytes(length) as usize;
+            if length == 0 || length > 4096 {
+                return Err(Error::Workload("C1 pipe message exceeds its bound"));
+            }
+            let mut bytes = [0; 4096];
+            self.transfer(self.input, &mut bytes[..length], false)?;
+            serde_json::from_slice(&bytes[..length])
+                .map_err(|_| Error::Workload("invalid C1 pipe message"))
+        }
+        pub fn require_eof(&self) -> Result<()> {
+            // A successful exit does not prove that finished was the last output.
+            loop {
+                self.wait_ready(self.input, libc::POLLIN)?;
+                let mut byte = [0u8; 1];
+                // SAFETY: byte is a live, exclusive one-byte buffer; input remains open.
+                let read = unsafe { libc::read(self.input, byte.as_mut_ptr().cast(), byte.len()) };
+                if read == 0 {
+                    return Ok(());
+                }
+                if read > 0 {
+                    return Err(Error::Workload("C1 child wrote after finished"));
+                }
+                let error = std::io::Error::last_os_error();
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+
+    fn require(ok: bool, message: &'static str) -> Result<()> {
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Workload(message))
+        }
+    }
+
+    fn role(name: &str) -> Result<config::Role> {
+        match name {
+            "receive" => Ok(config::Role::Receive),
+            "apply" => Ok(config::Role::Apply),
+            "status" => Ok(config::Role::Status),
+            _ => Err(Error::Workload("unknown C1 role")),
+        }
+    }
+
+    fn configuration(root: &Path, name: &str) -> Result<config::Config> {
+        candidate(name)?;
+        let manifest = parse_manifest(CASES)?;
+        let mut cfg = config_for(
+            root,
+            &manifest,
+            Job {
+                case: 0,
+                candidate: 0,
+                repetition: 0,
+            },
+        );
+        cfg.dir = root.join(name);
+        Ok(cfg)
+    }
+
+    fn records(cfg: &config::Config) -> Result<Vec<format::Record>> {
+        let case = Case {
+            name: "C1".into(),
+            transactions: 4,
+            events_per_transaction: 1,
+            event_bytes: 40,
+        };
+        let mut input = Input::new(cfg, &case, parse_manifest(CASES)?.seed)?;
+        let mut records = Vec::with_capacity(8);
+        while let Some(mut record) = input.next_record()? {
+            let tx = match &mut record {
+                format::Record::Frame(frame) => &mut frame.tx,
+                format::Record::Completed(tx) => {
+                    tx.commit = Some(format::CommitLsn(10));
+                    tx.end = format::SourceEndLsn(11);
+                    &mut tx.tx
+                }
+            };
+            let (begin, xid) = [(20, 7), (10, 8), (30, 7), (40, 9)][tx.begin_ordinal as usize - 1];
+            tx.begin_ordinal = begin;
+            tx.xid = xid;
+            records.push(record);
+        }
+        require(records.len() == 8, "C1 canonical fixture is incomplete")?;
+        Ok(records)
+    }
+
+    fn encoded(record: &format::Record, cfg: &config::Config) -> Result<Vec<u8>> {
+        Ok(match record {
+            format::Record::Frame(frame) => format::encode_frame(frame, cfg.limits)?,
+            format::Record::Completed(tx) => format::encode_completed(tx, cfg.limits)?.to_vec(),
+        })
+    }
+
+    fn input_crc32(cfg: &config::Config) -> Result<u32> {
+        let mut checksum = format::StreamingChecksum::new();
+        for record in records(cfg)? {
+            checksum.update(&encoded(&record, cfg)?);
+        }
+        Ok(checksum.finish())
+    }
+
+    fn head(view: &config::ReadView<'_>) -> Result<Head> {
+        let head = view.head();
+        require(
+            head.catalog_version == config::CATALOG_VERSION,
+            "C1 catalog version differs",
+        )?;
+        Ok(Head {
+            receive_revision: head.receive_revision,
+            apply_revision: head.apply_revision,
+            next_record: head.next_record.get(),
+            published: head.published.map_or(0, |tx| tx.order.0),
+            consumer_cursor: head.consumer_cursor.0,
+        })
+    }
+
+    fn snapshot(store: &config::Store) -> Result<Head> {
+        let mut saved = None;
+        store.with_read_view(|view| {
+            saved = Some(head(view)?);
+            Ok(())
+        })?;
+        saved.ok_or(Error::Workload("C1 read-view callback was omitted"))
+    }
+
+    fn verify(
+        view: &config::ReadView<'_>,
+        cfg: &config::Config,
+        after: u64,
+        through: u64,
+        mut first: impl FnMut() -> Result<()>,
+    ) -> Result<u32> {
+        require(after <= through && through <= 4, "invalid C1 scan oracle")?;
+        let records = records(cfg)?;
+        let mut expected = records[after as usize * 2..through as usize * 2].iter();
+        let mut checksum = format::StreamingChecksum::new();
+        let mut seen = 0;
+        view.scan_complete(format::TxSeq(after), |record| {
+            require(
+                expected.next() == Some(record),
+                "C1 scan differs from canonical input",
+            )?;
+            if seen == 0 {
+                first()?;
+            }
+            seen += 1;
+            checksum.update(&encoded(record, cfg)?);
+            Ok(())
+        })?;
+        require(
+            expected.next().is_none() && seen == (through - after) * 2,
+            "C1 scan omitted records",
+        )?;
+        Ok(checksum.finish())
+    }
+
+    fn transaction(
+        store: &mut config::Store,
+        cfg: &config::Config,
+        sequence: usize,
+        revision: u64,
+    ) -> Result<()> {
+        let records = records(cfg)?;
+        let format::Record::Frame(frame) = &records[(sequence - 1) * 2] else {
+            unreachable!()
+        };
+        let format::Record::Completed(tx) = &records[sequence * 2 - 1] else {
+            unreachable!()
+        };
+        let stats = store.with_receive(revision, |batch| {
+            batch.append(frame)?;
+            batch.complete(tx)
+        })?;
+        require(
+            stats.frames == 1
+                && stats.completed == 1
+                && stats.encoded_bytes == 256
+                && stats.receive_revision == revision + 1
+                && stats.durable_frontier.0 == sequence as u64,
+            "C1 receive receipt differs from the input oracle",
+        )
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Message {
+        candidate: String,
+        role: String,
+        pid: u32,
+        phase: String,
+        head: Head,
+    }
+
+    fn command(channel: &Channel, expected: &str) -> Result<()> {
+        require(
+            channel.receive::<String>()? == expected,
+            "C1 command is out of order",
+        )
+    }
+
+    fn acknowledge(
+        channel: &Channel,
+        name: &str,
+        role: &str,
+        phase: &str,
+        head: Head,
+    ) -> Result<()> {
+        channel.send(&Message {
+            candidate: name.into(),
+            role: role.into(),
+            pid: std::process::id(),
+            phase: phase.into(),
+            head,
+        })
+    }
+
+    fn receive_steps(
+        store: config::Store,
+        cfg: &config::Config,
+        name: &str,
+        channel: &Channel,
+    ) -> Result<config::Store> {
+        let mut store = store;
+        command(channel, "partial")?;
+        transaction(&mut store, cfg, 1, 0)?;
+        let records = records(cfg)?;
+        let format::Record::Frame(frame) = &records[2] else {
+            unreachable!()
+        };
+        let stats = store.with_receive(1, |batch| batch.append(frame))?;
+        require(
+            stats.frames == 1
+                && stats.completed == 0
+                && stats.encoded_bytes == 128
+                && stats.receive_revision == 2
+                && stats.durable_frontier.0 == 1,
+            "C1 partial batch receipt differs",
+        )?;
+        store.with_read_view(|view| verify(view, cfg, 0, 1, || Ok(())).map(|_| ()))?;
+        acknowledge(channel, name, "receive", "partial", snapshot(&store)?)?;
+
+        command(channel, "complete")?;
+        let before = snapshot(&store)?;
+        let mut called = false;
+        let outcome = store.with_receive(1, |_| {
+            called = true;
+            Ok(())
+        });
+        require(
+            outcome == Err(Error::Conflict) && !called && snapshot(&store)? == before,
+            "C1 stale receive CAS changed state",
+        )?;
+        let format::Record::Completed(tx) = &records[3] else {
+            unreachable!()
+        };
+        let stats = store.with_receive(2, |batch| batch.complete(tx))?;
+        require(
+            stats.frames == 0
+                && stats.completed == 1
+                && stats.encoded_bytes == 128
+                && stats.receive_revision == 3
+                && stats.durable_frontier.0 == 2,
+            "C1 descriptor batch receipt differs",
+        )?;
+        acknowledge(channel, name, "receive", "complete", snapshot(&store)?)?;
+
+        command(channel, "third")?;
+        transaction(&mut store, cfg, 3, 3)?;
+        acknowledge(channel, name, "receive", "third", snapshot(&store)?)?;
+
+        command(channel, "restart")?;
+        let before = snapshot(&store)?;
+        drop(store);
+        let mut store = config::Store::reopen(candidate(name)?, cfg, format::TxSeq(3))?;
+        require(
+            snapshot(&store)? == before,
+            "C1 reopen changed catalog or append ordinal",
+        )?;
+        transaction(&mut store, cfg, 4, 4)?;
+        let before = snapshot(&store)?;
+        let format::Record::Frame(duplicate) = &records[0] else {
+            unreachable!()
+        };
+        let format::Record::Completed(mut descriptor) = records[1] else {
+            unreachable!()
+        };
+        descriptor.order = format::TxSeq(5);
+        let result = store.with_receive(5, |batch| {
+            batch.append(duplicate)?;
+            batch.complete(&descriptor)
+        });
+        require(
+            result == Err(Error::IdentityMismatch),
+            "C1 completion index accepted repeated transaction identity",
+        )?;
+        require(
+            store.with_receive(5, |_| Ok(())) == Err(Error::Poisoned),
+            "C1 failed mutator remained usable",
+        )?;
+        drop(store);
+        let store = config::Store::reopen(candidate(name)?, cfg, format::TxSeq(4))?;
+        require(
+            snapshot(&store)? == before,
+            "C1 failed completion changed catalog",
+        )?;
+        store.with_read_view(|view| verify(view, cfg, 0, 4, || Ok(())).map(|_| ()))?;
+        acknowledge(channel, name, "receive", "restart", snapshot(&store)?)?;
+        Ok(store)
+    }
+
+    fn apply_steps(
+        mut store: config::Store,
+        cfg: &config::Config,
+        name: &str,
+        channel: &Channel,
+    ) -> Result<config::Store> {
+        for (phase, revision, cursor) in [("one", 0, 1), ("two", 1, 2), ("final", 2, 4)] {
+            command(channel, phase)?;
+            if phase == "one" {
+                let reader = config::Store::open_role(
+                    candidate(name)?,
+                    cfg,
+                    config::Role::Status,
+                    format::TxSeq(1),
+                )?;
+                reader.with_read_view(|view| verify(view, cfg, 0, 1, || Ok(())).map(|_| ()))?;
+            }
+            store.with_read_view(|view| {
+                verify(view, cfg, 0, head(view)?.published, || Ok(())).map(|_| ())
+            })?;
+            let before = snapshot(&store)?;
+            store.advance_consumer(revision, format::TxSeq(cursor))?;
+            let after = snapshot(&store)?;
+            require(
+                after.receive_revision == before.receive_revision
+                    && after.published == before.published
+                    && after.next_record == before.next_record
+                    && after.apply_revision == revision + 1
+                    && after.consumer_cursor == cursor,
+                "C1 Apply overwrote peer fields",
+            )?;
+            require(
+                store.advance_consumer(revision, format::TxSeq(cursor)) == Err(Error::Conflict)
+                    && snapshot(&store)? == after,
+                "C1 stale Apply CAS changed state",
+            )?;
+            acknowledge(channel, name, "apply", phase, after)?;
+        }
+        drop(store);
+        config::Store::open_role(candidate(name)?, cfg, config::Role::Apply, format::TxSeq(4))
+    }
+
+    fn status_steps(
+        mut store: config::Store,
+        cfg: &config::Config,
+        name: &str,
+        channel: &Channel,
+    ) -> Result<config::Store> {
+        command(channel, "partial")?;
+        store.with_read_view(|view| verify(view, cfg, 0, 1, || Ok(())).map(|_| ()))?;
+        acknowledge(channel, name, "status", "partial", snapshot(&store)?)?;
+        command(channel, "pin")?;
+        store.with_read_view(|view| {
+            let captured = head(view)?;
+            verify(view, cfg, 0, 2, || {
+                acknowledge(channel, name, "status", "pinned", captured)?;
+                command(channel, "resume")
+            })?;
+            verify(view, cfg, 0, 2, || Ok(()))?;
+            require(
+                head(view)? == captured,
+                "C1 read view changed while publishers committed",
+            )?;
+            acknowledge(channel, name, "status", "stable", captured)
+        })?;
+        command(channel, "latest")?;
+        store.with_read_view(|view| {
+            verify(view, cfg, 0, 3, || Ok(()))?;
+            verify(view, cfg, 1, 3, || Ok(()))?;
+            let mut called = false;
+            let result = view.scan_complete(format::TxSeq(4), |_| {
+                called = true;
+                Ok(())
+            });
+            require(
+                result == Err(Error::Gap) && !called,
+                "C1 after-prefix gap emitted records",
+            )?;
+            let stop = Error::Workload("C1 visitor stop");
+            require(
+                view.scan_complete(format::TxSeq(0), |_| Err(stop.clone())) == Err(stop),
+                "C1 visitor abort was ignored",
+            )?;
+            verify(view, cfg, 2, 3, || Ok(())).map(|_| ())
+        })?;
+        let before = snapshot(&store)?;
+        let mut called = false;
+        let result = store.with_receive(before.receive_revision, |_| {
+            called = true;
+            Ok(())
+        });
+        require(
+            result == Err(Error::RoleViolation)
+                && !called
+                && store.advance_consumer(before.apply_revision, format::TxSeq(3))
+                    == Err(Error::RoleViolation)
+                && store.checkpoint() == Err(Error::RoleViolation)
+                && snapshot(&store)? == before,
+            "C1 Status accepted a mutation",
+        )?;
+        acknowledge(channel, name, "status", "latest", before)?;
+        command(channel, "gap")?;
+        require(
+            matches!(
+                config::Store::open_role(
+                    candidate(name)?,
+                    cfg,
+                    config::Role::Status,
+                    format::TxSeq(5)
+                ),
+                Err(Error::Gap)
+            ),
+            "C1 external required prefix was inferred from surviving storage",
+        )?;
+        acknowledge(channel, name, "status", "gap", snapshot(&store)?)?;
+        Ok(store)
+    }
+
+    pub fn child(root: &Path, name: &str, role_name: &str) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let cfg = configuration(root, name)?;
+        let role = role(role_name)?;
+        let metadata = fs::symlink_metadata(root)?;
+        require(
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.permissions().mode() & 0o777 == 0o700,
+            "C1 child root is not a private directory",
+        )?;
+        let channel = Channel::new(
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+            Instant::now() + Duration::from_secs(300),
+        )?;
+        let result = (|| {
+            let store = if role == config::Role::Receive {
+                config::Store::create(candidate(name)?, &cfg)?
+            } else {
+                config::Store::open_role(candidate(name)?, &cfg, role, format::TxSeq(0))?
+            };
+            if role == config::Role::Status {
+                drop(config::Store::open_role(
+                    candidate(name)?,
+                    &cfg,
+                    role,
+                    format::TxSeq(0),
+                )?);
+                for writer in [config::Role::Receive, config::Role::Apply] {
+                    require(
+                        matches!(
+                            config::Store::open_role(
+                                candidate(name)?,
+                                &cfg,
+                                writer,
+                                format::TxSeq(0)
+                            ),
+                            Err(Error::Busy)
+                        ),
+                        "C1 writer role was acquired by a second OS process",
+                    )?;
+                }
+            } else {
+                require(
+                    matches!(
+                        config::Store::open_role(candidate(name)?, &cfg, role, format::TxSeq(0)),
+                        Err(Error::Busy)
+                    ),
+                    "C1 duplicate role was not refused",
+                )?;
+            }
+            acknowledge(&channel, name, role_name, "ready", snapshot(&store)?)?;
+            let store = match role {
+                config::Role::Receive => receive_steps(store, &cfg, name, &channel)?,
+                config::Role::Apply => apply_steps(store, &cfg, name, &channel)?,
+                config::Role::Status => status_steps(store, &cfg, name, &channel)?,
+            };
+            command(&channel, "finish")?;
+            let final_head = snapshot(&store)?;
+            require(
+                final_head == FINAL_HEAD,
+                "C1 final catalog differs from the external oracle",
+            )?;
+            let mut checksum = None;
+            store.with_read_view(|view| {
+                checksum = Some(verify(view, &cfg, 0, 4, || Ok(()))?);
+                Ok(())
+            })?;
+            let receipt = Receipt {
+                version: 1,
+                candidate: name.into(),
+                role: role_name.into(),
+                pid: std::process::id(),
+                required_prefix: 4,
+                head: final_head,
+                counts: COUNTS,
+                input_crc32: checksum.ok_or(Error::Workload("C1 final scan was omitted"))?,
+                checks: checks(role_name)?
+                    .iter()
+                    .map(|check| (*check).into())
+                    .collect(),
+            };
+            drop(store);
+            write_json(&root.join(format!("{name}-{role_name}.json")), &receipt)?;
+            acknowledge(&channel, name, role_name, "finished", final_head)
+        })();
+        if let Err(error) = &result {
+            write_json(
+                &root.join(format!("{name}-{role_name}-error.json")),
+                &serde_json::json!({"version":1,"candidate":name,"role":role_name,"pid":std::process::id(),"error":error.to_string()}),
+            )?;
+        }
+        result
+    }
+
+    struct Worker {
+        child: Child,
+        channel: Channel,
+        _input: std::process::ChildStdin,
+        _output: std::process::ChildStdout,
+        name: String,
+        role: String,
+    }
+
+    impl Worker {
+        fn spawn(root: &Path, name: &str, role: &str, deadline: Instant) -> Result<Self> {
+            use std::os::fd::AsRawFd;
+            let mut child = Command::new(std::env::current_exe()?)
+                .arg("--c1-child")
+                .arg(root)
+                .arg(name)
+                .arg(role)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let input = child.stdin.take().expect("piped child stdin");
+            let output = child.stdout.take().expect("piped child stdout");
+            let channel = match Channel::new(output.as_raw_fd(), input.as_raw_fd(), deadline) {
+                Ok(channel) => channel,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = wait_child(&mut child, Duration::from_secs(2));
+                    return Err(error);
+                }
+            };
+            Ok(Self {
+                child,
+                channel,
+                _input: input,
+                _output: output,
+                name: name.into(),
+                role: role.into(),
+            })
+        }
+        fn expect(&self, phase: &str, expected: Head) -> Result<()> {
+            let message: Message = self.channel.receive().inspect_err(|_| {
+                eprintln!("{}", serde_json::json!({"candidate":self.name,"role":self.role,"phase":phase,"error":"C1 receipt missing or invalid"}));
+            })?;
+            require(
+                message.candidate == self.name
+                    && message.role == self.role
+                    && message.pid == self.child.id()
+                    && message.phase == phase
+                    && message.head == expected,
+                "C1 phase receipt differs from the external oracle",
+            )
+        }
+        fn step(&self, phase: &str, expected: Head) -> Result<()> {
+            self.channel.send(&phase)?;
+            self.expect(phase, expected)
+        }
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            if !matches!(self.child.try_wait(), Ok(Some(_))) {
+                let _ = self.child.kill();
+                let _ = wait_child(&mut self.child, Duration::from_secs(2));
+            }
+        }
+    }
+
+    pub fn parent(root: &Path) -> Result<()> {
+        build_info()?;
+        fs::DirBuilder::new().mode(0o700).create(root)?;
+        let root = root.canonicalize()?;
+        let oracle = input_crc32(&configuration(&root, CANDIDATES[0])?)?;
+        let mut receipts = Vec::with_capacity(9);
+        let mut pids = Vec::with_capacity(9);
+        for name in CANDIDATES {
+            let deadline = Instant::now() + Duration::from_secs(300);
+            let empty = Head {
+                receive_revision: 0,
+                apply_revision: 0,
+                next_record: 1,
+                published: 0,
+                consumer_cursor: 0,
+            };
+            let receive = Worker::spawn(&root, name, "receive", deadline)?;
+            receive.expect("ready", empty)?;
+            let apply = Worker::spawn(&root, name, "apply", deadline)?;
+            apply.expect("ready", empty)?;
+            let status = Worker::spawn(&root, name, "status", deadline)?;
+            status.expect("ready", empty)?;
+            let partial = Head {
+                receive_revision: 2,
+                apply_revision: 0,
+                next_record: 4,
+                published: 1,
+                consumer_cursor: 0,
+            };
+            receive.step("partial", partial)?;
+            status.step("partial", partial)?;
+            let applied_one = Head {
+                apply_revision: 1,
+                consumer_cursor: 1,
+                ..partial
+            };
+            apply.step("one", applied_one)?;
+            let complete = Head {
+                receive_revision: 3,
+                next_record: 5,
+                published: 2,
+                ..applied_one
+            };
+            receive.step("complete", complete)?;
+            status.channel.send(&"pin")?;
+            status.expect("pinned", complete)?;
+            let third = Head {
+                receive_revision: 4,
+                next_record: 7,
+                published: 3,
+                ..complete
+            };
+            receive.step("third", third)?;
+            let applied_two = Head {
+                apply_revision: 2,
+                consumer_cursor: 2,
+                ..third
+            };
+            apply.step("two", applied_two)?;
+            status.channel.send(&"resume")?;
+            status.expect("stable", complete)?;
+            status.step("latest", applied_two)?;
+            receive.step(
+                "restart",
+                Head {
+                    receive_revision: 5,
+                    next_record: 9,
+                    published: 4,
+                    ..applied_two
+                },
+            )?;
+            apply.step("final", FINAL_HEAD)?;
+            status.step("gap", FINAL_HEAD)?;
+            let mut workers = [receive, apply, status];
+            for worker in &workers {
+                worker.channel.send(&"finish")?;
+            }
+            for worker in &mut workers {
+                worker.expect("finished", FINAL_HEAD)?;
+                wait_child(
+                    &mut worker.child,
+                    deadline.saturating_duration_since(Instant::now()),
+                )?;
+                worker.channel.require_eof()?;
+                let receipt: Receipt =
+                    read_json(&root.join(format!("{name}-{}.json", worker.role)))?;
+                pids.push(worker.child.id());
+                receipts.push(receipt);
+            }
+        }
+        validate_receipts(&receipts, &pids, oracle)?;
+        write_json(
+            &root.join("c1-report.json"),
+            &serde_json::json!({"version":1,
+            "qualification":"development storage role coordination; consumer cursor is read progress only",
+            "scope":"all history retained; one active source transaction; no target proof, ACK, power-loss or performance qualification",
+            "required_prefix":4,"input_crc32":oracle,"receipts":receipts}),
+        )?;
+        File::open(&root)?.sync_all()?;
+        println!(
+            "{}",
+            serde_json::json!({"c1":"pass","candidates":3,"children":9,"required_prefix":4})
+        );
+        Ok(())
+    }
+}
+
+pub mod c2 {
+    use super::*;
+    use FaultPoint::*;
+    use config::{Candidate, FaultPoint, Store};
+    use format::{Record, TxSeq};
+
+    const SQLITE_TRACE: &[FaultPoint] = &[
+        BeforeAppend,
+        AfterAppend,
+        BeforeAppend,
+        AfterAppend,
+        BeforeCatalogCommit,
+        AfterCatalogCommit,
+        BeforeCatalogDirectorySync,
+        AfterCatalogDirectorySync,
+        BeforeReceiveReturn,
+    ];
+    const SEGMENTED_TRACE: &[FaultPoint] = &[
+        BeforeAppend,
+        BeforeRotationSync,
+        AfterRotationSync,
+        AfterAppend,
+        BeforeAppend,
+        AfterAppend,
+        BeforeFileSync,
+        AfterFileSync,
+        BeforeDirectorySync,
+        AfterDirectorySync,
+        BeforeCatalogCommit,
+        AfterCatalogCommit,
+        BeforeCatalogDirectorySync,
+        AfterCatalogDirectorySync,
+        BeforeReceiveReturn,
+    ];
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Job {
+        pub candidate: Candidate,
+        pub stop: Option<FaultPoint>,
+    }
+
+    impl Job {
+        pub fn trace(&self) -> &'static [FaultPoint] {
+            let trace = match self.candidate {
+                Candidate::Sqlite => SQLITE_TRACE,
+                Candidate::Segmented => SEGMENTED_TRACE,
+                Candidate::Redb => return &[],
+            };
+            match self.stop {
+                Some(point) => trace
+                    .iter()
+                    .position(|hit| *hit == point)
+                    .map_or(&[], |index| &trace[..index + 1]),
+                None => trace,
+            }
+        }
+
+        pub fn required_prefix(&self) -> u64 {
+            match self.stop {
+                None
+                | Some(
+                    AfterCatalogCommit
+                    | BeforeCatalogDirectorySync
+                    | AfterCatalogDirectorySync
+                    | BeforeReceiveReturn,
+                ) => 2,
+                _ => 1,
+            }
+        }
+    }
+
+    pub fn schedule() -> Vec<Job> {
+        let mut jobs = Vec::new();
+        for candidate in [Candidate::Segmented, Candidate::Sqlite] {
+            let complete = Job {
+                candidate,
+                stop: None,
+            };
+            let mut seen = Vec::new();
+            for point in complete.trace() {
+                if !seen.contains(point) {
+                    seen.push(*point);
+                    jobs.push(Job {
+                        candidate,
+                        stop: Some(*point),
+                    });
+                }
+            }
+            jobs.push(complete);
+        }
+        jobs
+    }
+
+    pub fn configuration(root: &Path) -> Result<config::Config> {
+        let manifest = parse_manifest(CASES)?;
+        let mut cfg = config_for(
+            root,
+            &manifest,
+            super::Job {
+                case: 0,
+                candidate: 0,
+                repetition: 0,
+            },
+        );
+        cfg.dir = root.join("store");
+        cfg.limits.max_frame_bytes = 128;
+        cfg.batch_bytes = 256;
+        cfg.segment_bytes = 256;
+        Ok(cfg)
+    }
+
+    pub fn records(cfg: &config::Config) -> Vec<Record> {
+        let mut records = Vec::with_capacity(4);
+        for (order, begin, byte) in [(1, 20, 0x31), (2, 10, 0x32)] {
+            let tx = format::TxId {
+                stream: cfg.stream,
+                xid: 7,
+                begin_ordinal: begin,
+            };
+            records.push(Record::Frame(format::Frame {
+                tx,
+                event_ordinal: 0,
+                part: 0,
+                last_part: true,
+                payload: vec![byte; 40],
+            }));
+            records.push(Record::Completed(format::CompletedTx {
+                tx,
+                order: TxSeq(order),
+                commit: None,
+                end: format::SourceEndLsn(11),
+                event_count: 1,
+                encoded_bytes: 256,
+            }));
+        }
+        records
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Phase {
+        Ready,
+        Hit,
+        Returned,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Message {
+        pub version: u32,
+        pub case: usize,
+        pub candidate: String,
+        pub pid: u32,
+        pub phase: Phase,
+        pub ordinal: usize,
+        pub point: Option<FaultPoint>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Ready {
+        message: Message,
+        settings: serde_json::Value,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CallerOutcome {
+        Unknown,
+        Returned,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Continuation {
+        pub prefix: u64,
+        pub input_crc32: u32,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Receipt {
+        pub version: u32,
+        pub case: usize,
+        pub candidate: String,
+        pub pid: u32,
+        pub hits: Vec<FaultPoint>,
+        pub caller_outcome: CallerOutcome,
+        pub required_prefix: u64,
+        pub input_crc32: u32,
+        pub settings: serde_json::Value,
+        pub continuation: Option<Continuation>,
+    }
+
+    fn require(ok: bool, message: &'static str) -> Result<()> {
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Workload(message))
+        }
+    }
+
+    fn job(case: usize) -> Result<Job> {
+        schedule()
+            .get(case)
+            .copied()
+            .ok_or(Error::Workload("unknown C2 case"))
+    }
+
+    fn validate_identity(message: &Message, case: usize, pid: u32) -> Result<Job> {
+        let job = job(case)?;
+        require(
+            message.version == 1
+                && message.case == case
+                && pid != 0
+                && message.pid == pid
+                && message.candidate == candidate_name(job.candidate),
+            "C2 message differs from owned child identity",
+        )?;
+        Ok(job)
+    }
+
+    pub fn validate_hit(message: &Message, case: usize, pid: u32, ordinal: usize) -> Result<()> {
+        let job = validate_identity(message, case, pid)?;
+        let expected = ordinal
+            .checked_sub(1)
+            .and_then(|index| job.trace().get(index))
+            .copied();
+        require(
+            expected.is_some()
+                && message.phase == Phase::Hit
+                && message.ordinal == ordinal
+                && message.point == expected,
+            "C2 boundary hit is absent or out of order",
+        )
+    }
+
+    fn check_settings(candidate: Candidate, settings: &serde_json::Value) -> Result<()> {
+        let sqlite = if candidate == Candidate::Segmented {
+            &settings["catalog"]
+        } else {
+            settings
+        };
+        let pragmas = &sqlite["effective_pragmas"];
+        require(
+            pragmas["journal_mode"] == "wal"
+                && pragmas["synchronous"] == 2
+                && pragmas["fullfsync"] == 1
+                && pragmas["checkpoint_fullfsync"] == 1
+                && pragmas["mmap_size"] == 0
+                && pragmas["wal_autocheckpoint"] == 0,
+            "C2 effective SQLite settings differ",
+        )
+    }
+
+    pub fn validate_receipts(
+        receipts: &[Receipt],
+        pids: &[u32],
+        crc: [u32; 2],
+        continuation_crc: [u32; 2],
+    ) -> Result<()> {
+        let jobs = schedule();
+        require(
+            jobs.len() == 22 && receipts.len() == 22 && pids.len() == 22,
+            "C2 omitted required fault coverage",
+        )?;
+        for (index, (receipt, job)) in receipts.iter().zip(jobs).enumerate() {
+            let prefix = job.required_prefix();
+            let outcome = if job.stop.is_some() {
+                CallerOutcome::Unknown
+            } else {
+                CallerOutcome::Returned
+            };
+            require(
+                receipt.version == 1
+                    && receipt.case == index
+                    && receipt.pid != 0
+                    && receipt.pid == pids[index]
+                    && receipt.candidate == candidate_name(job.candidate)
+                    && !receipt.hits.is_empty()
+                    && receipt.hits == job.trace()
+                    && receipt.caller_outcome == outcome
+                    && receipt.required_prefix == prefix
+                    && receipt.input_crc32 == crc[prefix as usize - 1],
+                "C2 receipt differs from scheduled publication proof",
+            )?;
+            check_settings(job.candidate, &receipt.settings)?;
+            let continuation = job.stop.map(|_| Continuation {
+                prefix: prefix + 1,
+                input_crc32: continuation_crc[prefix as usize - 1],
+            });
+            require(
+                receipt.continuation == continuation,
+                "C2 restart continuation proof differs",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn encoded(record: &Record, cfg: &config::Config) -> Result<Vec<u8>> {
+        Ok(match record {
+            Record::Frame(frame) => format::encode_frame(frame, cfg.limits)?,
+            Record::Completed(tx) => format::encode_completed(tx, cfg.limits)?.to_vec(),
+        })
+    }
+
+    fn input_crc(cfg: &config::Config, through: u64) -> Result<u32> {
+        records_crc(cfg, &records(cfg)[..through as usize * 2])
+    }
+
+    fn records_crc(cfg: &config::Config, records: &[Record]) -> Result<u32> {
+        let mut checksum = format::StreamingChecksum::new();
+        for record in records {
+            checksum.update(&encoded(record, cfg)?);
+        }
+        Ok(checksum.finish())
+    }
+
+    pub fn verify_prefix(store: &Store, cfg: &config::Config, through: u64) -> Result<u32> {
+        require(
+            (1..=2).contains(&through),
+            "C2 required prefix must come from its oracle",
+        )?;
+        let input = records(cfg);
+        let expected = &input[..through as usize * 2];
+        verify_records(store, cfg, expected, through)
+    }
+
+    fn verify_records(
+        store: &Store,
+        cfg: &config::Config,
+        expected: &[Record],
+        through: u64,
+    ) -> Result<u32> {
+        let Record::Completed(descriptor) = expected[expected.len() - 1] else {
+            unreachable!()
+        };
+        let mut checksum = format::StreamingChecksum::new();
+        let mut seen = 0;
+        store.with_read_view(|view| {
+            let head = view.head();
+            require(
+                head.receive_revision == through
+                    && head.apply_revision == 0
+                    && head.next_record.get() == through * 2 + 1
+                    && head.published == Some(descriptor)
+                    && head.consumer_cursor == TxSeq(0),
+                "C2 recovered catalog cut differs",
+            )?;
+            view.scan_complete(TxSeq(0), |record| {
+                require(
+                    expected.get(seen) == Some(record),
+                    "C2 scan differs from independent input",
+                )?;
+                seen += 1;
+                checksum.update(&encoded(record, cfg)?);
+                Ok(())
+            })
+        })?;
+        require(seen == expected.len(), "C2 scan omitted required records")?;
+        let crc = checksum.finish();
+        require(
+            crc == records_crc(cfg, expected)?,
+            "C2 recovered input checksum differs",
+        )?;
+        Ok(crc)
+    }
+
+    pub fn continue_recovered(store: &mut Store, cfg: &config::Config, cut: u64) -> Result<u32> {
+        let input = restart_records(cfg, cut)?;
+        let Record::Frame(frame) = &input[input.len() - 2] else {
+            unreachable!()
+        };
+        let Record::Completed(tx) = &input[input.len() - 1] else {
+            unreachable!()
+        };
+        let stats = store.with_receive(cut, |batch| {
+            batch.append(frame)?;
+            batch.complete(tx)
+        })?;
+        require(
+            stats.frames == 1
+                && stats.completed == 1
+                && stats.encoded_bytes == 256
+                && stats.receive_revision == cut + 1
+                && stats.durable_frontier == TxSeq(cut + 1),
+            "C2 restarted receive result differs",
+        )?;
+        verify_records(store, cfg, &input, cut + 1)
+    }
+
+    fn restart_records(cfg: &config::Config, cut: u64) -> Result<Vec<Record>> {
+        require(
+            (1..=2).contains(&cut),
+            "C2 restart cut must come from its oracle",
+        )?;
+        let mut input = records(cfg);
+        input.truncate(cut as usize * 2);
+        let tx = format::TxId {
+            stream: cfg.stream,
+            xid: 7,
+            begin_ordinal: if cut == 1 { 30 } else { 40 },
+        };
+        input.push(Record::Frame(format::Frame {
+            tx,
+            event_ordinal: 0,
+            part: 0,
+            last_part: true,
+            payload: vec![if cut == 1 { 0x32 } else { 0x33 }; 40],
+        }));
+        input.push(Record::Completed(format::CompletedTx {
+            tx,
+            order: TxSeq(cut + 1),
+            commit: None,
+            end: format::SourceEndLsn(11),
+            event_count: 1,
+            encoded_bytes: 256,
+        }));
+        Ok(input)
+    }
+
+    fn raw_history(candidate: Candidate, cfg: &config::Config) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+        let mut history = Vec::new();
+        if candidate == Candidate::Segmented {
+            for entry in fs::read_dir(&cfg.dir)? {
+                let path = entry?.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".data"))
+                {
+                    history.push((path.clone(), fs::read(path)?));
+                }
+            }
+            require(!history.is_empty(), "C2 raw history capture was empty")?;
+        }
+        Ok(history)
+    }
+
+    impl Message {
+        fn at(
+            case: usize,
+            phase: Phase,
+            ordinal: usize,
+            point: Option<FaultPoint>,
+        ) -> Result<Self> {
+            Ok(Self {
+                version: 1,
+                case,
+                candidate: candidate_name(job(case)?.candidate).into(),
+                pid: std::process::id(),
+                phase,
+                ordinal,
+                point,
+            })
+        }
+    }
+
+    fn transaction(
+        store: &mut Store,
+        cfg: &config::Config,
+        order: usize,
+        observer: Option<&config::FaultObserver<'_>>,
+    ) -> Result<config::BatchStats> {
+        let input = records(cfg);
+        let Record::Frame(frame) = &input[(order - 1) * 2] else {
+            unreachable!()
+        };
+        let Record::Completed(tx) = &input[order * 2 - 1] else {
+            unreachable!()
+        };
+        let write = |batch: &mut config::BatchWriter<'_>| {
+            batch.append(frame)?;
+            batch.complete(tx)
+        };
+        let stats = match observer {
+            Some(observer) => store.with_receive_observed(order as u64 - 1, write, observer)?,
+            None => store.with_receive(order as u64 - 1, write)?,
+        };
+        require(
+            stats.frames == 1
+                && stats.completed == 1
+                && stats.encoded_bytes == 256
+                && stats.receive_revision == order as u64
+                && stats.durable_frontier == TxSeq(order as u64),
+            "C2 public receive result differs from input",
+        )?;
+        Ok(stats)
+    }
+
+    pub fn child(root: &Path, case: usize) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let job = job(case)?;
+        let metadata = fs::symlink_metadata(root)?;
+        require(
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.permissions().mode() & 0o777 == 0o700,
+            "C2 child root is not private",
+        )?;
+        let cfg = configuration(root)?;
+        let channel = c1::Channel::new(
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+            Instant::now() + Duration::from_secs(300),
+        )?;
+        let mut store = Store::create(job.candidate, &cfg)?;
+        transaction(&mut store, &cfg, 1, None)?;
+        channel.send(&Ready {
+            message: Message::at(case, Phase::Ready, 0, None)?,
+            settings: store.settings()?,
+        })?;
+        require(
+            channel.receive::<String>()? == "start",
+            "C2 start command differs",
+        )?;
+        let ordinal = std::cell::Cell::new(0_usize);
+        transaction(
+            &mut store,
+            &cfg,
+            2,
+            Some(&|point| {
+                let next = ordinal.get().checked_add(1).ok_or(Error::Overflow)?;
+                ordinal.set(next);
+                channel.send(&Message::at(case, Phase::Hit, next, Some(point))?)?;
+                require(
+                    channel.receive::<String>()? == "continue",
+                    "C2 boundary command differs",
+                )
+            }),
+        )?;
+        channel.send(&Message::at(case, Phase::Returned, ordinal.get(), None)?)
+    }
+
+    struct Worker {
+        child: Child,
+        channel: c1::Channel,
+        _input: std::process::ChildStdin,
+        _output: std::process::ChildStdout,
+    }
+
+    impl Worker {
+        fn spawn(root: &Path, case: usize, deadline: Instant) -> Result<Self> {
+            use std::os::fd::AsRawFd;
+            let mut child = Command::new(std::env::current_exe()?)
+                .arg("--c2-child")
+                .arg(root)
+                .arg(case.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let input = child.stdin.take().expect("piped C2 stdin");
+            let output = child.stdout.take().expect("piped C2 stdout");
+            match c1::Channel::new(output.as_raw_fd(), input.as_raw_fd(), deadline) {
+                Ok(channel) => Ok(Self {
+                    child,
+                    channel,
+                    _input: input,
+                    _output: output,
+                }),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = wait_child(&mut child, Duration::from_secs(2));
+                    Err(error)
+                }
+            }
+        }
+
+        fn kill_at(&mut self, hit: &Message, case: usize, ordinal: usize) -> Result<()> {
+            use std::os::unix::process::ExitStatusExt;
+            validate_hit(hit, case, self.child.id(), ordinal)?;
+            require(
+                job(case)?.stop == hit.point,
+                "C2 kill point differs from schedule",
+            )?;
+            self.child.kill()?;
+            require(
+                matches!(
+                    wait_child(&mut self.child, Duration::from_secs(2)),
+                    Err(Error::Workload("storage child failed"))
+                ),
+                "C2 killed child was not reaped",
+            )?;
+            require(
+                self.child
+                    .try_wait()?
+                    .is_some_and(|status| status.signal() == Some(libc::SIGKILL)),
+                "C2 child did not exit from the owned kill",
+            )?;
+            self.channel.require_eof()
+        }
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            if !matches!(self.child.try_wait(), Ok(Some(_))) {
+                let _ = self.child.kill();
+                let _ = wait_child(&mut self.child, Duration::from_secs(2));
+            }
+        }
+    }
+
+    pub fn parent(root: &Path) -> Result<()> {
+        fs::DirBuilder::new().mode(0o700).create(root)?;
+        let root = root.canonicalize()?;
+        let cfg = configuration(&root)?;
+        let crc = [input_crc(&cfg, 1)?, input_crc(&cfg, 2)?];
+        let continuation_crc = [
+            records_crc(&cfg, &restart_records(&cfg, 1)?)?,
+            records_crc(&cfg, &restart_records(&cfg, 2)?)?,
+        ];
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let mut pids = Vec::new();
+        let mut receipts = Vec::new();
+        for (case, job) in schedule().iter().enumerate() {
+            let job_root = root.join(format!("{case:02}-{}", candidate_name(job.candidate)));
+            fs::DirBuilder::new().mode(0o700).create(&job_root)?;
+            let cfg = configuration(&job_root)?;
+            let mut worker = Worker::spawn(&job_root, case, deadline)?;
+            let pid = worker.child.id();
+            pids.push(pid);
+            let ready: Ready = worker.channel.receive()?;
+            validate_identity(&ready.message, case, pid)?;
+            require(
+                ready.message.phase == Phase::Ready
+                    && ready.message.ordinal == 0
+                    && ready.message.point.is_none(),
+                "C2 baseline receipt differs",
+            )?;
+            check_settings(job.candidate, &ready.settings)?;
+            let baseline = Store::open_role(job.candidate, &cfg, config::Role::Status, TxSeq(1))?;
+            require(
+                verify_prefix(&baseline, &cfg, 1)? == crc[0],
+                "C2 baseline input differs",
+            )?;
+            drop(baseline);
+            worker.channel.send(&"start")?;
+            let mut hits = Vec::new();
+            for ordinal in 1..=job.trace().len() {
+                let hit: Message = worker.channel.receive()?;
+                validate_hit(&hit, case, pid, ordinal)?;
+                hits.push(hit.point.ok_or(Error::Workload("C2 missing boundary"))?);
+                if job.stop.is_some() && ordinal == job.trace().len() {
+                    worker.kill_at(&hit, case, ordinal)?;
+                } else {
+                    worker.channel.send(&"continue")?;
+                }
+            }
+            if job.stop.is_none() {
+                let returned: Message = worker.channel.receive()?;
+                validate_identity(&returned, case, pid)?;
+                require(
+                    returned.phase == Phase::Returned
+                        && returned.point.is_none()
+                        && returned.ordinal == job.trace().len(),
+                    "C2 public return was omitted",
+                )?;
+                worker.channel.require_eof()?;
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(Error::Workload("C2 run exceeded its deadline"))?;
+                wait_child(&mut worker.child, remaining)?;
+            }
+            let prefix = job.required_prefix();
+            let history = raw_history(job.candidate, &cfg)?;
+            let mut store = Store::reopen(job.candidate, &cfg, TxSeq(prefix))?;
+            let input_crc32 = verify_prefix(&store, &cfg, prefix)?;
+            check_settings(job.candidate, &store.settings()?)?;
+            let continuation = if job.stop.is_some() {
+                Some(Continuation {
+                    prefix: prefix + 1,
+                    input_crc32: continue_recovered(&mut store, &cfg, prefix)?,
+                })
+            } else {
+                None
+            };
+            for (path, bytes) in history {
+                require(
+                    fs::read(path)? == bytes,
+                    "C2 restart changed retained raw history",
+                )?;
+            }
+            receipts.push(Receipt {
+                version: 1,
+                case,
+                candidate: candidate_name(job.candidate).into(),
+                pid,
+                hits,
+                caller_outcome: if job.stop.is_some() {
+                    CallerOutcome::Unknown
+                } else {
+                    CallerOutcome::Returned
+                },
+                required_prefix: prefix,
+                input_crc32,
+                settings: ready.settings,
+                continuation,
+            });
+        }
+        validate_receipts(&receipts, &pids, crc, continuation_crc)?;
+        write_json(
+            &root.join("report.json"),
+            &serde_json::json!({"version":1,
+            "qualification":"development-only process-crash publication/reopen; all history retained; not power-loss",
+            "receipts":receipts}),
+        )?;
+        File::open(&root)?.sync_all()?;
+        Ok(())
+    }
+}
+
 pub fn run(args: &[OsString]) -> Result<()> {
     let manifest = parse_manifest(CASES)?;
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!(
-            "Usage: storage --root NEW_DIRECTORY\nRun every storage pilot case in fresh child processes; existing directories are refused."
+            "Usage: storage --root NEW_DIRECTORY | --c1-root NEW_DIRECTORY | --c2-root NEW_DIRECTORY\nRun development-only storage checks in fresh children; existing directories are refused.\nC1 consumer cursors measure read progress only; C2 process kills do not prove power-loss durability."
         );
         return Ok(());
     }
     if args.len() == 2 && args[0] == "--root" {
         return run_parent(Path::new(&args[1]), &manifest);
+    }
+    if args.len() == 2 && args[0] == "--c1-root" {
+        return c1::parent(Path::new(&args[1]));
+    }
+    if args.len() == 2 && args[0] == "--c2-root" {
+        return c2::parent(Path::new(&args[1]));
+    }
+    if args.len() == 3 && args[0] == "--c2-child" {
+        let case = args[2]
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or(Error::Workload("unknown C2 case"))?;
+        return c2::child(Path::new(&args[1]), case);
+    }
+    if args.len() == 4 && args[0] == "--c1-child" {
+        let name = args[2]
+            .to_str()
+            .ok_or(Error::Workload("invalid C1 child job"))?;
+        let role = args[3]
+            .to_str()
+            .ok_or(Error::Workload("invalid C1 child job"))?;
+        return c1::child(Path::new(&args[1]), name, role);
     }
     if args.len() == 5 && args[0] == "--child" {
         let parse = |value: &OsString| {
@@ -803,7 +2452,9 @@ pub fn run(args: &[OsString]) -> Result<()> {
             &report,
         );
     }
-    Err(Error::Workload("expected --root NEW_DIRECTORY or --help"))
+    Err(Error::Workload(
+        "expected --root, --c1-root, --c2-root NEW_DIRECTORY or --help",
+    ))
 }
 
 pub fn main() -> ExitCode {

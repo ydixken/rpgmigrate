@@ -40,7 +40,7 @@ The harness worker owns `tools/test-db.py`, `tests/copy_integration.rs`, and the
 The compatibility worker owns generated parser fixtures and `docs/reference/compatibility.md` after a separate assignment.
 The performance worker owns `bench/`, including workload manifests and result schemas.
 The release worker owns CI and packaging after E1, with integration-worker coordination for manifest changes.
-The integration worker alone edits Makefile and root package metadata.
+The integration worker coordinates root Taskfile changes and alone edits root package metadata.
 The documentation worker owns the test and performance guides.
 
 The fixed first-slice harness invocation is `python3 tools/test-db.py -- cargo test --test copy_integration -- --test-threads=1`.

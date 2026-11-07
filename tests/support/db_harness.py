@@ -196,12 +196,13 @@ def psql(context, database, sql, *, role=ADMIN, canonical=True, raw=False):
 
 
 class OwnedCluster:
-    def __init__(self, manifest, *, fsync=True, logical=False):
-        if type(fsync) is not bool or type(logical) is not bool:
-            raise ValueError("fixture fsync and logical settings must be boolean")
+    def __init__(self, manifest, *, fsync=True, logical=False, tcp=False):
+        if any(type(value) is not bool for value in (fsync, logical, tcp)):
+            raise ValueError("fixture fsync, logical, and tcp settings must be boolean")
         self.manifest = manifest
         self.fsync = fsync
         self.logical = logical
+        self.tcp = tcp
         self.bindir = find_bindir(os.environ)
         self.environment = clean_environment(os.environ)
         self.token = secrets.token_hex(16)
@@ -242,14 +243,15 @@ class OwnedCluster:
                             "--locale=C", "--encoding=UTF8", "--auth-local=trust", "--auth-host=reject"],
                            env=self.environment, check=True, capture_output=True, timeout=45)
             hba = self.data / "pg_hba.conf"
-            hba.write_text("local all e1_auth scram-sha-256\n" + hba.read_text())
+            network_auth = "host all e1_source,e1_target 0.0.0.0/0 scram-sha-256\n" if self.tcp else ""
+            hba.write_text("local all e1_auth scram-sha-256\n" + network_auth + hba.read_text())
             self.log = (self.root / "postgres.log").open("wb")
             logical_options = (["-c", "wal_level=logical", "-c", "max_wal_senders=4",
                                 "-c", "max_replication_slots=4", "-c", "wal_sender_timeout=30s"]
                                if self.logical else [])
             self.process = subprocess.Popen([
                 str(self.bindir / "postgres"), "-D", str(self.data), "-k", str(self.socket),
-                "-p", str(self.port), "-c", "listen_addresses=", "-c", "unix_socket_permissions=0700",
+                "-p", str(self.port), "-c", "listen_addresses=" + ("0.0.0.0" if self.tcp else ""), "-c", "unix_socket_permissions=0700",
                 "-c", "cluster_name=" + self.token, "-c", "max_connections=30",
                 "-c", "shared_buffers=16MB", "-c", "log_min_error_statement=panic",
                 "-c", "fsync=" + ("on" if self.fsync else "off"),
@@ -272,13 +274,18 @@ class OwnedCluster:
             assert (self.socket.stat().st_mode & 0o777) == 0o700
             assert stat.S_IMODE((self.socket / f".s.PGSQL.{self.port}").stat().st_mode) == 0o700
             settings = psql(self.context, "postgres", "SELECT json_build_array(current_setting('listen_addresses'), current_setting('data_directory'), current_setting('port'), current_setting('fsync'));")
-            assert json.loads(settings) == ["", str(self.data), str(self.port), "on" if self.fsync else "off"], "fixture isolation settings differ"
+            assert json.loads(settings) == ["0.0.0.0" if self.tcp else "", str(self.data), str(self.port), "on" if self.fsync else "off"], "fixture isolation settings differ"
             if self.logical:
                 settings = psql(self.context, "postgres", "SELECT json_build_array(current_setting('wal_level'), current_setting('max_wal_senders'), current_setting('max_replication_slots'), current_setting('wal_sender_timeout'));")
                 assert json.loads(settings) == ["logical", "4", "4", "30s"], "logical fixture settings differ"
             self.context["server_version_num"] = int(psql(self.context, "postgres", "SHOW server_version_num;"))
             assert self.context["server_version_num"] == self.manifest["server_version_num"], "unexpected server version"
-            psql(self.context, "postgres", "CREATE ROLE e1_source LOGIN; CREATE ROLE e1_target LOGIN;")
+            password = " PASSWORD " + quote(self.auth_password) if self.tcp else ""
+            encryption = "SET password_encryption='scram-sha-256'; " if self.tcp else ""
+            psql(self.context, "postgres", encryption +
+                 f"CREATE ROLE e1_source LOGIN{password}; CREATE ROLE e1_target LOGIN{password};")
+            if self.tcp:
+                self.context["tcp_password"] = self.auth_password
             psql(self.context, "postgres", "SET password_encryption='scram-sha-256'; "
                  f"CREATE ROLE e1_auth LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {quote(self.auth_password)};")
             assert psql(self.context, "postgres", "SELECT rolpassword LIKE 'SCRAM-SHA-256$%' FROM pg_authid WHERE rolname='e1_auth';") == "t"
