@@ -1,8 +1,8 @@
 //! Opaque records keep the journal catalog independent of the frame codec.
 
 use super::config::{
-    CatalogHead, CatalogReadView, CompletionEntry, Config, Error, ReceiveSink, RecordNo,
-    RecordSink, Result, Role,
+    CatalogHead, CatalogReadView, CompletionEntry, Config, Error, FaultObserver, FaultPoint,
+    ReceiveSink, RecordNo, RecordSink, Result, Role,
 };
 use super::format::{self, TxSeq};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Statement, TransactionBehavior, params};
@@ -50,6 +50,24 @@ impl Store {
         &mut self,
         expected_receive_revision: u64,
         write: impl FnOnce(&mut dyn ReceiveSink) -> Result<()>,
+    ) -> Result<CatalogHead> {
+        self.receive(expected_receive_revision, write, None)
+    }
+
+    pub(super) fn with_receive_observed(
+        &mut self,
+        expected_receive_revision: u64,
+        write: impl FnOnce(&mut dyn ReceiveSink) -> Result<()>,
+        observer: &FaultObserver<'_>,
+    ) -> Result<CatalogHead> {
+        self.receive(expected_receive_revision, write, Some(observer))
+    }
+
+    fn receive(
+        &mut self,
+        expected_receive_revision: u64,
+        write: impl FnOnce(&mut dyn ReceiveSink) -> Result<()>,
+        observer: Option<&FaultObserver<'_>>,
     ) -> Result<CatalogHead> {
         self.require_role(Role::Receive)?;
         let tx = self
@@ -112,10 +130,24 @@ impl Store {
                 Err(error)
             }
             Ok(head) => {
+                if let Some(observer) = observer
+                    && let Err(error) = observer(FaultPoint::BeforeCatalogCommit)
+                {
+                    tx.rollback()
+                        .map_err(|_| Error::Backend("SQLite rollback failed; reopen required"))?;
+                    return Err(after_callback(error));
+                }
                 tx.commit().map_err(|_| {
                     Error::Backend("SQLite COMMIT outcome is uncertain; reopen required")
                 })?;
+                if let Some(observer) = observer {
+                    observer(FaultPoint::AfterCatalogCommit).map_err(after_callback)?;
+                    observer(FaultPoint::BeforeCatalogDirectorySync).map_err(after_callback)?;
+                }
                 self.directory.sync_all()?;
+                if let Some(observer) = observer {
+                    observer(FaultPoint::AfterCatalogDirectorySync).map_err(after_callback)?;
+                }
                 self.poisoned = false;
                 Ok(head)
             }
@@ -729,6 +761,7 @@ fn sqlite_error(_: rusqlite::Error) -> Error {
 mod tests {
     use super::*;
     use crate::format::{Limits, RunId, SourceId, StreamId};
+    use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -828,6 +861,289 @@ mod tests {
                 sink.complete(entry(cfg, order, no.get(), no.get()))
             })
             .unwrap()
+    }
+
+    const CATALOG_TRACE: [FaultPoint; 4] = [
+        FaultPoint::BeforeCatalogCommit,
+        FaultPoint::AfterCatalogCommit,
+        FaultPoint::BeforeCatalogDirectorySync,
+        FaultPoint::AfterCatalogDirectorySync,
+    ];
+
+    fn c2_append(sink: &mut dyn ReceiveSink, cfg: &Config) -> Result<()> {
+        let first = sink.append(b"event locator")?;
+        let last = sink.append(b"descriptor locator")?;
+        sink.complete(entry(cfg, 1, first.get(), last.get()))
+    }
+
+    fn fail_commit(store: &Store) {
+        store.connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE child(parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER fail_commit AFTER INSERT ON records
+               BEGIN INSERT INTO child VALUES (999); END;"
+        ).unwrap();
+    }
+
+    #[test]
+    fn c2_catalog_observer_order_tracks_actual_commit_visibility() {
+        let fixture = Fixture::new();
+        let mut writer = Store::create(&fixture.cfg).unwrap();
+        let reader = Store::open_role(&fixture.cfg, Role::Status).unwrap();
+        let trace = RefCell::new(Vec::new());
+        let received = writer
+            .with_receive_observed(0, |sink| c2_append(sink, &fixture.cfg), &|point| {
+                trace.borrow_mut().push(point);
+                let revision = u64::from(point != FaultPoint::BeforeCatalogCommit);
+                assert_eq!(head(&reader).receive_revision, revision);
+                assert_eq!(records(&reader).unwrap().len(), revision as usize * 2);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(*trace.borrow(), CATALOG_TRACE);
+        assert_eq!(head(&reader), received);
+        assert_eq!(received.next_record.get(), 3);
+        writer.with_receive(1, |_| Ok(())).unwrap();
+        assert_eq!(*trace.borrow(), CATALOG_TRACE);
+    }
+
+    #[test]
+    fn c2_observer_errors_poison_and_preserve_the_actual_committed_prefix() {
+        for (point, hits, revision) in [
+            (FaultPoint::BeforeCatalogCommit, 1, 0),
+            (FaultPoint::AfterCatalogCommit, 2, 1),
+            (FaultPoint::BeforeCatalogDirectorySync, 3, 1),
+            (FaultPoint::AfterCatalogDirectorySync, 4, 1),
+        ] {
+            let fixture = Fixture::new();
+            let mut writer = Store::create(&fixture.cfg).unwrap();
+            let trace = RefCell::new(Vec::new());
+            let failure = Error::Backend("injected observer failure");
+            assert_eq!(
+                writer.with_receive_observed(
+                    0,
+                    |sink| c2_append(sink, &fixture.cfg),
+                    &|observed| {
+                        trace.borrow_mut().push(observed);
+                        if observed == point {
+                            Err(failure.clone())
+                        } else {
+                            Ok(())
+                        }
+                    }
+                ),
+                Err(failure)
+            );
+            assert_eq!(*trace.borrow(), CATALOG_TRACE[..hits]);
+            assert_eq!(writer.with_receive(0, |_| Ok(())), Err(Error::Poisoned));
+            assert_eq!(writer.checkpoint(), Err(Error::Poisoned));
+            drop(writer);
+            let reopened = Store::reopen(&fixture.cfg).unwrap();
+            assert_eq!(head(&reopened).receive_revision, revision);
+            assert_eq!(records(&reopened).unwrap().len(), revision as usize * 2);
+            reopened
+                .with_read_view(|view| {
+                    assert_eq!(view.completion(TxSeq(1))?.is_some(), revision == 1);
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn c2_observer_panics_poison_even_after_a_successful_commit() {
+        for (point, hits, revision) in [
+            (FaultPoint::BeforeCatalogCommit, 1, 0),
+            (FaultPoint::AfterCatalogCommit, 2, 1),
+            (FaultPoint::BeforeCatalogDirectorySync, 3, 1),
+            (FaultPoint::AfterCatalogDirectorySync, 4, 1),
+        ] {
+            let fixture = Fixture::new();
+            let mut writer = Store::create(&fixture.cfg).unwrap();
+            let trace = RefCell::new(Vec::new());
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = writer.with_receive_observed(
+                    0,
+                    |sink| c2_append(sink, &fixture.cfg),
+                    &|observed| {
+                        trace.borrow_mut().push(observed);
+                        assert_ne!(observed, point, "injected observer panic");
+                        Ok(())
+                    },
+                );
+            }));
+            assert!(panic.is_err(), "observer must execute at {point:?}");
+            assert_eq!(*trace.borrow(), CATALOG_TRACE[..hits]);
+            assert_eq!(writer.with_receive(0, |_| Ok(())), Err(Error::Poisoned));
+            drop(writer);
+            let reopened = Store::reopen(&fixture.cfg).unwrap();
+            assert_eq!(head(&reopened).receive_revision, revision);
+            assert_eq!(records(&reopened).unwrap().len(), revision as usize * 2);
+        }
+    }
+
+    #[test]
+    fn c2_observer_busy_or_conflict_cannot_advertise_safe_retry() {
+        for failure in [Error::Busy, Error::Conflict] {
+            for (point, revision) in [
+                (FaultPoint::BeforeCatalogCommit, 0),
+                (FaultPoint::AfterCatalogCommit, 1),
+            ] {
+                let fixture = Fixture::new();
+                let mut writer = Store::create(&fixture.cfg).unwrap();
+                assert_eq!(
+                    writer.with_receive_observed(
+                        0,
+                        |sink| c2_append(sink, &fixture.cfg),
+                        &|observed| {
+                            if observed == point {
+                                Err(failure.clone())
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    ),
+                    Err(Error::Poisoned)
+                );
+                assert_eq!(writer.with_receive(0, |_| Ok(())), Err(Error::Poisoned));
+                drop(writer);
+                assert_eq!(
+                    head(&Store::reopen(&fixture.cfg).unwrap()).receive_revision,
+                    revision
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn c2_precallback_busy_and_conflict_do_not_invoke_the_observer() {
+        let fixture = Fixture::new();
+        let mut writer = Store::create(&fixture.cfg).unwrap();
+        let blocker = Connection::open(fixture.cfg.dir.join(DATABASE)).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let must_not_observe = |point| panic!("pre-callback refusal reached {point:?}");
+        assert_eq!(
+            writer.with_receive_observed(0, |_| panic!("busy callback"), &must_not_observe),
+            Err(Error::Busy)
+        );
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            writer.with_receive_observed(1, |_| panic!("stale callback"), &must_not_observe),
+            Err(Error::Conflict)
+        );
+        let trace = RefCell::new(Vec::new());
+        writer
+            .with_receive_observed(0, |sink| c2_append(sink, &fixture.cfg), &|point| {
+                trace.borrow_mut().push(point);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(*trace.borrow(), CATALOG_TRACE);
+    }
+
+    #[test]
+    fn c2_failed_callback_does_not_reach_catalog_hooks() {
+        let fixture = Fixture::new();
+        let mut writer = Store::create(&fixture.cfg).unwrap();
+        let trace = RefCell::new(Vec::new());
+        let failure = Error::Backend("injected callback failure");
+        assert_eq!(
+            writer.with_receive_observed(
+                0,
+                |sink| {
+                    c2_append(sink, &fixture.cfg)?;
+                    Err(failure.clone())
+                },
+                &|point| {
+                    trace.borrow_mut().push(point);
+                    Ok(())
+                }
+            ),
+            Err(failure)
+        );
+        assert!(trace.borrow().is_empty());
+        assert_eq!(writer.with_receive(0, |_| Ok(())), Err(Error::Poisoned));
+        drop(writer);
+        assert_eq!(
+            head(&Store::reopen(&fixture.cfg).unwrap()),
+            CatalogHead::empty()
+        );
+    }
+
+    #[test]
+    fn c2_failed_commit_has_no_success_or_directory_hooks() {
+        let fixture = Fixture::new();
+        let mut writer = Store::create(&fixture.cfg).unwrap();
+        fail_commit(&writer);
+        let trace = RefCell::new(Vec::new());
+        let mut insert_succeeded = false;
+        let result = writer.with_receive_observed(
+            0,
+            |sink| {
+                c2_append(sink, &fixture.cfg)?;
+                insert_succeeded = true;
+                Ok(())
+            },
+            &|point| {
+                trace.borrow_mut().push(point);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Backend(_))));
+        assert!(insert_succeeded, "fault must execute at COMMIT");
+        assert_eq!(*trace.borrow(), [FaultPoint::BeforeCatalogCommit]);
+        assert_eq!(writer.with_receive(0, |_| Ok(())), Err(Error::Poisoned));
+        let count: i64 = writer
+            .connection
+            .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn c2_failed_directory_sync_has_no_after_hook_and_keeps_committed_records() {
+        let fixture = Fixture::new();
+        let mut writer = Store::create(&fixture.cfg).unwrap();
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd: std::os::fd::OwnedFd = socket.into();
+        writer.directory = fd.into();
+        let trace = RefCell::new(Vec::new());
+        let result =
+            writer.with_receive_observed(0, |sink| c2_append(sink, &fixture.cfg), &|point| {
+                trace.borrow_mut().push(point);
+                Ok(())
+            });
+        assert!(matches!(result, Err(Error::Io(_))));
+        assert_eq!(*trace.borrow(), CATALOG_TRACE[..3]);
+        assert_eq!(writer.with_receive(0, |_| Ok(())), Err(Error::Poisoned));
+        drop(writer);
+        let reopened = Store::reopen(&fixture.cfg).unwrap();
+        assert_eq!(head(&reopened).receive_revision, 1);
+        assert_eq!(records(&reopened).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn c2_receipt_settings_query_preserves_effective_values_and_status_role() {
+        let fixture = Fixture::new();
+        let mut writer = Store::create(&fixture.cfg).unwrap();
+        writer.connection.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA fullfsync = OFF; PRAGMA checkpoint_fullfsync = OFF; PRAGMA wal_autocheckpoint = 7;").unwrap();
+        let before = writer.settings().unwrap();
+        writer
+            .with_receive_observed(0, |sink| c2_append(sink, &fixture.cfg), &|_| Ok(()))
+            .unwrap();
+        assert_eq!(writer.settings().unwrap(), before);
+        assert_eq!(before["effective_pragmas"]["journal_mode"], "wal");
+        assert_eq!(before["effective_pragmas"]["synchronous"], 1);
+        assert_eq!(before["effective_pragmas"]["fullfsync"], 0);
+        assert_eq!(before["effective_pragmas"]["checkpoint_fullfsync"], 0);
+        assert_eq!(before["effective_pragmas"]["wal_autocheckpoint"], 7);
+        let mut status = Store::open_role(&fixture.cfg, Role::Status).unwrap();
+        let before = status.settings().unwrap();
+        assert_eq!(before["effective_pragmas"]["fullfsync"], 0);
+        assert_eq!(before["effective_pragmas"]["checkpoint_fullfsync"], 0);
+        assert_eq!(status.checkpoint(), Err(Error::RoleViolation));
+        assert_eq!(status.settings().unwrap(), before);
     }
 
     #[test]
@@ -1648,13 +1964,7 @@ mod tests {
     fn commit_error_requires_reopen_and_never_reports_batch_success() {
         let fixture = Fixture::new();
         let mut store = Store::create(&fixture.cfg).unwrap();
-        store.connection.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE parent(id INTEGER PRIMARY KEY);
-             CREATE TABLE child(parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
-             CREATE TRIGGER fail_commit AFTER INSERT ON records
-               BEGIN INSERT INTO child VALUES (999); END;"
-        ).unwrap();
+        fail_commit(&store);
         let mut insert_succeeded = false;
         assert!(
             store

@@ -1,4 +1,4 @@
-//! C1 experiment facade; runtime migration code does not import this module.
+//! Development storage experiments; runtime migration code does not import this module.
 //! The closed backend set shares catalog transactions and bounded snapshot reads.
 //! Role locks protect cooperating experiment processes; consumer progress is not target proof.
 
@@ -24,6 +24,26 @@ pub enum Candidate {
     Redb,
     Sqlite,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaultPoint {
+    BeforeAppend,
+    AfterAppend,
+    BeforeRotationSync,
+    AfterRotationSync,
+    BeforeFileSync,
+    AfterFileSync,
+    BeforeDirectorySync,
+    AfterDirectorySync,
+    BeforeCatalogCommit,
+    AfterCatalogCommit,
+    BeforeCatalogDirectorySync,
+    AfterCatalogDirectorySync,
+    BeforeReceiveReturn,
+}
+
+pub type FaultObserver<'a> = dyn Fn(FaultPoint) -> Result<()> + 'a;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -199,6 +219,7 @@ impl Config {
 pub struct BatchWriter<'a> {
     sink: &'a mut dyn ReceiveSink,
     progress: &'a mut Progress,
+    observer: Option<&'a FaultObserver<'a>>,
     limit: u64,
     frames: u64,
     completed: u64,
@@ -357,7 +378,13 @@ impl BatchWriter<'_> {
     fn append_record(&mut self, bytes: &[u8]) -> Result<RecordNo> {
         let expected = self.sink.head().next_record;
         expected.next()?;
+        if let Some(observer) = self.observer {
+            observer(FaultPoint::BeforeAppend)?;
+        }
         let number = self.sink.append(bytes)?;
+        if let Some(observer) = self.observer {
+            observer(FaultPoint::AfterAppend)?;
+        }
         if number != expected {
             return Err(Error::Gap);
         }
@@ -479,11 +506,23 @@ impl Backend {
         &mut self,
         expected: u64,
         write: impl FnOnce(&mut dyn ReceiveSink) -> Result<()>,
+        observer: Option<&FaultObserver<'_>>,
     ) -> Result<CatalogHead> {
         match self {
-            Self::Segmented(store) => store.with_receive(expected, write),
-            Self::Redb(store) => store.with_receive(expected, write),
-            Self::Sqlite(store) => store.with_receive(expected, write),
+            Self::Segmented(store) => match observer {
+                Some(observer) => store.with_receive_observed(expected, write, observer),
+                None => store.with_receive(expected, write),
+            },
+            Self::Redb(store) => {
+                if observer.is_some() {
+                    return Err(Error::Config("C2 observers do not qualify redb"));
+                }
+                store.with_receive(expected, write)
+            }
+            Self::Sqlite(store) => match observer {
+                Some(observer) => store.with_receive_observed(expected, write, observer),
+                None => store.with_receive(expected, write),
+            },
         }
     }
     fn with_read_view(&self, read: impl FnOnce(&dyn CatalogReadView) -> Result<()>) -> Result<()> {
@@ -544,17 +583,38 @@ impl Store {
         })
     }
 
+    pub fn with_receive_observed(
+        &mut self,
+        expected_receive_revision: u64,
+        write: impl FnOnce(&mut BatchWriter<'_>) -> Result<()>,
+        observer: &FaultObserver<'_>,
+    ) -> Result<BatchStats> {
+        if matches!(self.backend, Backend::Redb(_)) {
+            return Err(Error::Config("C2 observers do not qualify redb"));
+        }
+        self.receive(expected_receive_revision, write, Some(observer))
+    }
+
     pub fn with_receive(
         &mut self,
         expected_receive_revision: u64,
         write: impl FnOnce(&mut BatchWriter<'_>) -> Result<()>,
     ) -> Result<BatchStats> {
+        self.receive(expected_receive_revision, write, None)
+    }
+
+    fn receive(
+        &mut self,
+        expected_receive_revision: u64,
+        write: impl FnOnce(&mut BatchWriter<'_>) -> Result<()>,
+        observer: Option<&FaultObserver<'_>>,
+    ) -> Result<BatchStats> {
         self.require_role(Role::Receive)?;
         let mut counts = None;
         let mut entered = false;
-        let result = self
-            .backend
-            .with_receive(expected_receive_revision, |sink| {
+        let result = self.backend.with_receive(
+            expected_receive_revision,
+            |sink| {
                 entered = true;
                 // Unwinding must leave this validator unusable, just as an uncertain commit does.
                 self.progress.poisoned = true;
@@ -567,6 +627,7 @@ impl Store {
                 let mut batch = BatchWriter {
                     sink,
                     progress: &mut self.progress,
+                    observer,
                     limit: self.cfg.batch_bytes,
                     frames: 0,
                     completed: 0,
@@ -582,7 +643,9 @@ impl Store {
                 }
                 counts = Some((batch.frames, batch.completed, batch.bytes));
                 Ok(())
-            });
+            },
+            observer,
+        );
         let head = match result {
             Ok(head) => head,
             Err(error) => {
@@ -604,6 +667,9 @@ impl Store {
             return Err(Error::Gap);
         }
         self.head = head;
+        if let Some(observer) = observer {
+            observer(FaultPoint::BeforeReceiveReturn)?;
+        }
         self.progress.poisoned = false;
         Ok(BatchStats {
             frames,

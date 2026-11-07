@@ -104,6 +104,7 @@ tasks:
       - task: test-harness
       - task: test-storage-format
       - task: test-storage-recovery
+      - task: test-storage-publication
 
   test-unit:
     desc: Run nonempty Rust unit tests without live databases
@@ -148,10 +149,22 @@ tasks:
       - >-
         {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery -- --list |
         awk '/: test$/ { count++ } END {
-        if (count != 141) { print "error: expected 141 storage recovery and driver tests"; exit 1 } }'
+        if (count != 165) { print "error: expected 165 storage recovery and driver tests"; exit 1 } }'
       - >-
         {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery --
         --include-ignored --test-threads=1
+
+  test-storage-publication:
+    desc: Verify process-crash publication and continuation in fresh storage
+    cmds:
+      - task: native-check
+      - |
+        set -eu
+        {{.RUN}}
+        mkdir -p {{.ROOT_DIR | shellQuote}}/target
+        publication_parent=$(mktemp -d {{.ROOT_DIR | shellQuote}}/target/storage-publication.XXXXXX)
+        {{.CARGO_COMMAND}} run --locked --example storage -- --c2-root "$publication_parent/run"
+        {{.PYTHON_COMMAND}} tools/ci/verify.py --storage-publication "$publication_parent/run/report.json"
 
   storage-pilot:
     desc: Run the storage pilot in the required fresh STORAGE_ROOT

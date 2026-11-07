@@ -186,7 +186,7 @@ They are dev dependencies and do not select a runtime journal backend.
 1. Run the required format, backend, common recovery, and driver tests.
 
    ```sh
-   task test-storage-format test-storage-recovery
+   task test-storage-format test-storage-recovery test-storage-publication
    ```
 
 2. Select a new directory below an existing parent and run the release pilot.
@@ -202,7 +202,10 @@ Seeded case ordering and paired candidate shuffling reduce fixed-order bias.
 The parent requires every exact receipt and compares canonical input checksums and storage-batch boundaries.
 Missing cases, empty workloads, failed children, and missing or inconsistent reports return nonzero.
 
-Each child reports storage completed transactions and encoded bytes, with separate create, write, checkpoint, close, reopen, verified-scan, and finalization timings.
+The default `task test` includes the separate publication/recovery matrix: 20 process kills, two complete traces, and a verified append after each killed case.
+This check uses fresh private storage under `target/` and retains all history; it does not qualify power-loss behavior, pruning, quotas, or a production backend.
+
+Each pilot child reports storage completed transactions and encoded bytes, with separate create, write, checkpoint, close, reopen, verified-scan, and finalization timings.
 Write time includes input generation, encoding, common validation, batch setup, and commit overhead; it is not an isolated synchronization measurement.
 Total time includes explicit checkpoints, redb integrity-on-open work, and both bounded scan passes before completion.
 The scan compares each replayed record with the deterministic input stream and requires the workload's external completed-transaction prefix.

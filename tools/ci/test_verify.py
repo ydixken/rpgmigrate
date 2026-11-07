@@ -1,6 +1,8 @@
 """Exercise CI refusal paths without a database or container engine."""
 
 import importlib.util
+import copy
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -27,11 +29,69 @@ class VerificationTests(unittest.TestCase):
     def test_all_task_test_suites_must_be_observed(self):
         rust = "test result: ok. 73 passed; 0 failed; 0 ignored; 7 filtered out;\n"
         python = "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 14 tests in 1.0s\nOK\n"
-        counts = runner.validate_output("test", rust + python)
-        self.assertEqual(counts, {"rust": 73, "python": [24, 20, 14]})
+        publication = "Storage publication verified 22 cases and 20 continuations\n"
+        counts = runner.validate_output("test", rust + python + publication)
+        self.assertEqual(counts, {"rust": 73, "python": [24, 20, 14], "storage_publication": 22,
+                                  "storage_continuations": 20})
         for output in (rust, python, rust + python.replace("Ran 20", "Ran 0"), rust.replace("0 ignored", "1 ignored") + python):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test", output)
+
+    def test_publication_footer_must_be_exact_and_unique(self):
+        suites = ("test result: ok. 73 passed; 0 failed; 0 ignored;\n"
+                  "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 19 tests in 1.0s\nOK\n")
+        footer = "Storage publication verified 22 cases and 20 continuations\n"
+        for value in ("", footer * 2, footer.replace("22", "0"), footer.replace("22", "21"),
+                      footer.replace("20", "19"), "[test] " + footer, footer + footer.replace("22", "23")):
+            with self.subTest(value=value), self.assertRaises(runner.VerificationError):
+                runner.validate_output("test", suites + value)
+
+    def test_publication_report_requires_exact_cases_and_continuations(self):
+        self.assertTrue(hasattr(runner, "storage_publication"), "publication receipt validator is absent")
+        good = {"version": 1, "receipts": [
+            {"version": 1, "case": i, "candidate": "segmented" if i < 14 else "sqlite",
+             "required_prefix": 2, "caller_outcome": "returned" if i in (13, 21) else "unknown",
+             "continuation": None if i in (13, 21) else {"prefix": 3, "input_crc32": 123}}
+            for i in range(22)]}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "report.json"
+            path.write_text(json.dumps(good))
+            self.assertEqual(runner.storage_publication(path),
+                             "Storage publication verified 22 cases and 20 continuations")
+            changes = [((), {}), (("version",), True), (("receipts",), []),
+                       (("receipts",), good["receipts"][:-1]),
+                       (("receipts",), good["receipts"] + [good["receipts"][0]]),
+                       (("receipts", 1, "case"), 0), (("receipts", 1, "case"), True),
+                       (("receipts", 0, "candidate"), "redb"),
+                       (("receipts", 0, "continuation"), None),
+                       (("receipts", 0, "continuation", "prefix"), 2),
+                       (("receipts", 0, "caller_outcome"), "returned"),
+                       (("receipts", 13, "continuation"), {"prefix": 3, "input_crc32": 123})]
+            for keys, value in changes:
+                bad = copy.deepcopy(good)
+                parent = bad
+                for key in keys[:-1]:
+                    parent = parent[key]
+                if keys:
+                    parent[keys[-1]] = value
+                else:
+                    bad = value
+                path.write_text(json.dumps(bad))
+                with self.subTest(keys=keys, value=value), self.assertRaises(runner.VerificationError):
+                    runner.storage_publication(path)
+
+    def test_publication_report_cli_refuses_absent_invalid_or_oversized_input(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "report.json"
+            for content in (None, b"", b"{", b" " * 65537):
+                if content is not None:
+                    path.write_bytes(content)
+                with self.subTest(content=None if content is None else len(content)):
+                    result = subprocess.run([sys.executable, "-O", str(SCRIPT), "--storage-publication", str(path)],
+                                            capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("invalid storage publication receipt", result.stderr)
 
     def test_database_receipts_require_both_exact_inventories_and_version(self):
         good = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"

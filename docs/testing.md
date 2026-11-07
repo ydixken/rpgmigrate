@@ -66,6 +66,14 @@ Its report records two authority faults and four replication observations.
 It also rejects absent or incorrect suite receipts and empty or skipped unit suites.
 Missing tools and failed commands are failures.
 
+`task test` also runs `test-storage-publication` after the format and recovery suites.
+This development-only check starts 22 fresh child processes: 20 publication-boundary kills and two complete traces across SQLite and the segmented journal.
+Each killed case must reopen against an external required prefix, append the next transaction, and verify the full retained history.
+The task creates a private directory under `target/storage-publication.*` and requires its nonempty `run/report.json` before emitting the receipt.
+The existing CI test stage requires exactly one 22-case, 20-continuation receipt in addition to the Rust and three Python suite receipts.
+Redb remains a development comparison with a known read-only corruption qualification failure; it is outside this publication matrix.
+Process kills do not qualify power-loss durability, pruning, quotas, target acknowledgements, or production backend selection.
+
 Each run exports one JSON report capped at 64 KiB.
 It contains stage results, observed suite counts, the source snapshot hash, image ID and base digest, package and tool versions, native build identity, and executable hash.
 We export structured evidence instead of raw command output because failing database tests can expose connection strings or fixture passwords.
@@ -95,6 +103,12 @@ The replication profile also requires the `test_decoding` plugin from that Postg
 
    ```sh
    task test-db-self-check test-db
+   ```
+
+4. Run only the development publication/recovery matrix in fresh storage.
+
+   ```sh
+   task test-storage-publication
    ```
 
 For focused live tests, choose one of these **examples**:
@@ -174,7 +188,7 @@ The [container guide](container.md) describes artifact identity, smoke checks, a
 > [!important]
 > A successful local report qualifies only its recorded architecture, PostgreSQL fixture, and source snapshot.
 > Configured workflow jobs do not prove a successful GitHub run.
-> The source fixture does not qualify the PostgreSQL 14–18 operator matrix, PG9.6/test_decoding, TimescaleDB, CDC, recovery, power-loss durability, or performance.
+> The source fixture does not qualify the PostgreSQL 14–18 operator matrix, PG9.6/test_decoding, TimescaleDB, runtime CDC, production recovery, power-loss durability, or performance.
 > Runtime packaging requires its separate exact-artifact smoke and publication gates.
 
 Run those gates under their approved plans before claiming the corresponding support.

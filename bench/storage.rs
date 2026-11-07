@@ -1674,11 +1674,723 @@ pub mod c1 {
     }
 }
 
+pub mod c2 {
+    use super::*;
+    use FaultPoint::*;
+    use config::{Candidate, FaultPoint, Store};
+    use format::{Record, TxSeq};
+
+    const SQLITE_TRACE: &[FaultPoint] = &[
+        BeforeAppend,
+        AfterAppend,
+        BeforeAppend,
+        AfterAppend,
+        BeforeCatalogCommit,
+        AfterCatalogCommit,
+        BeforeCatalogDirectorySync,
+        AfterCatalogDirectorySync,
+        BeforeReceiveReturn,
+    ];
+    const SEGMENTED_TRACE: &[FaultPoint] = &[
+        BeforeAppend,
+        BeforeRotationSync,
+        AfterRotationSync,
+        AfterAppend,
+        BeforeAppend,
+        AfterAppend,
+        BeforeFileSync,
+        AfterFileSync,
+        BeforeDirectorySync,
+        AfterDirectorySync,
+        BeforeCatalogCommit,
+        AfterCatalogCommit,
+        BeforeCatalogDirectorySync,
+        AfterCatalogDirectorySync,
+        BeforeReceiveReturn,
+    ];
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Job {
+        pub candidate: Candidate,
+        pub stop: Option<FaultPoint>,
+    }
+
+    impl Job {
+        pub fn trace(&self) -> &'static [FaultPoint] {
+            let trace = match self.candidate {
+                Candidate::Sqlite => SQLITE_TRACE,
+                Candidate::Segmented => SEGMENTED_TRACE,
+                Candidate::Redb => return &[],
+            };
+            match self.stop {
+                Some(point) => trace
+                    .iter()
+                    .position(|hit| *hit == point)
+                    .map_or(&[], |index| &trace[..index + 1]),
+                None => trace,
+            }
+        }
+
+        pub fn required_prefix(&self) -> u64 {
+            match self.stop {
+                None
+                | Some(
+                    AfterCatalogCommit
+                    | BeforeCatalogDirectorySync
+                    | AfterCatalogDirectorySync
+                    | BeforeReceiveReturn,
+                ) => 2,
+                _ => 1,
+            }
+        }
+    }
+
+    pub fn schedule() -> Vec<Job> {
+        let mut jobs = Vec::new();
+        for candidate in [Candidate::Segmented, Candidate::Sqlite] {
+            let complete = Job {
+                candidate,
+                stop: None,
+            };
+            let mut seen = Vec::new();
+            for point in complete.trace() {
+                if !seen.contains(point) {
+                    seen.push(*point);
+                    jobs.push(Job {
+                        candidate,
+                        stop: Some(*point),
+                    });
+                }
+            }
+            jobs.push(complete);
+        }
+        jobs
+    }
+
+    pub fn configuration(root: &Path) -> Result<config::Config> {
+        let manifest = parse_manifest(CASES)?;
+        let mut cfg = config_for(
+            root,
+            &manifest,
+            super::Job {
+                case: 0,
+                candidate: 0,
+                repetition: 0,
+            },
+        );
+        cfg.dir = root.join("store");
+        cfg.limits.max_frame_bytes = 128;
+        cfg.batch_bytes = 256;
+        cfg.segment_bytes = 256;
+        Ok(cfg)
+    }
+
+    pub fn records(cfg: &config::Config) -> Vec<Record> {
+        let mut records = Vec::with_capacity(4);
+        for (order, begin, byte) in [(1, 20, 0x31), (2, 10, 0x32)] {
+            let tx = format::TxId {
+                stream: cfg.stream,
+                xid: 7,
+                begin_ordinal: begin,
+            };
+            records.push(Record::Frame(format::Frame {
+                tx,
+                event_ordinal: 0,
+                part: 0,
+                last_part: true,
+                payload: vec![byte; 40],
+            }));
+            records.push(Record::Completed(format::CompletedTx {
+                tx,
+                order: TxSeq(order),
+                commit: None,
+                end: format::SourceEndLsn(11),
+                event_count: 1,
+                encoded_bytes: 256,
+            }));
+        }
+        records
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Phase {
+        Ready,
+        Hit,
+        Returned,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Message {
+        pub version: u32,
+        pub case: usize,
+        pub candidate: String,
+        pub pid: u32,
+        pub phase: Phase,
+        pub ordinal: usize,
+        pub point: Option<FaultPoint>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Ready {
+        message: Message,
+        settings: serde_json::Value,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CallerOutcome {
+        Unknown,
+        Returned,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Continuation {
+        pub prefix: u64,
+        pub input_crc32: u32,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Receipt {
+        pub version: u32,
+        pub case: usize,
+        pub candidate: String,
+        pub pid: u32,
+        pub hits: Vec<FaultPoint>,
+        pub caller_outcome: CallerOutcome,
+        pub required_prefix: u64,
+        pub input_crc32: u32,
+        pub settings: serde_json::Value,
+        pub continuation: Option<Continuation>,
+    }
+
+    fn require(ok: bool, message: &'static str) -> Result<()> {
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Workload(message))
+        }
+    }
+
+    fn job(case: usize) -> Result<Job> {
+        schedule()
+            .get(case)
+            .copied()
+            .ok_or(Error::Workload("unknown C2 case"))
+    }
+
+    fn validate_identity(message: &Message, case: usize, pid: u32) -> Result<Job> {
+        let job = job(case)?;
+        require(
+            message.version == 1
+                && message.case == case
+                && pid != 0
+                && message.pid == pid
+                && message.candidate == candidate_name(job.candidate),
+            "C2 message differs from owned child identity",
+        )?;
+        Ok(job)
+    }
+
+    pub fn validate_hit(message: &Message, case: usize, pid: u32, ordinal: usize) -> Result<()> {
+        let job = validate_identity(message, case, pid)?;
+        let expected = ordinal
+            .checked_sub(1)
+            .and_then(|index| job.trace().get(index))
+            .copied();
+        require(
+            expected.is_some()
+                && message.phase == Phase::Hit
+                && message.ordinal == ordinal
+                && message.point == expected,
+            "C2 boundary hit is absent or out of order",
+        )
+    }
+
+    fn check_settings(candidate: Candidate, settings: &serde_json::Value) -> Result<()> {
+        let sqlite = if candidate == Candidate::Segmented {
+            &settings["catalog"]
+        } else {
+            settings
+        };
+        let pragmas = &sqlite["effective_pragmas"];
+        require(
+            pragmas["journal_mode"] == "wal"
+                && pragmas["synchronous"] == 2
+                && pragmas["fullfsync"] == 1
+                && pragmas["checkpoint_fullfsync"] == 1
+                && pragmas["mmap_size"] == 0
+                && pragmas["wal_autocheckpoint"] == 0,
+            "C2 effective SQLite settings differ",
+        )
+    }
+
+    pub fn validate_receipts(
+        receipts: &[Receipt],
+        pids: &[u32],
+        crc: [u32; 2],
+        continuation_crc: [u32; 2],
+    ) -> Result<()> {
+        let jobs = schedule();
+        require(
+            jobs.len() == 22 && receipts.len() == 22 && pids.len() == 22,
+            "C2 omitted required fault coverage",
+        )?;
+        for (index, (receipt, job)) in receipts.iter().zip(jobs).enumerate() {
+            let prefix = job.required_prefix();
+            let outcome = if job.stop.is_some() {
+                CallerOutcome::Unknown
+            } else {
+                CallerOutcome::Returned
+            };
+            require(
+                receipt.version == 1
+                    && receipt.case == index
+                    && receipt.pid != 0
+                    && receipt.pid == pids[index]
+                    && receipt.candidate == candidate_name(job.candidate)
+                    && !receipt.hits.is_empty()
+                    && receipt.hits == job.trace()
+                    && receipt.caller_outcome == outcome
+                    && receipt.required_prefix == prefix
+                    && receipt.input_crc32 == crc[prefix as usize - 1],
+                "C2 receipt differs from scheduled publication proof",
+            )?;
+            check_settings(job.candidate, &receipt.settings)?;
+            let continuation = job.stop.map(|_| Continuation {
+                prefix: prefix + 1,
+                input_crc32: continuation_crc[prefix as usize - 1],
+            });
+            require(
+                receipt.continuation == continuation,
+                "C2 restart continuation proof differs",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn encoded(record: &Record, cfg: &config::Config) -> Result<Vec<u8>> {
+        Ok(match record {
+            Record::Frame(frame) => format::encode_frame(frame, cfg.limits)?,
+            Record::Completed(tx) => format::encode_completed(tx, cfg.limits)?.to_vec(),
+        })
+    }
+
+    fn input_crc(cfg: &config::Config, through: u64) -> Result<u32> {
+        records_crc(cfg, &records(cfg)[..through as usize * 2])
+    }
+
+    fn records_crc(cfg: &config::Config, records: &[Record]) -> Result<u32> {
+        let mut checksum = format::StreamingChecksum::new();
+        for record in records {
+            checksum.update(&encoded(record, cfg)?);
+        }
+        Ok(checksum.finish())
+    }
+
+    pub fn verify_prefix(store: &Store, cfg: &config::Config, through: u64) -> Result<u32> {
+        require(
+            (1..=2).contains(&through),
+            "C2 required prefix must come from its oracle",
+        )?;
+        let input = records(cfg);
+        let expected = &input[..through as usize * 2];
+        verify_records(store, cfg, expected, through)
+    }
+
+    fn verify_records(
+        store: &Store,
+        cfg: &config::Config,
+        expected: &[Record],
+        through: u64,
+    ) -> Result<u32> {
+        let Record::Completed(descriptor) = expected[expected.len() - 1] else {
+            unreachable!()
+        };
+        let mut checksum = format::StreamingChecksum::new();
+        let mut seen = 0;
+        store.with_read_view(|view| {
+            let head = view.head();
+            require(
+                head.receive_revision == through
+                    && head.apply_revision == 0
+                    && head.next_record.get() == through * 2 + 1
+                    && head.published == Some(descriptor)
+                    && head.consumer_cursor == TxSeq(0),
+                "C2 recovered catalog cut differs",
+            )?;
+            view.scan_complete(TxSeq(0), |record| {
+                require(
+                    expected.get(seen) == Some(record),
+                    "C2 scan differs from independent input",
+                )?;
+                seen += 1;
+                checksum.update(&encoded(record, cfg)?);
+                Ok(())
+            })
+        })?;
+        require(seen == expected.len(), "C2 scan omitted required records")?;
+        let crc = checksum.finish();
+        require(
+            crc == records_crc(cfg, expected)?,
+            "C2 recovered input checksum differs",
+        )?;
+        Ok(crc)
+    }
+
+    pub fn continue_recovered(store: &mut Store, cfg: &config::Config, cut: u64) -> Result<u32> {
+        let input = restart_records(cfg, cut)?;
+        let Record::Frame(frame) = &input[input.len() - 2] else {
+            unreachable!()
+        };
+        let Record::Completed(tx) = &input[input.len() - 1] else {
+            unreachable!()
+        };
+        let stats = store.with_receive(cut, |batch| {
+            batch.append(frame)?;
+            batch.complete(tx)
+        })?;
+        require(
+            stats.frames == 1
+                && stats.completed == 1
+                && stats.encoded_bytes == 256
+                && stats.receive_revision == cut + 1
+                && stats.durable_frontier == TxSeq(cut + 1),
+            "C2 restarted receive result differs",
+        )?;
+        verify_records(store, cfg, &input, cut + 1)
+    }
+
+    fn restart_records(cfg: &config::Config, cut: u64) -> Result<Vec<Record>> {
+        require(
+            (1..=2).contains(&cut),
+            "C2 restart cut must come from its oracle",
+        )?;
+        let mut input = records(cfg);
+        input.truncate(cut as usize * 2);
+        let tx = format::TxId {
+            stream: cfg.stream,
+            xid: 7,
+            begin_ordinal: if cut == 1 { 30 } else { 40 },
+        };
+        input.push(Record::Frame(format::Frame {
+            tx,
+            event_ordinal: 0,
+            part: 0,
+            last_part: true,
+            payload: vec![if cut == 1 { 0x32 } else { 0x33 }; 40],
+        }));
+        input.push(Record::Completed(format::CompletedTx {
+            tx,
+            order: TxSeq(cut + 1),
+            commit: None,
+            end: format::SourceEndLsn(11),
+            event_count: 1,
+            encoded_bytes: 256,
+        }));
+        Ok(input)
+    }
+
+    fn raw_history(candidate: Candidate, cfg: &config::Config) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+        let mut history = Vec::new();
+        if candidate == Candidate::Segmented {
+            for entry in fs::read_dir(&cfg.dir)? {
+                let path = entry?.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".data"))
+                {
+                    history.push((path.clone(), fs::read(path)?));
+                }
+            }
+            require(!history.is_empty(), "C2 raw history capture was empty")?;
+        }
+        Ok(history)
+    }
+
+    impl Message {
+        fn at(
+            case: usize,
+            phase: Phase,
+            ordinal: usize,
+            point: Option<FaultPoint>,
+        ) -> Result<Self> {
+            Ok(Self {
+                version: 1,
+                case,
+                candidate: candidate_name(job(case)?.candidate).into(),
+                pid: std::process::id(),
+                phase,
+                ordinal,
+                point,
+            })
+        }
+    }
+
+    fn transaction(
+        store: &mut Store,
+        cfg: &config::Config,
+        order: usize,
+        observer: Option<&config::FaultObserver<'_>>,
+    ) -> Result<config::BatchStats> {
+        let input = records(cfg);
+        let Record::Frame(frame) = &input[(order - 1) * 2] else {
+            unreachable!()
+        };
+        let Record::Completed(tx) = &input[order * 2 - 1] else {
+            unreachable!()
+        };
+        let write = |batch: &mut config::BatchWriter<'_>| {
+            batch.append(frame)?;
+            batch.complete(tx)
+        };
+        let stats = match observer {
+            Some(observer) => store.with_receive_observed(order as u64 - 1, write, observer)?,
+            None => store.with_receive(order as u64 - 1, write)?,
+        };
+        require(
+            stats.frames == 1
+                && stats.completed == 1
+                && stats.encoded_bytes == 256
+                && stats.receive_revision == order as u64
+                && stats.durable_frontier == TxSeq(order as u64),
+            "C2 public receive result differs from input",
+        )?;
+        Ok(stats)
+    }
+
+    pub fn child(root: &Path, case: usize) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let job = job(case)?;
+        let metadata = fs::symlink_metadata(root)?;
+        require(
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.permissions().mode() & 0o777 == 0o700,
+            "C2 child root is not private",
+        )?;
+        let cfg = configuration(root)?;
+        let channel = c1::Channel::new(
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+            Instant::now() + Duration::from_secs(300),
+        )?;
+        let mut store = Store::create(job.candidate, &cfg)?;
+        transaction(&mut store, &cfg, 1, None)?;
+        channel.send(&Ready {
+            message: Message::at(case, Phase::Ready, 0, None)?,
+            settings: store.settings()?,
+        })?;
+        require(
+            channel.receive::<String>()? == "start",
+            "C2 start command differs",
+        )?;
+        let ordinal = std::cell::Cell::new(0_usize);
+        transaction(
+            &mut store,
+            &cfg,
+            2,
+            Some(&|point| {
+                let next = ordinal.get().checked_add(1).ok_or(Error::Overflow)?;
+                ordinal.set(next);
+                channel.send(&Message::at(case, Phase::Hit, next, Some(point))?)?;
+                require(
+                    channel.receive::<String>()? == "continue",
+                    "C2 boundary command differs",
+                )
+            }),
+        )?;
+        channel.send(&Message::at(case, Phase::Returned, ordinal.get(), None)?)
+    }
+
+    struct Worker {
+        child: Child,
+        channel: c1::Channel,
+        _input: std::process::ChildStdin,
+        _output: std::process::ChildStdout,
+    }
+
+    impl Worker {
+        fn spawn(root: &Path, case: usize, deadline: Instant) -> Result<Self> {
+            use std::os::fd::AsRawFd;
+            let mut child = Command::new(std::env::current_exe()?)
+                .arg("--c2-child")
+                .arg(root)
+                .arg(case.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let input = child.stdin.take().expect("piped C2 stdin");
+            let output = child.stdout.take().expect("piped C2 stdout");
+            match c1::Channel::new(output.as_raw_fd(), input.as_raw_fd(), deadline) {
+                Ok(channel) => Ok(Self {
+                    child,
+                    channel,
+                    _input: input,
+                    _output: output,
+                }),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = wait_child(&mut child, Duration::from_secs(2));
+                    Err(error)
+                }
+            }
+        }
+
+        fn kill_at(&mut self, hit: &Message, case: usize, ordinal: usize) -> Result<()> {
+            use std::os::unix::process::ExitStatusExt;
+            validate_hit(hit, case, self.child.id(), ordinal)?;
+            require(
+                job(case)?.stop == hit.point,
+                "C2 kill point differs from schedule",
+            )?;
+            self.child.kill()?;
+            require(
+                matches!(
+                    wait_child(&mut self.child, Duration::from_secs(2)),
+                    Err(Error::Workload("storage child failed"))
+                ),
+                "C2 killed child was not reaped",
+            )?;
+            require(
+                self.child
+                    .try_wait()?
+                    .is_some_and(|status| status.signal() == Some(libc::SIGKILL)),
+                "C2 child did not exit from the owned kill",
+            )?;
+            self.channel.require_eof()
+        }
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            if !matches!(self.child.try_wait(), Ok(Some(_))) {
+                let _ = self.child.kill();
+                let _ = wait_child(&mut self.child, Duration::from_secs(2));
+            }
+        }
+    }
+
+    pub fn parent(root: &Path) -> Result<()> {
+        fs::DirBuilder::new().mode(0o700).create(root)?;
+        let root = root.canonicalize()?;
+        let cfg = configuration(&root)?;
+        let crc = [input_crc(&cfg, 1)?, input_crc(&cfg, 2)?];
+        let continuation_crc = [
+            records_crc(&cfg, &restart_records(&cfg, 1)?)?,
+            records_crc(&cfg, &restart_records(&cfg, 2)?)?,
+        ];
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let mut pids = Vec::new();
+        let mut receipts = Vec::new();
+        for (case, job) in schedule().iter().enumerate() {
+            let job_root = root.join(format!("{case:02}-{}", candidate_name(job.candidate)));
+            fs::DirBuilder::new().mode(0o700).create(&job_root)?;
+            let cfg = configuration(&job_root)?;
+            let mut worker = Worker::spawn(&job_root, case, deadline)?;
+            let pid = worker.child.id();
+            pids.push(pid);
+            let ready: Ready = worker.channel.receive()?;
+            validate_identity(&ready.message, case, pid)?;
+            require(
+                ready.message.phase == Phase::Ready
+                    && ready.message.ordinal == 0
+                    && ready.message.point.is_none(),
+                "C2 baseline receipt differs",
+            )?;
+            check_settings(job.candidate, &ready.settings)?;
+            let baseline = Store::open_role(job.candidate, &cfg, config::Role::Status, TxSeq(1))?;
+            require(
+                verify_prefix(&baseline, &cfg, 1)? == crc[0],
+                "C2 baseline input differs",
+            )?;
+            drop(baseline);
+            worker.channel.send(&"start")?;
+            let mut hits = Vec::new();
+            for ordinal in 1..=job.trace().len() {
+                let hit: Message = worker.channel.receive()?;
+                validate_hit(&hit, case, pid, ordinal)?;
+                hits.push(hit.point.ok_or(Error::Workload("C2 missing boundary"))?);
+                if job.stop.is_some() && ordinal == job.trace().len() {
+                    worker.kill_at(&hit, case, ordinal)?;
+                } else {
+                    worker.channel.send(&"continue")?;
+                }
+            }
+            if job.stop.is_none() {
+                let returned: Message = worker.channel.receive()?;
+                validate_identity(&returned, case, pid)?;
+                require(
+                    returned.phase == Phase::Returned
+                        && returned.point.is_none()
+                        && returned.ordinal == job.trace().len(),
+                    "C2 public return was omitted",
+                )?;
+                worker.channel.require_eof()?;
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(Error::Workload("C2 run exceeded its deadline"))?;
+                wait_child(&mut worker.child, remaining)?;
+            }
+            let prefix = job.required_prefix();
+            let history = raw_history(job.candidate, &cfg)?;
+            let mut store = Store::reopen(job.candidate, &cfg, TxSeq(prefix))?;
+            let input_crc32 = verify_prefix(&store, &cfg, prefix)?;
+            check_settings(job.candidate, &store.settings()?)?;
+            let continuation = if job.stop.is_some() {
+                Some(Continuation {
+                    prefix: prefix + 1,
+                    input_crc32: continue_recovered(&mut store, &cfg, prefix)?,
+                })
+            } else {
+                None
+            };
+            for (path, bytes) in history {
+                require(
+                    fs::read(path)? == bytes,
+                    "C2 restart changed retained raw history",
+                )?;
+            }
+            receipts.push(Receipt {
+                version: 1,
+                case,
+                candidate: candidate_name(job.candidate).into(),
+                pid,
+                hits,
+                caller_outcome: if job.stop.is_some() {
+                    CallerOutcome::Unknown
+                } else {
+                    CallerOutcome::Returned
+                },
+                required_prefix: prefix,
+                input_crc32,
+                settings: ready.settings,
+                continuation,
+            });
+        }
+        validate_receipts(&receipts, &pids, crc, continuation_crc)?;
+        write_json(
+            &root.join("report.json"),
+            &serde_json::json!({"version":1,
+            "qualification":"development-only process-crash publication/reopen; all history retained; not power-loss",
+            "receipts":receipts}),
+        )?;
+        File::open(&root)?.sync_all()?;
+        Ok(())
+    }
+}
+
 pub fn run(args: &[OsString]) -> Result<()> {
     let manifest = parse_manifest(CASES)?;
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!(
-            "Usage: storage --root NEW_DIRECTORY | --c1-root NEW_DIRECTORY\nRun the storage pilot or C1 role checks in fresh children; existing directories are refused.\nC1 consumer cursors measure read progress only."
+            "Usage: storage --root NEW_DIRECTORY | --c1-root NEW_DIRECTORY | --c2-root NEW_DIRECTORY\nRun development-only storage checks in fresh children; existing directories are refused.\nC1 consumer cursors measure read progress only; C2 process kills do not prove power-loss durability."
         );
         return Ok(());
     }
@@ -1687,6 +2399,16 @@ pub fn run(args: &[OsString]) -> Result<()> {
     }
     if args.len() == 2 && args[0] == "--c1-root" {
         return c1::parent(Path::new(&args[1]));
+    }
+    if args.len() == 2 && args[0] == "--c2-root" {
+        return c2::parent(Path::new(&args[1]));
+    }
+    if args.len() == 3 && args[0] == "--c2-child" {
+        let case = args[2]
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or(Error::Workload("unknown C2 case"))?;
+        return c2::child(Path::new(&args[1]), case);
     }
     if args.len() == 4 && args[0] == "--c1-child" {
         let name = args[2]
@@ -1731,7 +2453,7 @@ pub fn run(args: &[OsString]) -> Result<()> {
         );
     }
     Err(Error::Workload(
-        "expected --root, --c1-root NEW_DIRECTORY or --help",
+        "expected --root, --c1-root, --c2-root NEW_DIRECTORY or --help",
     ))
 }
 

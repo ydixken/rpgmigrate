@@ -556,9 +556,10 @@ Pruning, quotas, target proof integration, broader faults, power-loss behavior, 
 ## C2 publication and recovery experiment
 
 - [x] Freeze the explicit 13-point observer contract for the development driver, common facade, and SQLite/journal hooks.
-- [ ] Complete independent reviews and integrate the frozen C2 files in a separate snapshot.
-- [ ] Verify the required 20 process-kill cases and two complete traces against external record and prefix oracles.
-- [ ] After every killed child, append the next parent-constructed transaction through a fresh Receive handle and verify the full retained history.
+- [x] Complete independent reviews and integrate the frozen C2 files in a separate snapshot.
+- [x] Register the publication driver in default Task/CI verification with a fresh private root and a required 22-case, 20-continuation receipt.
+- [x] Verify the required 20 process-kill cases and two complete traces against external record and prefix oracles.
+- [x] After every killed child, append the next parent-constructed transaction through a fresh Receive handle and verify the full retained history.
 
 The contract retains the existing receive API and adds a shared per-call observer without global or environment hooks.
 The expected prefix is one before catalog COMMIT and two after it; a killed caller's original result remains unknown.
@@ -567,6 +568,33 @@ The continuation must preserve earlier records and orphan raw history while prov
 C2 remains a development-only process-crash experiment with all history retained.
 It does not qualify power-loss behavior, pruning, quotas, retirement, target proofs, production storage selection, or redb's known read-only corruption gap.
 Its source, tests, and inventory changes stay outside the tooling snapshot.
+Independent common/driver review passed nine focused tests, the 22-job matrix, and all 20 post-crash continuations.
+Independent SQLite review passed 42 focused tests, including all nine C2 cases; one older child-process test was outside that review's execution constraints.
+The author's complete 43-test SQLite run and 164-test aggregate remain separate evidence.
+The 164-test aggregate and 22-child report bind the pre-fix journal; they do not validate its replacement hash.
+Journal review found that a caller could catch an observer panic inside the raw callback before its failure latch was set, then commit that raw batch.
+The common guard contains this path; the journal author corrected the raw failure latch and observed the new regression fail before all 28 journal tests passed.
+Independent journal re-review passed SHA-256 `31049754bf86c48acf0257c7aa1b66595b92f533a9a3a21bf2960c42e2128de4`: one fresh regression passed, and the exact inverse reproduced the reviewed pre-fix source.
+That result closes the raw-journal finding; the author's 28-test run remains separate evidence.
+The distinct high-effort wiring review passed the four frozen Task/CI files with no findings.
+Its 60 scoped tests, 70 report refusal probes, and seven existing receipt refusal probes passed; it inspected the actual driver route and validate-before-report boundary without running Rust or process-crash tests.
+The [wiring review](../target/verify/c2-gate-review-py95_lmn/review.txt) records the exact file hashes and scope.
+Derive the final test inventory from actual discovery after that freeze; do not promote the anticipated count to a result.
+The focused integration uses tooling commit `15a4222` plus the five C2 files, Task/CI registration tests, and affected documentation.
+Restore the driver's committed development-codec import only in the export, preserving the primary E2 path retarget and excluding runtime, Cargo, and catalog-profile changes.
+The default gate retains 11 CI stages and three Python suite receipts, with one additional publication receipt required inside the existing test stage.
+The registration passed 36 Task tests, 24 verifier tests, and the full 152-test CI unit aggregate after observed failing tests for the missing task, validator, and required receipt.
+The [wiring proposal](../target/verify/c2-gate-wiring-_sljty6r/proposal.json) records the 13 selected paths and their hashes; it is not a frozen C2 tree or Rust qualification receipt.
+The selected export discovered 165 recovery tests, and the Task inventory guard requires that exact count.
+The [C2 gate receipt](../target/verify/c2-integration-5qpi5dva/gate-results.json) binds tested tree `d711ec2c73343e81bf1dd50d2ddad94264ed04bb` and all 114 exported files.
+On macOS arm64 with Rust 1.99.1, `task check lint test` passed 322 Rust tests and 63 Python tests, including the exact 165-test recovery inventory.
+The same export passed all 152 CI unit tests, strict YAML validation, and Python compilation checks.
+Its automatic publication gate observed 22 distinct children: 14 segmented-journal cases and eight SQLite cases, with 20 unknown killed-caller outcomes and two returned complete traces.
+All 20 recovery continuations passed: 12 reached external prefix two and eight reached prefix three.
+The fresh report SHA-256 is `dc2a4d45349c48d09efe28c92a41486db5b400b7a3b37655abb119bc400f1614`.
+The copied controlled native artifact passed verification; its macOS install name retains the original immutable local prefix, so this is not relocation evidence.
+No runtime source, Cargo dependency, catalog profile, or snapshot-anchor spec change belongs to this integration.
+Hosted regression on both architectures remains separate from this local C2 result.
 
 ## Publication and tooling boundary
 
@@ -583,7 +611,7 @@ The C1 run [42314615234](https://github.com/ydixken/rpgmigrate/actions/runs/4231
 
 - [x] Replace repository Make orchestration and active commands with one root Taskfile, preserving the 21 task names, default check, and help.
 - [x] Use one standard-library bootstrap helper and canonical Task 3.54.0 pins across local, CI, and container execution.
-- [ ] Complete hosted native amd64 and arm64 CI gates against the same exported runtime image artifacts.
+- [x] Complete hosted native amd64 and arm64 CI gates against the same exported runtime image artifacts.
 - [x] Build the current-CLI runtime image and pass its 23 checks on the local native arm64 fixture.
 - [x] Configure version-tag-only publication to ghcr.io/ydixken/rpgmigrate after exact-artifact gates, without creating a tag or release.
 
@@ -592,7 +620,7 @@ Routine future implementation and tooling workers use high effort, while recover
 The immutable C1 export released existing CI, harness-adapter, and codec paths without changing its tested source.
 The tooling export uses C1 as its base and includes only reviewed Task, CI, image, harness-adapter, and root-documentation changes.
 It excludes canonical codec, decoder, catalog-loader, test-only PG helper, DML planner, and C2 changes.
-Task has 26 tasks, including the original 21 names, default check, help, Linux CI, image build, and image smoke.
+The tooling snapshot has 26 tasks, including the original 21 names, default check, help, Linux CI, image build, and image smoke.
 Its 33 scoped tests and both environment/CLI override and command-prefix corrections passed independent re-review.
 The CI offline inventory derives its exact nonempty suite counts from the source, including the updated Task tests.
 The 71-case aggregate omitted the image build, runtime, and smoke unit modules.
@@ -626,7 +654,10 @@ Those results retain their original-tree attribution; every Rust, Cargo, Task, h
 The six changed packaging/test files received fresh static, image, and smoke checks.
 The local Skopeo 1.22.2 data-copy check preserved a two-platform fixture index and all seven blobs without running fixture binaries or contacting a registry.
 This is not native amd64 qualification or a publication result.
-Hosted verification of the committed tooling tree remains open, and no image tag or release was created.
+Hosted [run 42320992263](https://github.com/ydixken/rpgmigrate/actions/runs/42320992263) passed native arm64 and amd64 verification for tooling commit `15a42229de6237c5860406d0f3bc39b0758dad0f`.
+Each architecture passed all 11 source stages with 146 CI unit, 298 Rust, 63 Python, engine39, and COPY40 checks, followed by exact-artifact image build, smoke, and receipt binding.
+The downloaded bounded verification artifacts match their GitHub SHA-256 values and the same source hash on both architectures.
+Native image transfer and publication were skipped for this feature-branch push, and no image tag or release was created.
 
 ## Canonical codec and decoder delivery
 
@@ -672,6 +703,7 @@ The planner author reports 20 failing stub tests followed by 20 passing unit tes
 Its scoped strict Clippy run still failed with 92 reported dead-code diagnostics across staged E2/E3 code; formatting and whitespace checks passed.
 Independent planner review passed the exact source and 20 focused tests without a ranked defect.
 Real consumer wiring, transaction poisoning for local plan/bind failures, and a clean integrated warning gate remain required.
+Serial-apply integration depends on the budgeted event-decoding and target transaction/preflight interface proposals; their separate owners must use isolated Cargo targets after implementation release.
 The next clone/follow bootstrap also requires a separate logged COPY snapshot-anchor contract.
 The native COPY receipt is not an atomic logged target anchor, and a barrier over an empty checkpoint proves zero CDC transactions rather than COPY coverage.
 Do not substitute a synthetic transaction for that missing contract.

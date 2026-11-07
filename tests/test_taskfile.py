@@ -25,7 +25,7 @@ TARGETS = {"check", "fmt-check", "lint", "native", "native-check", "build", "tes
            "test-cli", "test-native", "test-harness", "test-storage-format", "test-storage-recovery",
            "storage-pilot", "test-db", "test-engine", "test-transport", "test-prepared",
            "test-replication", "test-authority", "test-db-self-check", "default", "help", "ci:linux", "image:build",
-           "image:smoke"}
+           "image:smoke", "test-storage-publication"}
 FORWARDED = ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG_PATH", "PG_BINDIR", "PG_CONFIG",
              "CARGO_TARGET_DIR", "RPGMIGRATE_BIN", "RPGMIGRATE_TEST_EXPECTED_PG_VERSION",
              "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM")
@@ -149,12 +149,27 @@ with open(os.environ["CALL_LOG"], "a") as out:
 if args and args[0].endswith(".py") and not pathlib.Path(args[0]).is_file():
     sys.exit(2)
 if "--list" in args:
-    default = "31" if "storage_format" in args else "141" if "storage_recovery" in args else "1"
+    default = "31" if "storage_format" in args else "165" if "storage_recovery" in args else "1"
     count = int(os.environ.get("DISCOVERY_COUNT", default))
     for number in range(count):
         print(f"case_{number}: test")
 if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
     sys.exit(9)
+if "--c2-root" in args:
+    root = pathlib.Path(args[args.index("--c2-root") + 1])
+    if root.exists() or root.parent.stat().st_mode & 0o777 != 0o700:
+        sys.exit(8)
+    root.mkdir(mode=0o700)
+    receipts = [{"version": 1, "case": i, "candidate": "segmented" if i < 14 else "sqlite",
+                 "pid": i + 100, "hits": ["before_append"], "settings": {}, "input_crc32": 123,
+                 "required_prefix": 2, "caller_outcome": "returned" if i in (13, 21) else "unknown",
+                 "continuation": None if i in (13, 21) else {"prefix": 3, "input_crc32": 456}}
+                for i in range(22)]
+    mode = os.environ.get("PUBLICATION_REPORT", "valid")
+    if mode != "missing":
+        (root / "report.json").write_text(json.dumps({"version": 1, "receipts": receipts if mode == "valid" else []}))
+if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
+    os.execv(sys.executable, [sys.executable, *args])
 '''
         for name in ("cargo", "python3", "chosen cargo", "chosen python"):
             path = self.bin / name
@@ -165,6 +180,9 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             fixture = self.root / path
             fixture.parent.mkdir(parents=True, exist_ok=True)
             fixture.touch()
+        verifier = self.root / "tools/ci/verify.py"
+        verifier.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "tools/ci/verify.py", verifier)
 
     def run_task(self, *args, env=None):
         return subprocess.run([str(self.binary), *FLAGS, *args], cwd=self.root,
@@ -286,9 +304,11 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.assertEqual(self.calls(), [])
 
     def test_all_local_suites_run_sequentially(self):
-        self.passed(self.run_task("test"))
+        result = self.run_task("test")
+        self.passed(result)
         calls = [row["argv"] for row in self.calls()]
-        self.assertEqual(calls, [
+        self.assertIn("Storage publication verified 22 cases and 20 continuations\n", result.stdout)
+        self.assertEqual(calls[:-3], [
             ["tools/build-libpq.py", "--verify"],
             ["test", "--locked", "--lib", "--", "--list", *FILTERS],
             ["test", "--locked", "--lib", "--bins", "--", *FILTERS],
@@ -301,6 +321,36 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             ["test", "--locked", "--test", "storage_recovery", "--", "--list"],
             ["test", "--locked", "--test", "storage_recovery", "--", "--include-ignored", "--test-threads=1"],
         ])
+        self.assertEqual(calls[-3], ["tools/build-libpq.py", "--verify"])
+        self.assertEqual(calls[-2][:-1], ["run", "--locked", "--example", "storage", "--", "--c2-root"])
+        self.assertEqual(calls[-1], ["tools/ci/verify.py", "--storage-publication", calls[-2][-1] + "/report.json"])
+
+    def test_publication_uses_a_new_private_root_on_every_run(self):
+        roots = []
+        for _ in range(2):
+            result = self.run_task("test-storage-publication")
+            self.passed(result)
+            self.assertEqual(result.stdout, "Storage publication verified 22 cases and 20 continuations\n")
+            root = Path(self.calls()[-2]["argv"][-1])
+            self.assertEqual(root.parent.parent, self.root / "target")
+            self.assertEqual(root.parent.stat().st_mode & 0o777, 0o700)
+            self.assertTrue((root / "report.json").is_file())
+            roots.append(root)
+        self.assertNotEqual(*roots)
+
+    def test_publication_missing_or_empty_report_cannot_pass(self):
+        for mode in ("missing", "empty"):
+            with self.subTest(mode=mode):
+                result = self.run_task("test-storage-publication", env={"PUBLICATION_REPORT": mode})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid storage publication receipt", result.stderr)
+                self.assertNotIn("Storage publication verified", result.stdout)
+
+    def test_publication_command_failure_cannot_emit_a_receipt(self):
+        result = self.run_task("test-storage-publication", env={"FAIL_MATCH": "--c2-root"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertNotIn("Storage publication verified", result.stdout)
 
     def test_unit_discovery_and_filters(self):
         self.passed(self.run_task("test-unit"))
@@ -317,7 +367,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.assertEqual(len(self.calls()), 2)
 
     def test_exact_storage_inventory(self):
-        for name, count in (("storage-format", 31), ("storage-recovery", 141)):
+        for name, count in (("storage-format", 31), ("storage-recovery", 165)):
             for actual in (0, count - 1, count, count + 1):
                 with self.subTest(name=name, actual=actual):
                     result = self.run_task("test-" + name, env={"DISCOVERY_COUNT": str(actual)})
@@ -360,7 +410,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
 
     def test_ci_linux_forwards_cli_environment(self):
         helper = self.root / "tools/ci/linux.sh"
-        helper.parent.mkdir(parents=True)
+        helper.parent.mkdir(parents=True, exist_ok=True)
         helper.write_text("exec python3 ci-linux\n")
         self.passed(self.run_task("ci:linux", "CARGO_TARGET_DIR=/cli target",
                                  env={"CARGO_TARGET_DIR": "/env target"}))

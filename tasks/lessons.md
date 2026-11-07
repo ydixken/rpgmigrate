@@ -118,11 +118,14 @@ State whether an estimate uses elapsed agent runtime or aggregate worker-hours, 
 Do not substitute human days or present an unmeasured estimate as a commitment.
 Separate healthy coordination evidence from fault qualification for each storage candidate.
 Require crash recovery to append the next externally defined transaction through a fresh writer and verify all retained history; readable reopen alone is insufficient.
+Set the failure latch before invoking a callback that can fail or panic, and clear it only after validated success.
+A caller that catches a callback panic must not make the raw batch committable.
 A candidate can remain useful for development comparisons after failing a production requirement.
 Preserve the failed probe and its exact scope instead of weakening read-only roles, catching library panics, or inventing a file validator.
 When replacing a task runner, test both environment and command-line overrides, explicit empty values, and command prefixes with arguments.
 A quoted executable path test alone does not verify argument handling or override precedence.
 Register every new regression module in a required default gate and test refusal when that module is missing.
+Require process-level qualification receipts in the default gate as well; a manual driver command does not protect CI against missing cases or continuations.
 Live acceptance checks do not replace unit tests for malformed artifacts or missing evidence.
 Build and inspect an actual runtime archive before treating fixture-only packaging checks as qualification.
 Seed a slim image's actual default trust-store path before its first HTTPS package request; the presence of a CA bundle at another path is insufficient.

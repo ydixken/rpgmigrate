@@ -4,8 +4,8 @@
 //! Read views keep one SQLite snapshot and its fixed published data boundary.
 
 use super::config::{
-    CatalogHead, CatalogReadView, CompletionEntry, Config, Error, ReceiveSink, RecordNo,
-    RecordSink, Result, Role,
+    CatalogHead, CatalogReadView, CompletionEntry, Config, Error, FaultObserver, FaultPoint,
+    ReceiveSink, RecordNo, RecordSink, Result, Role,
 };
 use super::format::TxSeq;
 use super::sqlite;
@@ -34,15 +34,17 @@ struct Segment {
 }
 
 impl Store {
-    pub(super) fn with_receive(
+    /// Post-commit observer failures require reopening because publication may have succeeded.
+    pub(super) fn with_receive_observed(
         &mut self,
         expected_receive_revision: u64,
         write: impl FnOnce(&mut dyn ReceiveSink) -> Result<()>,
+        observer: &FaultObserver<'_>,
     ) -> Result<CatalogHead> {
         self.require_role(Role::Receive)?;
-        let result = self
-            .catalog
-            .with_receive(expected_receive_revision, |catalog| {
+        let result = self.catalog.with_receive_observed(
+            expected_receive_revision,
+            |catalog| {
                 // Busy and stale CAS refusals happen before this callback and leave us usable.
                 self.poisoned = true;
                 let mut sink = ReceiveBatch {
@@ -50,6 +52,7 @@ impl Store {
                     active: &mut self.active,
                     next_segment: &mut self.next_segment,
                     catalog,
+                    observer,
                     written: 0,
                     failure: None,
                 };
@@ -60,15 +63,29 @@ impl Store {
                 callback?;
                 // Catalog COMMIT is allowed only after every referenced byte and name is durable.
                 if let Some(segment) = &self.active {
+                    observer(FaultPoint::BeforeFileSync)?;
                     segment.file.sync_all()?;
+                    observer(FaultPoint::AfterFileSync)?;
                 }
+                observer(FaultPoint::BeforeDirectorySync)?;
                 self.directory.sync_all()?;
+                observer(FaultPoint::AfterDirectorySync)?;
                 Ok(())
-            });
+            },
+            observer,
+        );
         if result.is_ok() {
             self.poisoned = false;
         }
         result
+    }
+
+    pub(super) fn with_receive(
+        &mut self,
+        expected_receive_revision: u64,
+        write: impl FnOnce(&mut dyn ReceiveSink) -> Result<()>,
+    ) -> Result<CatalogHead> {
+        self.with_receive_observed(expected_receive_revision, write, &|_| Ok(()))
     }
 
     pub(super) fn with_read_view(
@@ -244,6 +261,7 @@ struct ReceiveBatch<'a> {
     active: &'a mut Option<Segment>,
     next_segment: &'a mut u64,
     catalog: &'a mut dyn ReceiveSink,
+    observer: &'a FaultObserver<'a>,
     written: u64,
     failure: Option<Error>,
 }
@@ -257,6 +275,8 @@ impl ReceiveSink for ReceiveBatch<'_> {
         if self.failure.is_some() {
             return Err(Error::Poisoned);
         }
+        // A callback can catch an append panic and still try to publish the batch.
+        self.failure = Some(Error::Poisoned);
         let result = append_record(
             self.cfg,
             self.active,
@@ -264,10 +284,9 @@ impl ReceiveSink for ReceiveBatch<'_> {
             &mut self.written,
             record,
             self.catalog,
+            self.observer,
         );
-        if let Err(error) = &result {
-            self.failure = Some(error.clone());
-        }
+        self.failure = result.as_ref().err().cloned();
         result
     }
 
@@ -404,6 +423,7 @@ fn append_record(
     written: &mut u64,
     record: &[u8],
     publish: &mut dyn ReceiveSink,
+    observer: &FaultObserver<'_>,
 ) -> Result<RecordNo> {
     publish.head().next_record.next()?;
     if record.is_empty() || record.len() > cfg.limits.max_frame_bytes {
@@ -418,7 +438,9 @@ fn append_record(
         && segment.length.checked_add(length).ok_or(Error::Overflow)? > cfg.segment_bytes
     {
         // Sync before dropping the handle so a batch retains no list of touched files.
+        observer(FaultPoint::BeforeRotationSync)?;
         segment.file.sync_all()?;
+        observer(FaultPoint::AfterRotationSync)?;
         *active = None;
     }
     if active.is_none() {
@@ -508,6 +530,7 @@ impl Locator {
 mod tests {
     use super::*;
     use crate::format::{Limits, RunId, SourceId, StreamId};
+    use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -616,6 +639,275 @@ mod tests {
             })
             .unwrap();
         head.expect("read view callback must execute")
+    }
+
+    fn c2_baseline(segment_bytes: u64) -> (Fixture, Config, Store) {
+        let fixture = Fixture::new();
+        let mut cfg = fixture.config();
+        cfg.segment_bytes = segment_bytes;
+        let mut store = Store::create(&cfg).unwrap();
+        store
+            .with_receive(0, |sink| {
+                sink.append(&[11; 128])?;
+                sink.append(&[22; 128])?;
+                Ok(())
+            })
+            .unwrap();
+        (fixture, cfg, store)
+    }
+
+    const RAW_SYNC_POINTS: [FaultPoint; 6] = [
+        FaultPoint::BeforeRotationSync,
+        FaultPoint::AfterRotationSync,
+        FaultPoint::BeforeFileSync,
+        FaultPoint::AfterFileSync,
+        FaultPoint::BeforeDirectorySync,
+        FaultPoint::AfterDirectorySync,
+    ];
+
+    #[test]
+    fn c2_observer_orders_raw_sync_before_nested_catalog_publication() {
+        use FaultPoint::*;
+        let (_fixture, _cfg, mut store) = c2_baseline(256);
+        let trace = RefCell::new(Vec::new());
+        let head = store
+            .with_receive_observed(
+                1,
+                |sink| {
+                    assert_eq!(sink.append(&[33; 128])?.get(), 3);
+                    assert_eq!(sink.append(&[44; 128])?.get(), 4);
+                    Ok(())
+                },
+                &|point| {
+                    trace.borrow_mut().push(point);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            *trace.borrow(),
+            [
+                BeforeRotationSync,
+                AfterRotationSync,
+                BeforeFileSync,
+                AfterFileSync,
+                BeforeDirectorySync,
+                AfterDirectorySync,
+                BeforeCatalogCommit,
+                AfterCatalogCommit,
+                BeforeCatalogDirectorySync,
+                AfterCatalogDirectorySync,
+            ]
+        );
+        assert_eq!((head.receive_revision, head.next_record.get()), (2, 5));
+        assert_eq!(
+            records(&store).unwrap(),
+            [vec![11; 128], vec![22; 128], vec![33; 128], vec![44; 128]]
+        );
+    }
+
+    #[test]
+    fn c2_failed_sync_never_emits_its_after_point_or_publishes() {
+        use FaultPoint::*;
+        for boundary in ["rotation", "file", "directory"] {
+            let (_fixture, cfg, mut store) =
+                c2_baseline(if boundary == "rotation" { 256 } else { 1024 });
+            let (file, _peer) = unsyncable_file();
+            if boundary == "directory" {
+                store.directory = file;
+            } else {
+                store.active.as_mut().unwrap().file = file;
+            }
+            let trace = RefCell::new(Vec::new());
+            let result = store.with_receive_observed(
+                1,
+                |sink| {
+                    sink.append(&[33; 128])?;
+                    Ok(())
+                },
+                &|point| {
+                    trace.borrow_mut().push(point);
+                    Ok(())
+                },
+            );
+            assert!(
+                matches!(result, Err(Error::Io(_))),
+                "{boundary}: {result:?}"
+            );
+            let expected = match boundary {
+                "rotation" => vec![BeforeRotationSync],
+                "file" => vec![BeforeFileSync],
+                "directory" => vec![BeforeFileSync, AfterFileSync, BeforeDirectorySync],
+                _ => unreachable!(),
+            };
+            assert_eq!(*trace.borrow(), expected, "{boundary}");
+            assert_eq!(store.with_receive(1, |_| Ok(())), Err(Error::Poisoned));
+            drop(store);
+            assert_eq!(
+                records(&Store::reopen(&cfg).unwrap()).unwrap(),
+                [vec![11; 128], vec![22; 128]]
+            );
+        }
+    }
+
+    #[test]
+    fn c2_raw_observer_error_is_sticky_when_append_error_is_swallowed() {
+        for target in RAW_SYNC_POINTS {
+            let (_fixture, cfg, mut store) = c2_baseline(256);
+            let failure = Error::Workload("injected raw sync observer error");
+            let trace = RefCell::new(Vec::new());
+            let result = store.with_receive_observed(
+                1,
+                |sink| {
+                    if sink.append(&[33; 128]).is_ok() {
+                        let _ = sink.append(&[44; 128]);
+                    }
+                    Ok(())
+                },
+                &|point| {
+                    trace.borrow_mut().push(point);
+                    if point == target {
+                        Err(failure.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result, Err(failure), "{target:?}");
+            assert_eq!(trace.borrow().last(), Some(&target));
+            assert_eq!(store.with_receive(1, |_| Ok(())), Err(Error::Poisoned));
+            drop(store);
+            let reopened = Store::reopen(&cfg).unwrap();
+            assert_eq!(
+                (
+                    c1_head(&reopened).receive_revision,
+                    c1_head(&reopened).next_record.get()
+                ),
+                (1, 3)
+            );
+            assert_eq!(records(&reopened).unwrap(), [vec![11; 128], vec![22; 128]]);
+        }
+    }
+
+    #[test]
+    fn c2_raw_observer_panic_poisons_receiver_and_aborts_publication() {
+        for target in RAW_SYNC_POINTS {
+            let (_fixture, cfg, mut store) = c2_baseline(256);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                store.with_receive_observed(
+                    1,
+                    |sink| {
+                        sink.append(&[33; 128])?;
+                        sink.append(&[44; 128])?;
+                        Ok(())
+                    },
+                    &|point| {
+                        assert_ne!(point, target, "injected raw sync observer panic");
+                        Ok(())
+                    },
+                )
+            }));
+            assert!(result.is_err(), "{target:?}");
+            assert_eq!(store.with_receive(1, |_| Ok(())), Err(Error::Poisoned));
+            drop(store);
+            assert_eq!(
+                records(&Store::reopen(&cfg).unwrap()).unwrap(),
+                [vec![11; 128], vec![22; 128]]
+            );
+        }
+    }
+
+    #[test]
+    fn c2_caught_rotation_observer_panic_cannot_publish_earlier_appends() {
+        let fixture = Fixture::new();
+        let cfg = fixture.config();
+        let mut store = Store::create(&cfg).unwrap();
+        let baseline = store
+            .with_receive(0, |sink| {
+                sink.append(&[11; 128])?;
+                Ok(())
+            })
+            .unwrap();
+        let trace = RefCell::new(Vec::new());
+        let result = store.with_receive_observed(
+            1,
+            |sink| {
+                sink.append(&[22; 128])?;
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sink.append(&[33; 128])
+                }));
+                assert!(caught.is_err());
+                assert_eq!(trace.borrow().last(), Some(&FaultPoint::AfterRotationSync));
+                Ok(())
+            },
+            &|point| {
+                trace.borrow_mut().push(point);
+                assert_ne!(
+                    point,
+                    FaultPoint::AfterRotationSync,
+                    "injected rotation panic"
+                );
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(Error::Poisoned));
+        assert_eq!(
+            store.with_receive(1, |_| panic!("poisoned receiver ran callback")),
+            Err(Error::Poisoned)
+        );
+        let path = segment_path(&cfg.dir, 1);
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(raw.len(), 256);
+        assert_eq!(&raw[..128], &[11; 128]);
+        assert_eq!(&raw[128..], &[22; 128]);
+        drop(store);
+        let reopened = Store::reopen(&cfg).unwrap();
+        assert_eq!(c1_head(&reopened), baseline);
+        assert_eq!(records(&reopened).unwrap(), [vec![11; 128]]);
+        assert_eq!(fs::read(path).unwrap(), raw);
+    }
+
+    #[test]
+    fn c2_post_commit_observer_error_requires_reopen_with_published_records_intact() {
+        use FaultPoint::*;
+        for target in [
+            AfterCatalogCommit,
+            BeforeCatalogDirectorySync,
+            AfterCatalogDirectorySync,
+        ] {
+            let (_fixture, cfg, mut store) = c2_baseline(256);
+            let failure = Error::Workload("injected post-commit observer error");
+            let result = store.with_receive_observed(
+                1,
+                |sink| {
+                    sink.append(&[33; 128])?;
+                    sink.append(&[44; 128])?;
+                    Ok(())
+                },
+                &|point| {
+                    if point == target {
+                        Err(failure.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result, Err(failure), "{target:?}");
+            assert_eq!(store.with_receive(1, |_| Ok(())), Err(Error::Poisoned));
+            drop(store);
+            let reopened = Store::reopen(&cfg).unwrap();
+            assert_eq!(
+                (
+                    c1_head(&reopened).receive_revision,
+                    c1_head(&reopened).next_record.get()
+                ),
+                (2, 5)
+            );
+            assert_eq!(
+                records(&reopened).unwrap(),
+                [vec![11; 128], vec![22; 128], vec![33; 128], vec![44; 128]]
+            );
+        }
     }
 
     #[test]

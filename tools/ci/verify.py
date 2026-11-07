@@ -22,6 +22,7 @@ CI_SUITES = (
     "tools/ci/test_verify.py", "tools/ci/test_publish.py", "tests/test_taskfile.py", "tools/ci/test_linux.py",
     "tools/image/test_build.py", "tools/image/test_runtime.py", "tools/image/test_smoke.py",
 )
+PUBLICATION_RECEIPT = "Storage publication verified 22 cases and 20 continuations"
 
 
 class VerificationError(RuntimeError):
@@ -69,6 +70,41 @@ def task_command(name):
     return ["task", "--silent", "--output=interleaved", "--color=false", name]
 
 
+def storage_publication(path):
+    # The driver checks records, traces, and CRCs; this binds its nonempty report to the CI stage.
+    try:
+        with path.open("rb") as stream:
+            encoded = stream.read(65537)
+        if len(encoded) > 65536:
+            raise ValueError
+        report = json.loads(encoded)
+        if type(report["version"]) is not int or report["version"] != 1:
+            raise ValueError
+        rows = report["receipts"]
+        if not isinstance(rows, list) or len(rows) != 22:
+            raise ValueError
+        for index, row in enumerate(rows):
+            complete = index in (13, 21)
+            if (type(row["version"]) is not int or row["version"] != 1
+                    or type(row["case"]) is not int or row["case"] != index
+                    or row["candidate"] != ("segmented" if index < 14 else "sqlite")
+                    or row["caller_outcome"] != ("returned" if complete else "unknown")
+                    or type(row["required_prefix"]) is not int or row["required_prefix"] not in (1, 2)):
+                raise ValueError
+            continuation = row["continuation"]
+            if complete:
+                if continuation is not None or row["required_prefix"] != 2:
+                    raise ValueError
+            elif (not isinstance(continuation, dict) or type(continuation["prefix"]) is not int
+                  or continuation["prefix"] != row["required_prefix"] + 1
+                  or type(continuation["input_crc32"]) is not int
+                  or not 0 <= continuation["input_crc32"] <= 0xffffffff):
+                raise ValueError
+    except (OSError, ValueError, KeyError, TypeError):
+        raise VerificationError("invalid storage publication receipt") from None
+    return PUBLICATION_RECEIPT
+
+
 def validate_output(stage, output):
     if stage == "ci-unit":
         python = [int(n) for n in re.findall(r"^Ran (\d+) tests? in ", output, re.M)]
@@ -82,7 +118,11 @@ def validate_output(stage, output):
             raise VerificationError("missing, empty, failed, or ignored Rust unit suite")
         if len(python) != 3 or not all(python) or "skipped=" in output:
             raise VerificationError("missing, empty, or skipped Python suite")
-        return {"rust": sum(int(row[0]) for row in rust), "python": python}
+        publication = [line for line in output.splitlines() if "Storage publication " in line]
+        if publication != [PUBLICATION_RECEIPT]:
+            raise VerificationError("missing or incorrect storage publication receipt")
+        return {"rust": sum(int(row[0]) for row in rust), "python": python,
+                "storage_publication": 22, "storage_continuations": 20}
     if stage == "test-db":
         engine = re.findall(r"^Engine verified (\d+) exact cases; full E1 suite not selected$", output, re.M)
         full = re.findall(r"^E1 verified (\d+) exact cases on PostgreSQL ([\d.]+)$", output, re.M)
@@ -235,4 +275,12 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--storage-publication"]:
+        try:
+            if len(sys.argv) != 3:
+                raise VerificationError("invalid storage publication receipt")
+            print(storage_publication(Path(sys.argv[2])))
+        except VerificationError as error:
+            sys.exit(str(error))
+        sys.exit(0)
     sys.exit(main())
