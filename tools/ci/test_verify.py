@@ -24,7 +24,7 @@ class VerificationTests(unittest.TestCase):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test", output)
 
-    def test_all_make_test_suites_must_be_observed(self):
+    def test_all_task_test_suites_must_be_observed(self):
         rust = "test result: ok. 73 passed; 0 failed; 0 ignored; 7 filtered out;\n"
         python = "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 14 tests in 1.0s\nOK\n"
         counts = runner.validate_output("test", rust + python)
@@ -111,7 +111,7 @@ class VerificationTests(unittest.TestCase):
             runner.execute([sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.05)
 
     def test_ci_checks_cannot_report_empty_or_skipped_tests(self):
-        self.assertEqual(runner.validate_output("ci-unit", "Ran 6 tests in 0.1s\nOK\n"), {"python": [6]})
+        self.assertEqual(runner.validate_output("ci-unit", f"Ran {sum(runner.ci_unit_inventory().values())} tests in 0.1s\nOK\n"), {"python": [sum(runner.ci_unit_inventory().values())]})
         for output in ("", "Ran 0 tests in 0.1s\nOK\n", "Ran 6 tests in 0.1s\nOK (skipped=1)\n"):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("ci-unit", output)
@@ -119,14 +119,88 @@ class VerificationTests(unittest.TestCase):
     def test_source_snapshot_refuses_symlinked_input_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for name in ("Cargo.toml", "Cargo.lock", "Makefile", "build.rs", "NOTICE"):
+            for name in ("Cargo.toml", "Cargo.lock", "Taskfile.yml", "Dockerfile", ".dockerignore", "build.rs", "NOTICE"):
                 (root / name).touch()
             for name in ("tests", "tools", "native", "bench", "docs", ".github", "outside"):
                 (root / name).mkdir()
             (root / "outside/hidden.rs").write_text("private input")
             (root / "src").symlink_to(root / "outside", target_is_directory=True)
+            with self.assertRaisesRegex(runner.VerificationError, "^source symlinks are not supported$"):
+                runner.source_files(root)
+
+    def test_prefixed_receipts_and_dry_run_output_cannot_pass(self):
+        rust = "test result: ok. 73 passed; 0 failed; 0 ignored; 7 filtered out;\n"
+        python = "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 19 tests in 1.0s\nOK\n"
+        for output in ("[test] " + rust + python, "task: [test] cargo test\n", rust + "[test] " + python):
+            with self.subTest(output=output), self.assertRaises(runner.VerificationError):
+                runner.validate_output("test", output)
+
+    def test_task_dry_run_environment_refuses_before_commands(self):
+        from unittest.mock import patch
+        for value in ("true", "1", "TRUE", "yes"):
+            with patch.dict(runner.os.environ, {"TASK_DRY": value}), self.assertRaises(runner.VerificationError):
+                runner.task_command("native")
+
+    def test_missing_task_cannot_pass(self):
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaises(runner.VerificationError):
+                runner.execute(["task", "--version"], environment={"PATH": empty})
+
+    def test_source_snapshot_requires_taskfile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("Cargo.toml", "Cargo.lock", "Makefile", "build.rs", "NOTICE", "Dockerfile", ".dockerignore"):
+                (root / name).touch()
+            for name in ("src", "tests", "tools", "native", "bench", "docs", ".github"):
+                (root / name).mkdir()
             with self.assertRaises(runner.VerificationError):
                 runner.source_files(root)
+
+    def test_ci_inventory_matches_source_and_refuses_empty_modules(self):
+        self.assertTrue(hasattr(runner, "ci_unit_inventory"), "source inventory calculation is absent")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in runner.CI_SUITES:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("class Tests(unittest.TestCase):\n    def test_required(self): pass\n")
+            self.assertEqual(set(runner.ci_unit_inventory(root).values()), {1})
+            (root / next(iter(runner.CI_SUITES))).write_text("class Tests(unittest.TestCase): pass\n")
+            with self.assertRaises(runner.VerificationError):
+                runner.ci_unit_inventory(root)
+
+    def test_missing_image_unit_module_refuses_the_aggregate(self):
+        image_suites = ("tools/image/test_build.py", "tools/image/test_runtime.py", "tools/image/test_smoke.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            contents = "class Tests(unittest.TestCase):\n    def test_required(self): pass\n"
+            for name in (*runner.CI_SUITES, *image_suites):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents)
+            for name in image_suites:
+                path = root / name
+                path.unlink()
+                with self.subTest(module=name), self.assertRaises(runner.VerificationError):
+                    runner.ci_unit_inventory(root)
+                path.write_text(contents)
+
+    def test_source_snapshot_includes_all_image_unit_modules(self):
+        image_suites = ("tools/image/test_build.py", "tools/image/test_runtime.py", "tools/image/test_smoke.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("Cargo.toml", "Cargo.lock", "Taskfile.yml", "Dockerfile", ".dockerignore", "build.rs", "NOTICE"):
+                (root / name).touch()
+            for name in ("src", "tests", "tools", "native", "bench", "docs", ".github"):
+                (root / name).mkdir()
+            for name in image_suites:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("class Tests(unittest.TestCase):\n    def test_required(self): pass\n")
+            files = runner.source_files(root)
+            for name in image_suites:
+                with self.subTest(module=name):
+                    self.assertIn(Path(name), files)
 
     def test_child_output_is_not_echoed(self):
         result = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import verify; verify.execute([sys.executable, '-c', 'print(\"password=do-not-export\")'])", str(SCRIPT.parent)], capture_output=True, text=True)

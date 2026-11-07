@@ -154,7 +154,7 @@ Unreviewed discrepancies remain observations rather than implicit target require
 ## Production test ownership
 
 The production CLI worker owns parser and executable tests.
-The `make test-cli` suite should compare descriptors from the production parser with this frozen manifest.
+The `task test-cli` suite should compare descriptors from the production parser with this frozen manifest.
 Expected descriptors must come from this baseline, with reviewed deltas applied explicitly.
 Tests must inspect the descriptors that parsing actually uses, rather than a second target option table.
 The suite should also compare advertised help with accepted parser options and report reviewed discrepancies by ID.

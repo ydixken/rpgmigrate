@@ -33,7 +33,7 @@ Use `PKG_CONFIG_PATH`, `CC`, `CFLAGS`, `CPPFLAGS`, and `LDFLAGS` to select an ex
 
 The implementation accepts macOS and Linux.
 The initial build was verified on macOS arm64 with Apple clang 21.0.0, GNU Make 3.81, OpenSSL 4.1.0, Kerberos 1.22.2, and the macOS libcurl development metadata version 8.7.1.
-Linux build and runtime validation remain a separate verification step.
+The [task status](../../../tasks/todo.md) records verified Linux snapshots separately from the initial macOS build.
 Unsupported platforms, missing prerequisites, failed checksums, patch drift, and absent capabilities return nonzero.
 There is no fallback to stock libpq.
 
@@ -72,7 +72,7 @@ The helper builds only libpq, its OAuth module, their required common/port code,
 It installs no server, command-line utility, or system package.
 The build log is `target/native/build.log`.
 The build lock rejects overlapping helper invocations.
-The helper clears inherited Make recursion state so a parent Make target cannot skip PostgreSQL's generated headers.
+The helper clears inherited Make recursion state so a caller cannot skip PostgreSQL's generated headers.
 It sets `ZERO_AR_DATE=1` to prevent macOS archive-member timestamps from changing the static library bytes between local builds.
 Existing output symlinks that point outside the controlled prefix cause failure before a rebuild.
 

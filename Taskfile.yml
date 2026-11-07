@@ -1,0 +1,231 @@
+version: '3'
+
+set: [pipefail]
+
+vars:
+  TASK_EXECUTION:
+    sh: >-
+      case "${TASK_DRY-}" in
+      ''|0|[Ff][Aa][Ll][Ss][Ee]) ;;
+      *) printf '%s\n' 'error: unset TASK_DRY before executing verification tasks' >&2; exit 1 ;;
+      esac
+  CARGO:
+    sh: 'printf "%s" "${CARGO-cargo}"'
+  PYTHON:
+    sh: 'printf "%s" "${PYTHON-python3}"'
+  # An empty prefix must remain an empty executable, not expose the following command.
+  CARGO_COMMAND: >-
+    {{.CARGO | default "''"}}
+  PYTHON_COMMAND: >-
+    {{.PYTHON | default "''"}}
+  PQ_LIB_DIR:
+    sh: >-
+      if [ "${PQ_LIB_DIR+x}" = x ]; then printf '%s' "$PQ_LIB_DIR";
+      else printf '%s' {{.ROOT_DIR | shellQuote}}/target/native/libpq/lib; fi
+  STORAGE_ROOT:
+    sh: 'printf "%s" "${STORAGE_ROOT-}"'
+  # Declare CLI overrides before RUN; null leaves the inherited environment unchanged.
+  CC: null
+  CFLAGS: null
+  CPPFLAGS: null
+  LDFLAGS: null
+  PKG_CONFIG_PATH: null
+  PG_BINDIR: null
+  PG_CONFIG: null
+  CARGO_TARGET_DIR: null
+  RPGMIGRATE_BIN: null
+  RPGMIGRATE_TEST_EXPECTED_PG_VERSION: null
+  RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM: null
+  # Inline exports preserve CLI precedence even when the inherited environment differs.
+  RUN: >-
+    {{.TASK_EXECUTION}}
+    {{range $name := list "CC" "CFLAGS" "CPPFLAGS" "LDFLAGS" "PKG_CONFIG_PATH" "PG_BINDIR" "PG_CONFIG"
+    "CARGO_TARGET_DIR" "RPGMIGRATE_BIN"
+    "RPGMIGRATE_TEST_EXPECTED_PG_VERSION" "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM"}}
+    {{if ne (index $ $name) nil}}export {{$name}}={{index $ $name | shellQuote}};{{end}}
+    {{end}}
+    export PQ_LIB_DIR={{.PQ_LIB_DIR | shellQuote}} STORAGE_ROOT={{.STORAGE_ROOT | shellQuote}};
+    : "${PQ_LIB_DIR:?PQ_LIB_DIR must not be empty}";
+  UNIT_FILTERS: >-
+    --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip pg::replication_live_tests::
+    --skip apply::checkpoint::live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
+
+tasks:
+  default:
+    desc: Check all targets after native verification
+    cmds:
+      - task: check
+
+  help:
+    desc: List available tasks
+    cmds:
+      - '{{.TASK_EXE | shellQuote}} --list-all'
+
+  check:
+    desc: Check all Rust targets
+    cmds:
+      - task: native-check
+      - '{{.RUN}} {{.CARGO_COMMAND}} check --locked --all-targets'
+
+  fmt-check:
+    desc: Check Rust formatting
+    cmds:
+      - '{{.RUN}} {{.CARGO_COMMAND}} fmt --all -- --check'
+
+  lint:
+    desc: Check formatting and run strict Clippy
+    cmds:
+      - task: fmt-check
+      - task: native-check
+      - '{{.RUN}} {{.CARGO_COMMAND}} clippy --locked --all-targets -- -D warnings'
+
+  native:
+    desc: Build the controlled libpq artifact
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/build-libpq.py'
+
+  native-check:
+    desc: Verify the existing controlled libpq artifact
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/build-libpq.py --verify'
+
+  build:
+    desc: Build the executable after native verification
+    cmds:
+      - task: native-check
+      - '{{.RUN}} {{.CARGO_COMMAND}} build --locked'
+
+  test:
+    desc: Run local test suites in order
+    cmds:
+      - task: test-unit
+      - task: test-cli
+      - task: test-native
+      - task: test-harness
+      - task: test-storage-format
+      - task: test-storage-recovery
+
+  test-unit:
+    desc: Run nonempty Rust unit tests without live databases
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.CARGO_COMMAND}} test --locked --lib -- --list {{.UNIT_FILTERS}} |
+        awk '/: test$/ { count++ } END { if (count == 0) { print "error: no Rust unit tests discovered"; exit 1 } }'
+      - '{{.RUN}} {{.CARGO_COMMAND}} test --locked --lib --bins -- {{.UNIT_FILTERS}}'
+
+  test-cli:
+    desc: Verify CLI compatibility
+    cmds:
+      - task: build
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tests/cli_contract.py'
+
+  test-native:
+    desc: Test the controlled native dependency
+    cmds:
+      - task: native-check
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tests/test_native_libpq.py'
+
+  test-harness:
+    desc: Test the database harness
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tests/support/test_harness.py'
+
+  test-storage-format:
+    desc: Verify and run the storage format inventory
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_format -- --list |
+        awk '/: test$/ { count++ } END {
+        if (count != 31) { print "error: expected 31 storage format and identity tests"; exit 1 } }'
+      - '{{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_format -- --include-ignored'
+
+  test-storage-recovery:
+    desc: Verify and run the serial storage recovery inventory
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery -- --list |
+        awk '/: test$/ { count++ } END {
+        if (count != 141) { print "error: expected 141 storage recovery and driver tests"; exit 1 } }'
+      - >-
+        {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery --
+        --include-ignored --test-threads=1
+
+  storage-pilot:
+    desc: Run the storage pilot in the required fresh STORAGE_ROOT
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.CARGO_COMMAND}} run --locked --release --example storage --
+        --root "${STORAGE_ROOT:?set STORAGE_ROOT to a new directory}"
+
+  test-db:
+    desc: Run engine and COPY database profiles
+    cmds:
+      - task: build
+      - task: test-engine
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py -- {{.CARGO_COMMAND}}
+        test --locked --test copy_integration -- --test-threads=1
+
+  test-engine:
+    desc: Run the exact engine profile
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --engine -- {{.CARGO_COMMAND}}
+        test --locked --lib -- --ignored --test-threads=1
+
+  test-transport:
+    desc: Run the live transport profile
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --transport -- {{.CARGO_COMMAND}}
+        test --locked --lib pg::live_tests:: -- --ignored --test-threads=1
+
+  test-prepared:
+    desc: Run the prepared execution profile
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --prepared -- {{.CARGO_COMMAND}}
+        test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
+
+  test-replication:
+    desc: Run the replication profile
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --replication -- {{.CARGO_COMMAND}}
+        test --locked --lib pg::replication_live_tests:: -- --ignored --test-threads=1
+
+  test-authority:
+    desc: Run the authority profile
+    cmds:
+      - task: native-check
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --authority -- {{.CARGO_COMMAND}}
+        test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1
+
+  test-db-self-check:
+    desc: Run database harness negative controls
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --self-check'
+
+  ci:linux:
+    desc: Run Linux verification in its owned container
+    cmds:
+      - '{{.RUN}} bash tools/ci/linux.sh'
+
+  image:build:
+    desc: Build one runtime image with explicit engine, platform, and output arguments
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/image/build.py {{.CLI_ARGS}}'
+
+  image:smoke:
+    desc: Qualify an existing runtime image with an explicit fixture image
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/image/smoke.py {{.CLI_ARGS}}'

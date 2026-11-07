@@ -5,8 +5,9 @@ It creates its own PostgreSQL server, roles, databases, and temporary state, the
 
 ## Prerequisites
 
-Use Rust 1.99.1 with rustfmt and Clippy, Python 3.12 or newer, and Make.
-The native builder also requires a C compiler, pkg-config, patch, Perl, Bison, and Flex.
+Use Rust 1.99.1 with rustfmt and Clippy, and Python 3.12 or newer.
+The shared bootstrap helper installs and verifies Task 3.54.0 under `target/tools/task/` without changing system tools.
+The native builder also requires GNU Make, a C compiler, pkg-config, patch, Perl, Bison, and Flex.
 Provide installed OpenSSL, Kerberos/GSSAPI, and libcurl development libraries with pkg-config metadata.
 The default database fixture requires PostgreSQL 14.24 server utilities, including `initdb`, `postgres`, and `psql`.
 Each profile checks its declared expected version against the actual server.
@@ -21,8 +22,8 @@ The build stays under `target/native/` and does not replace system libraries.
 The [native build guide](../native/libpq/docs/build.md) describes source verification, configuration, and attribution.
 The controlled build has its own system-wide service-file directory; use `PGSYSCONFDIR` to select an existing directory when required.
 
-Make selects `target/native/libpq/lib` through `PQ_LIB_DIR` and verifies the native receipt before Rust builds or tests.
-Remove an old system-libpq `PQ_LIB_DIR` override before using these targets.
+Task selects `target/native/libpq/lib` through `PQ_LIB_DIR` and verifies the native receipt before Rust builds or tests.
+Remove an old system-libpq `PQ_LIB_DIR` override before using these tasks.
 Use `PKG_CONFIG_PATH` to locate the native builder's installed dependency metadata when needed.
 Stock libpq lacks the required capability and cannot silently replace this artifact for database operations.
 
@@ -44,25 +45,32 @@ Check out this **example** for an existing Homebrew PostgreSQL 14 installation:
    git status --short --branch
    ```
 
-2. Build and verify the controlled native dependency.
+2. Install the pinned Task binary and put its directory first in this shell's command path.
 
    ```sh
-   make native native-check
+   python3 tools/bootstrap-task.py
+   export PATH="$PWD/target/tools/task/3.54.0/bin:$PATH"
    ```
 
-3. Run compilation, formatting, lint, and database-free tests.
+3. Build and verify the controlled native dependency.
 
    ```sh
-   make check lint test
+   task native native-check
    ```
 
-4. Verify the independent oracle, then run the live engine and executable suites.
+4. Run compilation, formatting, lint, and database-free tests.
 
    ```sh
-   make test-db-self-check test-db
+   task check lint test
    ```
 
-5. Inspect the native version and accepted COPY syntax.
+5. Verify the independent oracle, then run the live engine and executable suites.
+
+   ```sh
+   task test-db-self-check test-db
+   ```
+
+6. Inspect the native version and accepted COPY syntax.
 
    ```sh
    target/debug/rpgmigrate version
@@ -73,7 +81,9 @@ The harness creates disposable databases rather than using an existing server.
 Its receipt must match the exact expected test inventory, with no missing or skipped cases.
 The data oracle checks relation inventories, column layouts, duplicate-preserving counts, and complete content digests.
 Fault cases require evidence that the intended fault occurred.
-The default test target also runs the isolated persistence-format contracts; those tests do not qualify a storage backend or establish performance.
+The default test task also runs the isolated persistence-format contracts; those tests do not qualify a storage backend or establish performance.
+Running `task` without a task name selects `check`.
+Leave `TASK_DRY` unset for verification, because a dry run cannot supply test evidence.
 
 For direct Cargo commands, select the same controlled library directory explicitly:
 
@@ -176,14 +186,14 @@ They are dev dependencies and do not select a runtime journal backend.
 1. Run the required format, backend, common recovery, and driver tests.
 
    ```sh
-   make test-storage-format test-storage-recovery
+   task test-storage-format test-storage-recovery
    ```
 
 2. Select a new directory below an existing parent and run the release pilot.
    The runner refuses an existing directory and preserves its generated stores and receipts.
 
    ```sh
-   STORAGE_ROOT=target/storage-pilot-1 make storage-pilot
+   STORAGE_ROOT=target/storage-pilot-1 task storage-pilot
    ```
 
 The fixed [case manifest](../bench/storage/cases.json) supplies the seed, all three candidates, all three workloads, and three repetitions.

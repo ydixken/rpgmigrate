@@ -15,7 +15,9 @@ It uses a controlled, patched libpq dependency for connection checks and a restr
 
 ```sh
 .
-├── Cargo.toml     # One unpublished Rust package
+├── Cargo.toml    # One unpublished Rust package
+├── Taskfile.yml  # Local checks, native builds, and container tasks
+├── Dockerfile    # Runtime image for the implemented CLI
 ├── src/          # Private engine modules and the executable entry point
 ├── native/libpq/ # Pinned source, reviewed patches, and dependency notices
 ├── bench/        # Isolated persistence experiments
@@ -27,36 +29,40 @@ It uses a controlled, patched libpq dependency for connection checks and a restr
 
 ## Getting Started
 
-1. Prepare the [build prerequisites](docs/getting-started.md#prerequisites), then build the controlled native dependency.
+1. Prepare the [build prerequisites](docs/getting-started.md#prerequisites), confirm the checkout, and install the pinned Task binary locally.
 
    ```sh
-   make native
+   git status --short --branch
+   python3 tools/bootstrap-task.py
+   export PATH="$PWD/target/tools/task/3.54.0/bin:$PATH"
    ```
 
-2. Compile and run the checks that need no database server.
+2. Build the controlled native dependency, then run the checks that need no database server.
 
    ```sh
-   make check lint test
+   task native
+   task check lint test
    ```
 
 3. Run real connection and COPY checks against the harness's disposable PostgreSQL server.
 
    ```sh
-   make test-db
+   task test-db
    ```
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `make native` | Build the pinned, patched libpq artifact. |
-| `make native-check` | Verify the selected native artifact. |
-| `make check` | Check every Rust target. |
-| `make fmt-check` | Check Rust formatting. |
-| `make lint` | Check formatting and Clippy warnings. |
-| `make test` | Run Rust, CLI, native-build, and harness unit checks. |
-| `make test-db-self-check` | Check the independent data oracle. |
-| `make test-db` | Run isolated live engine and executable checks. |
+| `task help` | List the available tasks. |
+| `task native` | Build the pinned, patched libpq artifact. |
+| `task native-check` | Verify the selected native artifact. |
+| `task check` | Check every Rust target. |
+| `task fmt-check` | Check Rust formatting. |
+| `task lint` | Check formatting and Clippy warnings. |
+| `task test` | Run Rust, CLI, native-build, and harness unit checks. |
+| `task test-db-self-check` | Check the independent data oracle. |
+| `task test-db` | Run isolated live engine and executable checks. |
 
 ## Limits
 
@@ -65,6 +71,10 @@ See the [first-slice limits](docs/getting-started.md#first-slice-limits).
 ## Testing
 
 See the [Testing guide](docs/testing.md).
+
+## Containers
+
+See the [container build and verification guide](docs/container.md).
 
 ## Storage experiments
 

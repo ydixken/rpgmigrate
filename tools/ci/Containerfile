@@ -31,13 +31,19 @@ RUN set -eu; case "$(dpkg --print-architecture)" in \
     tar -xzf /tmp/actionlint.tgz -C /opt/e1 LICENSE.txt; \
     rm /tmp/actionlint.tgz
 
+COPY bootstrap-task.py /opt/e1/tools/bootstrap-task.py
+RUN python3 /opt/e1/tools/bootstrap-task.py > /tmp/task.path \
+    && ln -s "$(cat /tmp/task.path)" /usr/local/bin/task \
+    && rm /tmp/task.path
+
 RUN useradd --uid 1000 --create-home verifier && mkdir /work && chown verifier:verifier /work
 ENV PG_BINDIR=/usr/lib/postgresql/17/bin \
     RPGMIGRATE_TEST_EXPECTED_PG_VERSION=17.11 \
     RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM=170011 \
     PQ_LIB_DIR=/work/target/native/libpq/lib \
     CARGO_TERM_COLOR=never \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    TASK_BIN=/usr/local/bin/task
 USER verifier
 WORKDIR /work
 CMD ["python3", "/source/tools/ci/verify.py"]

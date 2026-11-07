@@ -420,8 +420,8 @@ Expose reserved risk separately from actual sent feedback.
 
 ## Verification and commit gate
 
-Extend the E0 Make targets only through the integration worker.
-The verification worker defines `make test-cdc`, `make test-faults`, and `make bench-apply` before they appear in runnable guides.
+Extend the E0 Taskfile tasks only through the integration worker.
+The verification worker defines `task test-cdc`, `task test-faults`, and `task bench-apply` before they appear in runnable guides.
 Tests require exact fixture inventories, observed injection, independent fingerprints, and positive target commit evidence.
 Run format, lint, unit, database, CDC, and relevant fault checks before requesting a commit.
 Record actual commands, case counts, server versions, and results in `tasks/todo.md`.

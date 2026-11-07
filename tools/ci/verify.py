@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run E1 in the owned Linux container and export only bounded, structured evidence."""
 
+import ast
 import hashlib
 import json
 import os
@@ -17,6 +18,10 @@ import tempfile
 PG_VERSION = "17.11"
 ENGINE_CASES = 39
 INTEGRATION_CASES = 40
+CI_SUITES = (
+    "tools/ci/test_verify.py", "tools/ci/test_publish.py", "tests/test_taskfile.py", "tools/ci/test_linux.py",
+    "tools/image/test_build.py", "tools/image/test_runtime.py", "tools/image/test_smoke.py",
+)
 
 
 class VerificationError(RuntimeError):
@@ -42,14 +47,36 @@ def execute(command, *, timeout=900, environment=None):
     return output
 
 
+def ci_unit_inventory(root=None):
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[2]
+    inventory = {}
+    for name in CI_SUITES:
+        try:
+            tree = ast.parse((root / name).read_text())
+        except (OSError, SyntaxError):
+            raise VerificationError("CI unit source is missing or invalid") from None
+        count = sum(isinstance(method, ast.FunctionDef) and method.name.startswith("test_")
+                    for node in tree.body if isinstance(node, ast.ClassDef) for method in node.body)
+        if count == 0:
+            raise VerificationError("CI unit source inventory is empty")
+        inventory[name] = count
+    return inventory
+
+
+def task_command(name):
+    if os.environ.get("TASK_DRY", "false").lower() not in ("", "0", "false"):
+        raise VerificationError("unset TASK_DRY before verification")
+    return ["task", "--silent", "--output=interleaved", "--color=false", name]
+
+
 def validate_output(stage, output):
     if stage == "ci-unit":
         python = [int(n) for n in re.findall(r"^Ran (\d+) tests? in ", output, re.M)]
-        if len(python) != 1 or not all(python) or "skipped=" in output:
+        if python != [sum(ci_unit_inventory().values())] or "skipped=" in output:
             raise VerificationError("missing, empty, or skipped CI unit suite")
         return {"python": python}
     if stage == "test":
-        rust = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", output)
+        rust = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", output, re.M)
         python = [int(n) for n in re.findall(r"^Ran (\d+) tests? in ", output, re.M)]
         if not rust or not sum(int(row[0]) for row in rust) or any(int(failed) or int(ignored) for _, failed, ignored in rust):
             raise VerificationError("missing, empty, failed, or ignored Rust unit suite")
@@ -82,7 +109,7 @@ def validate_output(stage, output):
 
 def source_files(source):
     files = []
-    for name in ("Cargo.toml", "Cargo.lock", "Makefile", "build.rs", "NOTICE", "src", "tests", "tools", "native", "bench", "docs", ".github"):
+    for name in ("Cargo.toml", "Cargo.lock", "Taskfile.yml", "Dockerfile", ".dockerignore", "build.rs", "NOTICE", "src", "tests", "tools", "native", "bench", "docs", ".github"):
         path = source / name
         if path.is_symlink():
             raise VerificationError("source symlinks are not supported")
@@ -159,19 +186,26 @@ def main():
             "rustc": ["rustc", "--version"], "cargo": ["cargo", "--version"],
             "python": ["python3", "--version"], "postgres": [os.environ["PG_BINDIR"] + "/postgres", "--version"],
             "shellcheck": ["shellcheck", "--version"], "actionlint": ["actionlint", "--version"],
+            "task": ["task", "--version"],
         }.items()}
+        expected_task = execute(["python3", "tools/bootstrap-task.py", "--version"]).strip()
+        if report["versions"]["task"] != expected_task:
+            raise VerificationError("Task version differs from the shared bootstrap pin")
+        workflows = [str(path) for path in sorted(Path(".github/workflows").glob("*.y*ml"))]
+        if not workflows:
+            raise VerificationError("workflow inventory is empty")
         for stage, command in (
-            ("ci-unit", ["python3", "tools/ci/test_verify.py"]),
+            ("ci-unit", ["python3", "tools/ci/unit.py"]),
             ("shellcheck", ["shellcheck", "tools/ci/linux.sh"]),
-            ("yamllint", ["yamllint", "--strict", "-c", "tools/ci/yamllint.yml", ".github/workflows/ci.yml", "tools/ci/yamllint.yml"]),
-            ("actionlint", ["actionlint", "-color", ".github/workflows/ci.yml"]),
-            ("native", ["make", "native"]),
-            ("native-check", ["make", "native-check"]),
-            ("lint", ["make", "lint"]),
-            ("test", ["make", "test"]),
+            ("yamllint", ["yamllint", "--strict", "-c", "tools/ci/yamllint.yml", "Taskfile.yml", "tools/ci/yamllint.yml", *workflows]),
+            ("actionlint", ["actionlint", *workflows]),
+            ("native", task_command("native")),
+            ("native-check", task_command("native-check")),
+            ("lint", task_command("lint")),
+            ("test", task_command("test")),
             ("stock-refusal", None),
-            ("test-db-self-check", ["make", "test-db-self-check"]),
-            ("test-db", ["make", "test-db"]),
+            ("test-db-self-check", task_command("test-db-self-check")),
+            ("test-db", task_command("test-db")),
         ):
             print(f"E1: {stage}", flush=True)
             counts = stock_refusal(Path.cwd() / "target/debug/rpgmigrate") if command is None else validate_output(stage, execute(command))

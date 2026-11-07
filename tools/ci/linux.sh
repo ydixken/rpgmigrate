@@ -14,8 +14,15 @@ trap 'if [[ "$created" == true ]]; then podman rm --force "$name" >/dev/null; fi
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-podman build --iidfile "$output/image.id" --file "$root/tools/ci/Containerfile" "$root/tools/ci"
-image_id=$(cat "$output/image.id")
+mkdir "$output/context"
+cp "$root/tools/ci/Containerfile" "$root/tools/bootstrap-task.py" "$output/context/"
+podman build --iidfile "$output/image.id" --file "$output/context/Containerfile" "$output/context"
+image_id=$(podman image inspect --format '{{.Id}}' "$(cat "$output/image.id")")
+image_id="sha256:${image_id#sha256:}"
+[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'E1 image identity is invalid.' >&2; exit 1; }
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'fixture_image=%s\nreport=%s/report.json\n' "$image_id" "$output" >> "$GITHUB_OUTPUT"
+fi
 podman create --name "$name" --label rpgmigrate.task=e1-ci \
     --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=512 \
     --network=bridge --env "E1_IMAGE_ID=$image_id" \

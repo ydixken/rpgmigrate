@@ -28,10 +28,13 @@ Match SQLite `fullfsync` and `checkpoint_fullfsync` settings to those candidate 
 
 Deliver a reviewable first milestone early so independent workers can start.
 Fix exact interfaces, access rules, tests, and file ownership before parallel edits.
+Verify the actual module path before assigning ownership; source metadata lives in `src/catalog.rs`, not a parallel PG catalog module.
 Coordinate changes to frozen interfaces with the leader.
 Keep later feature maps concise and expand their tasks before implementation.
 Use ordinary branches, never worktrees.
 Follow the current per-file assignment and transfer ownership only through the leader.
+Set worker reasoning effort through the explicit `multi_agent` reasoning-effort parameter and verify the resulting metadata.
+Do not describe an inherited high-effort worker as max effort or infer effort from the visible task label.
 The integration worker owns task-status updates after the documentation handoff.
 Commit only after the leader requests it and required checks pass.
 
@@ -107,14 +110,31 @@ Validate the exact scheduled child receipts in a fresh private root; do not add 
 Use isolated Cargo target directories for parallel scoped checks and reserve broad lint/test execution for one integration worker after file freeze.
 For native test exports, copy and verify the pinned source archive as well as the installed artifact when the suite checks upstream patches.
 Separate concurrent milestones with exact-tree exports that retain their reviewed test inventories and exclude unfinished auto-discovered benchmark tests.
+Release disjoint writers after the immutable export exists; commit its frozen blobs without replacing their newer working files.
 Track known staging diagnostics under their active owner instead of reporting them as a new component defect or weakening the final lint gate.
 Check each tool's exit code before dependent ledger updates or success reports, especially when another owner can change a handoff file.
 Name transport observations by their proven scope: an empty libpq output buffer can follow a discarded write and cannot prove delivery or source acknowledgment.
 State whether an estimate uses elapsed agent runtime or aggregate worker-hours, together with its remaining scope and confidence.
 Do not substitute human days or present an unmeasured estimate as a commitment.
 Separate healthy coordination evidence from fault qualification for each storage candidate.
+Require crash recovery to append the next externally defined transaction through a fresh writer and verify all retained history; readable reopen alone is insufficient.
 A candidate can remain useful for development comparisons after failing a production requirement.
 Preserve the failed probe and its exact scope instead of weakening read-only roles, catching library panics, or inventing a file validator.
+When replacing a task runner, test both environment and command-line overrides, explicit empty values, and command prefixes with arguments.
+A quoted executable path test alone does not verify argument handling or override precedence.
+Register every new regression module in a required default gate and test refusal when that module is missing.
+Live acceptance checks do not replace unit tests for malformed artifacts or missing evidence.
+Build and inspect an actual runtime archive before treating fixture-only packaging checks as qualification.
+Seed a slim image's actual default trust-store path before its first HTTPS package request; the presence of a CA bundle at another path is insufficient.
+Normalize permissions only on owned staged license copies, preserving source files and strict final artifact checks.
+Use the same architecture-qualified package field in inventory producers and consumers; never strip suffixes or weaken version comparison to hide a mismatch.
+Satisfy earlier prerequisites in a refusal test and assert its specific intended error, so a different failure cannot produce a false pass.
+Treat an image revision label as caller metadata; bind actual source-file hashes to a frozen tree or independently checked workflow commit.
+Do not infer commit membership by comparing two copies of the same unverified label.
+Drive image smoke fixtures through bounded host commands on an owned private network; reuse the existing oracles without adding an RPC controller or mounting the engine socket.
+Freeze a handoff only after all owner edits stop, and invalidate its hashes before a self-review fix resumes.
+Check each container engine's actual resource identifiers and inspection fields instead of assuming Docker and Podman return the same shape.
+Record an owned resource before subsequent validation can fail, so cleanup can still identify it.
 Do not diagnose a transient missing executable as a build race without a clean serialized reproduction check.
 Promote the codec to one canonical production source only when its consumer is integrated; avoid competing identity types and unused production scaffolding.
 Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` only on staged prepared-transport items and remove it when that consumer is wired.
@@ -122,8 +142,12 @@ For canonical plain identity values in version-two state, use the approved serde
 Keep authority proofs and trusted constructors outside that serialization shortcut.
 Keep interim identity warnings visible until real consumers use them.
 Shared benchmark imports can make a runtime-only dead-code expectation unfulfilled.
+Let a cached DML plan own its derived SQL, parameter types, index maps, keys, and operation shape instead of borrowing full relation metadata.
+Borrow row values only during binding, so metadata eviction does not require a self-referential cache.
 Carry full transaction identity with a nonempty authority frontier because equal LSNs and reused XIDs do not identify one completed transaction.
 If a source plugin omits a physical commit-record position, preserve that absence in the receiver contract instead of fabricating it from the transaction-end LSN.
+Keep decoder relation suppression to one last-key value per transaction, reset at BEGIN, completion, and failure.
+Skip consecutive repeated keys and emit context on a key change; do not retain an unbounded seen-set or repeat full metadata for every row.
 Do not require begin ordinal to increase in commit order.
 Overlapping source transactions can commit in a different order.
 Return durable proof from the normal synchronous data/checkpoint COMMIT after its logged counter increment.
