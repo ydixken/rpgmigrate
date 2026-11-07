@@ -1,6 +1,8 @@
 # rpgmigrate approved design
 
 The user approved this design and delegated team execution on 2026-11-06.
+On 2026-11-07, the user accepted the operator-first release contract in the [maintained compatibility matrix](../../operator-compatibility.md).
+That scope revision supersedes full-CLI parity requirements; it does not weaken the COPY, WAL, ownership, durability, or recovery contracts below.
 The review resolutions below supersede the draft's durability and completion wording.
 The [task status](../../../tasks/todo.md) records implementation evidence and unfinished work.
 
@@ -14,10 +16,15 @@ The behavioral baseline is `ydixken/pgcopydb` on `origin/v0.18-fixes`, commit `8
 The completed audit covered 453 issues and 1,088 discussion comments across upstream, the fork, and the operator.
 Do not repeat that audit.
 
-Preserve registered commands, aliases, flags, short-option distinctions, existing environment names, precedence, and exit-code categories.
-This includes `PGCOPYDB_*` inputs, filters, machine output, standalone phases, intentional safety refusals, and existing apply-group limits.
-Preserve all three decoding plugins, all-databases, large objects, roles, extensions, comparison, progress, and deferred indexes.
-Parser-derived conformance fixtures are authoritative.
+The release contract covers eight operator paths: `clone`, `stream cleanup`, `stream sentinel set endpos`, `stream sentinel get`, `list progress`, `list tables`, `compare data`, and `compare schema`.
+Preserve their 43 emitted behavioral option names, consumed outputs, existing environment precedence and exit categories, plus general help, version, ping, and explicit connection/work-directory controls.
+The other 40 behavioral paths are deferred parity requirements, not a universal CLI compatibility promise.
+Retain the registered parser baseline, aliases, and short-option distinctions without removing flags as part of this scope change.
+Parser-derived fixtures remain authoritative for parsing, not proof that every registered operation is implemented or required for release.
+Every selected CRD feature must have its full semantics; staged profiles must explicitly refuse unsupported configurations during admission or preflight before mutation.
+This includes selected plugins, all-databases, large objects, roles, extensions, filters, binary fallback, parallel/split COPY, comparison, progress, deferred indexes, and apply grouping.
+Default follow uses `pgoutput`, and large objects are included unless explicitly skipped.
+The bounded `test_decoding` core gate does not qualify default operator follow, and silent plugin remapping is forbidden.
 Help text alone does not define compatibility.
 
 Intentional differences are executable/version/log/application identity, native state, corrected false-success and serialization bugs, native operator evidence, and additive durability/concurrency controls.
@@ -69,7 +76,10 @@ Bound workers, connections, catalogs, caches, queues, and byte budgets across al
 Include libpq buffers, socket buffers, pipeline results, and one oversize row or frame in memory accounting.
 Spill large transactions instead of collecting them in memory.
 Normal clone/follow runs inside one process with bounded tasks or threads.
-Standalone receive/prefetch and catchup/apply may overlap in separate processes.
+Live control and read-only progress observations may overlap the worker and access its native-owned workdir.
+Final verification and cleanup require worker quiescence.
+Concurrent rehearsal uses isolated scratch storage.
+Broader standalone receive/prefetch/catchup/apply CLI parity is deferred; retain the internal process-ownership and storage qualification gates.
 
 ## Ownership across processes
 
@@ -83,7 +93,8 @@ The metadata backend must support the actual overlapping-process topology.
 Check redb's selected version and lock modes before accepting it.
 Its [database API](https://docs.rs/redb/latest/redb/struct.Database.html) documents file-lock and single-writer behavior that must be tested across processes.
 Local control notifications wake an owner, but durable control records remain authoritative.
-Preserve existing `--host`/`--port` control semantics with bounded versioned native messages.
+Use bounded versioned native control for the selected operator contract.
+Unconsumed standalone `--host`/`--port` CLI compatibility is deferred.
 No C-struct wire compatibility or permanent new service is required.
 
 ## Persistence experiment
@@ -100,7 +111,7 @@ SQLite may win when alternatives lack repeatable value.
 Do not add RocksDB without measured need.
 Check effective SQLite settings because unknown pragmas do not fail, as documented by [SQLite](https://www.sqlite.org/pragma.html).
 Do not maintain another durable representation of generated SQL.
-Preserve debug/export and SQL-stdin command contracts.
+Debug/export and SQL-stdin CLI parity are deferred unless selected by a later explicit general-use contract.
 
 Journal identity contains run, source, database, stream generation, transaction identity, and event ordinal.
 LSN or XID alone is insufficient.
@@ -280,6 +291,11 @@ No binary alias or automatic state adoption is allowed.
 
 The adapter changes executable/workdir identity, version checks, log/application matching, mode and lag fields, and completion evidence.
 It also checks metadata privileges and exact owned-object exclusions.
+Use an explicit immutable engine selection for new migrations, with omitted selection retaining the legacy runtime and native jobs using a new UID and native-owned workdir.
+Reuse the operator's existing progress, sentinel, exec, connection, and job boundaries rather than adding a second controller framework.
+Freeze native capability, status, COPY metric, position, checkpoint, certified-drain, cutover, verification, and owned-cleanup DTOs before implementation.
+Legacy target-origin SQL remains legacy-only; missing native proof blocks native completion.
+The audited operator does not directly query production SQLite or source-sentinel tables, so no legacy storage emulation is required or permitted.
 Keep its diff and verification gate separate.
 Read current operator instructions before editing it, without copying mutable tasks or policies into this repository.
 Preserve its CI-first functional-test policy.
@@ -291,7 +307,8 @@ A client dependency must not silently raise the source floor.
 
 ## Verification and performance gates
 
-CLI fixtures cover registrations, aliases, environments, malformed input, stdout/stderr, JSON, exit categories, and phase composition.
+Retain full parser fixtures for registrations, aliases, environments, malformed input, stdout/stderr, JSON, and exit categories.
+Runtime compatibility gates cover the accepted operator/general-use contract, selected CRD combinations, and complete migration phases; unused CLI families remain deferred.
 Record corrected bugs as explicit exceptions.
 Use independent SQL fingerprints for data, schema, sequences, large objects, ownership, and partitions.
 Negative harness tests must reject empty fixtures, wrong versions, wrong failure reasons, missed injection, skipped cases, and exit-zero mismatches.
@@ -314,7 +331,7 @@ No arbitrary speedup is promised.
 
 CI gates include Rust format/lint/tests, parser/state fuzzing, FFI ownership/sanitizers, dependency/license/security checks, and documentation drift.
 Add STE100 hard-rule checks, database integration, crash suites, cross-version cases, and bounded runtime/size fixtures.
-Published artifacts require isolated operator E2E.
+Operator-qualified release artifacts require isolated operator E2E.
 Promote the exact tested binary/image digests without rebuilding.
 
 ## Platforms, workflow, and exclusions
@@ -333,4 +350,4 @@ Preserve third-party notices and let the readiness worker check the dependency g
 
 Builder decisions include narrow module names, vetted crate versions, codec/checksum details, benchmark-selected storage, measured budgets, and implementation sequence.
 Escalate changes that violate these contracts.
-Non-goals are legacy import, a pgcopydb alias, universal DDL replication, custom auth/TLS, distributed cross-node scheduling, and a generic backend plugin framework.
+Non-goals are legacy import, a pgcopydb alias or storage emulation, universal CLI/drop-in parity, universal DDL replication, custom auth/TLS, distributed cross-node scheduling, and a generic backend plugin framework.

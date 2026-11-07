@@ -1,9 +1,29 @@
 # rpgmigrate task status
 
 This file is the authoritative running status.
-The approved design defines scope.
+The approved design and latest user scope decisions define active scope.
 Plans define worker interfaces and acceptance checks.
 The team leader reviews worker results before closing a milestone.
+
+## Active scope
+
+The user accepted the [operator-first release contract](../docs/operator-compatibility.md) on 2026-11-07.
+The completed runtime and API audits select eight operator paths and 43 behavioral option names, plus general help, version, ping, and explicit connection/work-directory controls.
+The other 40 behavioral paths are deferred parity requirements; retain the parser baseline and existing implemented commands.
+Every selected CRD feature requires its full semantics, with explicit admission or preflight refusal for unsupported staged configurations before mutation.
+Default follow uses `pgoutput`; large objects, binary COPY with safe fallback, and parallel/split COPY remain required workflow gates.
+The bounded `test_decoding` consumer does not qualify operator-default follow.
+Native support applies only to new migrations and native-owned workdirs, through an explicit adapter without legacy SQLite or source-sentinel storage emulation.
+No universal CLI parity, operator-complete, alpha, backend-winner, or performance claim follows from this scope change.
+
+- [x] Freeze the consumed command/option/default contract and source citations in the maintained matrix.
+- [ ] Finish the bounded Gate 3 consumer correction, protocol capture integration, independent review, and actual live qualification.
+- [ ] Freeze shared interfaces once, then use disjoint pgoutput decoder, context/publication/source lifecycle, clone/runtime, and operator adapter/API owners.
+- [ ] Qualify selected clone phases, recovery, cutover/drain, progress, verification, cleanup, and default operator configurations through runnable commands.
+- [ ] Run targeted risk tests per change and one exact integrated candidate matrix, retaining crash, unknown-COMMIT, source/native/image binding, and strict aggregate gates.
+
+Root owns primary integration, the normal Git index, and the task ledger; the parent owns worker allocation and resource leases.
+Do not repeat broad checks without a changed input or unresolved concern, and do not substitute component counts for a working operator workflow.
 
 ## Documentation bootstrap
 
@@ -26,17 +46,27 @@ The team leader reviews worker results before closing a milestone.
 - [ ] E2: CDC decoding, packed journal, complete descriptors, and persistence measurements.
 - [ ] E3: Logged target checkpoints, serial apply, recovery, and apply benchmarks.
 - [ ] E4: Durability profiles, run-wide risk caps, and crash verification.
-- [ ] E5: Full CLI and standalone phase compatibility.
-- [ ] E6: Schema, filters, snapshots, large objects, and all-databases behavior.
+- [ ] E5: Implement the eight operator routes, their 43 behavioral option names, and approved general controls.
+- [ ] E6: Implement the selected CRD semantics, including full clone phases, filters, large objects, binary fallback, parallel/split COPY, and all-databases behavior.
 - [ ] E7: Qualified batching and parallel apply.
 - [ ] O1-O4: Native operator adapter and isolated operator tests.
 - [ ] V1-V6: Compatibility, faults, performance, version matrices, and release checks.
-- [ ] Full-scope review against the feature map.
+- [ ] Verify the selected operator profile against the maintained matrix; broader CLI parity remains deferred.
 - [ ] Verify each platform's power-loss barrier before journal durability claims, including macOS `fsync` versus `F_FULLFSYNC`.
 - [ ] Match SQLite `fullfsync` and `checkpoint_fullfsync` settings to candidate barriers in persistence comparisons.
 - [ ] Test the declared minimum Rust toolchain in CI before expanding compiler support claims.
 - [ ] Add namespace identity and DDL coordination before removing E1's DDL-quiescence requirement.
 - [x] Build the same controlled native recipe in local Linux arm64 Podman and verify loaded-image guards, rpath, and authentication features.
+
+## Executable command scope
+
+The [parser](../src/cli.rs) registers 50 leaf commands: help/version and 48 behavioral paths.
+The [admission code](../src/config.rs) and [dispatch](../src/lib.rs) implement `ping` and restricted serial text `copy table-data` into compatible, precreated empty tables.
+The COPY coordinator requires confirmed synchronous target COMMIT before native completion.
+The other 46 behavioral paths, including all eight operator-required routes, return explicit unsupported errors with nonzero exit status.
+Parser acceptance and private component qualification do not establish production command or flag semantics.
+The accepted matrix defines the release target; it does not claim that clone, follow, recovery, cutover, or an operator workflow is implemented.
+Private runtime work and its unresolved strict-lint and Gate 3 harness gates are excluded from this documentation checkpoint.
 
 ## Evidence and review
 
@@ -733,4 +763,4 @@ The integration worker takes ownership of running updates to this file after the
 E0/E1 signatures stay frozen unless the leader coordinates a change.
 Review E2-E4 interfaces before their workers start.
 Expand the E5-E7 and operator/release feature maps before each later milestone.
-Full CLI/operator/release scope remains unfinished after E1.
+The selected operator workflow and release gates remain unfinished after E1; broader CLI parity is deferred.

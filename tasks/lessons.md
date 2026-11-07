@@ -6,7 +6,10 @@ Use `origin/v0.18-fixes` at `86bf908adca02d87063849dae775a02c1659c829` as the co
 Do not substitute an older upstream release or repeat the completed issue audit.
 Name the executable `rpgmigrate`.
 Never import, resume, restart, convert, or clean pgcopydb state.
-Full CLI and operator parity remain objectives after the first working slice.
+Derive release parity from actual operator argv, lifecycle, consumed outputs, configuration, and explicitly approved general controls.
+A parser inventory is regression evidence, not an obligation to implement every upstream command.
+Update the approved spec, roadmap, and matrix when the user changes scope; preserve existing evidence and safety guards.
+Trace admission defaults through generated argv; an alternate plugin test does not qualify default follow behavior.
 Never report a scaffold or parser as completed migration functionality.
 
 ## Durability and performance
@@ -177,3 +180,11 @@ Preserve third-party notices.
 Direct crate metadata checks do not replace a locked dependency graph audit.
 Native libpq and target bookkeeping permissions are explicitly approved.
 Do not introduce another approval gate for those decisions.
+
+## Workflow status and estimates
+
+Lead progress reports with the runnable production/operator workflow and the features still missing.
+Label component test evidence by its actual scope and keep it secondary to workflow qualification.
+Distinguish aggregate agent-hours from elapsed time and state assumptions and uncertainty; estimates are not commitments.
+Deferring 40 command paths does not imply an 80 percent reduction in engineering work, because the selected paths still require the migration engine and its safety gates.
+Checkpoint a coherent verified subset explicitly when broader WIP is unqualified; never describe it as saving or qualifying all local work.

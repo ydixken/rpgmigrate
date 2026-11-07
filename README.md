@@ -96,6 +96,10 @@ See the [durability design and runtime gates](docs/durability.md).
 
 See the [CLI compatibility guide](docs/cli-compatibility.md).
 
+## Operator compatibility
+
+See the [Operator compatibility contract](docs/operator-compatibility.md).
+
 ## Design
 
 See the [approved design](docs/superpowers/specs/2026-11-06-rpgmigrate-design.md).
