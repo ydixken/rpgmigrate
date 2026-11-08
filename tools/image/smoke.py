@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LABEL = "rpgmigrate.image-smoke"
 SMOKE_CHECKS = (
     "archive-identity", "native-platform", "loaded-image-identity", "runtime-files",
-    "runtime-config", "help-version", "native-capability", "native-same-dso",
+    "runtime-config", "client-loader-resolution", "help-version", "native-capability", "native-same-dso",
     "native-stock-refusal", "oauth-load", "ping", "copy-contents", "copy-oracle-controls",
     "synthetic-redaction", "signal-sigint", "signal-sigterm", "persistent-workdir",
     "state-permission", "state-lock", "state-symlink", "legacy-state", "prior-native-state",
@@ -525,6 +525,73 @@ def runtime_files(containers, image, build):
     require(result.returncode == 0 and result.stdout.splitlines() == build["packages"], "runtime package inventory differs")
 
 
+def client_loader_resolution(containers, image, build):
+    from runtime import CLIENT_PREFIX, ldd_paths
+    graph = build['runtime']['clients']['dependencies']
+    roots = {name for name in graph if name.startswith(CLIENT_PREFIX + '/')}
+    require(graph and roots, 'client loader dependency inventory is empty')
+    aliases, visited = {}, set()
+    def canonical(path):
+        if path not in aliases:
+            result = containers.run(image, ['-e', '--', path], entrypoint='/usr/bin/readlink')
+            target = result.stdout.rstrip('\n')
+            require(result.returncode == 0 and not result.stderr and target in graph,
+                    'client loader selected dependency path differs')
+            aliases[path] = target
+        return aliases[path]
+    for root in sorted(roots):
+        require(canonical(root) == root, 'client loader object alias differs')
+        result = containers.run(image, [root], entrypoint='/usr/bin/ldd')
+        require(result.returncode == 0 and not result.stderr, 'client loader trace failed')
+        try:
+            paths = ldd_paths(result.stdout)
+        except RuntimeError:
+            raise SmokeError('client loader dependency unresolved or malformed trace') from None
+        named, absolute, selected = {}, set(), set()
+        for soname, path in paths:
+            target = canonical(path)
+            selected.add(target)
+            if soname is None or soname.startswith('/'):
+                absolute.add(target)
+            else:
+                require(soname not in named, 'client loader duplicate dependency selection')
+                named[soname] = target
+        pending, closure = [root], set()
+        while pending:
+            name = pending.pop()
+            if name in closure:
+                continue
+            closure.add(name)
+            require(name == root or name in selected, 'client loader selected dependency missing')
+            node = graph[name]
+            for soname, target in node['needed'].items():
+                require(named.get(soname) == target if soname in named else target in absolute,
+                        'client loader dependency resolution differs')
+                pending.append(target)
+            if node['interpreter']:
+                require(node['interpreter'] in selected, 'client loader interpreter selection differs')
+                pending.append(node['interpreter'])
+        require(selected <= closure, 'client loader unexpected dependency selection')
+        visited.update(closure)
+    require(visited == set(graph), 'client loader dependency inventory incomplete')
+    result = containers.run(image, ['--', *sorted(visited)], entrypoint='/usr/bin/sha256sum')
+    require(result.returncode == 0 and not result.stderr, 'client loader dependency hash command failed')
+    expected = ''.join(graph[name]['sha256'] + '  ' + name + '\n' for name in sorted(visited))
+    require(result.stdout == expected, 'client loader selected dependency bytes differ')
+
+
+def client_commands(containers, image, build):
+    profile = build['runtime']['clients']
+    version, prefix = profile['version'], profile['prefix']
+    require(version in ('16.15', '18.6') and prefix == '/opt/rpgmigrate/target/native/pgtools', 'client runtime profile mismatch')
+    for name in ('pg_dump', 'pg_restore', 'pg_config'):
+        result = containers.run(image, ['--version'], entrypoint=prefix + '/bin/' + name)
+        expected = ('PostgreSQL ' if name == 'pg_config' else name + ' (PostgreSQL) ') + version
+        require(result.returncode == 0 and not result.stderr and result.stdout.strip() == expected, 'client runtime version mismatch')
+    result = containers.run(image, ['--bindir'], entrypoint=prefix + '/bin/pg_config')
+    require(result.returncode == 0 and not result.stderr and result.stdout.strip() == prefix + '/bin', 'client runtime bindir mismatch')
+
+
 def wait_fixture(fixture, expression, *arguments, timeout=15):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -583,7 +650,10 @@ def signal_case(containers, image, fixture, signum, record):
 
 def qualify(containers, image, fixture, build, record):
     runtime_files(containers, image, build)
+    client_commands(containers, image, build)
     record("runtime-files")
+    client_loader_resolution(containers, image, build)
+    record("client-loader-resolution")
     probe_sha256 = prepare_probe(fixture)
     probe = containers.run(image, [], entrypoint="/work/image-probe")
     require(probe.returncode == 0 and not probe.stderr, "native runtime probe failed")

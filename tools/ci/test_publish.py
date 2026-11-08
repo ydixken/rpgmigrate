@@ -45,6 +45,33 @@ class PublicationTests(unittest.TestCase):
             layouts.append((path, receipt))
         return layouts
 
+    def test_variant_tag_preserves_default_pg18_and_suffixes_pg16(self):
+        self.assertTrue(hasattr(self.publisher, 'variant_tag'), 'variant release identity is required')
+        self.assertEqual(self.publisher.variant_tag('v1.2.3', '18.6'), 'v1.2.3')
+        self.assertEqual(self.publisher.variant_tag('v1.2.3-rc.1', '16.15'), 'v1.2.3-rc.1-pg16')
+        with self.assertRaises(RuntimeError):
+            self.publisher.variant_tag('v1.2.3', '17.11')
+        for version in ('16.15', '18.6'):
+            with self.assertRaisesRegex(RuntimeError, 'reserved'):
+                self.publisher.variant_tag('v1.2.3-pg16', version)
+
+    def test_same_source_different_client_variants_cannot_form_one_index(self):
+        self.bundle_fixture('amd64')
+        directory, identity = self.bundle_fixture('arm64')
+        spec = importlib.util.spec_from_file_location('variant_fixture', SCRIPT.parents[1] / 'image/test_runtime.py')
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        path, _ = fixture.write_fixture(directory, architecture='arm64', client_version='16.15')
+        # All prerequisite bindings must match before the cross-variant guard is exercised.
+        runtime = self.publisher.image_module('runtime')
+        receipt = runtime.load_receipt(path)
+        smoke_path = directory / 'smoke.json'; smoke = json.loads(smoke_path.read_bytes())
+        smoke.update(self.publisher.image_module('smoke').bindings(receipt, self.publisher.digest(path)))
+        smoke_path.write_bytes(encode(smoke))
+        _, envelope = self.publisher.evidence(directory, identity, 'arm64')
+        (directory / 'ci.json').write_bytes(encode(envelope))
+        with self.assertRaisesRegex(RuntimeError, 'client variants'):
+            self.publisher.bundles(self.root, identity)
+
     def test_index_preserves_two_exact_native_manifests(self):
         layouts = self.layouts()
         index = self.publisher.assemble_index(layouts, self.root / "merged")
@@ -139,6 +166,15 @@ class PublicationTests(unittest.TestCase):
         _, envelope = self.publisher.evidence(directory, identity, architecture)
         (directory / "ci.json").write_bytes(encode(envelope))
         return directory, identity
+
+    def test_missing_client_loader_check_refuses_publication_evidence(self):
+        directory, identity = self.bundle_fixture('amd64')
+        path = directory / 'smoke.json'
+        record = json.loads(path.read_bytes())
+        record['checks'] = [item for item in record['checks'] if item['name'] != 'client-loader-resolution']
+        path.write_bytes(encode(record))
+        with self.assertRaisesRegex(RuntimeError, 'smoke checks'):
+            self.publisher.evidence(directory, identity, 'amd64')
 
     def test_two_same_run_bundles_validate_actual_oci_and_smoke(self):
         self.bundle_fixture("amd64")

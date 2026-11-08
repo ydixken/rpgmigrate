@@ -58,6 +58,161 @@ class SmokeTests(unittest.TestCase):
         }
         return build, record
 
+    def test_client_commands_check_versions_and_runtime_bindir(self):
+        from types import SimpleNamespace
+        prefix = '/opt/rpgmigrate/target/native/pgtools'
+        for version in ('16.15', '18.6'):
+            build = {'runtime': {'clients': {'prefix': prefix, 'version': version}}}
+            outputs = ['pg_dump (PostgreSQL) ' + version, 'pg_restore (PostgreSQL) ' + version,
+                       'PostgreSQL ' + version, prefix + '/bin']
+            for bad in (None, 0, 1, 2, 3):
+                values = outputs.copy()
+                if bad is not None:
+                    values[bad] = 'wrong'
+                results = [subprocess.CompletedProcess([], 0, value + '\n', '') for value in values]
+                engine = SimpleNamespace(run=unittest.mock.Mock(side_effect=results))
+                with self.subTest(version=version, bad=bad):
+                    if bad is None:
+                        self.smoke.client_commands(engine, 'image', build)
+                        self.assertEqual(engine.run.call_args_list[-1].kwargs['entrypoint'], prefix + '/bin/pg_config')
+                    else:
+                        with self.assertRaisesRegex(self.smoke.SmokeError, 'version|bindir'):
+                            self.smoke.client_commands(engine, 'image', build)
+
+    def loader_case(self, version='18.6', architecture='arm64'):
+        from types import SimpleNamespace
+        prefix = '/opt/rpgmigrate/target/native/pgtools'
+        libc = '/usr/lib/libc.so.6'
+        loader = '/usr/lib/' + ('ld-linux-aarch64.so.1' if architecture == 'arm64' else 'ld-linux-x86-64.so.2')
+        soname = loader.rsplit('/', 1)[1]
+        libpq = prefix + '/lib/libpq.so.5'
+        graph = {loader: {'sha256': 'a' * 64, 'needed': {}, 'interpreter': None},
+                 libc: {'sha256': 'b' * 64, 'needed': {soname: loader}, 'interpreter': loader},
+                 libpq: {'sha256': 'c' * 64, 'needed': {'libc.so.6': libc}, 'interpreter': None}}
+        base_trace = 'linux-vdso.so.1 (0x100)\nlibc.so.6 => /lib/libc.so.6 (0x200)\n/lib/' + soname + ' (0x300)\n'
+        traces = {libpq: base_trace}
+        for name in ('pg_dump', 'pg_restore', 'pg_config'):
+            needed = {'libc.so.6': libc} if name == 'pg_config' else {'libpq.so.5': libpq, 'libc.so.6': libc}
+            path = prefix + '/bin/' + name
+            graph[path] = {'sha256': 'd' * 64, 'needed': needed, 'interpreter': loader}
+            traces[path] = ('' if name == 'pg_config' else 'libpq.so.5 => ' + libpq + ' (0x400)\n') + base_trace
+        if version == '18.6':
+            oauth = prefix + '/lib/libpq-oauth-18.so'
+            graph[oauth] = {'sha256': 'e' * 64, 'needed': {'libc.so.6': libc}, 'interpreter': None}
+            traces[oauth] = base_trace
+        state = {'traces': traces, 'aliases': {name: name for name in graph} |
+                 {'/lib/libc.so.6': libc, '/lib/' + soname: loader},
+                 'hashes': {name: node['sha256'] for name, node in graph.items()},
+                 'ldd_code': 0, 'ldd_stderr': '', 'calls': []}
+        build = {'runtime': {'clients': {'version': version, 'prefix': prefix, 'dependencies': graph}}}
+        def run(image, args, *, entrypoint):
+            self.assertEqual(image, 'exact-image')
+            state['calls'].append((entrypoint, args))
+            if entrypoint == '/usr/bin/ldd':
+                self.assertEqual(len(args), 1)
+                return subprocess.CompletedProcess([], state['ldd_code'], state['traces'][args[0]], state['ldd_stderr'])
+            if entrypoint == '/usr/bin/readlink':
+                self.assertEqual(args[:2], ['-e', '--'])
+                self.assertEqual(len(args), 3)
+                value = state['aliases'].get(args[2])
+                return subprocess.CompletedProcess([], 0 if value else 1, (value + '\n') if value else '', '')
+            self.assertEqual(entrypoint, '/usr/bin/sha256sum')
+            self.assertEqual(args[0], '--')
+            return subprocess.CompletedProcess([], 0, ''.join(state['hashes'][name] + '  ' + name + '\n' for name in args[1:]), '')
+        return build, SimpleNamespace(run=run), state
+
+    def check_loader(self, engine, build):
+        self.assertTrue(hasattr(self.smoke, 'client_loader_resolution'), 'final-image loader check is required')
+        self.smoke.client_loader_resolution(engine, 'exact-image', build)
+
+    def test_loader_checks_all_client_contexts_for_both_versions_and_architectures(self):
+        for version in ('16.15', '18.6'):
+            for architecture in ('amd64', 'arm64'):
+                with self.subTest(version=version, architecture=architecture):
+                    build, engine, state = self.loader_case(version, architecture)
+                    self.check_loader(engine, build)
+                    self.assertEqual({args[0] for command, args in state['calls'] if command == '/usr/bin/ldd'}, set(state['traces']))
+                    loader = 'ld-linux-aarch64.so.1' if architecture == 'arm64' else 'ld-linux-x86-64.so.2'
+                    state['traces'] = {name: trace.replace('/lib/' + loader + ' (0x300)', loader + ' => /lib/' + loader + ' (0x300)')
+                                       for name, trace in state['traces'].items()}
+                    self.check_loader(engine, build)
+
+    def test_unsearched_graph_cannot_leave_actual_default_libc_unbound(self):
+        for version in ('16.15', '18.6'):
+            for architecture in ('amd64', 'arm64'):
+                with self.subTest(version=version, architecture=architecture):
+                    build, engine, state = self.loader_case(version, architecture)
+                    graph = build['runtime']['clients']['dependencies']
+                    old, alternate = '/usr/lib/libc.so.6', '/usr/lib/unsearched/libc.so.6'
+                    graph[alternate] = graph.pop(old)
+                    for node in graph.values():
+                        node['needed'] = {key: alternate if path == old else path for key, path in node['needed'].items()}
+                    state['hashes'][old] = 'f' * 64
+                    with self.assertRaisesRegex(self.smoke.SmokeError, 'client loader'):
+                        self.check_loader(engine, build)
+
+    def test_loader_refuses_changed_bytes_interpreter_alias_and_missing_or_extra_selections(self):
+        for fault in ('bytes', 'interpreter', 'missing', 'extra', 'conflict', 'unresolved', 'empty', 'failed', 'stderr', 'edge'):
+            with self.subTest(fault=fault):
+                build, engine, state = self.loader_case()
+                if fault == 'bytes':
+                    state['hashes']['/usr/lib/libc.so.6'] = 'f' * 64
+                elif fault == 'interpreter':
+                    state['aliases']['/lib/ld-linux-aarch64.so.1'] = '/usr/lib/libc.so.6'
+                elif fault in ('failed', 'stderr'):
+                    state['ldd_code'] = 1 if fault == 'failed' else 0
+                    state['ldd_stderr'] = 'loader failed'
+                else:
+                    for name, trace in state['traces'].items():
+                        if fault == 'edge':
+                            if name.endswith('/pg_restore'):
+                                trace = trace.replace('libc.so.6 => /lib/libc.so.6', 'libc.so.6 => /lib/ld-linux-aarch64.so.1')
+                                trace += '/lib/libc.so.6 (0x700)\n'
+                        elif fault == 'missing':
+                            trace = trace.replace('/lib/ld-linux-aarch64.so.1 (0x300)\n', '')
+                        elif fault == 'extra':
+                            trace += 'extra.so => /usr/lib/extra.so (0x500)\n'
+                        elif fault == 'conflict':
+                            trace += 'libc.so.6 => /usr/lib/unsearched/libc.so.6 (0x600)\n'
+                        elif fault == 'unresolved':
+                            trace = trace.replace('libc.so.6 => /lib/libc.so.6 (0x200)', 'libc.so.6 => not found')
+                        else:
+                            trace = ''
+                        state['traces'][name] = trace
+                with self.assertRaisesRegex(self.smoke.SmokeError, 'client loader'):
+                    self.check_loader(engine, build)
+
+    def test_loader_empty_graph_cannot_pass(self):
+        build, engine, _ = self.loader_case()
+        build['runtime']['clients']['dependencies'] = {}
+        with self.assertRaisesRegex(self.smoke.SmokeError, 'client loader'):
+            self.check_loader(engine, build)
+
+    def test_missing_loader_check_refuses_smoke_acceptance(self):
+        build, record = self.evidence()
+        record['checks'] = [item for item in record['checks'] if item['name'] != 'client-loader-resolution']
+        with self.assertRaisesRegex(self.smoke.SmokeError, 'smoke checks'):
+            self.smoke.validate_smoke_receipt(build, record, 'f' * 64)
+
+    def test_qualification_must_run_loader_gate_before_other_probes(self):
+        with patch.object(self.smoke, 'runtime_files'), patch.object(self.smoke, 'client_commands'), \
+             patch.object(self.smoke, 'client_loader_resolution', create=True, side_effect=self.smoke.SmokeError('client loader refused')), \
+             patch.object(self.smoke, 'prepare_probe', side_effect=AssertionError('probe ran before loader gate')):
+            with self.assertRaisesRegex(self.smoke.SmokeError, 'client loader refused'):
+                self.smoke.qualify(None, 'exact-image', None, {}, lambda _: None)
+
+    def test_qualification_records_loader_check_only_after_success(self):
+        for version in ('16.15', '18.6'):
+            for architecture in ('amd64', 'arm64'):
+                with self.subTest(version=version, architecture=architecture):
+                    build, engine, _ = self.loader_case(version, architecture)
+                    events = []
+                    with patch.object(self.smoke, 'runtime_files'), patch.object(self.smoke, 'client_commands'), \
+                         patch.object(self.smoke, 'prepare_probe', side_effect=self.smoke.SmokeError('probe stop')):
+                        with self.assertRaisesRegex(self.smoke.SmokeError, 'probe stop'):
+                            self.smoke.qualify(engine, 'exact-image', None, build, events.append)
+                    self.assertEqual(events, ['runtime-files', 'client-loader-resolution'])
+
     def test_exact_complete_evidence_is_accepted(self):
         build, record = self.evidence()
         self.smoke.validate_smoke_receipt(build, record, "f" * 64)

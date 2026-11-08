@@ -237,8 +237,97 @@ def build(metadata, recipe, offline, jobs):
     return verify_install(PREFIX, recipe)
 
 
+def client_metadata(version):
+    if version not in ('16.15', '18.6'):
+        raise RuntimeError('unsupported PostgreSQL client version')
+    name = 'source16.json' if version == '16.15' else 'source.json'
+    return json.loads((METADATA / name).read_text())
+
+
+def client_commands(prefix, version):
+    if version not in ('16.15', '18.6'):
+        raise RuntimeError('unsupported PostgreSQL client version')
+    env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
+    commands = {name: output([str(prefix / 'bin' / name), '--version'], env)
+                for name in ('pg_dump', 'pg_restore', 'pg_config')}
+    expected = {name: ('PostgreSQL ' if name == 'pg_config' else name + ' (PostgreSQL) ') + version for name in commands}
+    if commands != expected:
+        raise RuntimeError('client utility version mismatch')
+    commands['bindir'] = output([str(prefix / 'bin/pg_config'), '--bindir'], env)
+    if commands['bindir'] != str(prefix / 'bin'):
+        raise RuntimeError('client pg_config bindir mismatch')
+    return commands
+
+
+def verify_clients(prefix, recipe, version):
+    receipt = json.loads((prefix / RECEIPT).read_text())
+    files = artifact_files(prefix)
+    if (receipt.get('recipe_sha256') != recipe or receipt.get('version') != version
+            or receipt.get('source') != client_metadata(version)
+            or not files or receipt.get('files') != files
+            or receipt.get('artifact_sha256') != identity(files)):
+        raise RuntimeError('client artifact identity or version mismatch')
+    if receipt.get('commands') != client_commands(prefix, version):
+        raise RuntimeError('client command identity mismatch')
+    library = ctypes.CDLL(str(library_path(prefix).resolve(strict=True)))
+    if library.PQlibVersion() != {'16.15': 160015, '18.6': 180006}[version]:
+        raise RuntimeError('client library version mismatch')
+    return receipt
+
+
+def build_clients(version, offline, jobs, rebuild=False):
+    prefix = NATIVE / 'pgtools'
+    local_directory(prefix)
+    local_directory(NATIVE / 'clients-build.log')
+    metadata = client_metadata(version)
+    recipe = identity({'builder': sha256(Path(__file__)), 'source': metadata})
+    if prefix.exists():
+        artifact_files(prefix)
+    if (prefix / RECEIPT).exists() and not rebuild:
+        return verify_clients(prefix, recipe, version)
+    archive = download(metadata, offline)
+    env, toolchain = build_environment()
+    with tempfile.TemporaryDirectory(prefix='pgclients-build-', dir=NATIVE) as temporary:
+        work = Path(temporary)
+        extract_archive(archive, metadata['sha256'], work)
+        source = work / metadata['source_directory']
+        apply_patches(source, metadata)
+        verify_sha256(source / 'COPYRIGHT', metadata['copyright_sha256'])
+        configure = ['./configure', f'--prefix={prefix}', '--with-openssl', '--with-gssapi',
+                     '--without-icu', '--without-readline', '--without-zlib', '--without-lz4', '--without-zstd']
+        if version == '18.6':
+            configure.append('--with-libcurl')
+        libraries = ['src/interfaces/libpq'] + (['src/interfaces/libpq-oauth'] if version == '18.6' else [])
+        with (NATIVE / 'clients-build.log').open('wb') as log:
+            run_build(configure, source, env, log)
+            for directory in libraries:
+                run_build(['make', '-C', directory, f'-j{jobs}'], source, env, log)
+            run_build(['make', '-C', 'src/bin/pg_dump', f'-j{jobs}', 'pg_dump', 'pg_restore'], source, env, log)
+            run_build(['make', '-C', 'src/bin/pg_config', f'-j{jobs}'], source, env, log)
+            if prefix.exists():
+                shutil.rmtree(prefix)
+            prefix.mkdir()
+            for directory in libraries:
+                run_build(['make', '-C', directory, 'install'], source, env, log)
+        (prefix / 'bin').mkdir(exist_ok=True)
+        for name in ('pg_dump', 'pg_restore', 'pg_config'):
+            directory = 'pg_config' if name == 'pg_config' else 'pg_dump'
+            shutil.copyfile(source / 'src/bin' / directory / name, prefix / 'bin' / name)
+            (prefix / 'bin' / name).chmod(0o755)
+        notices = prefix / 'share/licenses/libpq'
+        notices.mkdir(parents=True)
+        shutil.copyfile(source / 'COPYRIGHT', notices / 'COPYRIGHT')
+        (notices / 'NOTICE').write_text('PostgreSQL ' + version + ' clients and libpq; reviewed silent passfile rejection patch.\n')
+        files = artifact_files(prefix)
+        receipt = {'version': version, 'source': metadata, 'commands': client_commands(prefix, version), 'toolchain': toolchain, 'configure': configure,
+                   'recipe_sha256': recipe, 'files': files, 'artifact_sha256': identity(files)}
+        (prefix / RECEIPT).write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+    return verify_clients(prefix, recipe, version)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--client-version", choices=("16.15", "18.6"), help="also build one client trio in target/native/pgtools")
     parser.add_argument("--verify", action="store_true", help="verify the installed artifact without network or build")
     parser.add_argument("--offline", action="store_true", help="require the verified archive in target/native/downloads")
     parser.add_argument("--rebuild", action="store_true", help="rebuild the controlled prefix from pinned source")
@@ -246,6 +335,8 @@ def main():
     args = parser.parse_args()
     if sys.version_info < (3, 12) or sys.platform not in ("darwin", "linux"):
         parser.error("requires Python 3.12+ on macOS or Linux; no system-libpq fallback")
+    if args.verify and args.client_version:
+        parser.error("--client-version cannot be combined with --verify")
     if args.jobs < 1 or (args.verify and args.rebuild):
         parser.error("jobs must be positive; --verify and --rebuild cannot be combined")
     try:
@@ -269,6 +360,8 @@ def main():
                 receipt = verify_install(PREFIX, recipe)
             else:
                 receipt = build(metadata, recipe, args.offline, args.jobs)
+            if args.client_version:
+                build_clients(args.client_version, args.offline, args.jobs, args.rebuild)
         print(json.dumps({"prefix": str(PREFIX), "library_sha256": sha256(library_path(PREFIX)), "artifact_sha256": receipt["artifact_sha256"], "recipe_sha256": recipe, "capabilities": 1}))
         return 0
     except (OSError, RuntimeError, ValueError, tarfile.TarError) as error:

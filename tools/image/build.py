@@ -18,7 +18,7 @@ REQUIRED = ('Cargo.toml', 'Cargo.lock', 'build.rs', 'NOTICE', 'Dockerfile', '.do
             'tools/image/smoke.py', 'tools/test-db.py',
             'tests/support/db_harness.py', 'tests/support/e1_cases.py', 'tests/support/protocol_fault.py',
             'tests/fixtures/e1/manifest.json', 'tests/fixtures/e1/schema.sql', 'tests/fixtures/e1/seed.sql',
-            'native/libpq/source.json', 'native/libpq/COPYRIGHT', 'native/libpq/NOTICE')
+            'native/libpq/source.json', 'native/libpq/source16.json', 'native/libpq/0016-silent-passfile-rejection.patch', 'native/libpq/COPYRIGHT', 'native/libpq/NOTICE')
 
 
 def source_files(root):
@@ -61,7 +61,13 @@ def snapshot_source(root, destination, *, revision=None):
     return source
 
 
-def build(engine, platform, output, *, revision=None):
+def client_build_args(version):
+    require(version in ('16.15', '18.6'), 'unsupported PostgreSQL client version')
+    return ['--build-arg', 'PG_CLIENT_VERSION=' + version]
+
+
+def build(engine, platform, output, *, revision=None, client_version='18.6'):
+    arguments = client_build_args(client_version)
     check_platform(engine, platform)
     output = Path(output).absolute()
     require(not any(path.is_symlink() for path in (output, *output.parents)), 'image output paths must not contain symlinks')
@@ -75,14 +81,15 @@ def build(engine, platform, output, *, revision=None):
         if engine == 'podman':
             identity = Path(temporary) / 'image-id'
             execute([engine, 'build', '--format', 'oci', '--platform', platform, '--http-proxy=false',
-                     '--force-rm', '--iidfile', str(identity), str(context)], timeout=1800, log=output / 'build.log')
+                     '--force-rm', '--iidfile', str(identity), *arguments, str(context)], timeout=1800, log=output / 'build.log')
             image_id = identity.read_text().strip()
             require(len(image_id) in (64, 71) and all(c in '0123456789abcdef' for c in image_id.removeprefix('sha256:')), 'invalid built image ID')
             execute([engine, 'save', '--format', 'oci-archive', '--output', str(archive), image_id], timeout=300)
         else:
             execute([engine, 'buildx', 'build', '--platform', platform, '--provenance=false',
-                     '--output', 'type=oci,compression=gzip,dest=' + str(archive), str(context)], timeout=1800, log=output / 'build.log')
+                     '--output', 'type=oci,compression=gzip,dest=' + str(archive), *arguments, str(context)], timeout=1800, log=output / 'build.log')
         actual = inspect_archive(archive)
+        require(actual['runtime']['clients']['version'] == client_version, 'built client variant differs')
         require(actual['source'] == source and actual['platform'] == platform, 'built image differs from requested source or platform')
         receipt = {'schema': 1, 'status': 'built', 'archive': {'path': archive.name, 'sha256': sha256(archive)}, **actual}
         (output / 'receipt.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
@@ -95,11 +102,12 @@ def main():
     parser.add_argument('--engine', required=True, choices=('podman', 'docker'))
     parser.add_argument('--platform', required=True, choices=('linux/arm64', 'linux/amd64'))
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--client-version', choices=('16.15', '18.6'), default='18.6')
     parser.add_argument('--revision', help='revision label for an export; does not verify commit membership')
     args = parser.parse_args()
     try:
         require(sys.version_info >= (3, 12), 'image tooling requires Python 3.12 or newer')
-        build(args.engine, args.platform, args.output, revision=args.revision)
+        build(args.engine, args.platform, args.output, revision=args.revision, client_version=args.client_version)
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print('Runtime image: ' + (str(error) if isinstance(error, RuntimeError) else 'invalid or unavailable build input'), file=sys.stderr)
         return 1
