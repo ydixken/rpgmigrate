@@ -50,7 +50,17 @@ These results close bounded component checks, not a native operator workflow or 
 - [x] Qualify the bounded Native5 test_decoding SourceOrigin consumer in four PG16/18 cases; default pgoutput remains a separate gate.
 - [x] Measure the E3 serial-apply baseline and first E7 settings refactor with 24 runs per candidate; see the [eight-configuration comparison and limits](../docs/performance-baseline.md).
 - [x] Qualify the selected Native6 pgoutput SourceOrigin component in four PG16.15/PG18.6 cases, with 40 native witnesses and 64 admitted proof files; CLI, full clone, pruning and cutover remain separate gates.
-- [ ] Qualify Native7 target-only schema effects: the first PG16 command on the reviewed diagnostic candidate exited 101, with PG18 unrun; the original cause remains unknown, and the scope uses synthetic source receipts and fake utilities.
+- [x] Qualify selected Native7 target-only schema effects on PG16.15 and PG18.6, using synthetic source receipts and fake utilities.
+  The six selected live cases cover positive, rollback and Unknown outcomes, with 14 fresh runs, 40 native witnesses and 32 callback phases.
+  Each version ran three selected tests and passed 18 existing profile assertions.
+  This result does not qualify real pg_dump/pg_restore, full clone, the operator CLI or Native8.
+- [ ] Qualify Native8 postdata with real tools on PostgreSQL 16/18 and across 16 to 18.
+  The private base passed two independent safety reviews within their bounded scopes.
+  The separate wrapper composition passed check and test gates, including 748 library tests.
+  Strict lint remains red with 508 diagnostics: 504 from unwired normal-library dead code and four unused-import groups.
+  The exact lint baseline delta remains unknown.
+  The qualification harness remains under design, and the authors retain HOLD.
+  No Native8 PostgreSQL execution, activation, ACK, full restart or merge qualification follows from these private checks.
 - [ ] Complete clone phases, recovery, cutover/drain, progress, verification, owned cleanup and the selected operator profile through runnable commands.
 
 The [post-merge packaging run](https://github.com/ydixken/rpgmigrate/actions/runs/42445772554) passed all four native jobs on merge commit `bee9ab94584ab319f0803bb4a077f38f6fcf8ef9`; this is separate from the accepted pre-merge gates.
@@ -62,6 +72,9 @@ E1 acceptance: `e1-bbcd-live-qo4mu0kw/root-acceptance.json`, SHA-256 `59c519d82f
 Native6 acceptance: `n6-epoch-865d-live-csru8ioe/root-acceptance.json`, SHA-256 `26bda5e36c0d1874c210f2edaa8ee39f0202d69038aa098ee73f61474a90f3ac`, bound to execution receipt `78b3d70aaefa2cee8ffc90f402089a09490568ed187eaba5252a7edfef5eb12c`.
 Native6 negative: `n6-diagnostic-a1a-live-9rkdregb/root-negative-acceptance.json`, SHA-256 `679166eb8c01e666e860fa1c9d644280260d2ed2fd69035cdcdc4e1108f295b2`; its omitted payload does not establish the actual rejected value or a historical cause.
 Native7 original negative: `native7-schema-live-hsck6kr5/root-negative-acceptance.json`, prefix `f1572a67`; the later diagnostic result does not retroactively identify this cause.
+Native7 execution: `n7-wholerow-be268-live-wgpyuecq/execution-receipt.json`, SHA-256 `f70c03c8e14b7e73bab48a120a224d523f48333b5b2a41dc3c9a14d37dd9944b`.
+Native7 independent Root acceptance: `n7-wholerow-be268-live-wgpyuecq/root-result-acceptance.json`, SHA-256 `4633cfdfb804594e0160f60dfbe29835557f78e20fe3a5e25811ecd19a8b6f71`.
+Earlier Native7 negative causes remain unknown.
 The maintained local ledger contains detailed worker and lease history; earlier entries below retain their original scope.
 
 ## Implementation and release
