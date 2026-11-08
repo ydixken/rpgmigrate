@@ -178,7 +178,7 @@ def client_dependencies(paths):
     return graph
 
 
-def resolve_archive_path(name, records):
+def resolve_archive_path(name, records, *, aliases=None):
     for _ in range(40):
         parts = PurePosixPath(name).parts
         for length in range(2, len(parts) + 1):
@@ -188,11 +188,40 @@ def resolve_archive_path(name, records):
                 target = record['link']
                 if not target.startswith('/'):
                     target = str(PurePosixPath(prefix).parent / target)
+                if aliases is not None:
+                    aliases.append((prefix, posixpath.normpath(target)))
                 name = posixpath.normpath(str(PurePosixPath(target, *parts[length:])))
                 break
         else:
             return name
     raise RuntimeError('dependency symlink cycle or excessive depth')
+
+
+def interpreter_failure(name, recorded, requested, records, objects, source, architecture):
+    """Expose bounded loader facts without logging arbitrary archive paths or data."""
+    def path(value):
+        pattern = r'(?:/usr/lib(?:64)?|/lib(?:64)?|' + re.escape(CLIENT_PREFIX) + r')(?:/[A-Za-z0-9_.+-]+)*'
+        return value if isinstance(value, str) and len(value) <= 256 and re.fullmatch(pattern, value) and posixpath.normpath(value) == value else '<redacted>'
+    def digest(value):
+        return value if isinstance(value, str) and HEX.fullmatch(value) else None
+    aliases, resolved = [], None
+    try:
+        resolved = resolve_archive_path(requested, records, aliases=aliases)
+    except RuntimeError:
+        pass
+    revision = source.get('revision')
+    return json.dumps({
+        'object': path(name), 'object_sha256': digest(records.get(name, {}).get('sha256')),
+        'recorded_interpreter': path(recorded), 'elf_interpreter': path(requested),
+        'resolved_interpreter': path(resolved), 'recorded_is_elf': recorded in objects,
+        'resolved_is_elf': resolved in objects,
+        'recorded_sha256': digest(records.get(recorded, {}).get('sha256')),
+        'resolved_sha256': digest(records.get(resolved, {}).get('sha256')),
+        'aliases': [[path(alias), path(target)] for alias, target in aliases[:8]],
+        'alias_count': len(aliases), 'source_sha256': digest(source.get('sha256')),
+        'source_revision': revision if isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{40,64}', revision) else None,
+        'architecture': architecture,
+    }, sort_keys=True, separators=(',', ':'))
 
 
 def validate_clients(runtime, client, source, source_bytes, records, objects, architecture):
@@ -248,7 +277,9 @@ def validate_clients(runtime, client, source, source_bytes, records, objects, ar
         interpreter = record['interpreter']
         require((interpreter is None) == (parsed['interpreter'] is None), 'dependency interpreter mismatch')
         if interpreter:
-            require(interpreter in objects and interpreter == resolve_archive_path(parsed['interpreter'], records), 'dependency interpreter target mismatch')
+            if not (interpreter in objects and interpreter == resolve_archive_path(parsed['interpreter'], records)):
+                raise RuntimeError('dependency interpreter target mismatch: ' +
+                                   interpreter_failure(name, interpreter, parsed['interpreter'], records, objects, source, architecture))
             pending.append(interpreter)
         require(name.startswith((CLIENT_PREFIX + '/', '/usr/lib/', '/lib/', '/lib64/')), 'dependency outside runtime library roots')
     require(visited == set(graph), 'unreachable dependency evidence')

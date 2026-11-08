@@ -269,6 +269,67 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'interpreter target'):
             self.runtime.load_receipt(path)
 
+    def test_interpreter_failure_reports_actual_archive_paths_and_source_identity(self):
+        for version in ('16.15', '18.6'):
+            for architecture, soname in (('amd64', 'ld-linux-x86-64.so.2'), ('arm64', 'ld-linux-aarch64.so.1')):
+                with self.subTest(version=version, architecture=architecture):
+                    path, expected = write_fixture(self.root, client_version=version, architecture=architecture,
+                                                   extra_layer={'lib': ('usr/lib/foreign',)})
+                    with self.assertRaisesRegex(RuntimeError, 'dependency interpreter target mismatch') as caught:
+                        self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+                    self.assertIn(': {', str(caught.exception), 'failure must identify the failing predicate operands')
+                    facts = json.loads(str(caught.exception).split(': ', 1)[1])
+                    self.assertEqual(facts['recorded_interpreter'], '/usr/lib/' + soname)
+                    self.assertEqual(facts['elf_interpreter'], '/lib/' + soname)
+                    self.assertEqual(facts['resolved_interpreter'], '/usr/lib/foreign/' + soname)
+                    self.assertTrue(facts['recorded_is_elf'])
+                    self.assertFalse(facts['resolved_is_elf'])
+                    self.assertEqual(facts['aliases'], [['/lib', '/usr/lib/foreign']])
+                    self.assertEqual(facts['source_sha256'], expected['source']['sha256'])
+                    self.assertEqual(facts['source_revision'], expected['source']['revision'])
+                    self.assertEqual(facts['architecture'], architecture)
+                    self.assertEqual(facts['object_sha256'], expected['runtime']['files'][facts['object']]['sha256'])
+
+    def test_interpreter_failure_distinguishes_missing_elf_from_path_mismatch(self):
+        loader = '/usr/lib/ld-linux-aarch64.so.1'
+        data = b'not an ELF object'
+        path, _ = write_fixture(self.root, extra_layer={loader.lstrip('/'): data})
+        with self.assertRaisesRegex(RuntimeError, 'dependency interpreter target mismatch') as caught:
+            self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+        self.assertIn(': {', str(caught.exception), 'failure must report missing ELF evidence')
+        facts = json.loads(str(caught.exception).split(': ', 1)[1])
+        self.assertFalse(facts['recorded_is_elf'])
+        self.assertFalse(facts['resolved_is_elf'])
+        self.assertEqual(facts['recorded_interpreter'], facts['resolved_interpreter'])
+        self.assertEqual(facts['recorded_sha256'], digest(data))
+        self.assertEqual(facts['resolved_sha256'], digest(data))
+
+    def test_interpreter_failure_capture_redacts_non_system_paths_and_invalid_hashes(self):
+        self.assertTrue(hasattr(self.runtime, 'interpreter_failure'), 'bounded interpreter failure capture is required')
+        secret = 'private-password-canary'
+        requested = '/tmp/' + secret
+        source = {'sha256': 'sensitive-invalid-hash', 'revision': secret}
+        records = {'/usr/lib/link.so': {'link': requested}}
+        facts = self.runtime.interpreter_failure('/work/' + secret, requested, '/usr/lib/link.so',
+                                                 records, {}, source, 'arm64')
+        self.assertNotIn(secret, facts)
+        self.assertNotIn('sensitive-invalid-hash', facts)
+        value = json.loads(facts)
+        self.assertEqual(value['object'], '<redacted>')
+        self.assertEqual(value['recorded_interpreter'], '<redacted>')
+        self.assertEqual(value['resolved_interpreter'], '<redacted>')
+        self.assertIsNone(value['source_sha256'])
+        self.assertIsNone(value['source_revision'])
+        self.assertEqual(value['aliases'], [['/usr/lib/link.so', '<redacted>']])
+        self.assertLess(len(facts), 8192)
+        records = {'/usr/lib/link' + str(n): {'link': '/usr/lib/link' + str(n + 1)} for n in range(12)}
+        facts = self.runtime.interpreter_failure('/usr/lib/object.so', '/usr/lib/link12', '/usr/lib/link0',
+                                                 records, {}, source, 'arm64')
+        value = json.loads(facts)
+        self.assertEqual(value['alias_count'], 12)
+        self.assertEqual(len(value['aliases']), 8)
+        self.assertLess(len(facts), 8192)
+
     def test_dependency_collection_requires_every_needed_library(self):
         from unittest.mock import patch
         binary = self.root / 'tool'; library = self.root / 'libc.so.6'

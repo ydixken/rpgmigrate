@@ -84,6 +84,10 @@ Both output directories must be new.
 The build produces `image.oci.tar` and `receipt.json`; the smoke helper produces `smoke.json`.
 Missing inputs, mismatched artifacts, failed checks, and incomplete receipts return nonzero.
 Keep the local build log private, because it is diagnostic output rather than a sanitized publication artifact.
+An interpreter-target refusal reports bounded system paths, alias steps, ELF presence, file hashes, architecture, and source identity in the error line.
+Other paths and malformed identities are redacted; raw ELF bytes, file contents, and environment values are excluded.
+Retain that exact error line with the workflow run and job identifiers when reporting a packaging failure.
+These failure diagnostics do not qualify the image or bypass loader checks.
 
 ## What the smoke checks prove
 
