@@ -379,3 +379,12 @@ Label component test evidence by its actual scope and keep it secondary to workf
 Distinguish aggregate agent-hours from elapsed time and state assumptions and uncertainty; estimates are not commitments.
 Deferring 40 command paths does not imply an 80 percent reduction in engineering work, because the selected paths still require the migration engine and its safety gates.
 Checkpoint a coherent verified subset explicitly when broader WIP is unqualified; never describe it as saving or qualifying all local work.
+
+## Corrections on 2026-11-08
+
+Trust `AGENTS.md`, the approved design and this file; do not use the removed task ledger or dated plans as inputs.
+The [roadmap](../docs/roadmap.md) amendments supersede conflicting entries above, including the patched-libpq requirement and the never-worktrees rule.
+Git worktrees are allowed for parallel build work.
+Parallelize the build phase as far as file ownership allows.
+Review each change once and run each test suite once per changed input; do not repeat reviews or test runs on unchanged code.
+Write finished plans into the repository, not only into the session plan file.

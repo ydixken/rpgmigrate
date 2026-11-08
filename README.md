@@ -23,13 +23,13 @@ It uses a controlled, patched libpq dependency for connection checks and a restr
 ├── bench/        # Isolated persistence experiments
 ├── tests/        # Contracts, fixtures, and database checks
 ├── tools/        # Controlled native build and isolated database harness
-├── docs/         # Guides, approved design, and implementation plans
-└── tasks/        # Maintained status and lessons
+├── docs/         # Roadmap, approved design, and operator contract
+└── tasks/        # Lessons from user corrections
 ```
 
 ## Getting Started
 
-1. Prepare the [build prerequisites](docs/getting-started.md#prerequisites), confirm the checkout, and install the pinned Task binary locally.
+1. Confirm the checkout and install the pinned Task binary locally.
 
    ```sh
    git status --short --branch
@@ -64,37 +64,9 @@ It uses a controlled, patched libpq dependency for connection checks and a restr
 | `task test-db-self-check` | Check the independent data oracle. |
 | `task test-db` | Run isolated live engine and executable checks. |
 
-## Limits
+## Roadmap
 
-See the [first-slice limits](docs/getting-started.md#first-slice-limits).
-
-## Testing
-
-See the [Testing guide](docs/testing.md).
-
-## Containers
-
-See the [container build and verification guide](docs/container.md).
-
-## Storage experiments
-
-See the [bounded storage pilot](docs/getting-started.md#storage-pilot).
-
-## Storage results
-
-See the [macOS arm64 pilot results](docs/research/2026-11-06-storage-pilot.md).
-
-## Storage concurrency
-
-See the [C1 role checks and qualification limits](docs/research/2026-11-06-storage-concurrency.md).
-
-## Durability
-
-See the [durability design and runtime gates](docs/durability.md).
-
-## Compatibility
-
-See the [CLI compatibility guide](docs/cli-compatibility.md).
+See the [roadmap](docs/roadmap.md) for the assessment, decisions, and milestones.
 
 ## Operator compatibility
 
@@ -103,10 +75,6 @@ See the [Operator compatibility contract](docs/operator-compatibility.md).
 ## Design
 
 See the [approved design](docs/superpowers/specs/2026-11-06-rpgmigrate-design.md).
-
-## Status
-
-See the [task status](tasks/todo.md) for review evidence and unfinished migration, operator, and release work.
 
 ## Notices
 
