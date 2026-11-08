@@ -55,6 +55,12 @@ def run_identity(source, run, attempt):
     return {"source_revision": source, "run_id": run, "run_attempt": attempt}
 
 
+def variant_tag(tag, version):
+    require(version in ('16.15', '18.6'), 'unsupported client variant')
+    require(not tag.endswith('-pg16'), 'pg16 suffix is reserved for the client variant')
+    return tag + '-pg16' if version == '16.15' else tag
+
+
 def destination(repository, tag):
     require(repository == "ghcr.io/ydixken/rpgmigrate", "unapproved image destination")
     require(len(tag) <= 128 and re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?", tag),
@@ -153,6 +159,7 @@ def bundles(root, identity):
         envelope = read_json(directory / "ci.json")
         require(type(envelope.get("schema")) is int and envelope == expected_envelope, "CI receipt or workflow run mismatch")
         result.append((directory, receipt))
+    require(result[0][1]["runtime"]["clients"]["version"] == result[1][1]["runtime"]["clients"]["version"], "native images use different client variants")
     require(result[0][1]["source"] == result[1][1]["source"], "native images use different source bytes")
     envelopes = [read_json(path / "ci.json") for path, _ in result]
     require(envelopes[0]["verification_source_sha256"] == envelopes[1]["verification_source_sha256"],
@@ -210,8 +217,9 @@ def validate_manifest(actual, receipt):
 
 
 def publish(root, identity, repository, tag):
-    target = destination(repository, tag)
+    destination(repository, tag)
     inputs = bundles(root, identity)
+    target = destination(repository, variant_tag(tag, inputs[0][1]["runtime"]["clients"]["version"]))
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-publish-") as temporary:
         temporary = Path(temporary)
         layouts = []

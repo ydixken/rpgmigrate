@@ -10,12 +10,14 @@ RUN rm /etc/apt/sources.list.d/debian.sources \
       bison flex clang python3 libssl-dev libkrb5-dev libcurl4-openssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+ARG PG_CLIENT_VERSION=18.6
+
 WORKDIR /opt/rpgmigrate
 ENV PQ_LIB_DIR=/opt/rpgmigrate/target/native/libpq/lib \
     CARGO_TERM_COLOR=never \
     PYTHONDONTWRITEBYTECODE=1
 COPY . .
-RUN python3 tools/build-libpq.py \
+RUN python3 tools/build-libpq.py --client-version "$PG_CLIENT_VERSION" \
     && python3 tools/build-libpq.py --verify \
     && cargo build --locked --release --bin rpgmigrate \
     && python3 tools/image/runtime.py --stage /runtime \
@@ -45,7 +47,9 @@ RUN printf '%s\n' /opt/rpgmigrate/target/native/libpq/lib > /etc/ld.so.conf.d/rp
     && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin rpgmigrate \
     && mkdir /work && chown 1000:1000 /work \
     && /usr/local/bin/rpgmigrate --help > /dev/null
-ENV HOME=/home/rpgmigrate TMPDIR=/work
+ENV HOME=/home/rpgmigrate TMPDIR=/work \
+    PG_CONFIG=/opt/rpgmigrate/target/native/pgtools/bin/pg_config \
+    PATH=/opt/rpgmigrate/target/native/pgtools/bin:$PATH
 USER 1000:1000
 WORKDIR /work
 STOPSIGNAL SIGTERM

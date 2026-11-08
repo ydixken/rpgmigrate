@@ -19,3 +19,9 @@ Those external dependencies retain their own licenses and notices.
 This build does not copy their libraries or change their installations.
 
 Retain this notice and COPYRIGHT with copies of the modified libpq artifact.
+
+The optional runtime client variants are built separately in target/native/pgtools.
+source16.json pins the official PostgreSQL 16.15 client source and license.
+0016-silent-passfile-rejection.patch removes only the equivalent two diagnostics
+and adjusts their comment; PG16 validates stat information before opening the file.
+The application's patched PostgreSQL 18.6 library and capability ABI are unchanged.
