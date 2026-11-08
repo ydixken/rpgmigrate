@@ -1,20 +1,19 @@
 use super::{Checkpoint, CommitOutcome, ControlRow, Frontier, TargetCommit, metadata};
 use crate::catalog::{command, configure_durability, confirm_durability};
 use crate::cdc::contracts::Event;
-use crate::contracts::{CopyReport, Error, ErrorKind, IoControl, Result, SnapshotAnchor};
-use crate::copy_plan::open_sealed_copy_plan;
+use crate::contracts::{CopyReport, Error, ErrorKind, IoControl, Result};
 use crate::identity::StreamId;
-use crate::pg::{PgConnection, PgParam, PgResult, TransactionStatus};
-use crate::snapshot::SourceSnapshot;
+use crate::pg::{CommitObservation, PgConnection, PgParam, PgResult, TransactionStatus};
 use crate::state::{
-    ConfirmedProvenance, CopySnapshotIntent, NativeState, TARGET_METADATA_VERSION, TargetBinding,
-    TargetProvenance,
+    ConfirmedProvenance, NativeState, TARGET_METADATA_VERSION, TargetBinding, TargetProvenance,
 };
 use std::collections::BTreeSet;
 
 // Stable database-wide session fence: ASCII RPGM, serial writer slot 1, across all runs.
 const FENCE_CLASS: i32 = 0x5250_474d;
-const FENCE_SLOT: i32 = 1;
+fn fence_slot(run: crate::identity::RunId) -> i32 {
+    i32::from_ne_bytes(crc32fast::hash(&run.0).to_ne_bytes())
+}
 // Bound backend statement memory until the serial consumer owns eviction.
 const MAX_PREPARED_DML: usize = 1024;
 const CHECKPOINT_TABLE: &str = "checkpoint";
@@ -35,6 +34,7 @@ struct Session {
     role: u32,
     system: Option<u64>,
     synchronous_commit: &'static str,
+    fence_slot: i32,
 }
 
 pub(crate) struct TargetAuthority {
@@ -54,22 +54,6 @@ pub(crate) struct TargetTxn<'a> {
 #[derive(Debug)]
 pub(crate) struct DurableProof {
     evidence: Box<ProofEvidence>,
-}
-
-#[derive(Debug)]
-pub(crate) struct SnapshotProof {
-    anchor: SnapshotAnchor,
-    durable: DurableProof,
-}
-
-impl SnapshotProof {
-    pub(crate) fn anchor(&self) -> &SnapshotAnchor {
-        &self.anchor
-    }
-
-    pub(crate) fn durable(&self) -> &DurableProof {
-        &self.durable
-    }
 }
 
 #[derive(Debug)]
@@ -117,11 +101,21 @@ impl TargetAuthority {
         state: &mut NativeState,
         io: &IoControl,
     ) -> Result<Self> {
+        Self::acquire_inner(connection, stream, state, io, 1)
+    }
+
+    fn acquire_inner(
+        connection: PgConnection,
+        stream: StreamId,
+        state: &mut NativeState,
+        io: &IoControl,
+        slot: i32,
+    ) -> Result<Self> {
         if stream.run != state.identity().run {
             return Err(refusal("target-authority: native run and stream disagree"));
         }
         let previous = state.target_provenance(&stream).cloned();
-        let mut session = Session::acquire(connection, "on", io)?;
+        let mut session = Session::acquire(connection, "on", slot, io)?;
         let fresh = previous.is_none();
         let intent = match &previous {
             Some(TargetProvenance::Provisioning(intent)) => intent.clone(),
@@ -242,144 +236,6 @@ impl TargetAuthority {
         })
     }
 
-    fn begin_copy(&mut self, io: &IoControl) -> Result<TargetTxn<'_>> {
-        let outcome = (|| {
-            validate_copy_start(&self.row)?;
-            self.session.begin(io)?;
-            let row = self.read_row(io)?;
-            validate_copy_start(&row)?;
-            if row != self.row {
-                return Err(refusal(
-                    "target-authority: checkpoint changed before owned transaction",
-                ));
-            }
-            self.session.require_transaction()?;
-            self.row = row;
-            Ok(())
-        })();
-        if let Err(error) = outcome {
-            self.session.close();
-            return Err(error);
-        }
-        let mut tx = TargetTxn {
-            authority: self,
-            next: None,
-            failed: false,
-            finished: false,
-        };
-        tx.defer_constraints(io)?;
-        Ok(tx)
-    }
-
-    fn checked_snapshot_intent(&self, native: &NativeState) -> Result<CopySnapshotIntent> {
-        let intent = native
-            .checked_copy_snapshot()?
-            .ok_or_else(|| refusal("target-authority: COPY snapshot intent is absent"))?;
-        if intent.anchor.stream != self.provenance.intent.binding.stream
-            || !matches!(
-                native.target_provenance(&intent.anchor.stream),
-                Some(TargetProvenance::Confirmed(confirmed)) if confirmed == &self.provenance
-            )
-        {
-            return Err(refusal(
-                "target-authority: COPY intent and target provenance differ",
-            ));
-        }
-        Ok(intent)
-    }
-
-    pub(crate) fn copy_snapshot(
-        &mut self,
-        source: &mut SourceSnapshot,
-        native: &NativeState,
-        io: &IoControl,
-    ) -> Result<(CopyReport, SnapshotProof)> {
-        let outcome = (|| {
-            let intent = self.checked_snapshot_intent(native)?;
-            native.checked_source_binding(&source.receipt().intent.binding)?;
-            let receipt = source.receipt();
-            if receipt.intent.binding.stream() != intent.anchor.stream
-                || receipt.snapshot_token != intent.anchor.snapshot_token
-                || receipt.consistent_point != intent.anchor.consistent_point
-            {
-                return Err(refusal(
-                    "target-authority: source snapshot differs from the checked COPY intent",
-                ));
-            }
-            let mut reader = open_sealed_copy_plan(native, &intent, io)?;
-            let tx = self.begin_copy(io)?;
-            let owned = metadata::owned_relation_oids(
-                tx.authority.session.connection()?,
-                &tx.authority.provenance,
-                io,
-            )?;
-            let report =
-                source.copy_into(tx.authority.session.connection()?, &owned, &mut reader, io)?;
-            if report.tables != intent.plan.table_count {
-                return Err(refusal(
-                    "target-authority: COPY report table count differs from the sealed plan",
-                ));
-            }
-            let proof = tx.complete_snapshot(&intent.anchor, io)?;
-            drop(reader);
-            Ok((report, proof))
-        })();
-        if outcome.is_err() {
-            self.session.close();
-        }
-        outcome
-    }
-
-    pub(crate) fn recover_snapshot(
-        &mut self,
-        native: &NativeState,
-        io: &IoControl,
-    ) -> Result<SnapshotProof> {
-        let outcome = (|| {
-            let intent = self.checked_snapshot_intent(native)?;
-            let reader = open_sealed_copy_plan(native, &intent, io)?;
-            self.session.begin(io)?;
-            let row = self.read_row(io)?;
-            if row != self.row {
-                return Err(refusal(
-                    "target-authority: checkpoint changed before snapshot recovery",
-                ));
-            }
-            if row.anchor.as_ref() != Some(&intent.anchor) {
-                return Err(refusal(
-                    "target-authority: logged COPY anchor differs from native intent",
-                ));
-            }
-            self.row = row;
-            let epoch = self.row.barrier_epoch;
-            let next = increment_barrier(self.row.clone(), epoch)?;
-            self.write_row(&next, io)?;
-            let durable = match self.finish(next, TargetCommit::Synchronous, io)? {
-                CommitReceipt::Acknowledged(Some(proof)) => proof,
-                CommitReceipt::Acknowledged(None) => {
-                    return Err(refusal(
-                        "target-authority: snapshot recovery produced no durability proof",
-                    ));
-                }
-                CommitReceipt::Unknown => {
-                    return Err(refusal(
-                        "target-authority: snapshot recovery COMMIT outcome unknown",
-                    ));
-                }
-            };
-            let proof = SnapshotProof {
-                anchor: intent.anchor,
-                durable,
-            };
-            drop(reader);
-            Ok(proof)
-        })();
-        if outcome.is_err() {
-            self.session.close();
-        }
-        outcome
-    }
-
     #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn reacquire(
         &mut self,
@@ -388,7 +244,12 @@ impl TargetAuthority {
     ) -> Result<Option<Checkpoint>> {
         self.session.close();
         self.prepared.clear();
-        let mut session = Session::acquire(connection, self.session.synchronous_commit, io)?;
+        let mut session = Session::acquire(
+            connection,
+            self.session.synchronous_commit,
+            self.session.fence_slot,
+            io,
+        )?;
         session.validate_binding(&self.provenance.intent.binding)?;
         session.begin(io)?;
         if metadata::probe(session.connection()?, &self.provenance.intent, io)?.as_ref()
@@ -407,7 +268,6 @@ impl TargetAuthority {
         Ok(self.current_checkpoint())
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn barrier(
         &mut self,
         through: Option<&Frontier>,
@@ -503,16 +363,9 @@ impl TargetAuthority {
         self.session.verify(io)?;
         self.session.require_transaction()?;
         self.session.phase = Phase::CommitPending;
-        let evidence = self
-            .session
-            .connection()?
-            .query("COMMIT", io)
-            .and_then(|result| {
-                let status = self.session.connection()?.transaction_status()?;
-                Ok(commit_evidence(result.command_tag()?, status))
-            });
+        let evidence = self.session.connection()?.commit_observed(io);
         match evidence {
-            Ok(CommitEvidence::Committed) => {
+            Ok(CommitObservation::Committed) => {
                 self.session.phase = Phase::Idle;
                 self.row = next;
                 let proof = (mode == TargetCommit::Synchronous).then(|| DurableProof {
@@ -526,7 +379,7 @@ impl TargetAuthority {
                 });
                 Ok(CommitReceipt::Acknowledged(proof))
             }
-            Ok(CommitEvidence::RolledBack) => {
+            Ok(CommitObservation::RolledBack) => {
                 self.session.phase = Phase::Idle;
                 Err(refusal("target-authority: COMMIT returned ROLLBACK"))
             }
@@ -539,61 +392,6 @@ impl TargetAuthority {
 }
 
 impl TargetTxn<'_> {
-    fn defer_constraints(&mut self, io: &IoControl) -> Result<()> {
-        self.require_healthy()?;
-        self.failed = true;
-        let outcome = (|| {
-            self.authority.session.require_transaction()?;
-            command(
-                self.authority.session.connection()?,
-                "SET CONSTRAINTS ALL DEFERRED",
-                "SET CONSTRAINTS",
-                io,
-            )
-        })();
-        self.failed = outcome.is_err();
-        outcome
-    }
-
-    fn complete_snapshot(
-        mut self,
-        anchor: &SnapshotAnchor,
-        io: &IoControl,
-    ) -> Result<SnapshotProof> {
-        self.require_healthy()?;
-        self.failed = true;
-        if self.next.is_some() {
-            return Err(refusal(
-                "target-authority: COPY completion forbids a CDC frontier",
-            ));
-        }
-        validate_copy_start(&self.authority.row)?;
-        let mut next = self.authority.row.clone();
-        next.anchor = Some(anchor.clone());
-        let epoch = next.barrier_epoch;
-        next = increment_barrier(next, epoch)?;
-        self.authority.write_row(&next, io)?;
-        let durable = match self.authority.finish(next, TargetCommit::Synchronous, io)? {
-            CommitReceipt::Acknowledged(Some(proof)) => proof,
-            CommitReceipt::Acknowledged(None) => {
-                return Err(refusal(
-                    "target-authority: COPY produced no durability proof",
-                ));
-            }
-            CommitReceipt::Unknown => {
-                return Err(refusal(
-                    "target-authority: COPY COMMIT outcome unknown; recover on a fresh fenced connection",
-                ));
-            }
-        };
-        let proof = SnapshotProof {
-            anchor: anchor.clone(),
-            durable,
-        };
-        self.finished = true;
-        Ok(proof)
-    }
-
     /// Run on the first touch of each relation in every owned transaction.
     #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn preflight_relation(&mut self, expected: &Event, io: &IoControl) -> Result<()> {
@@ -772,6 +570,7 @@ impl Session {
     fn acquire(
         mut connection: PgConnection,
         minimum: &'static str,
+        slot: i32,
         io: &IoControl,
     ) -> Result<Self> {
         if connection.transaction_status()? != TransactionStatus::Idle {
@@ -801,12 +600,13 @@ impl Session {
         };
         command(&mut connection, "SET search_path = pg_catalog", "SET", io)?;
         let locked = connection.query(
-            &format!("SELECT pg_catalog.pg_advisory_lock({FENCE_CLASS}, {FENCE_SLOT})"),
+            &format!("SELECT pg_catalog.pg_advisory_lock({FENCE_CLASS}, {slot})"),
             io,
         )?;
         if locked.rows() != 1 {
             return Err(refusal("target-authority: writer fence returned no result"));
         }
+        let slot_oid = slot as u32;
         connection.prepare("rpgmigrate_authority_guard", &format!(
             "SELECT pg_catalog.pg_backend_pid() = $1::integer
             AND (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()) = $2::oid
@@ -817,7 +617,7 @@ impl Session {
             AND pg_catalog.current_setting('search_path') = 'pg_catalog'
             AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory'
                 AND database = $2::oid AND pid = $1::integer AND classid = {FENCE_CLASS}::oid
-                AND objid = {FENCE_SLOT}::oid AND objsubid = 2 AND mode = 'ExclusiveLock' AND granted)"
+                AND objid = {slot_oid}::oid AND objsubid = 2 AND mode = 'ExclusiveLock' AND granted)"
         ), &[23, 26, 26], io)?;
         let mut session = Self {
             connection: Some(connection),
@@ -827,6 +627,7 @@ impl Session {
             role,
             system,
             synchronous_commit,
+            fence_slot: slot,
         };
         session.verify(io)?;
         Ok(session)
@@ -922,6 +723,7 @@ impl Session {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
 enum CommitEvidence {
     Committed,
@@ -929,21 +731,13 @@ enum CommitEvidence {
     Unknown,
 }
 
+#[cfg(test)]
 fn commit_evidence(tag: &str, status: TransactionStatus) -> CommitEvidence {
     match (tag, status) {
         ("COMMIT", TransactionStatus::Idle) => CommitEvidence::Committed,
         ("ROLLBACK", TransactionStatus::Idle) => CommitEvidence::RolledBack,
         _ => CommitEvidence::Unknown,
     }
-}
-
-fn validate_copy_start(row: &ControlRow) -> Result<()> {
-    if row.applied.is_some() || row.anchor.is_some() {
-        return Err(refusal(
-            "target-authority: COPY requires an empty checkpoint and no snapshot anchor",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_pending_row(row: &ControlRow) -> Result<()> {
@@ -972,15 +766,6 @@ fn increment_barrier(row: ControlRow, epoch: u64) -> Result<ControlRow> {
             .ok_or_else(|| refusal("target-authority: barrier counter exhausted"))?,
         ..row
     })
-}
-
-#[cfg(test)]
-pub(crate) fn copy_metadata_names_for_test(stream: StreamId) -> (String, String, String) {
-    (
-        schema_name(stream),
-        CHECKPOINT_TABLE.into(),
-        format!("{CHECKPOINT_TABLE}_pkey"),
-    )
 }
 
 fn schema_name(stream: StreamId) -> String {
@@ -1101,6 +886,7 @@ mod tests {
                 role: 1,
                 system: Some(9),
                 synchronous_commit: "on",
+                fence_slot: 1,
             },
             provenance: ConfirmedProvenance {
                 intent: crate::state::ProvisioningIntent {
@@ -1117,12 +903,16 @@ mod tests {
                 },
                 schema_oid: 16_384,
                 table_oid: 16_385,
+                marker_table_oid: 16_386,
+                marker_index_oid: 16_387,
             },
             row: ControlRow {
                 applied: None,
                 barrier_epoch: 0,
                 barrier_counter: 0,
                 anchor: None,
+                clone: None,
+                certified_lsn: None,
             },
             prepared: BTreeSet::from(["keep".into()]),
         };
@@ -1152,123 +942,6 @@ mod tests {
         );
         assert!(matches!(authority.session.phase, Phase::Poisoned));
         assert_eq!(authority.row, cached);
-    }
-
-    fn test_anchor(stream: StreamId) -> SnapshotAnchor {
-        SnapshotAnchor {
-            stream,
-            snapshot_token: "owned snapshot token".into(),
-            consistent_point: SourceEndLsn(1),
-            plan_nonce: [1; 16],
-        }
-    }
-
-    #[test]
-    fn copy_completion_rejects_cdc_mode_before_sql() {
-        let (mut authority, io) = disconnected_authority();
-        let cached = authority.row.clone();
-        let anchor = test_anchor(authority.provenance.intent.binding.stream);
-        let tx = TargetTxn {
-            authority: &mut authority,
-            next: Some(frontier(1, 100, 120)),
-            failed: false,
-            finished: false,
-        };
-        let error = tx
-            .complete_snapshot(&anchor, &io)
-            .expect_err("CDC mode installed a snapshot anchor");
-        assert_eq!(
-            error.message,
-            "target-authority: COPY completion forbids a CDC frontier"
-        );
-        assert!(matches!(authority.session.phase, Phase::Poisoned));
-        assert_eq!(authority.row, cached);
-    }
-
-    #[test]
-    fn copy_begin_refuses_existing_frontier_or_anchor_before_sql() {
-        for anchored in [false, true] {
-            let (mut authority, io) = disconnected_authority();
-            authority.session.phase = Phase::Idle;
-            if anchored {
-                authority.row.anchor =
-                    Some(test_anchor(authority.provenance.intent.binding.stream));
-            } else {
-                authority.row.applied = Some(frontier(1, 100, 120));
-            }
-            let cached = authority.row.clone();
-            let error = match authority.begin_copy(&io) {
-                Err(error) => error,
-                Ok(_) => panic!("nonempty COPY begin succeeded"),
-            };
-            assert_eq!(
-                error.message,
-                "target-authority: COPY requires an empty checkpoint and no snapshot anchor"
-            );
-            assert!(matches!(authority.session.phase, Phase::Poisoned));
-            assert_eq!(authority.row, cached);
-        }
-    }
-
-    #[test]
-    fn copy_completion_counter_exhaustion_cannot_reach_sql_or_change_cache() {
-        let (mut authority, io) = disconnected_authority();
-        authority.row.barrier_counter = u64::MAX;
-        let cached = authority.row.clone();
-        let anchor = test_anchor(authority.provenance.intent.binding.stream);
-        let tx = TargetTxn {
-            authority: &mut authority,
-            next: None,
-            failed: false,
-            finished: false,
-        };
-        let error = tx
-            .complete_snapshot(&anchor, &io)
-            .expect_err("exhausted COPY counter succeeded");
-        assert_eq!(error.message, "target-authority: barrier counter exhausted");
-        assert!(matches!(authority.session.phase, Phase::Poisoned));
-        assert_eq!(authority.row, cached);
-    }
-
-    #[test]
-    fn snapshot_recovery_prebegin_native_failures_close_authority() {
-        for damaged in [false, true] {
-            let suffix = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "rpgmigrate-copy-authority-{}-{suffix}",
-                std::process::id()
-            ));
-            let native = crate::state::open(&crate::contracts::StateRequest {
-                path: path.clone(),
-                action: crate::contracts::StateAction::Create,
-            })
-            .unwrap();
-            if damaged {
-                std::fs::rename(path.join("manifest.json"), path.join("manifest.saved")).unwrap();
-            }
-            let (mut authority, io) = disconnected_authority();
-            authority.session.phase = Phase::Idle;
-            let cached = authority.row.clone();
-            let result = authority.recover_snapshot(&native, &io);
-            let poisoned = matches!(authority.session.phase, Phase::Poisoned);
-            let unchanged = authority.row == cached;
-            drop(native);
-            std::fs::remove_dir_all(path).unwrap();
-            let error = result.expect_err("unavailable native intent authorized recovery");
-            if damaged {
-                assert!(error.message.starts_with("state-"), "{error:?}");
-            } else {
-                assert_eq!(
-                    error.message,
-                    "target-authority: COPY snapshot intent is absent"
-                );
-            }
-            assert!(poisoned, "pre-BEGIN failure kept authority usable");
-            assert!(unchanged);
-        }
     }
 
     #[test]
@@ -1463,6 +1136,8 @@ mod tests {
             barrier_epoch: 7,
             barrier_counter: u64::MAX,
             anchor: None,
+            clone: None,
+            certified_lsn: None,
         };
         assert!(increment_barrier(row.clone(), 7).is_err());
         assert!(
@@ -1489,6 +1164,8 @@ mod tests {
                 barrier_epoch: 7,
                 barrier_counter: 1,
                 anchor: None,
+                clone: None,
+                certified_lsn: None,
             }
         );
     }
@@ -1550,5 +1227,1445 @@ mod tests {
                 CommitEvidence::Unknown
             );
         }
+    }
+}
+
+use crate::contracts::{ClonePlan, CopyGeneration, OwnedCopyTable, OwnedObject};
+use crate::state::{CloneInspection, ClonePhase, CloneState};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneControl {
+    pub(crate) generation: CopyGeneration,
+    pub(crate) phase: ClonePhase,
+    pub(crate) snapshot_token: String,
+    pub(crate) source_timeline: u32,
+    pub(crate) table_count: u64,
+}
+impl CloneControl {
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.generation.0 == 0
+            || self.source_timeline == 0
+            || self.table_count > 4096
+            || self.snapshot_token.is_empty()
+            || self.snapshot_token.len() > crate::contracts::MAX_SNAPSHOT_TOKEN_BYTES
+            || self.snapshot_token.contains('\0')
+        {
+            return Err(refusal("target-clone: invalid clone control identity"));
+        }
+        Ok(())
+    }
+    fn from_state(state: &CloneState) -> Self {
+        Self {
+            generation: state.plan.generation,
+            phase: state.phase,
+            snapshot_token: state.ticket.token.clone(),
+            source_timeline: state.plan.source.timeline,
+            table_count: state.plan.tables.len() as u64,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CopyDone {
+    pub(crate) source_oid: u32,
+    pub(crate) target_oid: u32,
+    pub(crate) generation: CopyGeneration,
+    pub(crate) rows: u64,
+    pub(crate) bytes: u64,
+    pub(crate) target_namespace_oid: u32,
+    pub(crate) target_owner_oid: u32,
+}
+impl CopyDone {
+    fn matches(&self, table: &OwnedCopyTable) -> bool {
+        self.source_oid == table.table.source_oid
+            && self.target_oid == table.target_oid
+            && self.generation == table.generation
+            && self.target_namespace_oid == table.target_namespace_oid
+            && self.target_owner_oid == table.target_owner_oid
+    }
+}
+
+pub(crate) struct CloneProgress {
+    pub(crate) generation: CopyGeneration,
+    pub(crate) phase: ClonePhase,
+    pub(crate) markers: Vec<CopyDone>,
+    pub(crate) durable_complete: bool,
+}
+
+pub(crate) struct CloneAuthority {
+    authority: TargetAuthority,
+    state: CloneState,
+    issued: BTreeSet<u32>,
+}
+
+pub(crate) struct CopyPermit {
+    provenance: ConfirmedProvenance,
+    table: OwnedCopyTable,
+    control: CloneControl,
+    coordinator_pid: u32,
+    fence_slot: i32,
+}
+
+pub(crate) enum CopyCommitOutcome {
+    Durable,
+    Unknown,
+}
+pub(crate) struct CopyTxn {
+    connection: Option<PgConnection>,
+    permit: CopyPermit,
+    pid: u32,
+    synchronous_commit: &'static str,
+    finished: bool,
+}
+
+impl CloneAuthority {
+    pub(crate) fn acquire(
+        connection: PgConnection,
+        state: &mut NativeState,
+        plan: &ClonePlan,
+        io: &IoControl,
+    ) -> Result<Self> {
+        let saved = state
+            .checked_clone()?
+            .ok_or_else(|| refusal("target-clone: native clone binding is absent"))?;
+        if saved.plan != *plan {
+            return Err(refusal(
+                "target-clone: requested plan differs from native binding",
+            ));
+        }
+        let stream = StreamId {
+            run: state.identity().run,
+            source: plan.source.identity,
+            generation: 1,
+        };
+        let authority =
+            TargetAuthority::acquire_inner(connection, stream, state, io, fence_slot(stream.run))?;
+        if authority.provenance.intent.binding.target_system_identifier
+            != Some(plan.target.identity.system_identifier)
+            || authority.provenance.intent.binding.target_database_oid
+                != plan.target.identity.database_oid
+        {
+            return Err(refusal(
+                "target-clone: target identity differs from clone plan",
+            ));
+        }
+        if authority.row.applied.is_some()
+            || authority.row.anchor.is_some()
+            || authority.row.certified_lsn.is_some()
+        {
+            return Err(refusal(
+                "target-clone: plain clone cannot adopt CDC checkpoint state",
+            ));
+        }
+        let mut owner = Self {
+            authority,
+            state: saved,
+            issued: BTreeSet::new(),
+        };
+        if let Some(control) = owner.authority.row.clone.as_ref() {
+            let expected = CloneControl::from_state(&owner.state);
+            if control.source_timeline != expected.source_timeline
+                || control.table_count != expected.table_count
+                || !(control.generation == expected.generation
+                    && control.snapshot_token == expected.snapshot_token
+                    || control.phase == ClonePhase::Copying
+                        && expected.phase == ClonePhase::Copying
+                        && control.generation.0.checked_add(1) == Some(expected.generation.0))
+            {
+                return Err(refusal(
+                    "target-clone: generation or snapshot binding differs",
+                ));
+            }
+        } else {
+            if owner.state.phase != ClonePhase::Fresh {
+                return Err(refusal(
+                    "target-clone: missing target clone state cannot be adopted",
+                ));
+            }
+            owner.publish(CloneControl::from_state(&owner.state), false, io)?;
+        }
+        Ok(owner)
+    }
+
+    pub(crate) fn permit(&mut self, table: &OwnedCopyTable) -> Result<CopyPermit> {
+        let control = self
+            .authority
+            .row
+            .clone
+            .as_ref()
+            .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
+        if control.phase != ClonePhase::Copying
+            || control.generation != table.generation
+            || !self.state.owned_tables.contains(table)
+            || !self.issued.insert(table.table.source_oid)
+        {
+            return Err(refusal(
+                "target-clone: table permit is absent, stale, or already delegated",
+            ));
+        }
+        Ok(CopyPermit {
+            provenance: self.authority.provenance.clone(),
+            table: table.clone(),
+            control: control.clone(),
+            coordinator_pid: self.authority.session.pid,
+            fence_slot: self.authority.session.fence_slot,
+        })
+    }
+
+    pub(crate) fn mark_stage(&mut self, phase: ClonePhase, io: &IoControl) -> Result<()> {
+        let mut control = self
+            .authority
+            .row
+            .clone
+            .clone()
+            .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
+        if !control.phase.permits(phase) || phase == ClonePhase::Complete {
+            return Err(refusal("target-clone: unsupported clone stage transition"));
+        }
+        if phase == ClonePhase::PostDataPending {
+            self.copy_report(io)?;
+        }
+        control.phase = phase;
+        self.publish(control, false, io)
+    }
+
+    pub(crate) fn advance_generation(&mut self, state: &NativeState, io: &IoControl) -> Result<()> {
+        let next = state
+            .checked_clone()?
+            .ok_or_else(|| refusal("target-clone: native clone state is absent"))?;
+        let old = self
+            .authority
+            .row
+            .clone
+            .as_ref()
+            .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
+        if next.phase != ClonePhase::Copying
+            || old.phase != ClonePhase::Copying
+            || old.generation.0.checked_add(1) != Some(next.plan.generation.0)
+            || next.plan.source != self.state.plan.source
+            || next.plan.target != self.state.plan.target
+            || next.plan.tables != self.state.plan.tables
+            || next.plan.sequences != self.state.plan.sequences
+            || next.plan.policy != self.state.plan.policy
+        {
+            return Err(refusal(
+                "target-clone: recopy requires the next exact owned generation",
+            ));
+        }
+        self.publish(CloneControl::from_state(&next), true, io)?;
+        self.state = next;
+        self.issued.clear();
+        Ok(())
+    }
+
+    pub(crate) fn bind_tables(&mut self, state: &NativeState, io: &IoControl) -> Result<()> {
+        let next = state
+            .checked_clone()?
+            .ok_or_else(|| refusal("target-clone: native clone state is absent"))?;
+        if next.plan != self.state.plan || next.phase != ClonePhase::Copying {
+            return Err(refusal("target-clone: positive table handoff is absent"));
+        }
+        self.state = next;
+        self.mark_stage(ClonePhase::Copying, io)
+    }
+
+    fn publish(&mut self, control: CloneControl, clear: bool, io: &IoControl) -> Result<()> {
+        let outcome = (|| {
+            self.authority.session.begin(io)?;
+            self.authority.row = self.authority.read_row(io)?;
+            let mut next = self.authority.row.clone();
+            next.clone = Some(control);
+            let epoch = next.barrier_epoch;
+            next = increment_barrier(next, epoch)?;
+            if clear {
+                metadata::clear_markers(
+                    self.authority.session.connection()?,
+                    &self.authority.provenance,
+                    io,
+                )?;
+            }
+            self.authority.write_row(&next, io)?;
+            match self.authority.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(_)) => Ok(()),
+                _ => Err(refusal(
+                    "target-clone: stage COMMIT outcome unknown; fresh fenced recovery required",
+                )),
+            }
+        })();
+        if outcome.is_err() {
+            self.authority.session.close();
+        }
+        outcome
+    }
+
+    fn checked_markers(&mut self, io: &IoControl) -> Result<Vec<CopyDone>> {
+        let row = metadata::read_only(
+            self.authority.session.connection()?,
+            &self.authority.provenance,
+            io,
+        )?;
+        if row.clone != self.authority.row.clone {
+            return Err(refusal(
+                "target-clone: clone control changed outside coordinator",
+            ));
+        }
+        let markers = metadata::read_markers(
+            self.authority.session.connection()?,
+            &self.authority.provenance,
+            io,
+        )?;
+        validate_markers(&markers, &self.state)?;
+        Ok(markers)
+    }
+
+    pub(crate) fn copy_report(&mut self, io: &IoControl) -> Result<CopyReport> {
+        aggregate_markers(&self.checked_markers(io)?, self.state.owned_tables.len())
+    }
+
+    pub(crate) fn resolve_unknown(
+        &mut self,
+        table: &OwnedCopyTable,
+        io: &IoControl,
+    ) -> Result<Option<CopyReport>> {
+        if !self.state.owned_tables.contains(table) {
+            return Err(refusal(
+                "target-clone: unknown commit table lacks exact ownership",
+            ));
+        }
+        // Every worker must be reaped before the coordinator reacquires its run fence.
+        let slot = self.authority.session.fence_slot;
+        let result = self.authority.session.connection()?.query(
+            &format!("SELECT pg_catalog.pg_advisory_unlock({FENCE_CLASS},{slot})"),
+            io,
+        )?;
+        if result.rows() != 1 || result.cell(0, 0)? != Some(b"t") {
+            self.authority.session.close();
+            return Err(refusal("target-clone: cannot release run fence"));
+        }
+        let result = self.authority.session.connection()?.query(
+            &format!("SELECT pg_catalog.pg_advisory_lock({FENCE_CLASS},{slot})"),
+            io,
+        )?;
+        if result.rows() != 1 {
+            self.authority.session.close();
+            return Err(refusal("target-clone: cannot reacquire run fence"));
+        }
+        self.authority.session.verify(io)?;
+        self.authority
+            .barrier(None, self.authority.row.barrier_epoch, io)?;
+        let marker = self
+            .checked_markers(io)?
+            .into_iter()
+            .find(|m| m.source_oid == table.table.source_oid);
+        Ok(marker.map(|m| CopyReport {
+            tables: 1,
+            rows: m.rows,
+            bytes: m.bytes,
+        }))
+    }
+
+    pub(crate) fn record_complete(&mut self, report: &CopyReport, io: &IoControl) -> Result<()> {
+        if self.copy_report(io)? != *report {
+            return Err(refusal(
+                "target-clone: completion counts differ from durable markers",
+            ));
+        }
+        let mut control = self
+            .authority
+            .row
+            .clone
+            .clone()
+            .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
+        if control.phase != ClonePhase::Analyzing {
+            return Err(refusal("target-clone: completion requires ANALYZE stage"));
+        }
+        control.phase = ClonePhase::Complete;
+        self.publish(control, false, io)
+    }
+
+    pub(crate) fn durable_completed(&mut self, io: &IoControl) -> Result<bool> {
+        if self
+            .authority
+            .row
+            .clone
+            .as_ref()
+            .is_none_or(|c| c.phase != ClonePhase::Complete)
+        {
+            return Ok(false);
+        }
+        self.copy_report(io)?;
+        self.authority
+            .barrier(None, self.authority.row.barrier_epoch, io)?;
+        Ok(true)
+    }
+}
+
+impl CopyTxn {
+    pub(crate) fn begin(
+        mut connection: PgConnection,
+        permit: CopyPermit,
+        io: &IoControl,
+    ) -> Result<Self> {
+        if connection.transaction_status()? != TransactionStatus::Idle {
+            return Err(refusal("target-copy: idle dedicated connection required"));
+        }
+        let durability = configure_durability(&mut connection, io)?;
+        command(&mut connection, "SET search_path=pg_catalog", "SET", io)?;
+        let result = connection.query("SELECT pg_catalog.pg_backend_pid()", io)?;
+        let pid = number(&result, 0)?;
+        let mut tx = Self {
+            connection: Some(connection),
+            permit,
+            pid,
+            synchronous_commit: durability,
+            finished: false,
+        };
+        tx.verify(io)?;
+        command(tx.connection_mut()?, "BEGIN", "BEGIN", io)?;
+        let provenance = tx.permit.provenance.clone();
+        let saved = metadata::read_only(tx.connection_mut()?, &provenance, io)?;
+        if saved.clone.as_ref() != Some(&tx.permit.control) {
+            return Err(refusal(
+                "target-copy: generation or snapshot permit is stale",
+            ));
+        }
+        let name = tx.qualified()?;
+        command(
+            tx.connection_mut()?,
+            &format!("LOCK TABLE ONLY {name} IN ACCESS EXCLUSIVE MODE"),
+            "LOCK TABLE",
+            io,
+        )?;
+        tx.validate_table(io)?;
+        command(
+            tx.connection_mut()?,
+            &format!("TRUNCATE ONLY {name}"),
+            "TRUNCATE TABLE",
+            io,
+        )?;
+        Ok(tx)
+    }
+    pub(crate) fn connection_mut(&mut self) -> Result<&mut PgConnection> {
+        self.connection
+            .as_mut()
+            .ok_or_else(|| refusal("target-copy: transaction connection is closed"))
+    }
+    fn qualified(&mut self) -> Result<String> {
+        let name = self.permit.table.table.name.clone();
+        Ok(format!(
+            "{}.{}",
+            self.connection_mut()?.quote_identifier(&name.schema)?,
+            self.connection_mut()?.quote_identifier(&name.table)?
+        ))
+    }
+    fn verify(&mut self, io: &IoControl) -> Result<()> {
+        let p = &self.permit;
+        let binding = &p.provenance.intent.binding;
+        let sql = format!(
+            "SELECT pg_catalog.pg_backend_pid()={} AND (SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())={}::oid AND NOT pg_catalog.pg_is_in_recovery() AND pg_catalog.current_setting('transaction_read_only')='off' AND pg_catalog.current_setting('fsync')='on' AND pg_catalog.current_setting('search_path')='pg_catalog' AND EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='advisory' AND database={}::oid AND pid={} AND classid={FENCE_CLASS}::oid AND objid={}::oid AND objsubid=2 AND mode='ExclusiveLock' AND granted)",
+            self.pid,
+            binding.target_database_oid,
+            binding.target_database_oid,
+            p.coordinator_pid,
+            p.fence_slot as u32
+        );
+        let result = self.connection_mut()?.query(&sql, io)?;
+        if result.rows() != 1 || result.cell(0, 0)? != Some(b"t") {
+            return Err(refusal(
+                "target-copy: coordinator fence or physical backend changed",
+            ));
+        }
+        Ok(())
+    }
+    fn validate_table(&mut self, io: &IoControl) -> Result<()> {
+        let t = self.permit.table.clone();
+        let qualified = self.qualified()?;
+        let qualified = self.connection_mut()?.quote_literal(&qualified)?;
+        let schema = self.connection_mut()?.quote_literal(&t.table.name.schema)?;
+        let name = self.connection_mut()?.quote_literal(&t.table.name.table)?;
+        let sql = format!(
+            "SELECT c.oid={}::oid AND c.relnamespace={}::oid AND c.relowner={}::oid AND n.nspname={schema}::pg_catalog.text AND c.relname={name}::pg_catalog.text AND c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger tr WHERE tr.tgrelid=c.oid AND NOT tr.tgisinternal) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=pg_catalog.to_regclass({qualified})::oid",
+            t.target_oid, t.target_namespace_oid, t.target_owner_oid
+        );
+        let result = self.connection_mut()?.query(&sql, io)?;
+        if result.rows() != 1 || result.cell(0, 0)? != Some(b"t") {
+            return Err(refusal(
+                "target-copy: exact owned table identity or COPY profile changed",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn mark_and_commit(
+        mut self,
+        rows: u64,
+        bytes: u64,
+        io: &IoControl,
+    ) -> Result<CopyCommitOutcome> {
+        self.verify(io)?;
+        self.validate_table(io)?;
+        if self.connection_mut()?.transaction_status()? != TransactionStatus::InTransaction {
+            return Err(refusal(
+                "target-copy: COPY did not finish in an active transaction",
+            ));
+        }
+        let provenance = self.permit.provenance.clone();
+        metadata::prepare(self.connection_mut()?, &provenance, io)?;
+        let row = metadata::lock_validate(self.connection_mut()?, &provenance, io)?;
+        if row.clone.as_ref() != Some(&self.permit.control) {
+            return Err(refusal(
+                "target-copy: copy generation changed before marker",
+            ));
+        }
+        let t = &self.permit.table;
+        let marker = CopyDone {
+            source_oid: t.table.source_oid,
+            target_oid: t.target_oid,
+            generation: t.generation,
+            rows,
+            bytes,
+            target_namespace_oid: t.target_namespace_oid,
+            target_owner_oid: t.target_owner_oid,
+        };
+        metadata::insert_marker(self.connection_mut()?, &provenance, &marker, io)?;
+        let minimum = self.synchronous_commit;
+        confirm_durability(self.connection_mut()?, minimum, io)?;
+        self.verify(io)?;
+        let result = self.connection_mut()?.commit_observed(io);
+        self.finished = true;
+        match result {
+            Ok(CommitObservation::Committed) => Ok(CopyCommitOutcome::Durable),
+            Ok(CommitObservation::RolledBack) => {
+                Err(refusal("target-copy: COMMIT returned ROLLBACK"))
+            }
+            _ => {
+                self.connection.take();
+                Ok(CopyCommitOutcome::Unknown)
+            }
+        }
+    }
+}
+impl Drop for CopyTxn {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.connection.take();
+        }
+    }
+}
+
+fn validate_markers(markers: &[CopyDone], state: &CloneState) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for marker in markers {
+        if !seen.insert(marker.source_oid) || !state.owned_tables.iter().any(|t| marker.matches(t))
+        {
+            return Err(refusal(
+                "target-clone: marker has a foreign table, generation, or object identity",
+            ));
+        }
+    }
+    Ok(())
+}
+fn aggregate_markers(markers: &[CopyDone], expected: usize) -> Result<CopyReport> {
+    if markers.len() != expected {
+        return Err(refusal(
+            "target-clone: completed table marker inventory is incomplete",
+        ));
+    }
+    let mut report = CopyReport {
+        tables: markers.len() as u64,
+        rows: 0,
+        bytes: 0,
+    };
+    for marker in markers {
+        report.rows = report
+            .rows
+            .checked_add(marker.rows)
+            .ok_or_else(|| refusal("target-clone: row counter exhausted"))?;
+        report.bytes = report
+            .bytes
+            .checked_add(marker.bytes)
+            .ok_or_else(|| refusal("target-clone: byte counter exhausted"))?;
+    }
+    Ok(report)
+}
+
+pub(crate) fn read_clone_progress(
+    connection: &mut PgConnection,
+    inspection: &CloneInspection,
+    io: &IoControl,
+) -> Result<CloneProgress> {
+    let row = metadata::read_only(connection, &inspection.provenance, io)?;
+    let control = row
+        .clone
+        .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
+    let expected = CloneControl::from_state(&inspection.clone_state);
+    if control.generation != expected.generation
+        || control.snapshot_token != expected.snapshot_token
+        || control.source_timeline != expected.source_timeline
+        || control.table_count != expected.table_count
+    {
+        return Err(refusal(
+            "target-clone: inspected generation or snapshot differs",
+        ));
+    }
+    let markers = metadata::read_markers(connection, &inspection.provenance, io)?;
+    validate_markers(&markers, &inspection.clone_state)?;
+    let complete = control.phase == ClonePhase::Complete
+        && inspection.clone_state.phase == ClonePhase::Complete
+        && inspection
+            .clone_state
+            .completion
+            .as_ref()
+            .is_some_and(|saved| {
+                aggregate_markers(&markers, inspection.clone_state.owned_tables.len())
+                    .is_ok_and(|actual| actual == *saved)
+            });
+    Ok(CloneProgress {
+        generation: control.generation,
+        phase: control.phase,
+        markers,
+        durable_complete: complete,
+    })
+}
+
+pub(crate) fn metadata_inventory(
+    connection: &mut PgConnection,
+    provenance: &ConfirmedProvenance,
+    io: &IoControl,
+) -> Result<Vec<OwnedObject>> {
+    metadata::read_only(connection, provenance, io)?;
+    let owned = metadata::owned_relation_oids(connection, provenance, io)?;
+    let all = crate::catalog::clone_object_inventory(connection, io)?;
+    let inventory = all
+        .into_iter()
+        .filter(|o| {
+            o.class_oid == 2615 && o.object_oid == provenance.schema_oid
+                || o.namespace_oid == Some(provenance.schema_oid)
+        })
+        .collect::<Vec<_>>();
+    if !owned
+        .into_iter()
+        .chain([provenance.marker_table_oid, provenance.marker_index_oid])
+        .all(|oid| {
+            inventory
+                .iter()
+                .any(|o| o.class_oid == 1259 && o.object_oid == oid)
+        })
+    {
+        return Err(refusal("target-metadata: exact owned relations are absent"));
+    }
+    if !inventory
+        .iter()
+        .any(|o| o.class_oid == 2615 && o.object_oid == provenance.schema_oid)
+    {
+        return Err(refusal("target-metadata: exact owned namespace is absent"));
+    }
+    Ok(inventory)
+}
+
+#[cfg(test)]
+mod clone_marker_tests {
+    use super::*;
+    use crate::contracts::{
+        CloneSource, CloneTable, CloneTarget, QualifiedTable, RestorePolicy, SnapshotTicket,
+    };
+    use crate::identity::SourceId;
+    fn saved() -> CloneState {
+        let source = CloneSource {
+            identity: SourceId {
+                system_identifier: 1,
+                database_oid: 2,
+            },
+            timeline: 1,
+            major: 16,
+        };
+        let table = OwnedCopyTable {
+            table: CloneTable {
+                source_oid: 3,
+                name: QualifiedTable {
+                    schema: "public".into(),
+                    table: "t".into(),
+                },
+                writable_columns: vec!["id".into()],
+                all_columns: vec!["id".into()],
+            },
+            target_oid: 4,
+            target_namespace_oid: 2200,
+            target_owner_oid: 10,
+            generation: CopyGeneration(1),
+        };
+        CloneState {
+            plan: ClonePlan {
+                source: source.clone(),
+                target: CloneTarget {
+                    identity: SourceId {
+                        system_identifier: 5,
+                        database_oid: 6,
+                    },
+                    major: 18,
+                },
+                generation: CopyGeneration(1),
+                tables: vec![table.table.clone()],
+                sequences: vec![],
+                policy: RestorePolicy::default(),
+            },
+            ticket: SnapshotTicket {
+                token: "t".into(),
+                source,
+                generation: CopyGeneration(1),
+            },
+            phase: ClonePhase::Copying,
+            owned_objects: vec![],
+            owned_tables: vec![table],
+            completion: None,
+        }
+    }
+    fn done() -> CopyDone {
+        CopyDone {
+            source_oid: 3,
+            target_oid: 4,
+            generation: CopyGeneration(1),
+            rows: 1,
+            bytes: 2,
+            target_namespace_oid: 2200,
+            target_owner_oid: 10,
+        }
+    }
+    #[test]
+    fn markers_reject_other_tables_oids_owners_generations_and_duplicate_completion() {
+        let state = saved();
+        validate_markers(&[done()], &state).unwrap();
+        for field in 0..5 {
+            let mut bad = done();
+            match field {
+                0 => bad.source_oid += 1,
+                1 => bad.target_oid += 1,
+                2 => bad.generation.0 += 1,
+                3 => bad.target_namespace_oid += 1,
+                _ => bad.target_owner_oid += 1,
+            };
+            assert!(validate_markers(&[bad], &state).is_err());
+        }
+        assert!(validate_markers(&[done(), done()], &state).is_err());
+        assert!(aggregate_markers(&[], 1).is_err());
+    }
+    #[test]
+    fn marker_totals_and_generation_bounds_never_wrap() {
+        let mut first = done();
+        first.rows = u64::MAX;
+        assert!(aggregate_markers(&[first, done()], 2).is_err());
+        let mut control = CloneControl::from_state(&saved());
+        control.generation = CopyGeneration(0);
+        assert!(control.validate().is_err());
+        control = CloneControl::from_state(&saved());
+        control.table_count = 4097;
+        assert!(control.validate().is_err());
+        control = CloneControl::from_state(&saved());
+        control.snapshot_token = "x".repeat(1025);
+        assert!(control.validate().is_err());
+    }
+    #[test]
+    fn worker_permits_are_send_without_containing_a_live_connection() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CopyPermit>();
+    }
+
+    fn cancel_sync_replication_wait(
+        target: &crate::contracts::Conninfo,
+        pid: u32,
+        io: &IoControl,
+    ) -> std::thread::JoinHandle<()> {
+        let target = target.clone();
+        let io = io.clone();
+        std::thread::spawn(move || {
+            let mut observer = PgConnection::connect(&target, &io).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let result = observer.query(&format!("SELECT wait_event='SyncRep' AND query='COMMIT' FROM pg_catalog.pg_stat_activity WHERE pid={pid}"), &io).unwrap();
+                if result.rows() == 1 && result.cell(0, 0).unwrap() == Some(b"t".as_slice()) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "COMMIT did not enter the required synchronous replication wait"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                observer
+                    .query(&format!("SELECT pg_catalog.pg_cancel_backend({pid})"), &io)
+                    .unwrap()
+                    .cell(0, 0)
+                    .unwrap(),
+                Some(b"t".as_slice())
+            );
+        })
+    }
+
+    fn set_missing_sync_standby(target: &mut PgConnection, missing: bool, io: &IoControl) {
+        let value = if missing {
+            "FIRST 1 (rpgmigrate_absent)"
+        } else {
+            ""
+        };
+        let quoted = target.quote_literal(value).unwrap();
+        target
+            .query(
+                &format!("ALTER SYSTEM SET synchronous_standby_names={quoted}"),
+                io,
+            )
+            .unwrap();
+        assert_eq!(
+            target
+                .query("SELECT pg_catalog.pg_reload_conf()", io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"t".as_slice())
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if target
+                .query("SHOW synchronous_standby_names", io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                == Some(value.as_bytes())
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owned synchronous standby configuration was not reloaded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn sync_replication_uncertainty(
+        authority: &mut CloneAuthority,
+        state: &mut NativeState,
+        target: &mut PgConnection,
+        target_info: &crate::contracts::Conninfo,
+        io: &IoControl,
+    ) -> (bool, bool) {
+        assert_eq!(
+            target
+                .query("SHOW synchronous_standby_names", io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"".as_slice())
+        );
+        let clone = state.checked_clone().unwrap().unwrap();
+        let next = crate::contracts::SnapshotTicket {
+            token: "sync-replication-warning-snapshot".into(),
+            source: clone.plan.source.clone(),
+            generation: CopyGeneration(clone.plan.generation.0 + 1),
+        };
+        state.advance_copy_generation(&next).unwrap();
+        authority.advance_generation(state, io).unwrap();
+        authority.authority.session.close();
+        let plan = state.checked_clone().unwrap().unwrap().plan;
+        let mut connection = PgConnection::connect(target_info, io).unwrap();
+        connection
+            .query("SET synchronous_commit=remote_apply", io)
+            .unwrap();
+        connection
+            .query("SET client_min_messages=error", io)
+            .unwrap();
+        *authority = CloneAuthority::acquire(connection, state, &plan, io).unwrap();
+        assert_eq!(
+            authority.authority.session.synchronous_commit,
+            "remote_apply"
+        );
+        let table = state.owned_copy_tables().unwrap().remove(0);
+        let mut connection = PgConnection::connect(target_info, io).unwrap();
+        connection
+            .query("SET synchronous_commit=remote_apply", io)
+            .unwrap();
+        connection
+            .query("SET client_min_messages=error", io)
+            .unwrap();
+        let mut tx = CopyTxn::begin(connection, authority.permit(&table).unwrap(), io).unwrap();
+        assert_eq!(tx.synchronous_commit, "remote_apply");
+        let name = tx.qualified().unwrap();
+        tx.connection_mut()
+            .unwrap()
+            .start_copy_in(
+                &format!("COPY {name} FROM STDIN WITH(FORMAT text,FREEZE true)"),
+                io,
+            )
+            .unwrap();
+        tx.connection_mut().unwrap().write_copy(b"5\n", io).unwrap();
+        assert_eq!(tx.connection_mut().unwrap().finish_copy_in(io).unwrap(), 1);
+        set_missing_sync_standby(target, true, io);
+        let canceller = cancel_sync_replication_wait(target_info, tx.pid, io);
+        let worker_unknown = matches!(
+            tx.mark_and_commit(1, 2, io).unwrap(),
+            CopyCommitOutcome::Unknown
+        );
+        canceller.join().unwrap();
+        assert!(state.checked_clone().unwrap().unwrap().completion.is_none());
+        let canceller =
+            cancel_sync_replication_wait(target_info, authority.authority.session.pid, io);
+        let barrier_refused = authority.resolve_unknown(&table, io).is_err();
+        canceller.join().unwrap();
+        set_missing_sync_standby(target, false, io);
+        authority.authority.session.close();
+        let mut connection = PgConnection::connect(target_info, io).unwrap();
+        connection
+            .query("SET synchronous_commit=remote_apply", io)
+            .unwrap();
+        connection
+            .query("SET client_min_messages=error", io)
+            .unwrap();
+        *authority = CloneAuthority::acquire(connection, state, &plan, io).unwrap();
+        assert_eq!(
+            authority.authority.session.synchronous_commit,
+            "remote_apply"
+        );
+        assert_eq!(
+            authority.resolve_unknown(&table, io).unwrap(),
+            Some(CopyReport {
+                tables: 1,
+                rows: 1,
+                bytes: 2
+            })
+        );
+        assert!(state.checked_clone().unwrap().unwrap().completion.is_none());
+        assert_eq!(
+            target
+                .query(&format!("SELECT id FROM {name}"), io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"5".as_slice())
+        );
+        (worker_unknown, barrier_refused)
+    }
+
+    fn delayed_marker_commit(
+        authority: &mut CloneAuthority,
+        table: &OwnedCopyTable,
+        target: &crate::contracts::Conninfo,
+        io: &IoControl,
+    ) -> bool {
+        let permit = authority.permit(table).unwrap();
+        let target = target.clone();
+        let io_worker = io.clone();
+        let coordinator_pid = authority.authority.session.pid;
+        let (ready, started) = std::sync::mpsc::sync_channel(0);
+        let handle = std::thread::spawn(move || {
+            let mut tx = CopyTxn::begin(
+                PgConnection::connect(&target, &io_worker).unwrap(),
+                permit,
+                &io_worker,
+            )
+            .unwrap();
+            let table = tx.permit.table.clone();
+            let name = tx.qualified().unwrap();
+            tx.connection_mut()
+                .unwrap()
+                .start_copy_in(
+                    &format!("COPY {name} FROM STDIN WITH(FORMAT text,FREEZE true)"),
+                    &io_worker,
+                )
+                .unwrap();
+            tx.connection_mut()
+                .unwrap()
+                .write_copy(b"4\n", &io_worker)
+                .unwrap();
+            assert_eq!(
+                tx.connection_mut()
+                    .unwrap()
+                    .finish_copy_in(&io_worker)
+                    .unwrap(),
+                1
+            );
+            let provenance = tx.permit.provenance.clone();
+            metadata::prepare(tx.connection_mut().unwrap(), &provenance, &io_worker).unwrap();
+            let row =
+                metadata::lock_validate(tx.connection_mut().unwrap(), &provenance, &io_worker)
+                    .unwrap();
+            assert_eq!(row.clone.as_ref(), Some(&tx.permit.control));
+            metadata::insert_marker(
+                tx.connection_mut().unwrap(),
+                &provenance,
+                &CopyDone {
+                    source_oid: table.table.source_oid,
+                    target_oid: table.target_oid,
+                    generation: table.generation,
+                    rows: 1,
+                    bytes: 2,
+                    target_namespace_oid: table.target_namespace_oid,
+                    target_owner_oid: table.target_owner_oid,
+                },
+                &io_worker,
+            )
+            .unwrap();
+            ready.send(()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let sql = format!(
+                    "SELECT {} = ANY(pg_catalog.pg_blocking_pids({coordinator_pid}))",
+                    tx.pid
+                );
+                let waiting = tx
+                    .connection_mut()
+                    .unwrap()
+                    .query(&sql, &io_worker)
+                    .unwrap();
+                if waiting.cell(0, 0).unwrap() == Some(b"t".as_slice()) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "coordinator did not wait behind the pending marker transaction"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let minimum = tx.synchronous_commit;
+            confirm_durability(tx.connection_mut().unwrap(), minimum, &io_worker).unwrap();
+            assert_eq!(
+                tx.connection_mut()
+                    .unwrap()
+                    .query("COMMIT", &io_worker)
+                    .unwrap()
+                    .command_tag()
+                    .unwrap(),
+                "COMMIT"
+            );
+            tx.finished = true;
+        });
+        started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let result = authority.resolve_unknown(table, io).unwrap();
+        handle.join().unwrap();
+        result
+            == Some(CopyReport {
+                tables: 1,
+                rows: 1,
+                bytes: 2,
+            })
+    }
+
+    fn refuse_replaced_owned_name(
+        authority: &mut CloneAuthority,
+        table: &OwnedCopyTable,
+        target: &mut PgConnection,
+        target_info: &crate::contracts::Conninfo,
+        io: &IoControl,
+    ) -> bool {
+        let schema = target.quote_identifier(&table.table.name.schema).unwrap();
+        let name = target.quote_identifier(&table.table.name.table).unwrap();
+        let renamed = target
+            .quote_identifier(&format!("{}_owned_renamed", table.table.name.table))
+            .unwrap();
+        let permit = authority.permit(table).unwrap();
+        target
+            .query(
+                &format!("ALTER TABLE {schema}.{name} RENAME TO {renamed}"),
+                io,
+            )
+            .unwrap();
+        target
+            .query(&format!("CREATE TABLE {schema}.{name}(id int)"), io)
+            .unwrap();
+        target
+            .query(&format!("INSERT INTO {schema}.{name} VALUES(777)"), io)
+            .unwrap();
+        let attempt = CopyTxn::begin(PgConnection::connect(target_info, io).unwrap(), permit, io);
+        let refused = attempt.is_err();
+        drop(attempt);
+        assert_eq!(
+            target
+                .query(&format!("SELECT id FROM {schema}.{renamed}"), io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"4".as_slice())
+        );
+        assert_eq!(
+            target
+                .query(&format!("SELECT id FROM {schema}.{name}"), io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"777".as_slice())
+        );
+        assert!(authority.checked_markers(io).unwrap().is_empty());
+        refused
+    }
+
+    fn lost_marker_commit(
+        authority: &mut CloneAuthority,
+        table: &OwnedCopyTable,
+        target: &crate::contracts::Conninfo,
+        io: &IoControl,
+    ) {
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        let script = r#"
+import json,os,pathlib,shlex,sys
+sys.path.insert(0,str(pathlib.Path.cwd()/'tests'/'support'))
+from protocol_fault import ProtocolFault
+from db_harness import conninfo
+context=json.loads(pathlib.Path(os.environ['RPGMIGRATE_TEST_CONTEXT']).read_text())
+values=dict(part.split('=',1) for part in shlex.split(os.environ['RPGMIGRATE_TEST_CLONE_TARGET_ADMIN']))
+with ProtocolFault(context,'commit_unknown') as relay:
+ print(json.dumps({'conninfo':conninfo(context,values['dbname'],values['user'],str(relay.directory))}),flush=True)
+ assert sys.stdin.readline().strip()=='done'
+ assert relay.backend_closed.wait(timeout=5) and relay.hits==1 and relay.client_copy_bytes>0
+ print(json.dumps({'fault_hits':relay.hits,'backend_closed':True}),flush=True)
+"#;
+        let mut child = Command::new("python3")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let conninfo =
+            crate::contracts::Conninfo::new(ready["conninfo"].as_str().unwrap().into()).unwrap();
+        let mut tx = CopyTxn::begin(
+            PgConnection::connect(&conninfo, io).unwrap(),
+            authority.permit(table).unwrap(),
+            io,
+        )
+        .unwrap();
+        let name = format!("{}.{}", table.table.name.schema, table.table.name.table);
+        tx.connection_mut()
+            .unwrap()
+            .start_copy_in(
+                &format!("COPY {name} FROM STDIN WITH(FORMAT text,FREEZE true)"),
+                io,
+            )
+            .unwrap();
+        tx.connection_mut().unwrap().write_copy(b"3\n", io).unwrap();
+        assert_eq!(tx.connection_mut().unwrap().finish_copy_in(io).unwrap(), 1);
+        assert!(matches!(
+            tx.mark_and_commit(1, 2, io).unwrap(),
+            CopyCommitOutcome::Unknown
+        ));
+        writeln!(input, "done").unwrap();
+        input.flush().unwrap();
+        line.clear();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let observed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(observed["fault_hits"], 1);
+        assert_eq!(observed["backend_closed"], true);
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            authority.resolve_unknown(table, io).unwrap(),
+            Some(CopyReport {
+                tables: 1,
+                rows: 1,
+                bytes: 2
+            })
+        );
+        let mut observer = PgConnection::connect(target, io).unwrap();
+        assert_eq!(
+            observer
+                .query(&format!("SELECT id FROM {name}"), io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"3".as_slice())
+        );
+    }
+
+    #[test]
+    #[ignore = "requires owned clone PostgreSQL harness"]
+    fn live_markers_commit_atomically_and_refuse_stale_generation_and_foreign_metadata() {
+        use crate::contracts::{Conninfo, StateAction, StateRequest};
+        let io = IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        let context: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                std::path::Path::new(context["root"].as_str().unwrap()).join(".e1-owner")
+            )
+            .unwrap(),
+            context["token"].as_str().unwrap()
+        );
+        let source_info =
+            Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN").unwrap()).unwrap();
+        let target_info =
+            Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_CLONE_TARGET_ADMIN").unwrap()).unwrap();
+        let mut source = PgConnection::connect(&source_info, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        let schema = format!("m2_marker_{}", std::process::id());
+        for sql in [
+            format!("CREATE SCHEMA {schema}"),
+            format!("CREATE TABLE {schema}.a(id int)"),
+            format!("CREATE TABLE {schema}.b(id int)"),
+        ] {
+            source.query(&sql, &io).unwrap();
+        }
+        source
+            .query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", &io)
+            .unwrap();
+        let source_identity = crate::catalog::read_clone_source(&mut source, &io).unwrap();
+        let tables = crate::catalog::inspect_clone_tables(&mut source, &[], &io)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name.schema == schema)
+            .collect();
+        let plan = ClonePlan {
+            source: source_identity.clone(),
+            target: crate::catalog::read_clone_target(&mut target, &io).unwrap(),
+            generation: CopyGeneration(1),
+            tables,
+            sequences: vec![],
+            policy: RestorePolicy::default(),
+        };
+        let path =
+            std::path::Path::new(context["root"].as_str().unwrap()).join(format!("{schema}-state"));
+        let operator = crate::contracts::OperatorIdentity {
+            migration_uid: "03030303-0303-0303-0303-030303030303".into(),
+            run: crate::identity::RunId([3; 16]),
+            workdir_id: format!("{schema}-state"),
+            checkpoint_generation: 1,
+        };
+        assert!(fence_slot(operator.run) < 0);
+        let mut state = crate::state::open_clone(
+            &StateRequest {
+                path,
+                action: StateAction::Create,
+            },
+            Some(&operator),
+            &io,
+        )
+        .unwrap();
+        state
+            .bind_clone(
+                &plan,
+                &SnapshotTicket {
+                    token: "marker-test-snapshot".into(),
+                    source: source_identity.clone(),
+                    generation: CopyGeneration(1),
+                },
+            )
+            .unwrap();
+        let mut authority = CloneAuthority::acquire(
+            PgConnection::connect(&target_info, &io).unwrap(),
+            &mut state,
+            &plan,
+            &io,
+        )
+        .unwrap();
+        let before = crate::catalog::clone_object_inventory(&mut target, &io).unwrap();
+        state.begin_pre_data().unwrap();
+        authority
+            .mark_stage(ClonePhase::PreDataPending, &io)
+            .unwrap();
+        for sql in [
+            format!("CREATE SCHEMA {schema}"),
+            format!("CREATE TABLE {schema}.a(id int)"),
+            format!("CREATE TABLE {schema}.b(id int)"),
+            format!("INSERT INTO {schema}.a VALUES(99)"),
+            format!("INSERT INTO {schema}.b VALUES(99)"),
+        ] {
+            target.query(&sql, &io).unwrap();
+        }
+        let objects = crate::catalog::clone_object_inventory(&mut target, &io)
+            .unwrap()
+            .into_iter()
+            .filter(|o| !before.contains(o))
+            .collect::<Vec<_>>();
+        let owned =
+            crate::catalog::reconcile_clone_tables(&mut target, &plan, &objects, &io).unwrap();
+        state.confirm_pre_data(objects, owned.clone()).unwrap();
+        authority.bind_tables(&state, &io).unwrap();
+        let permits = owned
+            .iter()
+            .map(|t| authority.permit(t).unwrap())
+            .collect::<Vec<_>>();
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for permit in permits {
+                let info = target_info.clone();
+                let io = io.clone();
+                handles.push(scope.spawn(move || {
+                    let name = permit.table.table.name.clone();
+                    let mut tx =
+                        CopyTxn::begin(PgConnection::connect(&info, &io).unwrap(), permit, &io)
+                            .unwrap();
+                    tx.connection_mut()
+                        .unwrap()
+                        .start_copy_in(
+                            &format!(
+                                "COPY {}.{} FROM STDIN WITH(FORMAT text,FREEZE true)",
+                                name.schema, name.table
+                            ),
+                            &io,
+                        )
+                        .unwrap();
+                    tx.connection_mut()
+                        .unwrap()
+                        .write_copy(b"1\n", &io)
+                        .unwrap();
+                    assert_eq!(tx.connection_mut().unwrap().finish_copy_in(&io).unwrap(), 1);
+                    assert!(matches!(
+                        tx.mark_and_commit(1, 2, &io).unwrap(),
+                        CopyCommitOutcome::Durable
+                    ));
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+        assert_eq!(
+            authority.copy_report(&io).unwrap(),
+            CopyReport {
+                tables: 2,
+                rows: 2,
+                bytes: 4
+            }
+        );
+        for table in &owned {
+            assert_eq!(
+                authority.resolve_unknown(table, &io).unwrap(),
+                Some(CopyReport {
+                    tables: 1,
+                    rows: 1,
+                    bytes: 2
+                })
+            );
+        }
+        // Retain an old permit to prove it cannot truncate after the generation handoff.
+        authority.issued.clear();
+        let stale = authority.permit(&owned[0]).unwrap();
+        let fresh = SnapshotTicket {
+            token: "fresh-marker-snapshot".into(),
+            source: source_identity,
+            generation: CopyGeneration(2),
+        };
+        state.advance_copy_generation(&fresh).unwrap();
+        authority.advance_generation(&state, &io).unwrap();
+        assert!(
+            CopyTxn::begin(
+                PgConnection::connect(&target_info, &io).unwrap(),
+                stale,
+                &io
+            )
+            .is_err()
+        );
+        assert!(authority.copy_report(&io).is_err());
+        assert_eq!(
+            target
+                .query(
+                    &format!(
+                        "SELECT id FROM {}.{}",
+                        owned[0].table.name.schema, owned[0].table.name.table
+                    ),
+                    &io
+                )
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"1".as_slice())
+        );
+        let current = state.owned_copy_tables().unwrap();
+        let permit = authority.permit(&current[0]).unwrap();
+        let mut dropped = CopyTxn::begin(
+            PgConnection::connect(&target_info, &io).unwrap(),
+            permit,
+            &io,
+        )
+        .unwrap();
+        let table_name = format!(
+            "{}.{}",
+            current[0].table.name.schema, current[0].table.name.table
+        );
+        dropped
+            .connection_mut()
+            .unwrap()
+            .start_copy_in(
+                &format!("COPY {table_name} FROM STDIN WITH(FORMAT text,FREEZE true)"),
+                &io,
+            )
+            .unwrap();
+        dropped
+            .connection_mut()
+            .unwrap()
+            .write_copy(b"2\n", &io)
+            .unwrap();
+        assert_eq!(
+            dropped
+                .connection_mut()
+                .unwrap()
+                .finish_copy_in(&io)
+                .unwrap(),
+            1
+        );
+        drop(dropped);
+        assert_eq!(authority.resolve_unknown(&current[0], &io).unwrap(), None);
+        assert_eq!(
+            target
+                .query(&format!("SELECT id FROM {table_name}"), &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"1".as_slice())
+        );
+        authority.issued.remove(&current[0].table.source_oid);
+        lost_marker_commit(&mut authority, &current[0], &target_info, &io);
+        let pending_commit_resolved =
+            delayed_marker_commit(&mut authority, &current[1], &target_info, &io);
+        let (sync_worker_unknown, sync_barrier_refused) = sync_replication_uncertainty(
+            &mut authority,
+            &mut state,
+            &mut target,
+            &target_info,
+            &io,
+        );
+        let next = SnapshotTicket {
+            token: "identity-replacement-snapshot".into(),
+            source: plan.source.clone(),
+            generation: CopyGeneration(4),
+        };
+        state.advance_copy_generation(&next).unwrap();
+        authority.advance_generation(&state, &io).unwrap();
+        let latest = state.owned_copy_tables().unwrap();
+        let replaced_name_refused =
+            refuse_replaced_owned_name(&mut authority, &latest[1], &mut target, &target_info, &io);
+        assert!(
+            pending_commit_resolved
+                && replaced_name_refused
+                && sync_worker_unknown
+                && sync_barrier_refused,
+            "pending_commit_resolved={pending_commit_resolved}, replaced_name_refused={replaced_name_refused}, sync_worker_unknown={sync_worker_unknown}, sync_barrier_refused={sync_barrier_refused}"
+        );
+        let metadata_schema = authority
+            .authority
+            .provenance
+            .intent
+            .binding
+            .schema_name
+            .clone();
+        target
+            .query(
+                &format!("CREATE TABLE {metadata_schema}.foreign_object(id int)"),
+                &io,
+            )
+            .unwrap();
+        assert!(metadata_inventory(&mut target, &authority.authority.provenance, &io).is_err());
     }
 }

@@ -19,18 +19,10 @@ from protocol_fault import ProtocolFault
 from authority_fixture import authority_fixture, validate_authority_faults
 from replication_fixture import replication_fixture, validate_replication_faults
 from source_snapshot_fixture import source_snapshot_fixture, validate_source_snapshot_faults
-from journal_fixture import prepare_journal_fixture, validate_journal_receipts
 
 
 def validate_module_receipt(profile, expected, output, context):
     validate_libtest_output(expected, output)
-    if profile == "JournalSerial":
-        assert expected == module_cases({}, profile), "wrong journal parent inventory"
-        summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
-        assert len(summaries) == 1 and re.fullmatch(
-            r"ok\. 2 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
-            summaries[0]), "missing or inconsistent journal test summary"
-        validate_journal_receipts(context)
     if profile == "SourceSnapshot":
         assert expected == module_cases({}, profile), "wrong source snapshot inventory"
         summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
@@ -38,7 +30,7 @@ def validate_module_receipt(profile, expected, output, context):
             r"ok\. 12 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
             summaries[0]), "missing or inconsistent source snapshot test summary"
         validate_source_snapshot_faults(context["snapshot"])
-    if profile in ("Catalog", "SourceCatalog"):
+    if profile in ("Catalog", "SourceCatalog", "Clone", "Schema"):
         summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
         assert len(summaries) == 1 and re.fullmatch(
             rf"ok\. {len(expected)} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
@@ -141,15 +133,16 @@ def protocol_self_check(cluster, manifest):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--schema", action="store_true", help="require the exact native pre-data drift guard case")
+    modes.add_argument("--clone", action="store_true", help="require all seven exact native clone component cases")
     modes.add_argument("--self-check", action="store_true")
     modes.add_argument("--transport", action="store_true", help="require the exact transport unit-test inventory")
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
     modes.add_argument("--authority", action="store_true", help="require the exact target authority live-test inventory")
     modes.add_argument("--replication", action="store_true", help="require the exact raw CopyBoth live-test inventory")
-    modes.add_argument("--catalog", action="store_true", help="require the exact ten source and target CDC catalog live tests")
+    modes.add_argument("--catalog", action="store_true", help="require the exact twelve CDC and native clone catalog live tests")
     modes.add_argument("--source-catalog", action="store_true", help="require the exact three source identity live tests")
     modes.add_argument("--source-snapshot", action="store_true", help="require twelve source snapshot cases and five observed fault receipts")
-    modes.add_argument("--journal-serial", action="store_true", help="require two journal parents, two killed children, and two committed Unknown faults")
     modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, replication, and catalog/COPY live tests")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -157,16 +150,16 @@ def main():
     if not args.self_check and not command:
         parser.error("provide --self-check or -- followed by the integration test command")
     manifest = load_manifest()
-    module_suite = args.transport or args.engine or args.prepared or args.authority or args.replication or args.catalog or args.source_catalog or args.source_snapshot or args.journal_serial
+    module_suite = args.transport or args.engine or args.prepared or args.authority or args.replication or args.catalog or args.source_catalog or args.source_snapshot or args.clone or args.schema
     if module_suite:
-        profile = "JournalSerial" if args.journal_serial else "SourceSnapshot" if args.source_snapshot else "SourceCatalog" if args.source_catalog else "Catalog" if args.catalog else "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
+        profile = "Schema" if args.schema else "Clone" if args.clone else "SourceSnapshot" if args.source_snapshot else "SourceCatalog" if args.source_catalog else "Catalog" if args.catalog else "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
         expected = module_cases(manifest, profile)
     with OwnedCluster(manifest) as cluster, ExitStack() as fixtures:
         if args.self_check:
             self_check(cluster, manifest)
             return 0
         source, target = databases(cluster.context, "source_catalog" if args.source_catalog else "catalog" if args.catalog else "transport",
-                                   empty=args.catalog or args.source_catalog)
+                                   empty=args.catalog or args.source_catalog or args.clone or args.schema)
         receipt = cluster.root / "results.json"
         environment = dict(cluster.environment)
         environment.update({
@@ -181,6 +174,16 @@ def main():
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION": manifest["server_version"],
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM": str(manifest["server_version_num"]),
         })
+        if args.schema:
+            environment.update({
+                "RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN": conninfo(cluster.context, source, "e1_admin"),
+                "RPGMIGRATE_TEST_SCHEMA_TARGET_ADMIN": conninfo(cluster.context, target, "e1_admin"),
+            })
+        if args.clone:
+            environment.update({
+                "RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN": conninfo(cluster.context, source, "e1_admin"),
+                "RPGMIGRATE_TEST_CLONE_TARGET_ADMIN": conninfo(cluster.context, target, "e1_admin"),
+            })
         if args.catalog:
             environment.update({
                 "RPGMIGRATE_TEST_CATALOG_SOURCE": conninfo(cluster.context, source, "e1_source"),
@@ -196,14 +199,12 @@ def main():
                 "RPGMIGRATE_TEST_SOURCE_CATALOG_SOURCE": conninfo(cluster.context, source, "e1_source"),
                 "RPGMIGRATE_TEST_SOURCE_CATALOG_ADMIN": conninfo(cluster.context, source, "e1_admin"),
             })
-        if args.authority or args.engine or args.journal_serial:
+        if args.authority or args.engine:
             environment.update(fixtures.enter_context(authority_fixture(cluster)))
-        if args.replication or args.engine or args.journal_serial:
+        if args.replication or args.engine:
             context, source_environment = fixtures.enter_context(replication_fixture(manifest))
             cluster.context["replication"] = context
             environment.update(source_environment)
-        if args.journal_serial:
-            prepare_journal_fixture(cluster.context, cluster.context["replication"])
         if args.source_snapshot:
             context, source_environment = fixtures.enter_context(source_snapshot_fixture(manifest))
             cluster.context["snapshot"] = context
@@ -227,9 +228,6 @@ def main():
                 print("Replication faults verified 4 wire cases and observed PQflush backpressure")
             if args.source_snapshot:
                 print("SourceSnapshot faults verified 5 observed cases and closed backends")
-            if args.journal_serial:
-                print("JournalSerial children verified 2 pre-COMMIT SIGKILL receipts")
-                print("JournalSerial faults verified 2 committed Unknown replies and released fences")
             print(f"{profile} verified {len(expected)} exact cases; full E1 suite not selected")
             return 0
         if not receipt.is_file():

@@ -16,21 +16,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::cdc::contracts::Plugin;
 use crate::contracts::{
-    COPY_PLAN_REFERENCE_VERSION, CopyPlanRef, CopyReport, Error, ErrorKind,
-    MAX_SNAPSHOT_TOKEN_BYTES, Result, RunId, SnapshotAnchor, StateAction, StateIdentity,
-    StateRequest,
+    ClonePlan, CopyGeneration, CopyReport, Error, ErrorKind, IoControl, MAX_SNAPSHOT_TOKEN_BYTES,
+    OperatorIdentity, OwnedCopyTable, OwnedObject, Result, RunId, SnapshotTicket, StateAction,
+    StateIdentity, StateRequest,
 };
 use crate::identity::{SourceEndLsn, StreamId};
 
-mod plan_files;
-pub(crate) use plan_files::{NativePlanDraft, NativePlanPin};
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CopySnapshotIntent {
-    pub(crate) anchor: SnapshotAnchor,
-    pub(crate) plan: CopyPlanRef,
-}
+mod clone_state;
+pub(crate) use clone_state::{CloneInspection, ClonePhase, CloneState, inspect_clone, open_clone};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +143,8 @@ pub(crate) struct ConfirmedProvenance {
     pub(crate) intent: ProvisioningIntent,
     pub(crate) schema_oid: u32,
     pub(crate) table_oid: u32,
+    pub(crate) marker_table_oid: u32,
+    pub(crate) marker_index_oid: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -166,10 +161,10 @@ pub(crate) enum TargetProvenance {
 
 const MANIFEST: &CStr = c"manifest.json";
 const TEMP: &CStr = c".manifest.tmp";
-const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
-const FORMAT_VERSION: u32 = 4;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const FORMAT_VERSION: u32 = 5;
 const MAX_TARGET_PROVENANCE: usize = 1;
-pub(crate) const TARGET_METADATA_VERSION: u32 = 3;
+pub(crate) const TARGET_METADATA_VERSION: u32 = 4;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -187,7 +182,9 @@ struct Manifest {
     #[serde(deserialize_with = "Option::deserialize")]
     source_slot: Option<SourceSlotProvenance>,
     #[serde(deserialize_with = "Option::deserialize")]
-    copy_snapshot: Option<CopySnapshotIntent>,
+    clone_state: Option<CloneState>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    operator: Option<OperatorIdentity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -213,7 +210,6 @@ pub(crate) struct NativeState {
     manifest: Manifest,
     manifest_file: File,
     fresh_created: bool,
-    plans: plan_files::PlanNamespace,
 }
 
 pub(crate) fn open(request: &StateRequest) -> Result<NativeState> {
@@ -292,11 +288,18 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
     directory.check()?;
     let path = directory.parent_path.join(leaf);
     let entries = root_entries(&directory.handle, false)?;
+    if entries.data {
+        return Err(bad_state(
+            "state-foreign: legacy or unrecognized data namespace cannot be adopted",
+        ));
+    }
     if entries.manifest {
         let (manifest, manifest_file) = read_manifest(&directory, &path)?;
-        let plans = plan_files::PlanNamespace::open(&directory)?;
         if recover_provenance {
-            if manifest.target_provenance.is_empty() && manifest.source_slot.is_none() {
+            if manifest.target_provenance.is_empty()
+                && manifest.source_slot.is_none()
+                && manifest.clone_state.is_none()
+            {
                 return Err(bad_state(
                     "state-provenance: native state has no provisioning intent",
                 ));
@@ -311,7 +314,6 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
                 manifest,
                 manifest_file,
                 fresh_created: false,
-                plans,
             });
         }
         if request.action == StateAction::Create {
@@ -334,7 +336,6 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
             "state-foreign: data without native state cannot be adopted",
         ));
     }
-    let plans = plan_files::PlanNamespace::create(&directory)?;
     let meta = metadata(&directory.handle)?;
     let run = RunId(random_identity()?);
     let manifest = Manifest {
@@ -347,9 +348,10 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
         copy_complete: None,
         target_provenance: Vec::new(),
         source_slot: None,
-        copy_snapshot: None,
+        clone_state: None,
+        operator: None,
     };
-    let manifest_file = publish(&directory, &plans, &manifest, None)?;
+    let manifest_file = publish(&directory, &manifest, None)?;
     Ok(NativeState {
         identity: StateIdentity {
             run,
@@ -360,38 +362,12 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
         manifest,
         manifest_file,
         fresh_created: true,
-        plans,
     })
 }
 
 impl NativeState {
     pub(crate) fn identity(&self) -> &StateIdentity {
         &self.identity
-    }
-
-    pub(crate) fn bind_copy_snapshot(&mut self, intent: &CopySnapshotIntent) -> Result<()> {
-        let mut next = self.checked_manifest()?;
-        intent.validate(&next)?;
-        if let Some(existing) = &next.copy_snapshot {
-            if existing != intent {
-                return Err(bad_state(
-                    "state-copy: existing COPY snapshot intent cannot be replaced",
-                ));
-            }
-            self.open_plan_file(intent.plan.plan_nonce)?;
-            return self.synchronize_manifest();
-        }
-        self.open_plan_file(intent.plan.plan_nonce)?;
-        next.copy_snapshot = Some(intent.clone());
-        self.replace_manifest(next)
-    }
-
-    pub(crate) fn checked_copy_snapshot(&self) -> Result<Option<CopySnapshotIntent>> {
-        let current = self.checked_manifest()?;
-        if let Some(intent) = &current.copy_snapshot {
-            self.open_plan_file(intent.plan.plan_nonce)?;
-        }
-        Ok(current.copy_snapshot)
     }
 
     /// Only a successful durable publication authorizes the caller's single CREATE attempt.
@@ -554,12 +530,8 @@ impl NativeState {
     }
 
     fn checked_manifest(&self) -> Result<Manifest> {
-        self.checked_manifest_with_draft(None)
-    }
-
-    fn checked_manifest_with_draft(&self, draft: Option<[u8; 16]>) -> Result<Manifest> {
         self.directory.check()?;
-        self.plans.check(&self.directory, draft)?;
+        self.directory.check()?;
         if !manifest_present(&self.directory.handle, false)? {
             return Err(bad_state("state-replaced: native manifest disappeared"));
         }
@@ -577,7 +549,6 @@ impl NativeState {
         next.validate_provenance()?;
         self.manifest_file = publish(
             &self.directory,
-            &self.plans,
             &next,
             Some((&self.manifest, &self.manifest_file)),
         )?;
@@ -629,45 +600,6 @@ impl SourceSlotProvenance {
     }
 }
 
-impl CopySnapshotIntent {
-    fn validate(&self, manifest: &Manifest) -> Result<()> {
-        if self.anchor.stream.run != manifest.run
-            || self.anchor.consistent_point.0 == 0
-            || self.anchor.snapshot_token.is_empty()
-            || self.anchor.snapshot_token.len() > MAX_SNAPSHOT_TOKEN_BYTES
-            || self.anchor.snapshot_token.contains('\0')
-            || self.anchor.plan_nonce == [0; 16]
-            || self.plan.plan_nonce != self.anchor.plan_nonce
-            || self.plan.reference_version != COPY_PLAN_REFERENCE_VERSION
-        {
-            return Err(bad_state(
-                "state-copy: COPY snapshot identity or reference is invalid",
-            ));
-        }
-        match &manifest.source_slot {
-            Some(SourceSlotProvenance::Confirmed(receipt))
-                if receipt.intent.binding.stream == self.anchor.stream
-                    && receipt.consistent_point == self.anchor.consistent_point
-                    && receipt.snapshot_token == self.anchor.snapshot_token => {}
-            _ => {
-                return Err(bad_state(
-                    "state-copy: COPY snapshot requires exact confirmed source provenance",
-                ));
-            }
-        }
-        match manifest.target_provenance.first() {
-            Some(TargetProvenance::Confirmed(receipt))
-                if receipt.intent.binding.stream == self.anchor.stream =>
-            {
-                Ok(())
-            }
-            _ => Err(bad_state(
-                "state-copy: COPY snapshot requires exact confirmed target provenance",
-            )),
-        }
-    }
-}
-
 impl TargetBinding {
     fn validate(&self, run: RunId) -> Result<()> {
         if self.stream.run != run
@@ -707,7 +639,19 @@ impl TargetProvenance {
             ));
         }
         if let Self::Confirmed(confirmed) = self
-            && (confirmed.schema_oid == 0 || confirmed.table_oid == 0)
+            && (confirmed.schema_oid == 0
+                || confirmed.table_oid == 0
+                || confirmed.marker_table_oid == 0
+                || confirmed.marker_index_oid == 0
+                || [
+                    confirmed.table_oid,
+                    confirmed.marker_table_oid,
+                    confirmed.marker_index_oid,
+                ]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                    != 3)
         {
             return Err(bad_state(
                 "state-provenance: confirmed object OIDs must be nonzero",
@@ -737,8 +681,36 @@ impl Manifest {
                 ));
             }
         }
-        if let Some(intent) = &self.copy_snapshot {
-            intent.validate(self)?;
+        if let Some(clone) = &self.clone_state {
+            clone.validate()?;
+            if let Some(target) = self.target_provenance.first() {
+                let binding = &target.intent().binding;
+                if binding.stream.source != clone.plan.source.identity
+                    || binding.stream.generation != 1
+                    || binding.target_system_identifier
+                        != Some(clone.plan.target.identity.system_identifier)
+                    || binding.target_database_oid != clone.plan.target.identity.database_oid
+                {
+                    return Err(bad_state(
+                        "state-clone: clone endpoints differ from metadata provenance",
+                    ));
+                }
+                if let TargetProvenance::Confirmed(confirmed) = target
+                    && clone.owned_objects.iter().any(|object| {
+                        object.namespace_oid == Some(confirmed.schema_oid)
+                            || object.class_oid == 2615 && object.object_oid == confirmed.schema_oid
+                    })
+                {
+                    return Err(bad_state(
+                        "state-ownership: native metadata cannot become user-data ownership",
+                    ));
+                }
+            }
+        }
+        if let Some(operator) = &self.operator
+            && (operator.run != self.run || operator.checkpoint_generation != 1)
+        {
+            return Err(bad_state("state-operator: operator binding is invalid"));
         }
         Ok(())
     }
@@ -851,7 +823,13 @@ struct RootEntries {
 }
 
 fn manifest_present(directory: &File, allow_temp: bool) -> Result<bool> {
-    Ok(root_entries(directory, allow_temp)?.manifest)
+    let entries = root_entries(directory, allow_temp)?;
+    if entries.data {
+        return Err(bad_state(
+            "state-foreign: legacy or unrecognized data namespace cannot be adopted",
+        ));
+    }
+    Ok(entries.manifest)
 }
 
 fn root_entries(directory: &File, allow_temp: bool) -> Result<RootEntries> {
@@ -998,7 +976,6 @@ fn read_manifest(directory: &Directory, path: &Path) -> Result<(Manifest, File)>
 
 fn publish(
     directory: &Directory,
-    plans: &plan_files::PlanNamespace,
     manifest: &Manifest,
     previous: Option<(&Manifest, &File)>,
 ) -> Result<File> {
@@ -1009,7 +986,7 @@ fn publish(
             "state-invalid: native manifest exceeds the control metadata limit",
         ));
     }
-    check_publication(directory, plans, manifest, previous, false)?;
+    check_publication(directory, manifest, previous, false)?;
     #[cfg(test)]
     tests::publication_step(tests::PublicationStep::Create)?;
     let mut temporary = open_at(
@@ -1029,7 +1006,7 @@ fn publish(
     temporary
         .sync_all()
         .map_err(|_| bad_state("state-sync: cannot synchronize temporary native metadata"))?;
-    check_publication(directory, plans, manifest, previous, true)?;
+    check_publication(directory, manifest, previous, true)?;
     check_same(&temporary, &open_metadata(&directory.handle, TEMP)?)?;
     #[cfg(test)]
     tests::publication_step(tests::PublicationStep::Rename)?;
@@ -1061,13 +1038,11 @@ fn publish(
 
 fn check_publication(
     directory: &Directory,
-    plans: &plan_files::PlanNamespace,
     manifest: &Manifest,
     previous: Option<(&Manifest, &File)>,
     allow_temp: bool,
 ) -> Result<()> {
     directory.check()?;
-    plans.check(directory, None)?;
     let present = manifest_present(&directory.handle, allow_temp)?;
     match previous {
         Some((expected, file)) if present => {
@@ -1245,21 +1220,28 @@ mod tests {
     }
 
     #[test]
+    fn clone_state_uses_new_explicit_native_and_target_formats() {
+        assert_eq!(FORMAT_VERSION, 5);
+        assert_eq!(TARGET_METADATA_VERSION, 4);
+    }
+
+    #[test]
     fn fresh_state_publishes_private_native_identity_without_completion() {
         let tmp = TempDir::new();
         let state = tmp.create();
         let value = manifest(&tmp.path());
         assert_eq!(value["magic"], "RPGMIGRATE");
-        assert_eq!(value["format_version"], 4);
+        assert_eq!(value["format_version"], 5);
         assert_eq!(value["canonical_path"], tmp.path().to_str().unwrap());
         assert_eq!(value["run"].as_array().unwrap().len(), 16);
         assert_ne!(value["run"], json!(vec![0; 16]));
         assert_eq!(value["copy_complete"], Value::Null);
         assert_eq!(value["target_provenance"], json!([]));
         assert_eq!(value.get("source_slot"), Some(&Value::Null));
-        assert_eq!(value.get("copy_snapshot"), Some(&Value::Null));
+        assert_eq!(value.get("clone_state"), Some(&Value::Null));
+        assert_eq!(value.get("operator"), Some(&Value::Null));
         assert_eq!(state.identity().canonical_path, tmp.path());
-        assert_eq!(state.identity().format_version, 4);
+        assert_eq!(state.identity().format_version, 5);
         assert_eq!(value["run"], json!(state.identity().run.0));
         let directory = fs::metadata(tmp.path()).unwrap();
         assert_eq!(value["directory_inode"], directory.ino());
@@ -1272,10 +1254,7 @@ mod tests {
                 & 0o777,
             0o600
         );
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
-        for path in [tmp.path().join("data"), tmp.path().join("data/plans")] {
-            assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o700);
-        }
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -1399,7 +1378,7 @@ mod tests {
     fn unknown_version_is_rejected_before_restart() {
         let tmp = TempDir::new();
         drop(tmp.create());
-        change_manifest(&tmp.path(), |value| value["format_version"] = json!(5));
+        change_manifest(&tmp.path(), |value| value["format_version"] = json!(6));
         refusal(&tmp.path(), StateAction::Restart, "state-version:");
     }
 
@@ -1536,7 +1515,7 @@ mod tests {
         let mut old_bytes = Vec::new();
         (&old_file).read_to_end(&mut old_bytes).unwrap();
         assert_eq!(old_bytes, old_manifest);
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
         let before = tree(&tmp.path());
         let error = state.record_copy_complete(&report()).unwrap_err();
         assert!(error.message.starts_with("state-complete:"), "{error:?}");
@@ -1588,7 +1567,8 @@ mod tests {
             "copy_complete",
             "target_provenance",
             "source_slot",
-            "copy_snapshot",
+            "clone_state",
+            "operator",
             "run",
             "canonical_path",
             "directory_device",
@@ -1771,7 +1751,7 @@ mod tests {
             schema_name: "rpgmigrate_owned".into(),
             table_name: "checkpoint".into(),
             owner_oid: 10,
-            metadata_version: 3,
+            metadata_version: TARGET_METADATA_VERSION,
         }
     }
 
@@ -1780,6 +1760,8 @@ mod tests {
             intent: intent.clone(),
             schema_oid: 20000,
             table_oid: 20001,
+            marker_table_oid: 20002,
+            marker_index_oid: 20003,
         }
     }
 
@@ -1818,7 +1800,7 @@ mod tests {
                 };
                 intent["binding"]["metadata_version"] = json!(version);
             });
-            assert_eq!(manifest(&tmp.path())["format_version"], 4);
+            assert_eq!(manifest(&tmp.path())["format_version"], 5);
             recovery_refusal(&tmp.path(), "state-provenance:");
             for action in [
                 StateAction::Create,
@@ -1847,7 +1829,7 @@ mod tests {
         let mut bytes = Vec::new();
         old_file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, old);
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
         drop(state);
         let before = tree(&tmp.path());
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
@@ -2042,7 +2024,7 @@ mod tests {
         let tmp = TempDir::new();
         let mut state = tmp.create();
         let mut desired = binding(&state);
-        desired.schema_name = "a".repeat(16384);
+        desired.schema_name = "a".repeat(MAX_MANIFEST_BYTES as usize);
         let before = tree(&tmp.path());
         let error = state.begin_target_provisioning(desired).unwrap_err();
         assert!(error.message.starts_with("state-invalid:"), "{error:?}");
@@ -2062,7 +2044,7 @@ mod tests {
 
     #[test]
     fn recovery_refuses_v1_and_unknown_versions_without_conversion() {
-        for version in [1, 2, 3, 5] {
+        for version in [1, 2, 3, 4, 6] {
             let tmp = TempDir::new();
             drop(tmp.create());
             change_manifest(&tmp.path(), |value| {
@@ -2083,7 +2065,7 @@ mod tests {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(recovered.identity().format_version, 4);
+        assert_eq!(recovered.identity().format_version, 5);
     }
 
     #[test]
@@ -2384,8 +2366,8 @@ mod tests {
         fs::write(
             &path,
             original.replace(
-                "\"metadata_version\":3",
-                "\"metadata_version\":3,\"metadata_version\":3",
+                "\"metadata_version\":4",
+                "\"metadata_version\":4,\"metadata_version\":4",
             ),
         )
         .unwrap();
@@ -2444,7 +2426,7 @@ mod tests {
         let mut bytes = Vec::new();
         old_file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, old);
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
         source_refusal(state.checked_source_binding(&desired));
         let before = tree(&tmp.path());
         source_refusal(state.begin_source_slot(&desired));
@@ -2738,7 +2720,7 @@ mod tests {
         state.checked_source_binding(&desired).unwrap();
         assert_eq!(
             manifest(&tmp.path())["target_provenance"][0]["record"]["intent"]["binding"]["metadata_version"],
-            3
+            4
         );
     }
 
@@ -2840,17 +2822,12 @@ mod tests {
     }
 
     #[test]
-    fn source_slot_manifest_bound_is_checked_before_publication_files() {
+    fn source_slot_escaped_token_remains_within_the_version_five_manifest_bound() {
         let tmp = TempDir::new();
         let mut state = tmp.create();
         let desired = source_binding(&state);
-        let mut target = binding(&state);
-        target.stream = desired.stream();
-        target.schema_name = "a".repeat(13000);
-        state.begin_target_provisioning(target).unwrap();
         let intent = state.begin_source_slot(&desired).unwrap();
-        let before = tree(&tmp.path());
-        let error = state
+        state
             .confirm_source_slot(
                 &intent,
                 CreatedSlotData {
@@ -2858,16 +2835,14 @@ mod tests {
                     ..created_slot()
                 },
             )
-            .unwrap_err();
-        assert!(error.message.starts_with("state-invalid:"), "{error:?}");
-        assert_eq!(tree(&tmp.path()), before);
+            .unwrap();
         assert!(
             fs::metadata(tmp.path().join("manifest.json"))
                 .unwrap()
                 .len()
-                <= 16384
+                <= MAX_MANIFEST_BYTES
         );
-        source_refusal(state.checked_source_binding(&desired));
+        state.checked_source_binding(&desired).unwrap();
     }
 
     #[test]
@@ -3114,7 +3089,7 @@ mod tests {
         for action in [StateAction::Resume, StateAction::Restart] {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
-        for version in [1, 2, 3, 5, u32::MAX] {
+        for version in [1, 2, 3, 4, 6, u32::MAX] {
             change_manifest(&tmp.path(), |value| {
                 value["format_version"] = json!(version);
                 value.as_object_mut().unwrap().remove("source_slot");
@@ -3128,367 +3103,5 @@ mod tests {
                 refusal(&tmp.path(), action, "state-version:");
             }
         }
-    }
-
-    fn copy_snapshot_intent(state: &mut NativeState) -> CopySnapshotIntent {
-        let source = source_binding(state);
-        let pending = state.begin_source_slot(&source).unwrap();
-        let receipt = state.confirm_source_slot(&pending, created_slot()).unwrap();
-        let mut target = binding(state);
-        target.stream = source.stream();
-        let pending = state.begin_target_provisioning(target).unwrap();
-        state
-            .confirm_target_provisioning(confirmed(&pending))
-            .unwrap();
-        state.create_plan_file([42; 16]).unwrap().publish().unwrap();
-        CopySnapshotIntent {
-            anchor: SnapshotAnchor {
-                stream: source.stream(),
-                snapshot_token: receipt.snapshot_token,
-                consistent_point: receipt.consistent_point,
-                plan_nonce: [42; 16],
-            },
-            plan: CopyPlanRef {
-                reference_version: 1,
-                plan_nonce: [42; 16],
-                table_count: 0,
-                logical_bytes: 0,
-                crc32: 0,
-            },
-        }
-    }
-
-    #[test]
-    fn copy_count_create_failure_preserves_intent_and_clears_guard() {
-        let tmp = TempDir::new();
-        let mut state = tmp.create();
-        let intent = copy_snapshot_intent(&mut state);
-        state.bind_copy_snapshot(&intent).unwrap();
-        let report = CopyReport {
-            tables: 0,
-            rows: 0,
-            bytes: 0,
-        };
-        let before = tree(&tmp.path());
-        let error = state
-            .record_copy_complete_with_create_failure(&report)
-            .unwrap_err();
-        assert_eq!(error.message, "state-test: injected publication failure");
-        assert_eq!(tree(&tmp.path()), before);
-        assert!(state.checked_manifest().unwrap().copy_complete.is_none());
-        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent.clone()));
-        assert_eq!(FAIL_AT.with(Cell::get), None);
-        drop(state);
-
-        let mut state = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
-        assert_eq!(tree(&tmp.path()), before);
-        state.record_copy_complete(&report).unwrap();
-        assert!(state.checked_manifest().unwrap().copy_complete.is_some());
-        let error = state
-            .record_copy_complete_with_create_failure(&report)
-            .unwrap_err();
-        assert!(error.message.starts_with("state-complete:"));
-        assert_eq!(FAIL_AT.with(Cell::get), None);
-    }
-
-    #[test]
-    fn copy_snapshot_intent_is_exact_immutable_and_reopens() {
-        let tmp = TempDir::new();
-        let mut state = tmp.create();
-        assert_eq!(state.checked_copy_snapshot().unwrap(), None);
-        let intent = copy_snapshot_intent(&mut state);
-        state.bind_copy_snapshot(&intent).unwrap();
-        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent.clone()));
-        assert_eq!(manifest(&tmp.path())["copy_snapshot"], json!(intent));
-        let before = tree(&tmp.path());
-        state.bind_copy_snapshot(&intent).unwrap();
-        assert_eq!(tree(&tmp.path()), before);
-        for variant in 0..5 {
-            let mut changed = intent.clone();
-            match variant {
-                0 => changed.plan.crc32 = 1,
-                1 => changed.plan.table_count = 1,
-                2 => changed.plan.logical_bytes = 1,
-                3 => {
-                    changed.plan.plan_nonce = [43; 16];
-                    changed.anchor.plan_nonce = [43; 16];
-                }
-                _ => changed.anchor.snapshot_token.push('x'),
-            }
-            assert!(state.bind_copy_snapshot(&changed).is_err());
-            assert_eq!(tree(&tmp.path()), before);
-        }
-        drop(state);
-        let state = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
-        assert_eq!(tree(&tmp.path()), before);
-    }
-
-    #[test]
-    fn copy_snapshot_rejects_invalid_identity_version_nonce_and_zero_point_before_publication() {
-        let tmp = TempDir::new();
-        let mut state = tmp.create();
-        let intent = copy_snapshot_intent(&mut state);
-        for variant in 0..10 {
-            let mut invalid = intent.clone();
-            match variant {
-                0 => invalid.anchor.consistent_point = SourceEndLsn(0),
-                1 => invalid.anchor.stream.run.0[0] ^= 1,
-                2 => invalid.anchor.stream.source.system_identifier += 1,
-                3 => invalid.anchor.stream.generation += 1,
-                4 => invalid.anchor.snapshot_token.push('x'),
-                5 => invalid.anchor.plan_nonce = [0; 16],
-                6 => invalid.plan.plan_nonce = [0; 16],
-                7 => invalid.plan.plan_nonce = [41; 16],
-                8 => invalid.plan.reference_version = 0,
-                _ => invalid.plan.reference_version = 2,
-            }
-            let before = tree(&tmp.path());
-            let error = state.bind_copy_snapshot(&invalid).unwrap_err();
-            assert!(
-                error.message.starts_with("state-copy:"),
-                "{variant}: {error:?}"
-            );
-            assert_eq!(state.checked_copy_snapshot().unwrap(), None);
-            assert_eq!(
-                manifest(&tmp.path()).get("copy_snapshot"),
-                Some(&Value::Null)
-            );
-            assert!(manifest(&tmp.path())["copy_complete"].is_null());
-            assert_eq!(tree(&tmp.path()), before);
-        }
-        state.bind_copy_snapshot(&intent).unwrap();
-    }
-
-    #[test]
-    fn copy_snapshot_requires_confirmed_source_and_target_and_existing_plan() {
-        for variant in 0..5 {
-            let tmp = TempDir::new();
-            let mut state = tmp.create();
-            let intent = copy_snapshot_intent(&mut state);
-            match variant {
-                0 => state.manifest.source_slot = None,
-                1 => {
-                    let Some(SourceSlotProvenance::Confirmed(receipt)) =
-                        &state.manifest.source_slot
-                    else {
-                        panic!("missing source")
-                    };
-                    state.manifest.source_slot =
-                        Some(SourceSlotProvenance::Provisioning(receipt.intent.clone()));
-                }
-                2 => state.manifest.target_provenance.clear(),
-                3 => {
-                    let TargetProvenance::Confirmed(receipt) = &state.manifest.target_provenance[0]
-                    else {
-                        panic!("missing target")
-                    };
-                    state.manifest.target_provenance[0] =
-                        TargetProvenance::Provisioning(receipt.intent.clone());
-                }
-                _ => {
-                    fs::remove_dir_all(tmp.path().join("data/plans").join("2a".repeat(16))).unwrap()
-                }
-            }
-            // Publish the controlled prerequisite change so held-file checks do not mask provenance refusal.
-            let bytes = serde_json::to_vec(&state.manifest).unwrap();
-            fs::write(tmp.path().join("manifest.json"), bytes).unwrap();
-            let before = tree(&tmp.path());
-            let error = state.bind_copy_snapshot(&intent).unwrap_err();
-            let code = if variant == 4 {
-                "state-plan:"
-            } else {
-                "state-copy:"
-            };
-            assert!(error.message.starts_with(code), "{variant}: {error:?}");
-            assert_eq!(tree(&tmp.path()), before);
-        }
-    }
-
-    #[test]
-    fn copy_snapshot_preserves_u64_reference_fields_and_zero_crc_without_sqlite_narrowing() {
-        let tmp = TempDir::new();
-        let mut state = tmp.create();
-        let mut intent = copy_snapshot_intent(&mut state);
-        intent.plan.table_count = u64::MAX;
-        intent.plan.logical_bytes = u64::MAX;
-        state.bind_copy_snapshot(&intent).unwrap();
-        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
-    }
-
-    #[test]
-    fn copy_snapshot_required_nullable_field_and_unknown_fields_refuse_corruption() {
-        let tmp = TempDir::new();
-        let state = tmp.create();
-        assert_eq!(state.checked_copy_snapshot().unwrap(), None);
-        drop(state);
-        change_manifest(&tmp.path(), |value| {
-            assert!(
-                value
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("copy_snapshot")
-                    .is_some()
-            );
-        });
-        recovery_refusal(&tmp.path(), "state-invalid:");
-        for action in [
-            StateAction::Create,
-            StateAction::Resume,
-            StateAction::Restart,
-        ] {
-            refusal(&tmp.path(), action, "state-invalid:");
-        }
-        for pointer in ["", "/anchor", "/plan"] {
-            let tmp = TempDir::new();
-            let mut state = tmp.create();
-            let intent = copy_snapshot_intent(&mut state);
-            state.bind_copy_snapshot(&intent).unwrap();
-            drop(state);
-            change_manifest(&tmp.path(), |value| {
-                value["copy_snapshot"]
-                    .pointer_mut(pointer)
-                    .unwrap()
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("unknown".into(), json!(1));
-            });
-            recovery_refusal(&tmp.path(), "state-invalid:");
-        }
-    }
-
-    #[test]
-    fn copy_snapshot_publication_and_identical_resync_failures_return_no_success() {
-        for repeating in [false, true] {
-            for step in [
-                PublicationStep::Create,
-                PublicationStep::Write,
-                PublicationStep::FileSync,
-                PublicationStep::Rename,
-                PublicationStep::DirectorySync,
-                PublicationStep::Published,
-            ] {
-                if repeating
-                    && !matches!(
-                        step,
-                        PublicationStep::FileSync | PublicationStep::DirectorySync
-                    )
-                {
-                    continue;
-                }
-                let tmp = TempDir::new();
-                let mut state = tmp.create();
-                let intent = copy_snapshot_intent(&mut state);
-                if repeating {
-                    state.bind_copy_snapshot(&intent).unwrap();
-                }
-                let previous = state.manifest.copy_snapshot.clone();
-                let failure = PublicationFailure::at(step);
-                let error = state.bind_copy_snapshot(&intent).unwrap_err();
-                assert!(
-                    error.message.starts_with("state-test:"),
-                    "{repeating} {step:?}: {error:?}"
-                );
-                assert_eq!(state.manifest.copy_snapshot, previous);
-                drop(failure);
-            }
-        }
-    }
-
-    #[test]
-    fn copy_snapshot_checked_lookup_refuses_changed_control_or_missing_plan() {
-        for (variant, code) in [
-            (0, "state-replaced:"),
-            (1, "state-invalid:"),
-            (2, "state-version:"),
-            (3, "state-plan:"),
-        ] {
-            let tmp = TempDir::new();
-            let mut state = tmp.create();
-            let intent = copy_snapshot_intent(&mut state);
-            state.bind_copy_snapshot(&intent).unwrap();
-            assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
-            match variant {
-                0 => change_manifest(&tmp.path(), |value| value["copy_snapshot"] = Value::Null),
-                1 => change_manifest(&tmp.path(), |value| {
-                    value.as_object_mut().unwrap().remove("copy_snapshot");
-                }),
-                2 => change_manifest(&tmp.path(), |value| value["format_version"] = json!(3)),
-                _ => {
-                    fs::remove_dir_all(tmp.path().join("data/plans").join("2a".repeat(16))).unwrap()
-                }
-            }
-            let before = tree(&tmp.path());
-            let error = state.checked_copy_snapshot().unwrap_err();
-            assert!(error.message.starts_with(code), "{variant}: {error:?}");
-            assert_eq!(tree(&tmp.path()), before);
-        }
-    }
-
-    #[test]
-    fn copy_snapshot_recovery_revalidates_nonzero_point_and_exact_reference() {
-        for (pointer, invalid) in [
-            ("/anchor/consistent_point", json!(0)),
-            ("/anchor/snapshot_token", json!("different")),
-            ("/plan/reference_version", json!(2)),
-            ("/plan/plan_nonce", json!(vec![0; 16])),
-            ("/anchor/plan_nonce", json!(vec![41; 16])),
-        ] {
-            let tmp = TempDir::new();
-            let mut state = tmp.create();
-            let intent = copy_snapshot_intent(&mut state);
-            state.bind_copy_snapshot(&intent).unwrap();
-            drop(state);
-            change_manifest(&tmp.path(), |value| {
-                *value["copy_snapshot"].pointer_mut(pointer).unwrap() = invalid.clone();
-            });
-            recovery_refusal(&tmp.path(), "state-copy:");
-        }
-    }
-
-    #[test]
-    fn copy_snapshot_keeps_the_manifest_bound_before_creating_publication_files() {
-        let tmp = TempDir::new();
-        let mut state = tmp.create();
-        let source = source_binding(&state);
-        let pending = state.begin_source_slot(&source).unwrap();
-        let receipt = state
-            .confirm_source_slot(
-                &pending,
-                CreatedSlotData {
-                    snapshot_name: "\u{1}".repeat(1024),
-                    ..created_slot()
-                },
-            )
-            .unwrap();
-        let mut target = binding(&state);
-        target.stream = source.stream();
-        target.schema_name = "a".repeat(6000);
-        let pending = state.begin_target_provisioning(target).unwrap();
-        state
-            .confirm_target_provisioning(confirmed(&pending))
-            .unwrap();
-        state.create_plan_file([42; 16]).unwrap().publish().unwrap();
-        let intent = CopySnapshotIntent {
-            anchor: SnapshotAnchor {
-                stream: source.stream(),
-                snapshot_token: receipt.snapshot_token,
-                consistent_point: receipt.consistent_point,
-                plan_nonce: [42; 16],
-            },
-            plan: CopyPlanRef {
-                reference_version: 1,
-                plan_nonce: [42; 16],
-                table_count: 0,
-                logical_bytes: 0,
-                crc32: 0,
-            },
-        };
-        let before = tree(&tmp.path());
-        let error = state.bind_copy_snapshot(&intent).unwrap_err();
-        assert!(error.message.starts_with("state-invalid:"), "{error:?}");
-        assert_eq!(state.checked_copy_snapshot().unwrap(), None);
-        assert_eq!(tree(&tmp.path()), before);
     }
 }

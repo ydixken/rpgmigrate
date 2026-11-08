@@ -8,5 +8,7 @@
   "catalog::tests::live_cdc_target_matches_and_retains_lock",
   "catalog::tests::live_cdc_target_rejects_metadata_mismatch",
   "catalog::tests::live_cdc_target_rejects_execution_profile",
-  "catalog::tests::live_cdc_target_requires_owned_transaction_settings"
+  "catalog::tests::live_cdc_target_requires_owned_transaction_settings",
+  "catalog::tests::live_clone_admission_selects_each_heap_once_and_omits_generated_input",
+  "catalog::tests::live_clone_admission_refuses_unsupported_relations_and_trigger_states"
 ]

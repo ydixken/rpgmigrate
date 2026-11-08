@@ -13,7 +13,6 @@ from db_harness import assert_identity, conninfo, psql
 from protocol_fault import ProtocolFault
 
 FAULT_CASES = ("lost_commit_reply", "provisioning_recovery")
-JOURNAL_CASES = ("journal_segmented", "journal_sqlite")
 
 
 def backend_evidence(context, pid):
@@ -114,7 +113,7 @@ def copy_main(case, phase):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     selector = parser.add_mutually_exclusive_group(required=True)
-    selector.add_argument("--case", choices=FAULT_CASES + JOURNAL_CASES)
+    selector.add_argument("--case", choices=FAULT_CASES)
     selector.add_argument("--copy-case")
     parser.add_argument("--phase")
     args = parser.parse_args()

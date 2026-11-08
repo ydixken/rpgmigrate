@@ -1,0 +1,9 @@
+# Development qualification only; M5 owns the released migration runner.
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg pkg-config python3 \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && printf '%s\n' 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends libpq-dev postgresql-client-16 postgresql-client-18 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace

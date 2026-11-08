@@ -1,13 +1,49 @@
 use super::error;
 use crate::contracts::{IoControl, Result};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+static UNBOUNDED: OnceLock<Instant> = OnceLock::new();
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+impl IoControl {
+    pub(crate) fn unbounded(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            deadline: *UNBOUNDED.get_or_init(Instant::now),
+            cancelled,
+        }
+    }
+
+    pub(crate) fn is_expired(&self) -> bool {
+        !self.is_unbounded() && Instant::now() >= self.deadline
+    }
+
+    fn is_unbounded(&self) -> bool {
+        UNBOUNDED
+            .get()
+            .is_some_and(|deadline| self.deadline == *deadline)
+    }
+}
+
+pub(crate) fn operation_control(io: &IoControl) -> IoControl {
+    let deadline = Instant::now() + OPERATION_TIMEOUT;
+    IoControl {
+        deadline: if io.is_unbounded() {
+            deadline
+        } else {
+            deadline.min(io.deadline)
+        },
+        cancelled: Arc::clone(&io.cancelled),
+    }
+}
 
 pub(super) fn check(io: &IoControl) -> Result<()> {
     if io.cancelled.load(Ordering::Acquire) {
         return Err(error("PostgreSQL operation cancelled"));
     }
-    if Instant::now() >= io.deadline {
+    if io.is_expired() {
         return Err(error("PostgreSQL operation deadline exceeded"));
     }
     Ok(())
@@ -207,5 +243,27 @@ mod tests {
     #[test]
     fn missing_socket_is_not_treated_as_success() {
         assert!(wait(-1, libc::POLLIN, &control(Duration::from_secs(1))).is_err());
+    }
+
+    #[test]
+    fn unbounded_run_uses_finite_operations_and_shared_cancellation() {
+        let io = IoControl::unbounded(Arc::new(AtomicBool::new(false)));
+        assert!(!io.is_expired());
+        assert!(check(&io).is_ok());
+        let bounded = operation_control(&io);
+        assert!(bounded.deadline > Instant::now());
+        assert!(bounded.deadline <= Instant::now() + Duration::from_secs(300));
+        assert!(Arc::ptr_eq(&bounded.cancelled, &io.cancelled));
+        io.cancelled.store(true, Ordering::Release);
+        assert!(check(&bounded).unwrap_err().message.contains("cancel"));
+    }
+
+    #[test]
+    fn operation_budget_never_extends_an_explicit_deadline() {
+        let io = control(Duration::from_millis(20));
+        assert_eq!(operation_control(&io).deadline, io.deadline);
+        let expired = control(Duration::ZERO);
+        assert!(expired.is_expired());
+        assert!(check(&operation_control(&expired)).is_err());
     }
 }

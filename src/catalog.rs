@@ -1,5 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+mod clone;
+pub(crate) use clone::{
+    analyze_clone, clone_object_inventory, inspect_clone_tables, plan_clone, read_clone_source,
+    read_clone_target, reconcile_clone_tables, sync_clone_sequences, verify_exact_exclusions,
+};
+
 use crate::cdc::contracts::{Column as CdcColumn, Event, RelationKey};
 use crate::contracts::{
     CopyFormat, CopyPlan, CopyTable, Error, ErrorKind, IoControl, QualifiedTable, Result,
@@ -508,9 +514,9 @@ fn source_identity_fields(fields: [&str; 4]) -> Result<(SourceId, u32)> {
     let version = fields[3]
         .parse::<u32>()
         .map_err(|_| refusal("source SQL returned an invalid server version"))?;
-    if version.to_string() != fields[3] || !matches!(version / 10000, 14 | 17) {
+    if version.to_string() != fields[3] || !matches!(version / 10000, 16 | 18) {
         return Err(refusal(
-            "source identity requires the PostgreSQL 14 or 17 profile",
+            "source identity requires the PostgreSQL 16 or 18 profile",
         ));
     }
     Ok((
@@ -1716,7 +1722,7 @@ fn require_supported(relation: &Relation) -> Result<()> {
 fn charge(remaining: &mut usize, bytes: usize) -> Result<()> {
     *remaining = remaining
         .checked_sub(bytes)
-        .ok_or_else(|| refusal("COPY catalog exceeds the E1 8 MiB catalog budget"))?;
+        .ok_or_else(|| refusal("catalog exceeds the 8 MiB catalog budget"))?;
     Ok(())
 }
 
@@ -2166,7 +2172,7 @@ mod tests {
             ("-1", u64::MAX),
         ] {
             assert_eq!(
-                source_identity_fields([sql, "23", "41", "140024"]).unwrap(),
+                source_identity_fields([sql, "23", "41", "160015"]).unwrap(),
                 (
                     SourceId {
                         system_identifier: expected,
@@ -2190,7 +2196,7 @@ mod tests {
             "invalid",
         ] {
             assert_eq!(
-                source_identity_fields([value, "23", "41", "140024"])
+                source_identity_fields([value, "23", "41", "160015"])
                     .unwrap_err()
                     .kind,
                 ErrorKind::BadConfig
@@ -2201,7 +2207,7 @@ mod tests {
     #[test]
     fn source_identity_preserves_full_oid_and_positive_pid_ranges() {
         assert_eq!(
-            source_identity_fields(["7", "4294967295", "2147483647", "170011"]).unwrap(),
+            source_identity_fields(["7", "4294967295", "2147483647", "180006"]).unwrap(),
             (
                 SourceId {
                     system_identifier: 7,
@@ -2211,7 +2217,7 @@ mod tests {
             )
         );
         assert_eq!(
-            source_identity_fields(["7", "1", "1", "140000"]).unwrap().1,
+            source_identity_fields(["7", "1", "1", "160000"]).unwrap().1,
             1
         );
     }
@@ -2219,7 +2225,7 @@ mod tests {
     #[test]
     fn source_identity_rejects_invalid_database_oids() {
         for oid in ["", "0", "-1", "+1", "1 ", "4294967296", "invalid"] {
-            assert!(source_identity_fields(["7", oid, "41", "140024"]).is_err());
+            assert!(source_identity_fields(["7", oid, "41", "160015"]).is_err());
         }
     }
 
@@ -2235,13 +2241,13 @@ mod tests {
             "4294967295",
             "invalid",
         ] {
-            assert!(source_identity_fields(["7", "23", pid, "140024"]).is_err());
+            assert!(source_identity_fields(["7", "23", pid, "160015"]).is_err());
         }
     }
 
     #[test]
     fn source_identity_requires_the_qualified_server_profile() {
-        for version in ["140000", "140024", "170000", "170011"] {
+        for version in ["160000", "160015", "180000", "180006"] {
             assert!(source_identity_fields(["7", "23", "41", version]).is_ok());
         }
         for version in [
@@ -2250,8 +2256,8 @@ mod tests {
             "90624",
             "130000",
             "150000",
-            "160000",
-            "180000",
+            "140000",
+            "170000",
             "14.24",
             "4294967296",
         ] {
@@ -2941,6 +2947,119 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(require_cdc_target_identity(&before, &after).is_err());
+        }
+    }
+
+    #[test]
+    fn live_clone_admission_selects_each_heap_once_and_omits_generated_input() {
+        let io = IoControl {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let mut connection = cdc_target_connection(true, &io);
+        command(&mut connection, "BEGIN", "BEGIN", &io).unwrap();
+        let schema = format!("clone_admission_{}", std::process::id());
+        let q = connection.quote_identifier(&schema).unwrap();
+        for sql in [
+            format!("CREATE SCHEMA {q}"),
+            format!("CREATE TYPE {q}.mood AS ENUM ('quiet','busy')"),
+            format!("CREATE DOMAIN {q}.positive AS integer CHECK (VALUE>0)"),
+            format!(
+                "CREATE TABLE {q}.parent (id integer GENERATED ALWAYS AS IDENTITY, number {q}.positive, moods {q}.mood[], computed integer GENERATED ALWAYS AS (id+1) STORED)"
+            ),
+            format!("CREATE TABLE {q}.child () INHERITS ({q}.parent)"),
+            format!("CREATE TABLE {q}.root (id integer, items integer[]) PARTITION BY RANGE (id)"),
+            format!("CREATE TABLE {q}.leaf PARTITION OF {q}.root FOR VALUES FROM (0) TO (100)"),
+            format!("CREATE INDEX ON {q}.parent (number)"),
+            format!(
+                "CREATE FUNCTION {q}.trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$"
+            ),
+            format!(
+                "CREATE TRIGGER normal_trigger BEFORE INSERT ON {q}.parent FOR EACH ROW EXECUTE FUNCTION {q}.trigger_fn()"
+            ),
+        ] {
+            connection.query(&sql, &io).unwrap();
+        }
+        let tables = inspect_clone_tables(&mut connection, &[], &io)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name.schema == schema)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tables
+                .iter()
+                .map(|t| t.name.table.as_str())
+                .collect::<Vec<_>>(),
+            ["child", "leaf", "parent"]
+        );
+        for table in tables.iter().filter(|t| t.name.table != "leaf") {
+            assert_eq!(table.writable_columns, ["id", "number", "moods"]);
+            assert_eq!(table.all_columns, ["id", "number", "moods", "computed"]);
+        }
+        command(&mut connection, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    }
+
+    #[test]
+    fn live_clone_admission_refuses_unsupported_relations_and_trigger_states() {
+        let io = IoControl {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let mut connection = cdc_target_connection(true, &io);
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["CREATE UNLOGGED TABLE {s}.item(id integer)"],
+                "clone refuses",
+            ),
+            (
+                &["CREATE MATERIALIZED VIEW {s}.item AS SELECT 1 AS id"],
+                "clone refuses",
+            ),
+            (
+                &[
+                    "CREATE FOREIGN DATA WRAPPER clone_fdw",
+                    "CREATE SERVER clone_srv FOREIGN DATA WRAPPER clone_fdw",
+                    "CREATE FOREIGN TABLE {s}.item(id integer) SERVER clone_srv",
+                ],
+                "clone refuses",
+            ),
+            (
+                &[
+                    "CREATE TABLE {s}.item(id integer)",
+                    "CREATE FUNCTION {s}.trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$",
+                    "CREATE TRIGGER test BEFORE INSERT ON {s}.item FOR EACH ROW EXECUTE FUNCTION {s}.trigger_fn()",
+                    "ALTER TABLE {s}.item ENABLE ALWAYS TRIGGER test",
+                ],
+                "clone refuses",
+            ),
+            (
+                &[
+                    "CREATE TABLE {s}.item(id integer)",
+                    "ALTER EXTENSION plpgsql ADD TABLE {s}.item",
+                ],
+                "clone refuses",
+            ),
+            (
+                &["CREATE TABLE {s}.item(computed integer GENERATED ALWAYS AS (1) STORED)"],
+                "at least one writable column",
+            ),
+        ];
+        for (index, (definitions, expected)) in cases.iter().enumerate() {
+            command(&mut connection, "BEGIN", "BEGIN", &io).unwrap();
+            let q = connection
+                .quote_identifier(&format!("clone_refusal_{}_{index}", std::process::id()))
+                .unwrap();
+            connection
+                .query(&format!("CREATE SCHEMA {q}"), &io)
+                .unwrap();
+            for definition in *definitions {
+                connection
+                    .query(&definition.replace("{s}", &q), &io)
+                    .unwrap();
+            }
+            let error = inspect_clone_tables(&mut connection, &[], &io).unwrap_err();
+            assert!(error.message.contains(expected));
+            command(&mut connection, "ROLLBACK", "ROLLBACK", &io).unwrap();
         }
     }
 

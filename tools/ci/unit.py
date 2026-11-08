@@ -16,9 +16,7 @@ def main():
     if arguments not in ([], ["--harness"]):
         raise RuntimeError("unknown unit test group")
     root = Path(__file__).resolve().parents[2]
-    sys.path.insert(0, str(root / "tools/image"))
-    if arguments:
-        sys.path.insert(0, str(root / "tests/support"))
+    sys.path.insert(0, str(root / "tests/support"))
     inventory = harness_unit_inventory(root) if arguments else ci_unit_inventory(root)
     suite = unittest.TestSuite()
     for number, (name, expected) in enumerate(inventory.items()):

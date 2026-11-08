@@ -1,7 +1,7 @@
 Third-party notices
 
-The controlled PostgreSQL/libpq dependency has its patch notice in native/libpq/NOTICE.
-Its unmodified upstream license is in native/libpq/COPYRIGHT.
+rpgmigrate links to stock PostgreSQL/libpq supplied by the build or runtime environment.
+Retain the PostgreSQL package copyright and license notices when redistributing that dependency.
 
 unicode-ident 1.0.27 uses Unicode data under Unicode-3.0.
 Source: https://crates.io/crates/unicode-ident/1.0.27

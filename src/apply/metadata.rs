@@ -13,7 +13,7 @@ const CATALOG: &str = "rpgmigrate_metadata_catalog";
 const READ: &str = "rpgmigrate_metadata_read";
 const UPDATE: &str = "rpgmigrate_metadata_update";
 const NUMERIC_U64: i32 = (20 << 16) + 4;
-const COLUMNS: [(&str, &str, u32, i32, bool); 22] = [
+const COLUMNS: [(&str, &str, u32, i32, bool); 24] = [
     ("magic", "text", 25, -1, true),
     ("version", "int4", 23, -1, true),
     ("run_id", "bytea", 17, -1, true),
@@ -36,6 +36,8 @@ const COLUMNS: [(&str, &str, u32, i32, bool); 22] = [
     ("copy_snapshot_token", "text", 25, -1, false),
     ("copy_consistent_point", "pg_lsn", 3220, -1, false),
     ("copy_plan_nonce", "bytea", 17, -1, false),
+    ("clone_state", "text", 25, -1, false),
+    ("certified_lsn", "pg_lsn", 3220, -1, false),
 ];
 
 pub(super) fn probe(
@@ -57,6 +59,7 @@ pub(super) fn probe(
         io,
     )?;
     require_catalog(&catalog)?;
+    validate_marker_catalog(connection, &confirmed, io)?;
     read_row(&connection.query(&read_sql(&table), io)?, &confirmed)?;
     Ok(Some(confirmed))
 }
@@ -108,8 +111,17 @@ pub(super) fn create(
         "REVOKE",
         io,
     )?;
+    let marker = marker_qualified(connection, intent)?;
+    command(connection, &marker_create_sql(&marker), "CREATE TABLE", io)?;
+    command(
+        connection,
+        &format!("REVOKE ALL ON TABLE {marker} FROM PUBLIC"),
+        "REVOKE",
+        io,
+    )?;
     let confirmed = locate(connection, intent, io)?
         .ok_or_else(|| refusal("target-metadata: created namespace is absent"))?;
+    validate_marker_catalog(connection, &confirmed, io)?;
     lock_table(connection, &confirmed, io)?;
     require_catalog(&query_once(
         connection,
@@ -144,6 +156,7 @@ pub(super) fn prepare(
         &catalog_values(confirmed),
         io,
     )?)?;
+    validate_marker_catalog(connection, confirmed, io)?;
     connection.prepare(READ, &read_sql(&table), &[], io)?;
     connection.prepare(UPDATE, &update_sql(&table), &[], io)?;
     Ok(())
@@ -162,6 +175,7 @@ pub(super) fn lock_validate(
         &catalog_values(confirmed),
         io,
     )?)?;
+    validate_marker_catalog(connection, confirmed, io)?;
     read_row(&connection.execute_prepared(READ, &[], io)?, confirmed)
 }
 
@@ -170,7 +184,7 @@ pub(super) fn owned_relation_oids(
     confirmed: &ConfirmedProvenance,
     io: &IoControl,
 ) -> Result<[u32; 2]> {
-    lock_validate(connection, confirmed, io)?;
+    read_only(connection, confirmed, io)?;
     let result = query_once(
         connection,
         "SELECT indexrelid FROM pg_catalog.pg_index
@@ -264,7 +278,7 @@ fn locate(
             "target-metadata: target database identity is absent",
         ));
     }
-    decode_location(
+    let found = decode_location(
         &[
             result.cell(0, 0)?,
             result.cell(0, 1)?,
@@ -272,7 +286,24 @@ fn locate(
             result.cell(0, 3)?,
         ],
         intent,
-    )
+    )?;
+    let Some(mut confirmed) = found else {
+        return Ok(None);
+    };
+    let marker = query_once(
+        connection,
+        "SELECT c.oid, i.indexrelid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_index i ON i.indrelid=c.oid AND i.indisprimary WHERE c.relnamespace=$1::oid AND c.relname='copy_done' AND c.relkind='r'",
+        &[Some(confirmed.schema_oid.to_string())],
+        io,
+    )?;
+    if marker.rows() != 1 {
+        return Err(refusal(
+            "target-metadata: marker table identity is absent or ambiguous",
+        ));
+    }
+    confirmed.marker_table_oid = oid(required(marker.cell(0, 0)?)?)?;
+    confirmed.marker_index_oid = oid(required(marker.cell(0, 1)?)?)?;
+    Ok(Some(confirmed))
 }
 
 fn decode_location(
@@ -296,6 +327,8 @@ fn decode_location(
         intent: intent.clone(),
         schema_oid: oid(required(cells[1])?)?,
         table_oid: oid(required(cells[2])?)?,
+        marker_table_oid: 0,
+        marker_index_oid: 0,
     }))
 }
 
@@ -401,6 +434,8 @@ fn catalog_values(confirmed: &ConfirmedProvenance) -> Vec<Option<String>> {
         Some(binding.owner_oid.to_string()),
         Some(binding.schema_name.clone()),
         Some(binding.table_name.clone()),
+        Some(confirmed.marker_table_oid.to_string()),
+        Some(confirmed.marker_index_oid.to_string()),
     ]
 }
 
@@ -419,6 +454,7 @@ fn read_sql(table: &str) -> String {
         "magic" => "CASE WHEN pg_catalog.octet_length(magic) < 64 THEN magic END".into(),
         "run_id" | "nonce" => format!("CASE WHEN pg_catalog.octet_length({0}) = 16 THEN pg_catalog.encode({0}, 'hex') END", column.0),
         // Invalid present optional fields must not become an absent anchor.
+        "clone_state" => "CASE WHEN clone_state IS NULL THEN NULL WHEN pg_catalog.octet_length(clone_state) <= 4096 THEN clone_state ELSE '' END".into(),
         "copy_snapshot_token" => format!("CASE WHEN copy_snapshot_token IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_snapshot_token) <= {MAX_SNAPSHOT_TOKEN_BYTES} THEN copy_snapshot_token ELSE '' END"),
         "copy_plan_nonce" => "CASE WHEN copy_plan_nonce IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_plan_nonce) = 16 THEN pg_catalog.encode(copy_plan_nonce, 'hex') ELSE '' END".into(),
         name => name.to_owned(),
@@ -525,7 +561,19 @@ fn decode_row(cells: &[Option<&[u8]>], confirmed: &ConfirmedProvenance) -> Resul
         applied,
         barrier_epoch: decimal(required(cells[17])?)?,
         barrier_counter: decimal(required(cells[18])?)?,
-        anchor: decode_anchor(&cells[19..], confirmed.intent.binding.stream)?,
+        anchor: decode_anchor(&cells[19..22], confirmed.intent.binding.stream)?,
+        clone: cells[22]
+            .map(|bytes| {
+                if bytes.len() > 4096 {
+                    return Err(refusal("target-metadata: clone control exceeds bound"));
+                }
+                let value: super::checkpoint::CloneControl = serde_json::from_slice(bytes)
+                    .map_err(|_| refusal("target-metadata: invalid clone control"))?;
+                value.validate()?;
+                Ok(value)
+            })
+            .transpose()?,
+        certified_lsn: cells[23].map(lsn).transpose()?.map(SourceEndLsn),
     })
 }
 
@@ -623,7 +671,7 @@ fn row_values(confirmed: &ConfirmedProvenance, row: &ControlRow) -> Result<Vec<O
     }) {
         return Err(refusal("target-metadata: invalid source frontier"));
     }
-    Ok(vec![
+    let mut values = vec![
         Some("rpgmigrate".into()),
         Some(binding.metadata_version.to_string()),
         Some(format!("\\x{}", hex(&binding.stream.run.0))),
@@ -661,7 +709,22 @@ fn row_values(confirmed: &ConfirmedProvenance, row: &ControlRow) -> Result<Vec<O
         row.anchor
             .as_ref()
             .map(|anchor| format!("\\x{}", hex(&anchor.plan_nonce))),
-    ])
+    ];
+    values.push(
+        row.clone
+            .as_ref()
+            .map(|value| {
+                value.validate()?;
+                serde_json::to_string(value)
+                    .map_err(|_| refusal("target-metadata: invalid clone control"))
+            })
+            .transpose()?,
+    );
+    values.push(
+        row.certified_lsn
+            .map(|v| format!("{:X}/{:X}", v.0 >> 32, v.0 as u32)),
+    );
+    Ok(values)
 }
 
 fn update_sql(table: &str) -> String {
@@ -721,6 +784,8 @@ fn empty_row() -> ControlRow {
         barrier_epoch: 0,
         barrier_counter: 0,
         anchor: None,
+        clone: None,
+        certified_lsn: None,
     }
 }
 
@@ -856,17 +921,17 @@ fn catalog_sql(version: u64) -> Result<String> {
                 AND op.opcname = CASE key.position WHEN 1 THEN 'bytea_ops' WHEN 3 THEN 'oid_ops' ELSE 'numeric_ops' END
                 AND op.opcintype = CASE key.position WHEN 1 THEN 17 WHEN 3 THEN 26 ELSE 1700 END::pg_catalog.oid, false))
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class other
-            WHERE other.relnamespace = n.oid AND other.oid NOT IN (c.oid, idx.oid))
+            WHERE other.relnamespace = n.oid AND other.oid NOT IN (c.oid, idx.oid, $7::oid, $8::oid))
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
             WHERE dep.refclassid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND dep.refobjid = n.oid
-            AND NOT ((dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dep.objid IN (c.oid, idx.oid))
-                OR (dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND dep.objid IN (c.reltype, rowtype.typarray))
+            AND NOT ((dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dep.objid IN (c.oid, idx.oid, $7::oid, $8::oid))
+                OR (dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND (dep.objid IN (c.reltype, rowtype.typarray) OR dep.objid IN (SELECT t.oid FROM pg_catalog.pg_type t WHERE t.typrelid=$7::oid OR t.oid IN (SELECT typarray FROM pg_catalog.pg_type WHERE typrelid=$7::oid))))
                 OR (dep.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
-                    AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.oid = dep.objid AND con.conrelid = c.oid))))
+                    AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.oid = dep.objid AND con.conrelid IN (c.oid,$7::oid)))))
         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
             WHERE dep.deptype = 'e' AND ((dep.classid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND dep.objid = n.oid)
-                OR (dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dep.objid IN (c.oid, idx.oid))
-                OR (dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND dep.objid IN (c.reltype, rowtype.typarray))))
+                OR (dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dep.objid IN (c.oid, idx.oid, $7::oid, $8::oid))
+                OR (dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND (dep.objid IN (c.reltype, rowtype.typarray) OR dep.objid IN (SELECT t.oid FROM pg_catalog.pg_type t WHERE t.typrelid=$7::oid OR t.oid IN (SELECT typarray FROM pg_catalog.pg_type WHERE typrelid=$7::oid))))))
         FROM pg_catalog.pg_namespace n
         JOIN pg_catalog.pg_roles writer ON writer.rolname = CURRENT_USER
         JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
@@ -883,6 +948,228 @@ fn refusal(message: &'static str) -> Error {
         kind: ErrorKind::Target,
         message: message.into(),
     }
+}
+
+const MARKER_COLUMNS: [(&str, &str, u32, i32, bool); 11] = [
+    ("magic", "text", 25, -1, true),
+    ("version", "int4", 23, -1, true),
+    ("run_id", "bytea", 17, -1, true),
+    ("nonce", "bytea", 17, -1, true),
+    ("source_table", "oid", 26, -1, true),
+    ("target_table", "oid", 26, -1, true),
+    ("copy_generation", "numeric", 1700, NUMERIC_U64, true),
+    ("rows", "numeric", 1700, NUMERIC_U64, true),
+    ("bytes", "numeric", 1700, NUMERIC_U64, true),
+    ("target_namespace", "oid", 26, -1, true),
+    ("target_owner", "oid", 26, -1, true),
+];
+
+fn marker_qualified(connection: &mut PgConnection, intent: &ProvisioningIntent) -> Result<String> {
+    Ok(format!(
+        "{}.{}",
+        connection.quote_identifier(&intent.binding.schema_name)?,
+        connection.quote_identifier("copy_done")?
+    ))
+}
+
+fn marker_create_sql(table: &str) -> String {
+    let fields = MARKER_COLUMNS
+        .iter()
+        .map(|(name, ty, oid, modifier, _)| {
+            format!(
+                "{name} pg_catalog.{ty}{}{} NOT NULL",
+                if *modifier == NUMERIC_U64 {
+                    "(20,0)"
+                } else {
+                    ""
+                },
+                if *oid == 25 {
+                    " COLLATE pg_catalog.\"C\""
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE TABLE {table} ({fields}, PRIMARY KEY(copy_generation, source_table)) USING heap"
+    )
+}
+
+fn validate_marker_catalog(
+    connection: &mut PgConnection,
+    confirmed: &ConfirmedProvenance,
+    io: &IoControl,
+) -> Result<()> {
+    if confirmed.marker_table_oid == 0
+        || confirmed.marker_index_oid == 0
+        || confirmed.marker_table_oid == confirmed.table_oid
+        || confirmed.marker_index_oid == confirmed.table_oid
+        || confirmed.marker_table_oid == confirmed.marker_index_oid
+    {
+        return Err(refusal("target-metadata: invalid marker object identities"));
+    }
+    let attributes = MARKER_COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _, ty, modifier, required))| {
+            format!("({},'{name}',{ty},{modifier},{required})", i + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let version = server_version(connection, io)?;
+    let pg18 = if version >= 180000 {
+        "OR (con.contype='n' AND con.conenforced AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred AND con.conislocal AND con.coninhcount=0 AND con.conindid=0 AND con.conbin IS NULL AND cardinality(con.conkey)=1 AND EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum=con.conkey[1] AND a.attnotnull))"
+    } else {
+        ""
+    };
+    let sql = format!(
+        r#"SELECT c.relnamespace=$3::oid AND c.relowner=$4::oid AND c.relname='copy_done'
+        AND c.relkind='r' AND c.relpersistence='p' AND c.relam=(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap')
+        AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition AND NOT c.relisshared
+        AND c.reloftype=0 AND c.relnatts=11 AND c.relchecks=0
+        AND pg_catalog.has_table_privilege(c.oid,'SELECT') AND pg_catalog.has_table_privilege(c.oid,'INSERT') AND pg_catalog.has_table_privilege(c.oid,'DELETE')
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) a WHERE a.grantor<>c.relowner OR (a.grantee<>c.relowner AND (a.grantee<>(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=CURRENT_USER) OR a.privilege_type NOT IN('SELECT','INSERT','DELETE') OR a.is_grantable)))
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT EXISTS(SELECT 1 FROM (VALUES {attributes}) e(num,name,ty,modifier,required) WHERE a.attnum=e.num AND a.attname=e.name AND a.atttypid=e.ty::oid AND a.atttypmod=e.modifier AND a.attnotnull=e.required AND NOT a.attisdropped AND NOT a.atthasdef AND a.attislocal AND a.attinhcount=0 AND a.attndims=0 AND a.attacl IS NULL AND a.attoptions IS NULL AND a.attfdwoptions IS NULL AND a.attidentity='' AND a.attgenerated='' AND a.attcollation=CASE WHEN a.atttypid=25 THEN 'pg_catalog."C"'::pg_catalog.regcollation::oid ELSE 0 END))
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attrdef a WHERE a.adrelid=c.oid)
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid)
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class=c.oid)
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid=c.oid OR h.inhparent=c.oid)
+        AND (SELECT count(*) FROM pg_catalog.pg_index ix WHERE ix.indrelid=c.oid)=1
+        AND i.indexrelid=$2::oid AND i.indisunique AND i.indisprimary AND NOT i.indisexclusion AND i.indimmediate AND i.indisvalid AND i.indisready AND i.indislive
+        AND i.indnatts=2 AND i.indnkeyatts=2 AND i.indexprs IS NULL AND i.indpred IS NULL
+        AND i.indkey='7 5'::pg_catalog.int2vector AND i.indcollation='0 0'::pg_catalog.oidvector AND i.indoption='0 0'::pg_catalog.int2vector
+        AND idx.relkind='i' AND idx.relnamespace=c.relnamespace AND idx.relowner=c.relowner AND idx.relpersistence='p' AND idx.relacl IS NULL
+        AND idx.relam=(SELECT oid FROM pg_catalog.pg_am WHERE amname='btree')
+        AND i.indclass=ARRAY[(SELECT oid FROM pg_catalog.pg_opclass WHERE opcnamespace='pg_catalog'::pg_catalog.regnamespace AND opcname='numeric_ops' AND opcmethod=idx.relam AND opcdefault),(SELECT oid FROM pg_catalog.pg_opclass WHERE opcnamespace='pg_catalog'::pg_catalog.regnamespace AND opcname='oid_ops' AND opcmethod=idx.relam AND opcdefault)]::pg_catalog.oidvector
+        AND p.contype='p' AND p.connamespace=c.relnamespace AND NOT p.condeferrable AND NOT p.condeferred AND p.convalidated AND p.conislocal AND p.coninhcount=0 AND p.conkey=ARRAY[7,5]::pg_catalog.int2[] AND p.conbin IS NULL
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.conrelid=c.oid AND NOT(con.oid=p.oid {pg18}))
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_index i ON i.indrelid=c.oid JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid JOIN pg_catalog.pg_constraint p ON p.conrelid=c.oid AND p.conindid=idx.oid WHERE c.oid=$1::oid"#
+    );
+    require_catalog(&query_once(
+        connection,
+        &sql,
+        &[
+            Some(confirmed.marker_table_oid.to_string()),
+            Some(confirmed.marker_index_oid.to_string()),
+            Some(confirmed.schema_oid.to_string()),
+            Some(confirmed.intent.binding.owner_oid.to_string()),
+        ],
+        io,
+    )?)
+}
+
+pub(super) fn read_only(
+    connection: &mut PgConnection,
+    confirmed: &ConfirmedProvenance,
+    io: &IoControl,
+) -> Result<ControlRow> {
+    validate_intent(&confirmed.intent)?;
+    if locate(connection, &confirmed.intent, io)?.as_ref() != Some(confirmed) {
+        return Err(refusal("target-metadata: exact metadata identities differ"));
+    }
+    let version = server_version(connection, io)?;
+    require_catalog(&query_once(
+        connection,
+        &catalog_sql(version)?,
+        &catalog_values(confirmed),
+        io,
+    )?)?;
+    validate_marker_catalog(connection, confirmed, io)?;
+    let table = qualified(connection, &confirmed.intent)?;
+    read_row(
+        &connection.query(&read_sql(&table).replace(" FOR UPDATE", ""), io)?,
+        confirmed,
+    )
+}
+
+pub(super) fn read_markers(
+    connection: &mut PgConnection,
+    confirmed: &ConfirmedProvenance,
+    io: &IoControl,
+) -> Result<Vec<super::checkpoint::CopyDone>> {
+    let table = marker_qualified(connection, &confirmed.intent)?;
+    let result=connection.query(&format!("SELECT magic,version,pg_catalog.encode(run_id,'hex'),pg_catalog.encode(nonce,'hex'),source_table,target_table,copy_generation,rows,bytes,target_namespace,target_owner FROM ONLY {table} ORDER BY source_table LIMIT 4097"),io)?;
+    if result.rows() > 4096 {
+        return Err(refusal(
+            "target-metadata: marker inventory exceeds table bound",
+        ));
+    }
+    let mut markers = Vec::with_capacity(result.rows());
+    for row in 0..result.rows() {
+        if result.cell(row, 0)? != Some(b"rpgmigrate")
+            || decimal(required(result.cell(row, 1)?)?)? != u64::from(TARGET_METADATA_VERSION)
+            || result.cell(row, 2)? != Some(hex(&confirmed.intent.binding.stream.run.0).as_bytes())
+            || result.cell(row, 3)? != Some(hex(&confirmed.intent.nonce).as_bytes())
+        {
+            return Err(refusal("target-metadata: marker provenance differs"));
+        }
+        markers.push(super::checkpoint::CopyDone {
+            source_oid: oid(required(result.cell(row, 4)?)?)?,
+            target_oid: oid(required(result.cell(row, 5)?)?)?,
+            generation: crate::contracts::CopyGeneration(decimal(required(result.cell(row, 6)?)?)?),
+            rows: decimal(required(result.cell(row, 7)?)?)?,
+            bytes: decimal(required(result.cell(row, 8)?)?)?,
+            target_namespace_oid: oid(required(result.cell(row, 9)?)?)?,
+            target_owner_oid: oid(required(result.cell(row, 10)?)?)?,
+        });
+    }
+    Ok(markers)
+}
+
+pub(super) fn insert_marker(
+    connection: &mut PgConnection,
+    confirmed: &ConfirmedProvenance,
+    marker: &super::checkpoint::CopyDone,
+    io: &IoControl,
+) -> Result<()> {
+    let table = marker_qualified(connection, &confirmed.intent)?;
+    let values = vec![
+        Some("rpgmigrate".into()),
+        Some(TARGET_METADATA_VERSION.to_string()),
+        Some(format!(
+            "\\x{}",
+            hex(&confirmed.intent.binding.stream.run.0)
+        )),
+        Some(format!("\\x{}", hex(&confirmed.intent.nonce))),
+        Some(marker.source_oid.to_string()),
+        Some(marker.target_oid.to_string()),
+        Some(marker.generation.0.to_string()),
+        Some(marker.rows.to_string()),
+        Some(marker.bytes.to_string()),
+        Some(marker.target_namespace_oid.to_string()),
+        Some(marker.target_owner_oid.to_string()),
+    ];
+    let placeholders = MARKER_COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(i, (_, ty, _, _, _))| format!("${}::pg_catalog.{ty}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    require_tag(
+        &query_once(
+            connection,
+            &format!("INSERT INTO {table} VALUES({placeholders})"),
+            &values,
+            io,
+        )?,
+        "INSERT 0 1",
+    )
+}
+
+pub(super) fn clear_markers(
+    connection: &mut PgConnection,
+    confirmed: &ConfirmedProvenance,
+    io: &IoControl,
+) -> Result<()> {
+    let table = marker_qualified(connection, &confirmed.intent)?;
+    let result = connection.query(&format!("DELETE FROM ONLY {table}"), io)?;
+    if !result.command_tag()?.starts_with("DELETE ") {
+        return Err(refusal("target-metadata: marker invalidation failed"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -914,13 +1201,15 @@ mod tests {
             },
             schema_oid: 23,
             table_oid: 29,
+            marker_table_oid: 31,
+            marker_index_oid: 37,
         }
     }
 
-    fn empty_cells() -> [Option<&'static [u8]>; 22] {
+    fn empty_cells() -> [Option<&'static [u8]>; 24] {
         [
             Some(b"rpgmigrate"),
-            Some(b"3"),
+            Some(b"4"),
             Some(b"11111111111111111111111111111111"),
             Some(b"22222222222222222222222222222222"),
             Some(b"7"),
@@ -941,17 +1230,19 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         ]
     }
 
-    fn snapshot_cells() -> [Option<&'static [u8]>; 22] {
-        let mut cells = [None; 22];
+    fn snapshot_cells() -> [Option<&'static [u8]>; 24] {
+        let mut cells = [None; 24];
         cells[..19].copy_from_slice(&empty_cells()[..19]);
         cells
     }
 
     #[test]
-    fn metadata3_accepts_empty_and_complete_snapshot_rows() {
+    fn metadata4_accepts_empty_and_complete_snapshot_rows() {
         let mut cells = snapshot_cells();
         assert_eq!(decode_row(&cells, &provenance()).unwrap().applied, None);
         cells[19] = Some(b"owned snapshot 'token'");
@@ -961,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata3_partial_snapshot_fields_have_a_specific_refusal() {
+    fn metadata4_partial_snapshot_fields_have_a_specific_refusal() {
         let values: [&[u8]; 3] = [
             b"owned snapshot token",
             b"0/1",
@@ -983,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata3_bounded_projection_preserves_null_and_invalid_presence() {
+    fn metadata4_bounded_projection_preserves_null_and_invalid_presence() {
         let sql = read_sql("\"s\".\"checkpoint\"");
         assert!(sql.contains("CASE WHEN copy_snapshot_token IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_snapshot_token) <= 1024 THEN copy_snapshot_token ELSE '' END"));
         assert!(sql.contains("CASE WHEN copy_plan_nonce IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_plan_nonce) = 16 THEN pg_catalog.encode(copy_plan_nonce, 'hex') ELSE '' END"));
@@ -991,16 +1282,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata3_fresh_catalog_requires_all_22_columns() {
-        assert_eq!(COLUMNS.len(), 22);
+    fn metadata4_fresh_catalog_requires_all_24_columns() {
+        assert_eq!(COLUMNS.len(), 24);
         let ddl = create_table_sql("\"s\".\"checkpoint\"", 170000);
         assert!(ddl.contains("copy_snapshot_token pg_catalog.text COLLATE pg_catalog.\"C\""));
         assert!(ddl.contains("copy_consistent_point pg_catalog.pg_lsn"));
         assert!(ddl.contains("copy_plan_nonce pg_catalog.bytea"));
         for version in [90600, 110000, 170000, 180000] {
             let sql = catalog_sql(version).unwrap();
-            assert!(sql.contains("c.relnatts = 22"));
-            assert!(sql.contains("a.attnum > 0) = 22"));
+            assert!(sql.contains("c.relnatts = 24"));
+            assert!(sql.contains("a.attnum > 0) = 24"));
             assert!(sql.contains("(20, 'copy_snapshot_token', 25, -1, false)"));
             assert!(sql.contains("(21, 'copy_consistent_point', 3220, -1, false)"));
             assert!(sql.contains("(22, 'copy_plan_nonce', 17, -1, false)"));
@@ -1010,13 +1301,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata3_cas_compares_all_fields_through_parameter_32() {
+    fn metadata4_cas_compares_all_fields_through_parameter_36() {
         let sql = update_sql("\"s\".\"checkpoint\"");
-        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 22);
-        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $23::pg_catalog.numeric"));
-        assert!(sql.contains("copy_snapshot_token IS NOT DISTINCT FROM $30::pg_catalog.text"));
-        assert!(sql.contains("copy_consistent_point IS NOT DISTINCT FROM $31::pg_catalog.pg_lsn"));
-        assert!(sql.contains("copy_plan_nonce IS NOT DISTINCT FROM $32::pg_catalog.bytea"));
+        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 24);
+        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $25::pg_catalog.numeric"));
+        assert!(sql.contains("copy_snapshot_token IS NOT DISTINCT FROM $32::pg_catalog.text"));
+        assert!(sql.contains("copy_consistent_point IS NOT DISTINCT FROM $33::pg_catalog.pg_lsn"));
+        assert!(sql.contains("copy_plan_nonce IS NOT DISTINCT FROM $34::pg_catalog.bytea"));
     }
 
     fn anchor() -> SnapshotAnchor {
@@ -1046,7 +1337,7 @@ mod tests {
             })
         );
         let values = row_values(&provenance(), &row).unwrap();
-        assert_eq!(values.len(), 22);
+        assert_eq!(values.len(), 24);
         assert_eq!(values[19].as_deref(), Some("owned snapshot 'token'"));
         assert_eq!(values[20].as_deref(), Some("FFFFFFFF/FFFFFFFF"));
         assert_eq!(
@@ -1054,7 +1345,7 @@ mod tests {
             Some("\\xaabbccddeeff00112233445566778899")
         );
         assert_eq!(
-            &row_values(&provenance(), &empty_row()).unwrap()[19..],
+            &row_values(&provenance(), &empty_row()).unwrap()[19..22],
             &[None, None, None]
         );
     }
@@ -1180,8 +1471,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata3_refuses_version2_and_legacy_row_width() {
-        assert_eq!(TARGET_METADATA_VERSION, 3);
+    fn metadata4_refuses_version2_and_legacy_row_width() {
+        assert_eq!(TARGET_METADATA_VERSION, 4);
         let mut cells = snapshot_cells();
         cells[1] = Some(b"2");
         assert_eq!(
@@ -1208,12 +1499,12 @@ mod tests {
             ..empty_row()
         };
         let values = update_values(&confirmed, &empty_row(), &installed).unwrap();
-        assert_eq!(values.len(), 32);
+        assert_eq!(values.len(), 36);
         assert_eq!(
             &values[19..22],
             &row_values(&confirmed, &installed).unwrap()[19..22]
         );
-        assert_eq!(&values[29..32], &[None, None, None]);
+        assert_eq!(&values[31..34], &[None, None, None]);
         let cdc = ControlRow {
             applied: Some(Frontier {
                 tx: TxId {
@@ -1229,7 +1520,7 @@ mod tests {
             ..installed.clone()
         };
         let values = update_values(&confirmed, &installed, &cdc).unwrap();
-        assert_eq!(&values[19..22], &values[29..32]);
+        assert_eq!(&values[19..22], &values[31..34]);
         let barrier = ControlRow {
             barrier_counter: 2,
             ..cdc.clone()
@@ -1349,6 +1640,8 @@ mod tests {
                 barrier_epoch: 0,
                 barrier_counter: 0,
                 anchor: None,
+                clone: None,
+                certified_lsn: None,
             }
         );
         let mut cells = empty_cells();
@@ -1385,6 +1678,8 @@ mod tests {
                 barrier_epoch: u64::MAX,
                 barrier_counter: u64::MAX,
                 anchor: None,
+                clone: None,
+                certified_lsn: None,
             }
         );
         cells[15] = None;
@@ -1460,9 +1755,11 @@ mod tests {
             barrier_epoch: u64::MAX,
             barrier_counter: 2,
             anchor: None,
+            clone: None,
+            certified_lsn: None,
         };
         let values = row_values(&confirmed, &row).unwrap();
-        assert_eq!(values.len(), 22);
+        assert_eq!(values.len(), 24);
         assert_eq!(
             values[2].as_deref(),
             Some("\\x11111111111111111111111111111111")
@@ -1510,12 +1807,12 @@ mod tests {
         assert!(sql.starts_with("UPDATE ONLY \"s\".\"checkpoint\" SET "));
         assert!(sql.contains("nonce IS NOT DISTINCT FROM $4::pg_catalog.bytea"));
         assert!(sql.contains("table_oid IS NOT DISTINCT FROM $12::pg_catalog.oid"));
-        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $23::pg_catalog.numeric"));
-        assert!(sql.contains("last_xid IS NOT DISTINCT FROM $24::pg_catalog.oid"));
-        assert!(sql.contains("source_commit_lsn IS NOT DISTINCT FROM $26::pg_catalog.pg_lsn"));
-        assert!(sql.contains("source_end_lsn IS NOT DISTINCT FROM $27::pg_catalog.pg_lsn"));
-        assert!(sql.contains("barrier_counter IS NOT DISTINCT FROM $29::pg_catalog.numeric"));
-        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 22);
+        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $25::pg_catalog.numeric"));
+        assert!(sql.contains("last_xid IS NOT DISTINCT FROM $26::pg_catalog.oid"));
+        assert!(sql.contains("source_commit_lsn IS NOT DISTINCT FROM $28::pg_catalog.pg_lsn"));
+        assert!(sql.contains("source_end_lsn IS NOT DISTINCT FROM $29::pg_catalog.pg_lsn"));
+        assert!(sql.contains("barrier_counter IS NOT DISTINCT FROM $31::pg_catalog.numeric"));
+        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 24);
     }
 
     #[test]
@@ -1553,7 +1850,11 @@ mod tests {
                 &confirmed.intent
             )
             .unwrap(),
-            Some(confirmed.clone())
+            Some(ConfirmedProvenance {
+                marker_table_oid: 0,
+                marker_index_oid: 0,
+                ..confirmed.clone()
+            })
         );
         for cells in [
             [None, None, None, None],

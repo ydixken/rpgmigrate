@@ -1,11 +1,12 @@
-name: Native verification and packaging
+name: Rust checks
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -15,155 +16,196 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
-  linux:
-    name: Native Linux (${{ matrix.architecture }}, client ${{ matrix.client_version }})
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        architecture: [amd64, arm64]
-        client_version: ['16.15', '18.6']
-        include:
-          - runner: ubuntu-24.04
-            architecture: amd64
-          - runner: ubuntu-24.04-arm
-            architecture: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Check installed native container tools
-        env:
-          ARCHITECTURE: ${{ matrix.architecture }}
-        run: >-
-          python3 tools/ci/image-publish.py preflight
-          --architecture "$ARCHITECTURE" --report target/ci-host/report.json
+      - name: Install stock PGDG libpq 18 and pkg-config
+        run: |
+          pgdg_key=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          pgdg_repository=https://apt.postgresql.org/pub/repos/apt
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --location --proto '=https' --tlsv1.2 \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o "$pgdg_key"
+          . /etc/os-release
+          printf '%s\n' "deb [signed-by=$pgdg_key] $pgdg_repository ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends 'libpq-dev=18.*' 'libpq5=18.*' pkg-config
+          dpkg-query -W libpq-dev libpq5
+          pkg-config --modversion libpq
+      - name: Select the manifest's Rust toolchain
+        run: |
+          toolchain=$(python3 -c \
+            'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
+          rustup override set "$toolchain"
+          rustc --version
+          cargo --version
       - name: Install and verify Task from the shared checksum pin
         run: |
           task_bin=$(python3 tools/bootstrap-task.py)
           dirname "$task_bin" >> "$GITHUB_PATH"
-      - name: Verify source in the disposable Linux fixture
-        id: source
-        run: task --silent --output=interleaved --color=false ci:linux
-      - name: Build the native runtime artifact once
-        env:
-          ARCHITECTURE: ${{ matrix.architecture }}
-          PG_CLIENT_VERSION: ${{ matrix.client_version }}
-        run: >-
-          task --silent --output=interleaved --color=false image:build --
-          --engine podman --platform "linux/$ARCHITECTURE" --output target/image
-          --client-version "$PG_CLIENT_VERSION"
-      - name: Smoke the exact exported runtime artifact
-        env:
-          FIXTURE_IMAGE: ${{ steps.source.outputs.fixture_image }}
-        run: >-
-          task --silent --output=interleaved --color=false image:smoke --
-          --engine podman --receipt target/image/receipt.json
-          --fixture-image "$FIXTURE_IMAGE" --output target/image-smoke
-      - name: Bind source and smoke receipts to this run
-        env:
-          SOURCE_REVISION: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          ARCHITECTURE: ${{ matrix.architecture }}
-          VERIFICATION_REPORT: ${{ steps.source.outputs.report }}
-        run: >-
-          python3 tools/ci/image-publish.py seal --directory target/image
-          --source "$SOURCE_REVISION" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
-          --architecture "$ARCHITECTURE" --smoke target/image-smoke/smoke.json
-          --verification "$VERIFICATION_REPORT"
-      - name: Transfer tested native artifact for version publication
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: native-${{ matrix.client_version }}-${{ matrix.architecture }}
-          path: |
-            target/image/image.oci.tar
-            target/image/receipt.json
-            target/image/smoke.json
-            target/image/verification.json
-            target/image/ci.json
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-      - name: Finish bounded host evidence
-        if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
-        run: python3 tools/ci/image-publish.py report --report target/ci-host/report.json --status "$JOB_STATUS"
-      - name: Keep bounded verification evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: verification-${{ matrix.client_version }}-${{ matrix.architecture }}
-          path: |
-            target/ci-linux-*/report.json
-            target/ci-host/report.json
-          if-no-files-found: error
-          retention-days: 7
+      - name: Check, lint and test
+        run: task --silent --output=interleaved --color=false check lint test
 
-  publish:
-    name: Publish the verified version index (${{ matrix.client_version }})
-    strategy:
-      fail-fast: false
-      matrix:
-        client_version: ['16.15', '18.6']
-    needs: linux
-    if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
-      github.repository == 'ydixken/rpgmigrate'
+  dependencies:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Check installed publication tools
-        run: >-
-          python3 tools/ci/image-publish.py preflight
-          --architecture amd64 --report target/ci-publish/report.json
-      - name: Download only this run's two native artifacts
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+      - name: Select the manifest's Rust toolchain
+        run: |
+          toolchain=$(python3 -c \
+            'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup override set "$toolchain"
+          rustc --version
+          cargo --version
+      - name: Install the pinned dependency auditor
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo deny --version
+      - name: Restrict the private license exemption to the unpublished root
+        run: |
+          mkdir -p target
+          cargo metadata --locked --format-version 1 > target/dependency-metadata.json
+          python3 - <<'PYDEPENDENCIES'
+          import json
+          from pathlib import Path
+          metadata = json.loads(Path("target/dependency-metadata.json").read_text())
+          root = metadata["resolve"]["root"]
+          private = [package["id"] for package in metadata["packages"] if package.get("publish") == []]
+          if not root or private != [root]:
+              raise SystemExit("only the unpublished root may use the private license exemption")
+          PYDEPENDENCIES
+      - name: Audit locked licenses and advisories for both image targets
+        run: cargo deny --locked check licenses advisories
+
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          name: native-${{ matrix.client_version }}-amd64
-          path: target/publish-input/native-amd64
-          digest-mismatch: error
-      - name: Download the matching arm64 variant
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+          persist-credentials: false
+      - name: Select tracked Markdown
+        id: markdown
+        run: |
+          python3 - <<'PYDOCS'
+          import os
+          import subprocess
+          from pathlib import Path
+          names = subprocess.check_output(["git", "ls-files", "-z", "--", "*.md", "*.markdown"])
+          paths = [name.decode() for name in names.split(b"\0") if name]
+          if not paths or any("\n" in path for path in paths):
+              raise SystemExit("tracked Markdown inventory is empty or invalid")
+          for path in paths:
+              if chr(0x2014) in Path(path).read_text():
+                  raise SystemExit(f"{path}: use a colon, comma, parentheses or full stop instead of an em dash")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("files<<MARKDOWN_FILES\n" + "\n".join(paths) + "\nMARKDOWN_FILES\n")
+          PYDOCS
+      - name: Lint tracked Markdown
+        uses: DavidAnson/markdownlint-cli2-action@696eb3f2509270d7b882d2aa68347bc676e7af34  # v25.0.0
         with:
-          name: native-${{ matrix.client_version }}-arm64
-          path: target/publish-input/native-arm64
-          digest-mismatch: error
-      - name: Validate receipts and preserve the tested index digests
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USER: ${{ github.actor }}
-          SOURCE_REVISION: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          VERSION_TAG: ${{ github.ref_name }}
-          IMAGE_REPOSITORY: ghcr.io/ydixken/rpgmigrate
-        run: >-
-          python3 tools/ci/image-publish.py publish --directory target/publish-input
-          --source "$SOURCE_REVISION" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
-          --repository "$IMAGE_REPOSITORY" --tag "$VERSION_TAG"
-          --report target/ci-publish/report.json
-      - name: Finish bounded publication evidence
-        if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
-        run: python3 tools/ci/image-publish.py report --report target/ci-publish/report.json --status "$JOB_STATUS"
-      - name: Keep bounded publication evidence
-        if: always()
+          globs: ${{ steps.markdown.outputs.files }}
+
+  engine-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pair: [16-16, 18-18, 16-18]
+    env:
+      CONTAINER_RUNTIME: podman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install and verify Task from the shared checksum pin
+        run: |
+          task_bin=$(python3 tools/bootstrap-task.py)
+          dirname "$task_bin" >> "$GITHUB_PATH"
+      - name: Check the native Podman runtime
+        run: |
+          command -v podman
+          podman --version
+          podman info
+          python3 --version
+          task --version
+      - name: Qualify the development engine image
+        run: task test-e2e-clone-${{ matrix.pair }}
+      - name: Revalidate the exact sanitized clone receipt
+        run: |
+          test -s "target/e2e/${{ matrix.pair }}.json"
+          python3 - <<'PYRECEIPT'
+          import importlib.util
+          import json
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("clone", "tools/e2e/clone.py")
+          clone = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(clone)
+          report = json.loads(Path("target/e2e/${{ matrix.pair }}.json").read_text())
+          if report.get("pair") != "${{ matrix.pair }}":
+              raise SystemExit("clone receipt does not match the selected pair")
+          clone.validate_receipt(report, clone.load_manifest())
+          if not report.get("runner_image_id") or len(report.get("server_image_ids", [])) != 2:
+              raise SystemExit("clone receipt lacks immutable image identities")
+          PYRECEIPT
+      - name: Retain sanitized clone qualification
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: publication-${{ matrix.client_version }}
-          path: target/ci-publish/report.json
+          name: clone-${{ matrix.pair }}
+          path: target/e2e/${{ matrix.pair }}.json
           if-no-files-found: error
-          retention-days: 7
+
+  runner-image:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      CONTAINER_RUNTIME: podman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install and verify Task from the shared checksum pin
+        run: |
+          task_bin=$(python3 tools/bootstrap-task.py)
+          dirname "$task_bin" >> "$GITHUB_PATH"
+      - name: Check the native Podman runtime
+        run: |
+          command -v podman
+          podman --version
+          podman info
+          python3 --version
+          task --version
+          test "$(dpkg --print-architecture)" = "${{ matrix.arch }}"
+      - name: Build the production runner on its native architecture
+        run: task image:build
+      - name: Smoke the read-only production runner as uid 65532
+        run: |
+          mkdir -p target/image
+          task --silent image:smoke > target/image/smoke.json
+          test -s target/image/smoke.json
+      - name: Retain immutable image smoke qualification
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: runner-image-${{ matrix.arch }}
+          path: target/image/smoke.json
+          if-no-files-found: error

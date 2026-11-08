@@ -1,0 +1,17 @@
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+
+[licenses]
+include-dev = true
+include-build = true
+confidence-threshold = 0.95
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+
+# The unpublished root has no project license decision; dependencies still require an allowed license.
+[licenses.private]
+ignore = true

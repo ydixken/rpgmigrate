@@ -9,12 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::CommandPath;
 pub(crate) use crate::identity::RunId;
-use crate::identity::{SourceEndLsn, StreamId};
+use crate::identity::{SourceEndLsn, SourceId, StreamId};
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const MAX_SNAPSHOT_TOKEN_BYTES: usize = 1024;
-pub(crate) const COPY_PLAN_REFERENCE_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub(crate) struct Error {
@@ -60,6 +59,7 @@ impl Error {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Conninfo(CString);
 
 impl Conninfo {
@@ -95,7 +95,8 @@ pub(crate) struct IoControl {
     pub(crate) cancelled: Arc<AtomicBool>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct QualifiedTable {
     pub(crate) schema: String,
     pub(crate) table: String,
@@ -126,16 +127,6 @@ pub(crate) struct CopyPlan {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CopyPlanRef {
-    pub(crate) reference_version: u32,
-    pub(crate) plan_nonce: [u8; 16],
-    pub(crate) table_count: u64,
-    pub(crate) logical_bytes: u64,
-    pub(crate) crc32: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct SnapshotAnchor {
     pub(crate) stream: StreamId,
     pub(crate) snapshot_token: String,
@@ -143,7 +134,8 @@ pub(crate) struct SnapshotAnchor {
     pub(crate) plan_nonce: [u8; 16],
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CopyReport {
     pub(crate) tables: u64,
     pub(crate) rows: u64,
@@ -157,23 +149,134 @@ pub(crate) enum StateAction {
     Restart,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct StateRequest {
     pub(crate) path: PathBuf,
     pub(crate) action: StateAction,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct StateIdentity {
     pub(crate) run: RunId,
     pub(crate) canonical_path: PathBuf,
     pub(crate) format_version: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OperatorIdentity {
+    pub(crate) migration_uid: String,
+    pub(crate) run: RunId,
+    pub(crate) workdir_id: String,
+    pub(crate) checkpoint_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CopyGeneration(pub(crate) u64);
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneSource {
+    pub(crate) identity: SourceId,
+    pub(crate) timeline: u32,
+    pub(crate) major: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneTarget {
+    pub(crate) identity: SourceId,
+    pub(crate) major: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SnapshotTicket {
+    pub(crate) token: String,
+    pub(crate) source: CloneSource,
+    pub(crate) generation: CopyGeneration,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneTable {
+    pub(crate) source_oid: u32,
+    pub(crate) name: QualifiedTable,
+    pub(crate) writable_columns: Vec<String>,
+    pub(crate) all_columns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnedCopyTable {
+    pub(crate) table: CloneTable,
+    pub(crate) target_oid: u32,
+    pub(crate) target_namespace_oid: u32,
+    pub(crate) target_owner_oid: u32,
+    pub(crate) generation: CopyGeneration,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnedObject {
+    pub(crate) class_oid: u32,
+    pub(crate) object_oid: u32,
+    pub(crate) object_sub_id: i32,
+    pub(crate) namespace_oid: Option<u32>,
+    pub(crate) namespace_name: Option<String>,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) owner_oid: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestorePolicy {
+    pub(crate) no_owner: bool,
+    pub(crate) no_acl: bool,
+    pub(crate) no_comments: bool,
+    pub(crate) no_tablespaces: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClonePlan {
+    pub(crate) source: CloneSource,
+    pub(crate) target: CloneTarget,
+    pub(crate) generation: CopyGeneration,
+    pub(crate) tables: Vec<CloneTable>,
+    pub(crate) sequences: Vec<QualifiedTable>,
+    pub(crate) policy: RestorePolicy,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CloneOptions {
+    pub(crate) source: Conninfo,
+    pub(crate) target: Conninfo,
+    pub(crate) state: StateRequest,
+    pub(crate) operator: Option<OperatorIdentity>,
+    pub(crate) table_jobs: usize,
+    pub(crate) post_data_jobs: usize,
+    pub(crate) policy: RestorePolicy,
+    pub(crate) not_consistent: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum Invocation {
+    Clone(CloneOptions),
+    Progress {
+        options: CloneOptions,
+        json: bool,
+    },
+    CompareSchema(CloneOptions),
+    CompareData {
+        options: CloneOptions,
+        json: bool,
+    },
     Help(CommandPath),
-    Version,
+    Version {
+        json: bool,
+    },
     Ping {
         source: Conninfo,
         target: Conninfo,
@@ -189,38 +292,6 @@ pub(crate) enum Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn copy_plan_reference_json_preserves_full_width_and_refuses_unknown_fields() {
-        for (tables, bytes, crc) in [(0, 0, 0), (u64::MAX, u64::MAX, u32::MAX)] {
-            let value = serde_json::json!({
-                "reference_version": 1,
-                "plan_nonce": vec![7; 16],
-                "table_count": tables,
-                "logical_bytes": bytes,
-                "crc32": crc,
-            });
-            let reference: CopyPlanRef = serde_json::from_value(value.clone()).unwrap();
-            assert_eq!(serde_json::to_value(reference).unwrap(), value);
-            let mut unknown = value.clone();
-            unknown["path"] = serde_json::json!("foreign.sqlite3");
-            assert!(serde_json::from_value::<CopyPlanRef>(unknown).is_err());
-            for field in [
-                "reference_version",
-                "plan_nonce",
-                "table_count",
-                "logical_bytes",
-                "crc32",
-            ] {
-                let mut missing = value.clone();
-                missing.as_object_mut().unwrap().remove(field);
-                assert!(
-                    serde_json::from_value::<CopyPlanRef>(missing).is_err(),
-                    "{field}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn snapshot_anchor_json_preserves_identity_and_requires_exact_fields() {

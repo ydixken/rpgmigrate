@@ -1,6 +1,5 @@
 mod ffi;
 mod io;
-mod native;
 mod replication;
 
 #[cfg(test)]
@@ -9,11 +8,13 @@ pub(crate) use ffi::replication_testing::owned_frame;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]
-mod passfile_tests;
+mod pipeline_live_tests;
 #[cfg(test)]
 mod prepared_live_tests;
 #[cfg(test)]
 mod replication_live_tests;
+#[cfg(test)]
+mod test_support;
 
 #[allow(
     unused_imports,
@@ -21,7 +22,10 @@ mod replication_live_tests;
 )]
 pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
 
+pub(crate) use ffi::CommitObservation;
 pub(crate) use ffi::PgParam;
+pub(crate) use ffi::utility_environment;
+pub(crate) use io::operation_control;
 
 pub(crate) use ffi::TransactionStatus;
 

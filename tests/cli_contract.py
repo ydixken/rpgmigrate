@@ -16,18 +16,24 @@ class CliContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.baseline = json.loads((ROOT / "tests/fixtures/cli/baseline.json").read_text())
+        storage = tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-offline-")
+        cls.addClassCleanup(storage.cleanup)
+        socket = Path(storage.name) / "absent-socket"
+        cls.offline_conninfo = f"host={socket} dbname=offline connect_timeout=1"
 
     def invoke(self, *args, env=None):
         controlled = {"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"}
         controlled.update(env or {})
-        return subprocess.run(
-            [str(BINARY), *args],
-            env=controlled,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-invoke-") as temporary:
+            controlled.setdefault("TMPDIR", temporary)
+            return subprocess.run(
+                [str(BINARY), *args],
+                env=controlled,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
 
     def test_help_and_version_use_native_identity(self):
         for args in [("--help",), ("help",), ("--version",), ("version",)]:
@@ -73,23 +79,24 @@ class CliContract(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("source", result.stderr)
 
-    def test_unimplemented_command_does_not_create_state(self):
+    def test_unsupported_clone_option_does_not_create_state(self):
         with tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-") as directory:
             state = Path(directory) / "state"
             result = self.invoke(
-                "clone", "--source", "host=invalid", "--target", "host=invalid",
-                "--dir", str(state),
+                "clone", "--source", self.offline_conninfo, "--target", self.offline_conninfo,
+                "--dir", str(state), "--use-copy-binary",
             )
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("unimplemented", result.stderr.lower())
+            self.assertIn("use-copy-binary", result.stderr)
+            self.assertIn("no database or state action was started", result.stderr)
             self.assertFalse(state.exists())
 
     def test_behavioral_copy_option_is_rejected_before_state_creation(self):
         with tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-") as directory:
             state = Path(directory) / "state"
             result = self.invoke(
-                "copy", "table-data", "--source", "host=invalid",
-                "--target", "host=invalid", "--dir", str(state), "--follow",
+                "copy", "table-data", "--source", self.offline_conninfo,
+                "--target", self.offline_conninfo, "--dir", str(state), "--follow",
             )
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("follow", result.stderr)
@@ -105,17 +112,18 @@ class CliContract(unittest.TestCase):
 
     def test_cli_connection_overrides_malformed_environment_connection(self):
         result = self.invoke(
-            "clone", "--source", "host=invalid", "--target", "host=invalid",
+            "clone", "--source", self.offline_conninfo, "--target", self.offline_conninfo,
             env={"PGCOPYDB_SOURCE_PGURI": "not conninfo", "PGCOPYDB_TARGET_PGURI": ""},
         )
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("unimplemented", result.stderr.lower())
+        self.assertEqual(result.returncode, 6, result.stderr)
+        self.assertEqual(json.loads(result.stderr)["category"], "Source")
+        self.assertIn("connection failed", result.stderr)
 
     def test_diagnostics_never_echo_connection_credentials(self):
         secret = "cli-contract-private-password"
         for args in [
-            ("ping", "--source", f"password={secret}", "--not-an-option"),
-            ("clone", "--source", f"password={secret}", "--target", "host=invalid"),
+            ("ping", "--source", f"{self.offline_conninfo} password={secret}", "--not-an-option"),
+            ("clone", "--source", f"{self.offline_conninfo} password={secret}", "--target", self.offline_conninfo),
         ]:
             with self.subTest(args=args):
                 result = self.invoke(*args)
@@ -158,8 +166,8 @@ class CliContract(unittest.TestCase):
 
     def test_command_local_short_options_keep_their_meanings(self):
         environment = {
-            "PGCOPYDB_SOURCE_PGURI": "host=invalid",
-            "PGCOPYDB_TARGET_PGURI": "host=invalid",
+            "PGCOPYDB_SOURCE_PGURI": self.offline_conninfo,
+            "PGCOPYDB_TARGET_PGURI": self.offline_conninfo,
         }
         cases = [
             ("clone", "-J", "1"),
@@ -179,8 +187,13 @@ class CliContract(unittest.TestCase):
         for args in cases:
             with self.subTest(args=args):
                 result = self.invoke(*args, env=environment)
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn("unimplemented", result.stderr.lower())
+                if args[:2] in (("clone", "-J"), ("clone", "-I")):
+                    self.assertEqual(result.returncode, 6, result.stderr)
+                    self.assertEqual(json.loads(result.stderr)["category"], "Source")
+                    self.assertIn("connection failed", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("unimplemented", result.stderr.lower())
         self.assertEqual(self.invoke("list", "tables", "-k").returncode, 1)
 
     def test_dump_short_flags_use_the_intended_long_option_arity(self):
@@ -189,7 +202,7 @@ class CliContract(unittest.TestCase):
             filters = Path(directory) / "filters.ini"
             filters.write_text("[exclude-table]\npublic.ignored\n")
             result = self.invoke(
-                "dump", "schema", "-S", "host=invalid", "-F", str(filters),
+                "dump", "schema", "-S", self.offline_conninfo, "-F", str(filters),
                 "-N", "00000001-00000002-1",
             )
             self.assertEqual(result.returncode, 2, result.stderr)
@@ -213,7 +226,7 @@ class CliContract(unittest.TestCase):
 
     def test_valid_additive_controls_are_still_explicitly_unimplemented(self):
         result = self.invoke(
-            "clone", "--source", "host=invalid", "--target", "host=invalid",
+            "clone", "--source", self.offline_conninfo, "--target", self.offline_conninfo,
             "--durability", "relaxed", "--apply-jobs", "2",
             "--loss-max-transactions", "10", "--loss-max-bytes", "1 MB",
         )
@@ -283,12 +296,12 @@ class CliContract(unittest.TestCase):
             "cli_create_snapshot_getopts": ["snapshot"],
             "cli_ping_getopts": ["ping"],
         }
-        environment = {"PGCOPYDB_SOURCE_PGURI": "host=invalid", "PGCOPYDB_TARGET_PGURI": "host=invalid"}
+        environment = {"PGCOPYDB_SOURCE_PGURI": self.offline_conninfo, "PGCOPYDB_TARGET_PGURI": self.offline_conninfo}
         with tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-") as directory:
             fixture = Path(directory) / "input"
             fixture.write_text("[exclude-table]\npublic.ignored\n")
             values = {
-                "source": "host=invalid", "target": "host=invalid", "dir": directory,
+                "source": self.offline_conninfo, "target": self.offline_conninfo,
                 "jobs": "1", "table-jobs": "1", "index-jobs": "1", "restore-jobs": "1",
                 "large-objects-jobs": "1", "split-max-parts": "1", "plugin": "wal2json",
                 "split-at": "1 MB", "split-tables-larger-than": "1 MB", "max-replaydb-size": "1 MB",
@@ -309,23 +322,62 @@ class CliContract(unittest.TestCase):
                     name = option["name"]
                     path = representatives[parser]
                     spelling = "-" + option["short"] if short else "--" + name
+                    state = Path(directory) / f"state-{count}"
                     with self.subTest(parser=parser, option=spelling):
                         args = [*path, spelling]
                         if option["arity"] == 1:
                             self.assertEqual(self.invoke(*args, env=environment).returncode, 1)
-                            args.append(values.get(name, "example"))
+                            args.append(str(state) if name == "dir" else values.get(name, "example"))
                         if name == "wal2json-numeric-as-string":
                             args += ["--plugin", "wal2json"]
                         if parser == "root_options" and name not in {"help", "version"}:
                             args += ["clone"]
                         if parser == "cli_ping_getopts" and name not in {"help", "version"}:
                             args += ["unsupported-operand"]
+                        if parser in {"cli_copy_db_getopts", "cli_compare_getopts"} and name != "dir":
+                            args += ["--dir", str(state)]
                         result = self.invoke(*args, env=environment)
-                        expected = 0 if name in {"help", "version"} else 2
+                        json_version = parser == "cli_print_version_getopts" and name == "json"
+                        admitted_clone = parser == "cli_copy_db_getopts" and name in {
+                            "source", "target", "dir", "jobs", "table-jobs", "index-jobs", "restore-jobs",
+                            "no-owner", "no-acl", "no-comments", "no-tablespaces", "skip-blobs", "skip-large-objects",
+                        }
+                        missing_clone = parser == "cli_copy_db_getopts" and name in {"resume", "restart"}
+                        missing_compare = parser == "cli_compare_getopts" and name in {"source", "target", "dir", "json"}
+                        inconsistent = parser == "cli_copy_db_getopts" and name == "not-consistent"
+                        if name in {"help", "version"} or json_version:
+                            expected = 0
+                        elif admitted_clone:
+                            expected = 6
+                        elif missing_clone or missing_compare:
+                            expected = 3
+                        elif inconsistent:
+                            expected = 1
+                        else:
+                            expected = 2
                         self.assertEqual(result.returncode, expected, result.stderr)
-                        if expected == 2:
+                        if expected == 6:
+                            self.assertEqual(json.loads(result.stderr)["category"], "Source")
+                            self.assertIn("connection failed", result.stderr)
+                            self.assertTrue((state / "manifest.json").is_file())
+                        elif expected == 3:
+                            self.assertEqual(json.loads(result.stderr)["category"], "BadState")
+                            self.assertIn("state-missing", result.stderr)
+                            self.assertFalse(state.exists())
+                        elif inconsistent:
+                            self.assertIn("--not-consistent requires --resume", result.stderr)
+                            self.assertFalse(state.exists())
+                        elif expected == 2:
                             self.assertIn("unimplemented", result.stderr.lower())
-                        count += 1
+                            self.assertFalse(state.exists())
+                        if json_version:
+                            report = json.loads(result.stdout)
+                            self.assertEqual(set(report), {"protocol_version", "engine_version", "capabilities"})
+                            self.assertEqual(report["protocol_version"], 1)
+                            self.assertRegex(report["engine_version"], r"^\d+\.\d+\.\d+$")
+                            self.assertEqual(report["capabilities"], [])
+                            self.assertEqual(result.stderr, "")
+                    count += 1
             self.assertEqual(count, 188 if short else 220)
 
 

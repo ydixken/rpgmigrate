@@ -311,7 +311,9 @@ assert all(thread is threading.current_thread() or not thread.is_alive() for thr
                                 time.sleep(0.001)
                         send(server, b"C", b"UPDATE 1\0")
                     send(server, b"C", b"COMMIT\0")
-                    send(server, b"Z", b"I")
+                    # Loss controls close at COMMIT; an unread tail resets Linux Unix sockets.
+                    if side == "target" and not held:
+                        send(server, b"Z", b"I")
                     assert server.recv(1) == b""
             except (EOFError, OSError):
                 if invalid is None:
@@ -807,6 +809,33 @@ copy_request(relay)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("provide --self-check or -- followed by", result.stderr)
 
+    def test_retired_journal_profile_is_unknown(self):
+        with self.assertRaisesRegex(ValueError, "unknown module test profile"):
+            module_cases(load_manifest(), "JournalSerial")
+
+    def test_retired_journal_mode_is_rejected_before_fixture_start(self):
+        wrapper = Path(__file__).resolve().parents[2] / "tools" / "test-db.py"
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, str(wrapper), "--journal-serial", "--", sys.executable],
+                env={**clean_environment(os.environ), "PG_BINDIR": str(Path(directory) / "missing"), "TMPDIR": directory},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("unrecognized arguments: --journal-serial", result.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_retired_journal_authority_cases_are_rejected_before_fixture_start(self):
+        helper = Path(__file__).resolve().with_name("authority_fault.py")
+        for case in ("journal_segmented", "journal_sqlite"):
+            with self.subTest(case=case):
+                result = subprocess.run(
+                    [sys.executable, str(helper), "--case", case], env=clean_environment(os.environ),
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("invalid choice", result.stderr)
+
     def test_auth_base_requires_explicit_fixture_connection_without_credentials(self):
         context = {"socket_dir": "/tmp/fixture-only", "port": 25432, "root": "/tmp/fixture-root"}
         result = conninfo(context, "auth_fixture", "e1_auth", include_passfile=False)
@@ -891,11 +920,57 @@ copy_request(relay)
                 validate_libtest_output(module_cases(manifest, "Engine"),
                                         "".join(f"test {name} ... ok\n" for name in subset))
 
+    def test_pipeline_cases_are_required_in_prepared_and_engine_profiles(self):
+        manifest = load_manifest()
+        expected = {
+            "pg::pipeline_live_tests::pipeline_validates_ordered_rows_and_every_terminal_result",
+            "pg::pipeline_live_tests::pipeline_sql_and_callback_errors_drain_through_sync",
+            "pg::pipeline_live_tests::pipeline_drop_deadline_and_limits_fail_closed",
+        }
+        for profile in ("Prepared", "Engine"):
+            inventory = module_cases(manifest, profile)
+            self.assertTrue(expected.issubset(inventory))
+            self.assertEqual(len(inventory), len(set(inventory)))
+            for omitted in expected:
+                output = "".join(f"test {name} ... ok\n" for name in inventory if name != omitted)
+                with self.subTest(profile=profile, omitted=omitted), self.assertRaises(AssertionError):
+                    validate_libtest_output(inventory, output)
+
+    def test_clone_inventory_refuses_missing_or_unrelated_success(self):
+        cases = module_cases(load_manifest(), "Clone")
+        self.assertEqual(len(cases), 7)
+        self.assertEqual(len(set(cases)), 7)
+        self.assertTrue(all(name.startswith(("snapshot::clone_tests::", "copy::live_tests::", "apply::checkpoint::clone_marker_tests::")) for name in cases))
+        good = "".join(f"test {name} ... ok\n" for name in cases)
+        validate_libtest_output(cases, good)
+        for omitted in cases:
+            with self.subTest(omitted=omitted), self.assertRaises(AssertionError):
+                validate_libtest_output(cases, good.replace(f"test {omitted} ... ok\n", ""))
+        for output in ("", good + "test unrelated ... ok\n", good.replace(" ... ok", " ... ignored", 1)):
+            with self.subTest(output=output), self.assertRaises(AssertionError):
+                validate_libtest_output(cases, output)
+
+    def test_schema_guard_inventory_requires_one_exact_case_and_summary(self):
+        cases = module_cases(load_manifest(), "Schema")
+        self.assertEqual(cases, ["schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"])
+        validate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "tools/test-db.py"))["validate_module_receipt"]
+        record = f"test {cases[0]} ... ok\n"
+        summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
+        validate("Schema", cases, record + summary, {})
+        for output in ("", summary, record, record + record + summary,
+                       record.replace(cases[0], "unrelated") + summary,
+                       record.replace(" ... ok", " ... ignored") + summary,
+                       record + summary.replace("1 passed", "0 passed")):
+            with self.subTest(output=output), self.assertRaises(AssertionError):
+                validate("Schema", cases, output, {})
+
     def test_child_environment_drops_database_context(self):
         environment = {
             "PATH": "/usr/bin", "HOME": "/home/test", "CARGO_HOME": "/cargo",
             "PGHOST": "existing", "PGPASSWORD": "secret", "PG_CONFIG": "old",
             "PGCOPYDB_SOURCE_PGURI": "secret", "RPGMIGRATE_TARGET": "secret",
+            "RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN": "foreign binding",
+            "RPGMIGRATE_TEST_SCHEMA_TARGET_ADMIN": "foreign binding",
         }
         result = clean_environment(environment)
         self.assertEqual(result, {"PATH": "/usr/bin", "HOME": "/home/test", "CARGO_HOME": "/cargo"})
@@ -1008,11 +1083,12 @@ copy_request(relay)
         self.assertEqual(len(authority), 18)
         self.assertEqual(authority[-2:], boundaries)
         old = manifest["transport_cases"] + manifest["copy_cases"]
-        old += json.loads((support / "prepared_cases.json").read_text()) + authority
+        old += module_cases(manifest, "Prepared") + authority
         self.assertEqual(len(replication), 9)
-        self.assertEqual(len(old), 32)
-        self.assertEqual(len(module_cases(manifest, "Engine")), 41)
-        self.assertEqual(module_cases(manifest, "Engine"), old + replication)
+        self.assertEqual(len(old), 35)
+        self.assertEqual(len(module_cases(manifest, "Engine")), 45)
+        self.assertEqual(module_cases(manifest, "Engine"), old + replication + [
+            "compare::tests::live_canonical_rows_preserve_only_generated_identity_null_and_duplicates"])
         self.assertEqual(module_cases(manifest, "Replication"), replication)
         for expected in (authority, replication, old + replication):
             good = "".join(f"test {name} ... ok\n" for name in expected)

@@ -2,66 +2,311 @@
 //! Persisted token text cannot replace the imported transaction owned here.
 
 use std::sync::atomic::Ordering;
-use std::time::Instant;
 
-use crate::catalog::{self, CopyInventory, CopyRelation, read_source_identity};
-use crate::cdc::contracts::Event;
-use crate::contracts::{
-    CopyFormat, CopyReport, CopyTable, Error, ErrorKind, IoControl, MAX_SNAPSHOT_TOKEN_BYTES,
-    QualifiedTable, Result, SnapshotAnchor,
-};
-use crate::copy;
-use crate::copy_plan::{self, PlanEntry, SealedCopyPlan};
+use crate::catalog::{self, read_source_identity};
+use crate::contracts::{Error, ErrorKind, IoControl, MAX_SNAPSHOT_TOKEN_BYTES, Result};
 use crate::identity::SourceId;
 use crate::pg::{IdentifySystem, PgConnection, SlotCreateOutcome, TransactionStatus};
-use crate::state::{
-    CopySnapshotIntent, CreatedSlotData, NativeState, SourceSlotBinding, SourceSlotReceipt,
-};
+use crate::state::{CreatedSlotData, NativeState, SourceSlotBinding, SourceSlotReceipt};
+
+fn validate_clone_ticket(ticket: &crate::contracts::SnapshotTicket) -> Result<()> {
+    if ticket.token.is_empty()
+        || ticket.token.len() > MAX_SNAPSHOT_TOKEN_BYTES
+        || ticket.token.as_bytes().contains(&0)
+        || ticket.source.identity.system_identifier == 0
+        || ticket.source.identity.database_oid == 0
+        || ticket.source.timeline == 0
+        || !matches!(ticket.source.major, 16 | 18)
+        || ticket.generation.0 == 0
+    {
+        return Err(refusal("clone-snapshot: invalid snapshot ticket"));
+    }
+    Ok(())
+}
+
+pub(crate) struct CloneSnapshot {
+    source: PgConnection,
+    ticket: crate::contracts::SnapshotTicket,
+    pid: u32,
+}
+
+impl CloneSnapshot {
+    pub(crate) fn export(
+        mut source: PgConnection,
+        generation: crate::contracts::CopyGeneration,
+        io: &IoControl,
+    ) -> Result<Self> {
+        check_control(io)?;
+        if generation.0 == 0 {
+            return Err(refusal("clone-snapshot: copy generation must be positive"));
+        }
+        require_clone_idle(&source)?;
+        catalog::configure_session(&mut source, io)?;
+        let before = catalog::read_clone_source(&mut source, io)?;
+        disable_clone_timeouts(&mut source, before.major, io)?;
+        let pid = source.backend_pid()?;
+        catalog::command(
+            &mut source,
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            "BEGIN",
+            io,
+        )?;
+        let actual = catalog::read_clone_source(&mut source, io)?;
+        if actual != before {
+            return Err(refusal("clone-snapshot: exporter source identity changed"));
+        }
+        let result = source.query("SELECT pg_catalog.pg_export_snapshot()", io)?;
+        if result.rows() != 1 {
+            return Err(refusal(
+                "clone-snapshot: exported snapshot token is missing",
+            ));
+        }
+        let token = result
+            .cell(0, 0)?
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .ok_or_else(|| refusal("clone-snapshot: exported snapshot token is invalid"))?
+            .to_owned();
+        let ticket = crate::contracts::SnapshotTicket {
+            token,
+            source: actual,
+            generation,
+        };
+        validate_clone_ticket(&ticket)?;
+        require_clone_transaction(&mut source, io)?;
+        Ok(Self {
+            source,
+            ticket,
+            pid,
+        })
+    }
+
+    pub(crate) fn ticket(&self) -> &crate::contracts::SnapshotTicket {
+        &self.ticket
+    }
+
+    pub(crate) fn connection(&mut self) -> Result<&mut PgConnection> {
+        if self.source.is_replication()?
+            || self.source.transaction_status()? != TransactionStatus::InTransaction
+            || self.source.backend_pid()? != self.pid
+        {
+            return Err(refusal(
+                "clone-snapshot: exporter transaction is unavailable",
+            ));
+        }
+        Ok(&mut self.source)
+    }
+
+    pub(crate) fn finish(mut self, io: &IoControl) -> Result<()> {
+        check_control(io)?;
+        self.connection()?;
+        let result = self.source.query("COMMIT", io).map_err(|_| {
+            refusal("clone-snapshot-finish-unknown: exporter COMMIT was not confirmed")
+        })?;
+        require_commit(result.command_tag()?, self.source.transaction_status()?)
+    }
+}
+
+pub(crate) fn import(
+    source: &mut PgConnection,
+    ticket: &crate::contracts::SnapshotTicket,
+    io: &IoControl,
+) -> Result<()> {
+    check_control(io)?;
+    validate_clone_ticket(ticket)?;
+    require_clone_idle(source)?;
+    catalog::configure_session(source, io)?;
+    if catalog::read_clone_source(source, io)? != ticket.source {
+        return Err(refusal(
+            "clone-snapshot: importer source identity does not match",
+        ));
+    }
+    disable_clone_timeouts(source, ticket.source.major, io)?;
+    let token = source.quote_literal(&ticket.token)?;
+    catalog::command(
+        source,
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "BEGIN",
+        io,
+    )?;
+    // Import precedes every snapshot-dependent query in this transaction.
+    catalog::command(
+        source,
+        &format!("SET TRANSACTION SNAPSHOT {token}"),
+        "SET",
+        io,
+    )?;
+    if catalog::read_clone_source(source, io)? != ticket.source {
+        return Err(refusal("clone-snapshot: imported source identity changed"));
+    }
+    require_clone_transaction(source, io)?;
+    check_control(io)
+}
+
+fn require_clone_idle(source: &PgConnection) -> Result<()> {
+    if source.is_replication()? || source.transaction_status()? != TransactionStatus::Idle {
+        return Err(refusal(
+            "clone-snapshot: dedicated idle SQL connection required",
+        ));
+    }
+    Ok(())
+}
+
+fn disable_clone_timeouts(source: &mut PgConnection, major: u32, io: &IoControl) -> Result<()> {
+    for name in ["statement_timeout", "idle_in_transaction_session_timeout"] {
+        catalog::command(source, &format!("SET {name} TO 0"), "SET", io)?;
+        catalog::require_setting(source, name, "0", io)?;
+    }
+    if major >= 17 {
+        catalog::command(source, "SET transaction_timeout TO 0", "SET", io)?;
+        catalog::require_setting(source, "transaction_timeout", "0", io)?;
+    }
+    Ok(())
+}
+
+fn require_clone_transaction(source: &mut PgConnection, io: &IoControl) -> Result<()> {
+    if source.transaction_status()? != TransactionStatus::InTransaction {
+        return Err(refusal(
+            "clone-snapshot: imported transaction is unavailable",
+        ));
+    }
+    catalog::require_setting(source, "transaction_read_only", "on", io)?;
+    catalog::require_setting(source, "transaction_isolation", "repeatable read", io)
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+    use crate::contracts::{CloneSource, CopyGeneration, SnapshotTicket};
+
+    #[test]
+    #[ignore = "requires the disposable M2 PostgreSQL harness"]
+    fn live_clone_snapshot_is_shared_and_exporter_lifetime_is_required() {
+        use crate::contracts::Conninfo;
+        use std::sync::{Arc, atomic::AtomicBool};
+        let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
+        let context: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                std::path::Path::new(context["root"].as_str().unwrap()).join(".e1-owner")
+            )
+            .unwrap(),
+            context["token"].as_str().unwrap()
+        );
+        let info = Conninfo::new(
+            std::env::var_os("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN").expect("M2 source required"),
+        )
+        .unwrap();
+        let io = IoControl::unbounded(Arc::new(AtomicBool::new(false)));
+        let mut writer = PgConnection::connect(&info, &io).unwrap();
+        let counts_sql = "SELECT (SELECT count(*) FROM pg_catalog.pg_replication_slots), (SELECT count(*) FROM pg_catalog.pg_publication)";
+        let before = writer.query(counts_sql, &io).unwrap();
+        let table = format!("m2_snapshot_{}", std::process::id());
+        let table = writer.quote_identifier(&table).unwrap();
+        writer
+            .query(&format!("CREATE TABLE public.{table} (value integer)"), &io)
+            .unwrap();
+        writer
+            .query(&format!("INSERT INTO public.{table} VALUES (1)"), &io)
+            .unwrap();
+        let exporter = CloneSnapshot::export(
+            PgConnection::connect(&info, &io).unwrap(),
+            CopyGeneration(1),
+            &io,
+        )
+        .unwrap();
+        let ticket = exporter.ticket().clone();
+        writer
+            .query(&format!("INSERT INTO public.{table} VALUES (2)"), &io)
+            .unwrap();
+        let mut importer = PgConnection::connect(&info, &io).unwrap();
+        import(&mut importer, &ticket, &io).unwrap();
+        let rows = importer
+            .query(
+                &format!("SELECT value FROM ONLY public.{table} ORDER BY value"),
+                &io,
+            )
+            .unwrap();
+        assert_eq!(rows.rows(), 1);
+        assert_eq!(rows.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+        exporter.finish(&io).unwrap();
+        let rows = importer
+            .query(&format!("SELECT count(*) FROM ONLY public.{table}"), &io)
+            .unwrap();
+        assert_eq!(rows.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+        command_importer_commit(&mut importer, &io);
+        let mut late = PgConnection::connect(&info, &io).unwrap();
+        let error = import(&mut late, &ticket, &io).unwrap_err();
+        assert!(
+            error.message.contains(if ticket.source.major == 16 {
+                "22023"
+            } else {
+                "42704"
+            }),
+            "expired exported snapshot was not observed"
+        );
+        assert_eq!(
+            late.transaction_status().unwrap(),
+            TransactionStatus::InError
+        );
+        drop(late);
+        let after = writer.query(counts_sql, &io).unwrap();
+        assert!(before.cell(0, 0).unwrap() == after.cell(0, 0).unwrap());
+        assert!(before.cell(0, 1).unwrap() == after.cell(0, 1).unwrap());
+    }
+
+    fn command_importer_commit(connection: &mut PgConnection, io: &IoControl) {
+        catalog::command(connection, "COMMIT", "COMMIT", io).unwrap();
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::Idle
+        );
+    }
+
+    fn ticket() -> SnapshotTicket {
+        SnapshotTicket {
+            token: "00000003-0000001B-1".into(),
+            source: CloneSource {
+                identity: SourceId {
+                    system_identifier: 7,
+                    database_oid: 23,
+                },
+                timeline: 1,
+                major: 16,
+            },
+            generation: CopyGeneration(1),
+        }
+    }
+
+    #[test]
+    fn clone_ticket_refuses_missing_identity_generation_and_invalid_token() {
+        validate_clone_ticket(&ticket()).unwrap();
+        for field in 0..8 {
+            let mut changed = ticket();
+            match field {
+                0 => changed.token.clear(),
+                1 => changed.token.push('\0'),
+                2 => changed.token = "x".repeat(MAX_SNAPSHOT_TOKEN_BYTES + 1),
+                3 => changed.source.identity.system_identifier = 0,
+                4 => changed.source.identity.database_oid = 0,
+                5 => changed.source.timeline = 0,
+                6 => changed.source.major = 17,
+                _ => changed.generation = CopyGeneration(0),
+            }
+            assert!(validate_clone_ticket(&changed).is_err(), "field {field}");
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "snapshot_live_tests.rs"]
 mod live_tests;
-
-#[cfg(test)]
-#[path = "snapshot_journal_live_tests.rs"]
-mod journal_live_tests;
 
 pub(crate) struct SourceSnapshot {
     source: PgConnection,
     exporter: PgConnection,
     receipt: SourceSlotReceipt,
     session: SessionFacts,
-    copy: CopyState,
-}
-
-#[derive(Default)]
-struct CopyState {
-    failed: bool,
-    attempted: bool,
-}
-
-impl CopyState {
-    fn begin(&mut self) -> Result<()> {
-        if self.failed || self.attempted {
-            return Err(refusal(
-                "source-snapshot-copy: source operation cannot be retried",
-            ));
-        }
-        // An error or unwind must leave the importer unavailable for further operations.
-        self.failed = true;
-        Ok(())
-    }
-
-    fn complete(&mut self) {
-        self.failed = false;
-    }
-
-    fn require_finish(&self) -> Result<()> {
-        if self.failed {
-            return Err(refusal("source-snapshot-copy: failed source cannot finish"));
-        }
-        Ok(())
-    }
 }
 
 pub(crate) struct OwnedSourceSlot {
@@ -154,7 +399,6 @@ impl SourceSnapshot {
                 exporter,
                 receipt,
                 session: before,
-                copy: CopyState::default(),
             })
         })()
         .map_err(source_failure)
@@ -162,141 +406,6 @@ impl SourceSnapshot {
 
     pub(crate) fn receipt(&self) -> &SourceSlotReceipt {
         &self.receipt
-    }
-
-    pub(crate) fn publish_copy_plan(
-        &mut self,
-        native: &mut NativeState,
-        plan_nonce: [u8; 16],
-        format: CopyFormat,
-        buffer_bytes: usize,
-        io: &IoControl,
-    ) -> Result<CopySnapshotIntent> {
-        self.copy.begin()?;
-        let result = (|| {
-            self.check_live(io)?;
-            let receipt = self.receipt.clone();
-            let mut relations =
-                CopyRelations::open(&mut self.source, receipt.intent.binding.catalog_epoch(), io)?;
-            let published = {
-                let mut entries = relations.by_ref().map(|relation| {
-                    let (table, event) = relation?.into_parts(format)?;
-                    require_format(format, table.format)?;
-                    PlanEntry::checked(table, event)
-                });
-                copy_plan::publish_copy_plan(
-                    native,
-                    &receipt,
-                    plan_nonce,
-                    buffer_bytes,
-                    &mut entries,
-                    io,
-                )
-            };
-            let complete = relations.require_complete();
-            let cleanup = relations.close();
-            let plan = published?;
-            complete?;
-            cleanup?;
-            drop(relations);
-            self.check_live(io)?;
-            Ok(CopySnapshotIntent {
-                anchor: SnapshotAnchor {
-                    stream: receipt.intent.binding.stream(),
-                    snapshot_token: receipt.snapshot_token,
-                    consistent_point: receipt.consistent_point,
-                    plan_nonce,
-                },
-                plan,
-            })
-        })();
-        if result.is_ok() {
-            self.copy.complete();
-        }
-        result
-    }
-
-    pub(crate) fn copy_into(
-        &mut self,
-        target: &mut PgConnection,
-        owned_target_relations: &[u32; 2],
-        plan: &mut SealedCopyPlan<'_>,
-        io: &IoControl,
-    ) -> Result<CopyReport> {
-        self.copy.begin()?;
-        let mut target_copy_active = false;
-        let result = (|| {
-            self.check_live(io)?;
-            catalog::configure_session(&mut self.source, io)?;
-            catalog::configure_session(target, io)?;
-            catalog::require_setting(target, "session_replication_role", "origin", io)?;
-            {
-                let mut relations = CopyRelations::open(
-                    &mut self.source,
-                    self.receipt.intent.binding.catalog_epoch(),
-                    io,
-                )?;
-                let admitted = (|| {
-                    plan.scan_from(0, io, |_, format, expected| {
-                        let actual = relations.next().ok_or_else(|| {
-                            refusal("source-snapshot-copy: sealed plan has an extra relation")
-                        })??;
-                        catalog::preflight_copy_target(
-                            target,
-                            &actual,
-                            owned_target_relations,
-                            io,
-                        )?;
-                        let (table, event) = actual.into_parts(format)?;
-                        require_format(format, table.format)?;
-                        require_relation(expected, &event)?;
-                        copy::validate_copy_table(&table)
-                    })?;
-                    match relations.next() {
-                        Some(Err(error)) => return Err(error),
-                        Some(Ok(_)) => {
-                            return Err(refusal(
-                                "source-snapshot-copy: sealed plan omits a source relation",
-                            ));
-                        }
-                        None => relations.require_complete()?,
-                    }
-                    Ok(())
-                })();
-                let cleanup = relations.close();
-                admitted?;
-                cleanup?;
-            }
-            self.check_live(io)?;
-            let buffer_bytes = plan.buffer_bytes();
-            let mut report = CopyReport {
-                tables: 0,
-                rows: 0,
-                bytes: 0,
-            };
-            self.copy.attempted = true;
-            plan.scan_from(0, io, |_, format, event| {
-                let table = transfer_metadata(event, format)?;
-                copy::transfer_table(
-                    &mut self.source,
-                    target,
-                    &table,
-                    buffer_bytes,
-                    &mut report,
-                    &mut target_copy_active,
-                    io,
-                )
-            })?;
-            self.check_live(io)?;
-            Ok(report)
-        })();
-        if result.is_err() && target_copy_active && matches!(target.is_replication(), Ok(false)) {
-            let _ = target.abort_copy_in("COPY failed", io);
-        }
-        if result.is_ok() {
-            self.copy.complete();
-        }
-        result
     }
 
     fn check_live(&mut self, io: &IoControl) -> Result<()> {
@@ -322,7 +431,6 @@ impl SourceSnapshot {
 
     pub(crate) fn finish(mut self, io: &IoControl) -> Result<OwnedSourceSlot> {
         (|| {
-            self.copy.require_finish()?;
             self.check_live(io)?;
             let result = self.source.query("COMMIT", io).map_err(|_| {
                 refusal("source-snapshot-finish-unknown: source COMMIT was not confirmed")
@@ -348,201 +456,6 @@ impl OwnedSourceSlot {
     pub(crate) fn receipt(&self) -> &SourceSlotReceipt {
         &self.receipt
     }
-}
-
-struct CopyRelations<'a> {
-    source: &'a mut PgConnection,
-    inventory: Option<CopyInventory>,
-    page: std::vec::IntoIter<(QualifiedTable, u32)>,
-    catalog_epoch: u64,
-    io: &'a IoControl,
-    finished: bool,
-    failed: bool,
-}
-
-impl<'a> CopyRelations<'a> {
-    fn open(source: &'a mut PgConnection, catalog_epoch: u64, io: &'a IoControl) -> Result<Self> {
-        let inventory = catalog::open_copy_inventory(source, io).map_err(source_failure)?;
-        Ok(Self {
-            source,
-            inventory: Some(inventory),
-            page: Vec::new().into_iter(),
-            catalog_epoch,
-            io,
-            finished: false,
-            failed: false,
-        })
-    }
-
-    fn close(&mut self) -> Result<()> {
-        self.page = Vec::new().into_iter();
-        if let Some(inventory) = self.inventory.take() {
-            let result = catalog::close_copy_inventory(self.source, inventory, self.io)
-                .map_err(source_failure);
-            if result.is_err() {
-                self.failed = true;
-            }
-            result
-        } else if self.finished && !self.failed {
-            Ok(())
-        } else {
-            Err(refusal(
-                "source-snapshot-copy: inventory CLOSE was not confirmed",
-            ))
-        }
-    }
-
-    fn require_complete(&self) -> Result<()> {
-        if !self.finished || self.failed {
-            return Err(refusal(
-                "source-snapshot-copy: source inventory did not finish",
-            ));
-        }
-        Ok(())
-    }
-
-    fn next_relation(&mut self) -> Result<Option<CopyRelation>> {
-        loop {
-            if let Some((name, oid)) = self.page.next() {
-                return catalog::inspect_copy_relation(
-                    self.source,
-                    &name,
-                    oid,
-                    self.catalog_epoch,
-                    self.io,
-                )
-                .map(Some)
-                .map_err(source_failure);
-            }
-            // Release the exhausted page before the next bounded FETCH allocates its replacement.
-            self.page = Vec::new().into_iter();
-            let inventory = self
-                .inventory
-                .as_mut()
-                .ok_or_else(|| refusal("source-snapshot-copy: source inventory is closed"))?;
-            match catalog::fetch_copy_inventory(self.source, inventory, self.io)
-                .map_err(source_failure)?
-            {
-                Some(page) => self.page = page.into_iter(),
-                None => {
-                    self.close()?;
-                    self.finished = true;
-                    return Ok(None);
-                }
-            }
-        }
-    }
-}
-
-impl Iterator for CopyRelations<'_> {
-    type Item = Result<CopyRelation>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
-            return Some(Err(refusal(
-                "source-snapshot-copy: source inventory has failed",
-            )));
-        }
-        if self.finished {
-            return None;
-        }
-        match self.next_relation() {
-            Ok(Some(relation)) => Some(Ok(relation)),
-            Ok(None) => None,
-            Err(error) => {
-                self.failed = true;
-                Some(Err(error))
-            }
-        }
-    }
-}
-
-fn require_format(expected: CopyFormat, actual: CopyFormat) -> Result<()> {
-    if actual != expected {
-        return Err(refusal(
-            "source-snapshot-copy: requested COPY format changed",
-        ));
-    }
-    Ok(())
-}
-
-fn require_relation(expected: &Event, actual: &Event) -> Result<()> {
-    if !matches!(actual, Event::Relation { .. }) || actual != expected {
-        return Err(refusal(
-            "source-snapshot-copy: canonical source relation changed",
-        ));
-    }
-    Ok(())
-}
-
-const COPY_TABLE_HEAP_BYTES: usize = 4 * 1024 * 1024;
-
-fn transfer_metadata(event: &Event, format: CopyFormat) -> Result<CopyTable> {
-    let Event::Relation {
-        schema,
-        name,
-        columns,
-        ..
-    } = event
-    else {
-        return Err(refusal(
-            "source-snapshot-copy: transfer requires a Relation",
-        ));
-    };
-    let mut available = COPY_TABLE_HEAP_BYTES;
-    let requested = columns
-        .len()
-        .checked_mul(size_of::<String>())
-        .ok_or_else(copy_allocation)?;
-    charge_copy_heap(&mut available, requested)?;
-    let mut names = Vec::new();
-    names
-        .try_reserve_exact(columns.len())
-        .map_err(|_| copy_allocation())?;
-    let actual = names
-        .capacity()
-        .checked_mul(size_of::<String>())
-        .ok_or_else(copy_allocation)?;
-    charge_copy_heap(
-        &mut available,
-        actual.checked_sub(requested).ok_or_else(copy_allocation)?,
-    )?;
-    let name = QualifiedTable {
-        schema: clone_copy_name(schema, &mut available)?,
-        table: clone_copy_name(name, &mut available)?,
-    };
-    for column in columns {
-        names.push(clone_copy_name(&column.name, &mut available)?);
-    }
-    Ok(CopyTable {
-        name,
-        columns: names,
-        format,
-    })
-}
-
-fn charge_copy_heap(available: &mut usize, bytes: usize) -> Result<()> {
-    *available = available.checked_sub(bytes).ok_or_else(copy_allocation)?;
-    Ok(())
-}
-
-fn clone_copy_name(value: &str, available: &mut usize) -> Result<String> {
-    charge_copy_heap(available, value.len())?;
-    let mut copy = String::new();
-    copy.try_reserve_exact(value.len())
-        .map_err(|_| copy_allocation())?;
-    charge_copy_heap(
-        available,
-        copy.capacity()
-            .checked_sub(value.len())
-            .ok_or_else(copy_allocation)?,
-    )?;
-    copy.push_str(value);
-    Ok(copy)
-}
-
-fn copy_allocation() -> Error {
-    refusal("source-snapshot-copy: transfer metadata exceeds its allocation budget")
 }
 
 fn inspect_source(source: &mut PgConnection, io: &IoControl) -> Result<SessionFacts> {
@@ -751,7 +664,7 @@ fn require_commit(tag: &str, status: TransactionStatus) -> Result<()> {
 }
 
 fn check_control(io: &IoControl) -> Result<()> {
-    if io.cancelled.load(Ordering::Acquire) || Instant::now() >= io.deadline {
+    if io.cancelled.load(Ordering::Acquire) || io.is_expired() {
         return Err(refusal(
             "source-snapshot: operation cancelled or deadline exceeded",
         ));
@@ -1027,132 +940,5 @@ mod tests {
             .store(false, std::sync::atomic::Ordering::Release);
         io.deadline = Instant::now() - Duration::from_secs(1);
         assert!(check_control(&io).is_err());
-    }
-
-    #[test]
-    fn incomplete_copy_operations_latch_failure_and_block_finish() {
-        let mut state = CopyState::default();
-        state.require_finish().unwrap();
-        state.begin().unwrap();
-        assert!(state.failed);
-        assert!(!state.attempted);
-        assert!(state.begin().is_err());
-        assert!(state.require_finish().is_err());
-    }
-
-    #[test]
-    fn completed_transfer_forbids_recopy_but_retains_source_finish() {
-        let mut state = CopyState::default();
-        state.begin().unwrap();
-        state.attempted = true;
-        state.complete();
-        assert!(!state.failed);
-        assert!(state.attempted);
-        assert!(state.begin().is_err());
-        state.require_finish().unwrap();
-        assert!(!state.failed);
-    }
-
-    #[test]
-    fn successful_plan_publication_does_not_claim_a_transfer_attempt() {
-        let mut state = CopyState::default();
-        state.begin().unwrap();
-        state.complete();
-        assert!(!state.attempted);
-        state.require_finish().unwrap();
-        state.begin().unwrap();
-        assert!(state.failed);
-    }
-
-    fn relation_event() -> Event {
-        Event::Relation {
-            key: crate::cdc::contracts::RelationKey {
-                oid: 83,
-                generation: 7,
-            },
-            schema: "SourceSchema".into(),
-            name: "Table\"Name".into(),
-            columns: vec![
-                crate::cdc::contracts::Column {
-                    name: "z".into(),
-                    type_oid: 23,
-                    type_mod: -1,
-                    key: true,
-                },
-                crate::cdc::contracts::Column {
-                    name: "A".into(),
-                    type_oid: 25,
-                    type_mod: -1,
-                    key: false,
-                },
-            ],
-            replica_identity: b'd',
-        }
-    }
-
-    #[test]
-    fn transfer_metadata_preserves_names_order_and_requested_format() {
-        let relation = relation_event();
-        for format in [CopyFormat::Text, CopyFormat::Binary] {
-            let table = transfer_metadata(&relation, format).unwrap();
-            assert_eq!(table.name.schema, "SourceSchema");
-            assert_eq!(table.name.table, "Table\"Name");
-            assert_eq!(table.columns, ["z", "A"]);
-            assert_eq!(table.format, format);
-            require_format(format, table.format).unwrap();
-        }
-        assert!(require_format(CopyFormat::Text, CopyFormat::Binary).is_err());
-        assert!(require_format(CopyFormat::Binary, CopyFormat::Text).is_err());
-        assert!(
-            transfer_metadata(
-                &Event::Truncate {
-                    relations: vec![],
-                    cascade: false,
-                    restart_identity: false
-                },
-                CopyFormat::Text
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn transfer_metadata_refuses_oversized_callback_clones() {
-        let mut event = relation_event();
-        let Event::Relation { columns, .. } = &mut event else {
-            unreachable!()
-        };
-        columns[1].name = "x".repeat(COPY_TABLE_HEAP_BYTES + 1);
-        assert!(transfer_metadata(&event, CopyFormat::Text).is_err());
-    }
-
-    #[test]
-    fn source_admission_requires_exact_canonical_metadata() {
-        let expected = relation_event();
-        require_relation(&expected, &expected).unwrap();
-        for field in 0..5 {
-            let mut actual = relation_event();
-            let Event::Relation {
-                key,
-                schema,
-                name,
-                columns,
-                ..
-            } = &mut actual
-            else {
-                unreachable!()
-            };
-            match field {
-                0 => key.generation = 9,
-                1 => key.oid += 1,
-                2 => schema.make_ascii_lowercase(),
-                3 => name.push('x'),
-                _ => columns.swap(0, 1),
-            }
-            assert!(
-                require_relation(&expected, &actual).is_err(),
-                "field {field}"
-            );
-        }
     }
 }

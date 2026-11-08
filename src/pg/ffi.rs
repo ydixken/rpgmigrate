@@ -5,11 +5,16 @@ use super::{
 };
 use crate::contracts::{Conninfo, Error, IoControl, Result};
 use pq_sys as pq;
-use std::ffi::{CStr, CString, c_void};
+use std::cell::Cell;
+use std::ffi::{CStr, CString, OsString, c_void};
 use std::marker::PhantomData;
+use std::os::unix::ffi::OsStringExt;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::time::Instant;
+
+#[path = "pipeline.rs"]
+mod pipeline;
 
 pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
     let mut diagnostic = ptr::null_mut();
@@ -32,12 +37,57 @@ pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
     }
 }
 
+pub(crate) fn utility_environment(conninfo: &Conninfo) -> Result<Vec<(OsString, OsString)>> {
+    let mut diagnostic = ptr::null_mut();
+    // SAFETY: conninfo is terminated and diagnostic is writable; each allocation is freed below.
+    let options = unsafe { pq::PQconninfoParse(conninfo.as_c_str().as_ptr(), &mut diagnostic) };
+    if !diagnostic.is_null() {
+        // SAFETY: libpq allocated this optional diagnostic, whose contents remain private.
+        unsafe { pq::PQfreemem(diagnostic.cast()) };
+    }
+    let options = NonNull::new(options).ok_or_else(|| {
+        error("PostgreSQL utility connection settings are invalid; details redacted")
+    })?;
+    let outcome = (|| {
+        let mut values = Vec::new();
+        let mut current = options.as_ptr();
+        // SAFETY: PQconninfoParse returns a keyword-terminated option array owned until PQconninfoFree.
+        while unsafe { !(*current).keyword.is_null() } {
+            // SAFETY: current points to one entry in the live, terminated option array.
+            let option = unsafe { &*current };
+            if !option.val.is_null() {
+                if option.envvar.is_null() {
+                    return Err(error(
+                        "PostgreSQL utility connection settings cannot be represented safely",
+                    ));
+                }
+                // SAFETY: non-null option fields are terminated strings owned by the option array.
+                let (key, value) =
+                    unsafe { (CStr::from_ptr(option.envvar), CStr::from_ptr(option.val)) };
+                values.push((
+                    OsString::from_vec(key.to_bytes().to_vec()),
+                    OsString::from_vec(value.to_bytes().to_vec()),
+                ));
+            }
+            // SAFETY: the current entry has a non-null keyword, so its successor exists.
+            current = unsafe { current.add(1) };
+        }
+        Ok(values)
+    })();
+    // SAFETY: this is the single release of PQconninfoParse's owned array.
+    unsafe { pq::PQconninfoFree(options.as_ptr()) };
+    outcome
+}
+
 pub(crate) struct PgConnection {
     raw: Option<Connection>,
     phase: Phase,
     mode: Mode,
     replication: ReplicationState,
+    copy_pending: Vec<u8>,
 }
+
+const COPY_BATCH_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Mode {
@@ -47,6 +97,7 @@ enum Mode {
 
 struct Connection {
     raw: NonNull<pq::PGconn>,
+    notices: Rc<NoticeState>,
     _owner: PhantomData<Rc<()>>,
 }
 
@@ -64,13 +115,46 @@ enum Phase {
     CopyIn,
     CopyOut,
     CopyBoth,
+    Pipeline,
 }
 
-unsafe extern "C" fn discard_notice(_arg: *mut c_void, _message: *const libc::c_char) {
-    // Server notices can contain SQL and row data; the default processor prints them.
+#[derive(Debug, Default)]
+struct NoticeState {
+    uncertain: Cell<bool>,
+}
+
+impl NoticeState {
+    fn observe(&self, severity: Option<&[u8]>) {
+        if !matches!(severity, Some(b"NOTICE" | b"INFO" | b"DEBUG" | b"LOG")) {
+            self.uncertain.set(true);
+        }
+    }
+
+    fn reset(&self) {
+        self.uncertain.set(false);
+    }
+}
+
+unsafe extern "C" fn record_notice(arg: *mut c_void, result: *const pq::PGresult) {
+    let Some(state) = NonNull::new(arg.cast::<NoticeState>()) else {
+        return;
+    };
+    // SAFETY: Connection and every derived PgResult retain the stable callback state.
+    let state = unsafe { state.as_ref() };
+    let severity = if result.is_null() {
+        ptr::null_mut()
+    } else {
+        // SAFETY: libpq supplies a live result for this callback; only nonlocalized severity is read.
+        unsafe { pq::PQresultErrorField(result, pq::PG_DIAG_SEVERITY_NONLOCALIZED.into()) }
+    };
+    state.observe(NonNull::new(severity).map(|severity| {
+        // SAFETY: the non-null field is terminated and remains live for the duration of the callback.
+        unsafe { CStr::from_ptr(severity.as_ptr()) }.to_bytes()
+    }));
 }
 pub(crate) struct PgResult {
     raw: NonNull<pq::PGresult>,
+    _notices: Rc<NoticeState>,
 }
 pub(crate) struct CopyBuffer {
     raw: NonNull<u8>,
@@ -99,14 +183,29 @@ pub(crate) enum TransactionStatus {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommitObservation {
+    Committed,
+    RolledBack,
+    Unknown,
+}
+
+fn commit_observation(tag: &str, status: TransactionStatus, warning: bool) -> CommitObservation {
+    match (tag, status, warning) {
+        ("COMMIT", TransactionStatus::Idle, false) => CommitObservation::Committed,
+        ("ROLLBACK", TransactionStatus::Idle, _) => CommitObservation::RolledBack,
+        _ => CommitObservation::Unknown,
+    }
+}
+
 impl PgConnection {
     pub(crate) fn connect(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
         Self::connect_mode(conninfo, Mode::Sql, io)
     }
 
     fn connect_mode(conninfo: &Conninfo, mode: Mode, io: &IoControl) -> Result<Self> {
+        let io = &io::operation_control(io);
         io::check(io)?;
-        super::native::check()?;
         let raw = match mode {
             Mode::Sql => {
                 // SAFETY: Conninfo owns a valid NUL-terminated string for this call.
@@ -128,10 +227,14 @@ impl PgConnection {
             NonNull::new(raw).ok_or_else(|| error("PostgreSQL connection allocation failed"))?;
         let owner = Connection {
             raw,
+            notices: Rc::new(NoticeState::default()),
             _owner: PhantomData,
         };
-        // SAFETY: owner keeps the connection live; the callback captures no Rust state.
-        unsafe { pq::PQsetNoticeProcessor(raw.as_ptr(), Some(discard_notice), ptr::null_mut()) };
+        let notices = owner.notices.as_ref() as *const NoticeState;
+        // SAFETY: owner retains the stable callback state; derived PgResults retain it independently.
+        unsafe {
+            pq::PQsetNoticeReceiver(raw.as_ptr(), Some(record_notice), notices.cast_mut().cast())
+        };
         // SAFETY: owner holds a valid connection even when connection startup fails.
         if unsafe { pq::PQstatus(raw.as_ptr()) } == pq::ConnStatusType::CONNECTION_BAD {
             return Err(error(
@@ -165,14 +268,52 @@ impl PgConnection {
             phase: Phase::Idle,
             mode,
             replication: ReplicationState::default(),
+            copy_pending: Vec::new(),
         })
     }
     pub(crate) fn query(&mut self, sql: &str, io: &IoControl) -> Result<PgResult> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             connection.send(sql, io)?;
             connection.drain(None, io)
         })
+    }
+
+    /// Complete deferred user effects before this boundary so they cannot hide COMMIT warnings.
+    pub(crate) fn commit_observed(&mut self, io: &IoControl) -> Result<CommitObservation> {
+        self.require_mode(Mode::Sql)?;
+        self.require(Phase::Idle)?;
+        let status = self.transaction_status()?;
+        if !matches!(
+            status,
+            TransactionStatus::InTransaction | TransactionStatus::InError
+        ) {
+            return Err(error(
+                "PostgreSQL checked COMMIT requires an active transaction",
+            ));
+        }
+        let notices = Rc::clone(
+            &self
+                .raw
+                .as_ref()
+                .ok_or_else(|| error("PostgreSQL connection is closed"))?
+                .notices,
+        );
+        notices.reset();
+        if status == TransactionStatus::InTransaction {
+            let guard = self.query("SET LOCAL client_min_messages = warning", io)?;
+            if guard.command_tag()? != "SET" {
+                return Err(error(
+                    "PostgreSQL COMMIT warning visibility was not confirmed",
+                ));
+            }
+        }
+        let result = self.query("COMMIT", io)?;
+        Ok(commit_observation(
+            result.command_tag()?,
+            self.transaction_status()?,
+            notices.uncertain.get(),
+        ))
     }
 
     /// Reads libpq's last known state without consuming input or checking server liveness.
@@ -224,7 +365,7 @@ impl PgConnection {
         io: &IoControl,
     ) -> Result<()> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             let raw = connection.require(Phase::Idle)?;
             let count = parameter_count(param_types.len())?;
             let name = prepared_cstring(name.as_bytes())?;
@@ -264,7 +405,7 @@ impl PgConnection {
         io: &IoControl,
     ) -> Result<PgResult> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             let raw = connection.require(Phase::Idle)?;
             let count = parameter_count(params.len())?;
             let name = prepared_cstring(name.as_bytes())?;
@@ -317,8 +458,16 @@ impl PgConnection {
     }
 
     pub(crate) fn read_copy(&mut self, io: &IoControl) -> Result<Option<CopyBuffer>> {
+        self.read_copy_bounded(usize::MAX, io)
+    }
+
+    pub(crate) fn read_copy_bounded(
+        &mut self,
+        max_row_bytes: usize,
+        io: &IoControl,
+    ) -> Result<Option<CopyBuffer>> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             let raw = connection.require(Phase::CopyOut)?;
             loop {
                 io::check(io)?;
@@ -329,10 +478,14 @@ impl PgConnection {
                     1.. => {
                         let raw = NonNull::new(buffer.cast())
                             .ok_or_else(|| error("PostgreSQL returned a missing COPY buffer"))?;
-                        return Ok(Some(CopyBuffer {
+                        let buffer = CopyBuffer {
                             raw,
                             len: size as usize,
-                        }));
+                        };
+                        if buffer.len > max_row_bytes {
+                            return Err(error("PostgreSQL COPY exceeds the admitted row limit"));
+                        }
+                        return Ok(Some(buffer));
                     }
                     0 => {
                         connection.wait(libc::POLLIN, io)?;
@@ -362,34 +515,38 @@ impl PgConnection {
 
     pub(crate) fn write_copy(&mut self, data: &[u8], io: &IoControl) -> Result<()> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
-            let raw = connection.require(Phase::CopyIn)?;
-            // Flush each chunk to bound libpq's queue even when the caller holds an oversized row.
-            for chunk in data.chunks(64 * 1024) {
-                loop {
-                    io::check(io)?;
-                    connection.consume()?;
-                    // SAFETY: chunk is valid for its bounded signed-int length, and libpq copies it.
-                    match unsafe {
-                        pq::PQputCopyData(raw, chunk.as_ptr().cast(), chunk.len() as i32)
-                    } {
-                        1 => break,
-                        0 => {
-                            connection.flush(io)?;
-                            connection.wait(libc::POLLIN | libc::POLLOUT, io)?;
-                        }
-                        _ => return Err(error("PostgreSQL COPY write failed")),
-                    }
+        self.operation(io, |connection, io| {
+            connection.require(Phase::CopyIn)?;
+            let mut remaining = data;
+            while !remaining.is_empty() {
+                io::check(io)?;
+                let length = remaining
+                    .len()
+                    .min(COPY_BATCH_BYTES - connection.copy_pending.len());
+                connection
+                    .copy_pending
+                    .extend_from_slice(&remaining[..length]);
+                remaining = &remaining[length..];
+                if connection.copy_pending.len() == COPY_BATCH_BYTES {
+                    connection.flush_copy_buffer(io)?;
                 }
-                connection.flush(io)?;
             }
             Ok(())
         })
     }
 
+    pub(crate) fn flush_copy(&mut self, io: &IoControl) -> Result<()> {
+        self.require_mode(Mode::Sql)?;
+        self.operation(io, |connection, io| {
+            connection.require(Phase::CopyIn)?;
+            connection.flush_copy_buffer(io)
+        })
+    }
+
     pub(crate) fn finish_copy_in(&mut self, io: &IoControl) -> Result<u64> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
+            connection.flush_copy_buffer(io)?;
             connection.end_copy(None, io)?;
             connection.drain(None, io)?.copy_count()
         })
@@ -397,7 +554,8 @@ impl PgConnection {
 
     pub(crate) fn abort_copy_in(&mut self, _reason: &str, io: &IoControl) -> Result<()> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
+            connection.copy_pending.clear();
             // An arbitrary caller reason could contain row values or connection secrets.
             connection.end_copy(Some(c"rpgmigrate aborted COPY"), io)?;
             let result = connection.drain(None, io);
@@ -459,6 +617,17 @@ impl PgConnection {
             .ok_or_else(|| error("PostgreSQL connection is closed"))
     }
 
+    fn own_result(&self, raw: NonNull<pq::PGresult>) -> Result<PgResult> {
+        let owner = self
+            .raw
+            .as_ref()
+            .ok_or_else(|| error("PostgreSQL connection is closed"))?;
+        Ok(PgResult {
+            raw,
+            _notices: Rc::clone(&owner.notices),
+        })
+    }
+
     fn require_mode(&self, mode: Mode) -> Result<()> {
         if self.mode == mode {
             Ok(())
@@ -485,7 +654,7 @@ impl PgConnection {
     pub(crate) fn identify_system(&mut self, io: &IoControl) -> Result<IdentifySystem> {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::Idle)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             connection.send_replication(c"IDENTIFY_SYSTEM", io)?;
             let result = connection.drain(None, io)?;
             // SAFETY: the result owns a live PGresult; dimensions are signed nonnegative ints.
@@ -584,7 +753,7 @@ impl PgConnection {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::Idle)?;
         let command = start_command(slot, start, options)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             connection.send_replication(&command, io)?;
             let result = connection
                 .next_result(io)?
@@ -642,7 +811,9 @@ impl PgConnection {
     ) -> Result<ReplicationPoll> {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::CopyBoth)?;
-        self.operation(io, |connection| connection.pump_replication(wake_at, io))
+        self.operation(io, |connection, io| {
+            connection.pump_replication(wake_at, io)
+        })
     }
 
     fn send_replication(&mut self, command: &CStr, io: &IoControl) -> Result<()> {
@@ -754,8 +925,9 @@ impl PgConnection {
                 // SAFETY: PQisBusy gates nonblocking PQgetResult on this owned connection.
                 if unsafe { pq::PQisBusy(raw) } == 0 {
                     // SAFETY: a non-null result transfers exclusive ownership to PgResult.
-                    let result =
-                        NonNull::new(unsafe { pq::PQgetResult(raw) }).map(|raw| PgResult { raw });
+                    let result = NonNull::new(unsafe { pq::PQgetResult(raw) })
+                        .map(|raw| self.own_result(raw))
+                        .transpose()?;
                     if let Some(result) = result {
                         match result.status() {
                             pq::ExecStatusType::PGRES_COPY_IN if !self.replication.sent_end => {}
@@ -848,13 +1020,15 @@ impl PgConnection {
     fn operation<T>(
         &mut self,
         io: &IoControl,
-        work: impl FnOnce(&mut Self) -> Result<T>,
+        work: impl FnOnce(&mut Self, &IoControl) -> Result<T>,
     ) -> Result<T> {
-        let outcome = io::check(io).and_then(|()| work(self));
+        let io = &io::operation_control(io);
+        let outcome = io::check(io).and_then(|()| work(self, io));
         if outcome.is_err() && self.phase != Phase::Idle {
             // An interrupted protocol cannot safely serve another command or claim a rollback.
             self.raw.take();
             self.phase = Phase::Idle;
+            self.copy_pending.clear();
         }
         outcome
     }
@@ -923,9 +1097,9 @@ impl PgConnection {
             // SAFETY: libpq parses buffered input and reports whether PQgetResult would block.
             if unsafe { pq::PQisBusy(raw) } == 0 {
                 // SAFETY: PQisBusy proved this nonblocking; the returned result transfers ownership.
-                return Ok(
-                    NonNull::new(unsafe { pq::PQgetResult(raw) }).map(|raw| PgResult { raw })
-                );
+                return NonNull::new(unsafe { pq::PQgetResult(raw) })
+                    .map(|raw| self.own_result(raw))
+                    .transpose();
             }
             self.wait(libc::POLLIN, io)?;
             self.consume()?;
@@ -978,7 +1152,7 @@ impl PgConnection {
         io: &IoControl,
     ) -> Result<()> {
         self.require_mode(Mode::Sql)?;
-        self.operation(io, |connection| {
+        self.operation(io, |connection, io| {
             connection.send(sql, io)?;
             let result = connection
                 .next_result(io)?
@@ -1010,6 +1184,34 @@ impl PgConnection {
             }
         }
         self.phase = Phase::Query;
+        self.flush(io)
+    }
+
+    fn flush_copy_buffer(&mut self, io: &IoControl) -> Result<()> {
+        let raw = self.require(Phase::CopyIn)?;
+        if self.copy_pending.is_empty() {
+            return self.flush(io);
+        }
+        loop {
+            io::check(io)?;
+            self.consume()?;
+            // SAFETY: the pending batch is bounded to 64 KiB and libpq copies it on success.
+            match unsafe {
+                pq::PQputCopyData(
+                    raw,
+                    self.copy_pending.as_ptr().cast(),
+                    self.copy_pending.len() as i32,
+                )
+            } {
+                1 => break,
+                0 => {
+                    self.flush(io)?;
+                    self.wait(libc::POLLIN | libc::POLLOUT, io)?;
+                }
+                _ => return Err(error("PostgreSQL COPY write failed")),
+            }
+        }
+        self.copy_pending.clear();
         self.flush(io)
     }
 }
@@ -1199,7 +1401,7 @@ pub(super) mod replication_testing {
             // PostgreSQL 9.6 lacks temporary slots; its entire test cluster is disposable.
             format!("CREATE_REPLICATION_SLOT \"{slot}\" LOGICAL test_decoding")
         };
-        connection.operation(io, |connection| {
+        connection.operation(io, |connection, io| {
             connection.send_replication(&CString::new(command).unwrap(), io)?;
             let result = connection.drain(None, io)?;
             if result.status() != pq::ExecStatusType::PGRES_TUPLES_OK
@@ -1260,17 +1462,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn commit_observation_refuses_warning_even_with_commit_and_idle() {
+        assert_eq!(
+            commit_observation("COMMIT", TransactionStatus::Idle, false),
+            CommitObservation::Committed
+        );
+        assert_eq!(
+            commit_observation("COMMIT", TransactionStatus::Idle, true),
+            CommitObservation::Unknown
+        );
+        assert_eq!(
+            commit_observation("ROLLBACK", TransactionStatus::Idle, false),
+            CommitObservation::RolledBack
+        );
+        for status in [
+            TransactionStatus::Active,
+            TransactionStatus::InTransaction,
+            TransactionStatus::InError,
+            TransactionStatus::Unknown,
+        ] {
+            assert_eq!(
+                commit_observation("COMMIT", status, false),
+                CommitObservation::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn commit_notice_classification_is_conservative_and_retains_no_text() {
+        let notices = NoticeState::default();
+        for severity in [
+            Some(&b"NOTICE"[..]),
+            Some(&b"INFO"[..]),
+            Some(&b"DEBUG"[..]),
+            Some(&b"LOG"[..]),
+        ] {
+            notices.observe(severity);
+            assert!(!notices.uncertain.get());
+        }
+        for severity in [
+            None,
+            Some(&b"WARNING"[..]),
+            Some(&b"private-row-secret"[..]),
+        ] {
+            notices.reset();
+            notices.observe(severity);
+            assert!(notices.uncertain.get());
+            assert!(!format!("{notices:?}").contains("private-row-secret"));
+        }
+        notices.reset();
+        assert!(!notices.uncertain.get());
+        assert_eq!(
+            std::mem::size_of::<NoticeState>(),
+            std::mem::size_of::<bool>()
+        );
+    }
+
+    #[test]
+    fn notice_callback_state_outlives_connection_with_its_result() {
+        let connection = unconnected();
+        let weak = Rc::downgrade(&connection.raw.as_ref().unwrap().notices);
+        // SAFETY: the standalone result is owned here and freed by PgResult.
+        let raw = unsafe {
+            pq::PQmakeEmptyPGresult(ptr::null_mut(), pq::ExecStatusType::PGRES_NONFATAL_ERROR)
+        };
+        let result = connection.own_result(NonNull::new(raw).unwrap()).unwrap();
+        drop(connection);
+        let state = result._notices.as_ref() as *const NoticeState;
+        // SAFETY: result retains the callback state and its live synthetic result.
+        unsafe { record_notice(state.cast_mut().cast(), result.raw.as_ptr()) };
+        assert!(result._notices.uncertain.get());
+        assert!(weak.upgrade().is_some());
+        drop(result);
+        assert!(weak.upgrade().is_none());
+    }
+
     fn unconnected() -> PgConnection {
         // SAFETY: the terminated invalid option is rejected before auth or socket setup.
         let raw = unsafe { pq::PQconnectStart(c"rpgmigrate_invalid_option=1".as_ptr()) };
         PgConnection {
             raw: Some(Connection {
                 raw: NonNull::new(raw).unwrap(),
+                notices: Rc::new(NoticeState::default()),
                 _owner: PhantomData,
             }),
             phase: Phase::Idle,
             mode: Mode::Logical,
             replication: ReplicationState::default(),
+            copy_pending: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn connection_failures_use_redacted_postgresql_errors() {
+        let conninfo =
+            Conninfo::new("rpgmigrate_invalid_option=private-connection-value".into()).unwrap();
+        for connect in [PgConnection::connect, PgConnection::connect_replication] {
+            let failure = connect(&conninfo, &control()).err().unwrap();
+            assert_eq!(failure.kind, crate::contracts::ErrorKind::Pgsql);
+            assert!(!failure.message.contains("private-connection-value"));
+        }
+    }
+
+    #[test]
+    fn utility_environment_uses_libpq_explicit_values_without_diagnostics() {
+        let conninfo = Conninfo::new(
+            "postgresql://a%20user:private-secret@example.invalid:5433/a%20db?sslmode=require"
+                .into(),
+        )
+        .unwrap();
+        let environment = utility_environment(&conninfo).unwrap();
+        for (key, value) in [
+            ("PGUSER", "a user"),
+            ("PGPASSWORD", "private-secret"),
+            ("PGHOST", "example.invalid"),
+            ("PGPORT", "5433"),
+            ("PGDATABASE", "a db"),
+            ("PGSSLMODE", "require"),
+        ] {
+            assert!(environment.contains(&(key.into(), value.into())));
+        }
+        assert!(!environment.iter().any(|(key, _)| key == "PGPASSFILE"));
+        for value in ["invalid=private-secret", "replication=database"] {
+            let failure = utility_environment(&Conninfo::new(value.into()).unwrap()).unwrap_err();
+            assert!(!failure.message.contains("private-secret"));
+            assert!(!failure.message.contains("replication"));
         }
     }
 
@@ -1418,6 +1735,7 @@ mod tests {
             phase: Phase::Idle,
             mode: Mode::Sql,
             replication: ReplicationState::default(),
+            copy_pending: Vec::new(),
         };
         assert!(
             connection
@@ -1481,8 +1799,8 @@ mod tests {
     }
 
     #[test]
-    fn native_libpq_is_linked() {
-        assert!(super::super::libpq_version() >= 180000);
+    fn stock_libpq_meets_minimum_version() {
+        assert!(super::super::libpq_version() >= 160000);
     }
 
     #[test]
@@ -1520,6 +1838,7 @@ mod tests {
             phase: Phase::Idle,
             mode: Mode::Sql,
             replication: ReplicationState::default(),
+            copy_pending: Vec::new(),
         };
         let failure = connection.transaction_status().unwrap_err();
         assert_eq!(failure.kind, crate::contracts::ErrorKind::Pgsql);
@@ -1554,6 +1873,7 @@ mod tests {
         };
         let result = PgResult {
             raw: NonNull::new(raw).unwrap(),
+            _notices: Rc::new(NoticeState::default()),
         };
         let mut attribute = pq::PGresAttDesc {
             name: c"value".as_ptr().cast_mut(),
@@ -1601,6 +1921,7 @@ mod tests {
             phase: Phase::Idle,
             mode: Mode::Sql,
             replication: ReplicationState::default(),
+            copy_pending: Vec::new(),
         };
         let io = control();
         assert!(connection.query("SELECT 1", &io).is_err());
@@ -1610,6 +1931,8 @@ mod tests {
         assert!(connection.read_copy(&io).is_err());
         assert!(connection.start_copy_in("COPY t FROM STDIN", &io).is_err());
         assert!(connection.write_copy(b"1\n", &io).is_err());
+        assert!(connection.flush_copy(&io).is_err());
+        assert!(connection.read_copy_bounded(16 * 1024 * 1024, &io).is_err());
         assert!(connection.finish_copy_in(&io).is_err());
         assert!(connection.abort_copy_in("secret reason", &io).is_err());
         assert!(connection.quote_identifier("t").is_err());

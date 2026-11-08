@@ -1,0 +1,200 @@
+# Native protocol v1
+
+We freeze the engine/operator boundary here and in the shared [contract fixtures](../tests/fixtures/native/v1/contract.json).
+The [M1 plan](superpowers/plans/2026-11-08-m1-native-contract.md) defines the implementation boundary.
+M1 implements discovery and pure contract validation; it advertises no migration capabilities.
+Operational examples are synthetic future-producer contracts.
+They do not qualify clone, follow, recovery, cutover, cleanup, PostgreSQL version support, or durability.
+
+## Discovery
+
+Run discovery without PostgreSQL, a workdir, or operator identity:
+
+1. Request the protocol and capability set.
+
+   ```sh
+   cargo run --locked -- version --json
+   ```
+
+The command writes one JSON object and a newline to stdout.
+Its exact required fields are `protocol_version`, `engine_version`, and `capabilities`.
+`protocol_version` is integer `1`, `engine_version` comes from Cargo package metadata, and the M1 capability array is explicitly empty.
+Discovery MUST NOT contain operational identity or report fields.
+Plain `version` retains text identity and libpq version output.
+Operational identity and apply-group settings do not gate discovery.
+
+The reserved capability names are `clone.single_db`, `copy.large_objects`, `copy.binary_fallback`, `copy.split`, `cdc.pgoutput`, `progress.v1`, `cutover.v1`, `verify.v1`, and `cleanup.v1`.
+Unknown or duplicate capabilities MUST fail validation.
+A reserved name does not mean that the runtime implements that capability.
+
+## Operational transport and document rules
+
+Operational framing requires the validated four-field operator identity bound to stored native state.
+Standalone clone and progress commands emit unframed JSON without a synthetic `work` object.
+The M2 container harness can select the actual Go `ParseReport` probe for cross-repository producer qualification; this does not qualify an operator controller workflow.
+
+An operator-bound producer emits each operational record on stdout as `"native-report: "` followed by one JSON object on the same line.
+The space after the colon is required.
+`ParseReport` receives only that JSON object after framing has been checked.
+M6 owns production log-tail selection and MUST bind the selected report to the expected command and work.
+The framing fixtures require exactly one matching record in their input; absent, truncated, malformed, and multiple records cannot prove completion.
+Unrelated lines carry no operational evidence.
+
+Documents MUST use valid UTF-8, exact member spelling, unique decoded member names, and at most 32 levels of JSON nesting.
+Unknown fields, case variants, trailing documents, and trailing non-whitespace bytes MUST fail.
+Protocol and counters use exact JSON integer syntax, without floats, exponents, strings, or booleans.
+Counters range from zero through signed int64 maximum.
+Absent or null measurements stay unknown; they MUST NOT become measured zero or completion evidence.
+When both are measured, `done` MUST NOT exceed `total`.
+
+Every operational Report requires `protocol_version`, `engine_version`, `command`, `capabilities`, `work`, and `phase`.
+Phases are `planning`, `copying`, `finalizing`, `streaming`, `draining`, `completed`, `failed`, and `suspended`.
+The command selects its required capability and payload:
+
+| Command | Capability | Payload |
+| --- | --- | --- |
+| `clone` | `clone.single_db` | `copy` |
+| `list tables` | `clone.single_db` | `copy` |
+| `list progress` | `progress.v1` | `copy` |
+| `stream sentinel get` | `cutover.v1` | `replication` |
+| `stream sentinel set endpos` | `cutover.v1` | `replication` |
+| `stream cleanup` | `cleanup.v1` | `cleanup` |
+
+`list tables` remains a staged runtime refusal despite its reserved DTO shape.
+`copy` may contain `tables`, `indexes`, and `bytes`, each with nullable or absent `total` and `done` counters.
+A parsed `completed` phase alone does not prove that all required counters were measured or completed.
+M6 must require positive command-specific completion evidence.
+
+## Compare stays outside Report
+
+`compare data --json` retains the existing per-table JSON array, including `schema`, `name`, `source.rowcount`, `source.checksum`, and `status`.
+Compare progress retains the `"compare progress: "` message prefix and keys `plannedTables`, `comparedTables`, `plannedBytes`, `comparedBytes`, `comparedRows`, `differingTables`, `failedTables`, `elapsedMs`, `final`, `inFlightCount`, and `inFlight`.
+Each in-flight entry contains `schema`, `name`, `bytes`, and `elapsedMs`.
+The operator's existing compare consumer owns these messages.
+`ParseReport` MUST reject compare arrays and compare command reports; a native `verification` payload does not replace this contract.
+
+## Work identity and ownership
+
+Operator runs supply all four environment variables together:
+
+- `RPGMIGRATE_MIGRATION_UID`: the canonical lowercase Migration UUID.
+- `RPGMIGRATE_RUN_ID`: the same UUID's 32 lowercase hexadecimal digits without hyphens.
+- `RPGMIGRATE_WORKDIR_ID`: the PVC UID, represented as a nonempty label of at most 256 bytes without surrounding whitespace, controls, or path separators.
+- `RPGMIGRATE_CHECKPOINT_GENERATION`: canonical decimal `1` for this profile.
+
+The report's `work` object uses `migration_uid`, `run_id`, `workdir_id`, and integer `checkpoint_generation`.
+Its values MUST exactly match caller-owned state.
+Partial, malformed, noncanonical, or mismatched identity MUST fail.
+Standalone runs retain random native run IDs without fabricating Migration/PVC identity.
+M2 binds the four validated caller identity values to recorded native state before granting any mutation authority.
+Mismatched caller identity and older native formats are explicit refusals; the clone state uses native format 5.
+COPY generations are separate from the immutable checkpoint generation.
+
+The owned metadata identity is `_rpgmigrate_<run_id>.checkpoint` with recorded schema/table OIDs and existing provenance checks.
+Exclude target bookkeeping only by its exact owned object identity.
+The operator workdir remains `/work/pgcopydb`; its native marker prevents adoption of legacy state.
+The reserved control layout is `control/lock`, `control/endpos.json`, and `control/.endpos.tmp`.
+Never adopt, convert, resume, restart, or clean pgcopydb state or resources.
+
+Application names are `rpgmigrate[<pid>] <role>` with exactly `copy`, `apply`, `receive`, and `compare` roles.
+The SQL LIKE prefix is `rpgmigrate[%`.
+The future runner flag is `--rpgmigrate-runner-image`, its chart value is `rpgmigrateRunnerImage`, and its default stays empty until image qualification.
+The runner executable is `/usr/local/bin/rpgmigrate`.
+Matching-major tools live in `/usr/lib/postgresql/16/bin` and `/usr/lib/postgresql/18/bin`; default `psql` is major 18.
+M5/M6 implement the image and its wiring.
+
+## Replication, endpos, and drain
+
+Every replication payload MUST explicitly measure `certified_lsn`, including an endpos acknowledgment.
+Other fields are `source_durable_head_lsn`, `received_lsn`, `durable_replay_lsn`, `end_lsn`, `end_persisted`, `drained`, `checkpoint_id`, and `drain_proof`.
+LSNs use PostgreSQL hexadecimal high/low notation within uint32 bounds.
+A measured `certified_lsn` may be `0/0`.
+Where both are measured, `certified_lsn` MUST NOT exceed `durable_replay_lsn`.
+
+An endpos acknowledgment requires the caller's nonzero expected endpos, a matching report endpos, and `end_persisted=true`.
+A drained assertion additionally requires `drain_proof` with `work`, `checkpoint_id`, `committed=true`, `end_lsn`, `replay_lsn`, and `kind`.
+The proof's work and checkpoint token MUST match the report and independent expected authority.
+The caller supplies `CheckpointEvidence` from the exact owned target row, with matching checkpoint ID, certified LSN, durable replay LSN, drain end, drain witness, drain kind, and `BarrierConfirmed=true`.
+Fixtures supply synthetic trusted bindings separately from report payloads.
+Production MUST NOT construct those bindings from the report being checked.
+
+We distinguish coverage evidence from feedback authority:
+
+- `keepalive`: witness W is at least caller endpos E and no greater than the persisted certified LSN.
+- `later_begin`: W is exactly `BEGIN.final_lsn`, strictly greater than E, and may exceed both certified and durable replay LSNs.
+
+A later-BEGIN proof can therefore cover E=`0/20` with W=`0/30`, while actual applied=`0/10`, certified=`0/10`, copy anchor=`0/8`, and durable replay=`0/10`.
+It MUST NOT raise feedback or reconnect authority to W.
+Do not substitute an outer WAL frame position or COMMIT transaction-end position for `BEGIN.final_lsn`.
+The source field definitions are in the [PG16 logical replication format](https://www.postgresql.org/docs/16/protocol-logicalrep-message-formats.html) and [PG18 logical replication format](https://www.postgresql.org/docs/18/protocol-logicalrep-message-formats.html).
+
+The producer computes durable replay as the barrier-proven maximum of actual durable applied end, keepalive-only certified LSN, and copy anchor.
+A visible asynchronous row with an older barrier token does not prove that maximum.
+The runtime MUST order the witness after all transactions through E, positively prove those transactions durable, and synchronously commit the witness and token in the same logged authority row before emitting drained.
+M6 independently reads that exact row.
+M2/M4 own these runtime ordering and persistence checks; pure JSON acceptance does not test them.
+
+The checkpoint token is `<generation>:<barrier_epoch>:<barrier_counter>` with canonical decimal components.
+Generation is positive signed int64 and equals `1` in this profile; epoch is uint64 and may be zero; counter is positive uint64.
+A transition keeps the epoch at least as large as its stored value and increments the stored counter by exactly one, refusing overflow.
+Restart continues that pair; it does not reset the counter or reuse a pair for different checkpoint/drain contents.
+After unknown COMMIT, reacquire the fence, read back the same row, and establish a positive synchronous barrier before emitting proof.
+Token syntax fixtures do not qualify runtime token transitions or unknown-COMMIT recovery.
+
+## Cleanup
+
+The caller supplies the complete resource obligations by exact `kind`, `name`, `owned`, and `retain` values.
+The report's `cleanup` requires `complete` and `resources`; each resource requires `kind`, `name`, `owned`, and `removed`.
+Allowed kinds are `replication_slot`, `publication`, `replication_origin`, and `workdir`.
+The report MUST contain exactly the caller's inventory without omissions, additions, or duplicate identities.
+Complete cleanup requires each owned slot/publication to be removed, including explicit treatment of an already absent owned object.
+The owned workdir is retained with `removed=false`.
+A recorded replication origin is unowned and unremoved; `--origin` never creates or grants ownership of an origin.
+An incomplete cleanup observation can parse successfully while retaining `complete=false`.
+Exit zero and an empty or truncated resource inventory cannot prove cleanup completion.
+
+## CLI, environment, and failures
+
+The fixture contract records all 43 operator option names with command, syntax, environment binding where present, native-stage disposition, and refusal class.
+The complete parser baseline remains pinned to `86bf908adca02d87063849dae775a02c1659c829`.
+M1 parser acceptance does not make a staged migration route executable.
+Argv cases explicitly use `stage=configuration`; `accept=true` means valid parsing/settings, and `expect.runtime=unsupported` requires runtime refusal.
+The local filter file is synthetic parser input, not an admitted native filtering feature.
+
+Keep `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, `PGPASSFILE`, `PGCOPYDB_LOG_JSON`, and `PGCOPYDB_APPLY_GROUP_TXNS` by name.
+Resolve CLI connection overrides before validating effective conninfo.
+Existing numeric environment validation still precedes numeric CLI overrides.
+JSON logging uses the existing boolean grammar; invalid values fail.
+Delegate passfile, service, and TLS behavior to stock libpq.
+The future apply-group default is 100; M1 validates a supplied positive uint64 setting and refuses execution rather than pretending to apply groups.
+Keep `durable` as the default.
+
+Exit codes are `BadArgs=1`, `BadConfig=2`, `BadState=3`, `Pgsql=4`, `Pgctl=5`, `Source=6`, `Target=7`, `Reload=9`, `Internal=12`, and `Fatal=122`.
+A recovery gap is `BadState`, exit 3.
+JSON diagnostics retain existing fields and include `error_severity="ERROR"` with a safe message beginning `"native:<ErrorKind>: "`.
+Credentials and row contents MUST NOT appear in diagnostics or fixtures.
+
+## Fixture verification
+
+Both repositories carry identical `manifest.json`, `contract.json`, `cases.json`, and payload files.
+The sorted manifest lists SHA-256 for every file except itself.
+Missing files, extra files, duplicate paths, empty cases, and changed bytes MUST fail local inventory validation.
+Each repository reads only its own fixture directory.
+Rust executes discovery and real CLI/settings cases; Go executes version/report validation, framing cases, and the existing compare-progress consumer.
+The Python suite tests inventory refusal paths, including mutations whose digests were recomputed.
+No test substitutes a duplicate migration runtime for the future producer.
+
+1. Run the portable inventory suite from the engine checkout.
+
+   ```sh
+   python3 -W error tools/ci/unit.py
+   ```
+
+2. At milestone close, compare the fixture trees using the actual sibling checkouts.
+
+   ```sh
+   diff -ru tests/fixtures/native/v1 ../pgcopydb-operator-native-contract-v1/internal/native/testdata/v1
+   ```
+
+The parity gate is explicit and separate from repository-local unit tests.
+The [task ledger](../tasks/todo.md) records closing lint/test results and unresolved gates.

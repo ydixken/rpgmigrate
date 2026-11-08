@@ -11,7 +11,7 @@ Inputs: the code of all three repos, operator and fork issues, pgcopydb `origin/
 Not used: `tasks/todo.md` and the dated plans.
 A 9-reader audit with adversarial cross-checks and a 5-lens plan review (correctness, scope, operator/E2E, performance, builder) produced the findings below.
 
-## Assessment
+## Assessment at the planning baseline
 
 - The binary runs real work for `ping` and a restricted serial `copy table-data` only (`src/lib.rs:56-103`); all eight operator routes return "unimplemented".
 - Uncommitted work lives in two places: 51 untracked files on `main` and `stash@{0}` ("WIP on feat/native-copy: bd0925d", 42 files, +11.6k/-2.1k, with the 4.3k-line catalog, COPY anchor, slot creation and state provenance).
@@ -88,24 +88,50 @@ Each milestone ends with a runnable demonstration and clean `task lint test`; ta
 After M1, the engine track (M2-M4), packaging (M5) and the operator track (M6, kind bootstrap of M7) run in parallel.
 The first operator E2E (M7) runs the vertical slice with binary COPY, split and large objects switched off in the Migration; M8 turns them on.
 
+> [!IMPORTANT]
+> M0 and M1 implementation and focused verification are recorded in the [task ledger](../tasks/todo.md), but both milestone closing gates remain open under the approved strict-lint hold.
+> The latest Clippy result is 165 library and 19 library-test unused/dead-code errors, including six new M2 pipeline diagnostics staged for M3 and tracked separately from retained scaffold.
+> The user approved proceeding with later approved milestones on 2026-11-08 while retaining that hold.
+> M2 has a passing focused quiescent PostgreSQL 16 to 16 plain clone; the three-pair and recovery E2E gates remain open.
+> Keep commits pending until the integrated required checks are green; these component results qualify no native operator workflow.
+
 ### M0: Preserve and reset (rpgmigrate)
 
 - [x] Guarded preservation: `stash@{0}` plus the 51 untracked files are archive commit `8fceb45` on `wip/native-copy-snapshot` (base `bd0925d`, never merged); `archive/stash-0` pins the stash; a tar of the untracked files sits outside the repo.
 - [x] `feat/native-engine` branches from `8fceb45`; this roadmap is committed there.
 - [x] Remove the superseded plans, the old task ledger, the superseded anchor spec and the previous team's guides and research notes; point `AGENTS.md` and `README.md` at this roadmap; record this session's corrections in `tasks/lessons.md`.
-- [ ] Record whether `feat/native-engine` builds as archived (`task check`), before any other change.
-- [ ] Create `tasks/todo.md` from these milestones; add the dated design revision with the amendments above (and fix its links to removed files).
-- [ ] Remove the M0 drop list; apply the libpq decision; plain CI for fmt, clippy and unit tests.
+- [x] Record whether `feat/native-engine` builds as archived (`task check`), before any other change.
+- [x] Create `tasks/todo.md` from these milestones; add the dated design revision with the amendments above (and fix its links to removed files).
+- [x] Remove the M0 drop list; apply the libpq decision; plain CI for fmt, clippy and unit tests.
+
+- [ ] Close M0 after the integrated strict lint and remaining closing checks pass.
 
 ### M1: Contract freeze (both repos)
 
-- [ ] Commands, option names, env (`PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, `PGPASSFILE`, `PGCOPYDB_LOG_JSON`, `PGCOPYDB_APPLY_GROUP_TXNS`), exit codes and error classes for the native profile.
-- [ ] Protocol v1 amendments: version/capability DTO, `native-report:` stdout transport, work identity env, caller-supplied endpos ack, drain proof with `certified_lsn`, cleanup inventory; compare outside ParseReport.
-- [ ] application_name scheme, owned schema name, workdir and `control/` layout, native runner image selection and tool layout.
-- [ ] Shared golden fixtures in both repos with tests on both sides.
+- [x] Commands, option names, env (`PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, `PGPASSFILE`, `PGCOPYDB_LOG_JSON`, `PGCOPYDB_APPLY_GROUP_TXNS`), exit codes and error classes for the native profile.
+- [x] Protocol v1 amendments: version/capability DTO, `native-report:` stdout transport, work identity env, caller-supplied endpos ack, drain proof with `certified_lsn`, cleanup inventory; compare outside ParseReport.
+- [x] application_name scheme, owned schema name, workdir and `control/` layout, native runner image selection and tool layout.
+- [x] Shared golden fixtures in both repos with tests on both sides.
+
+- [ ] Close M1 after the integrated strict lint gate passes; retain the completed engine/operator contract and fixture evidence.
 
 ### M2: Clone slice (engine)
 
+The approved [M2 plan](superpowers/plans/2026-11-08-m2-clone-slice.md) freezes the shared interfaces and seven disjoint owners.
+Focused receipts cover the seven-case Clone profile on PostgreSQL 16.15/18.6, the schema drift guard on all three pairs, catalog admission and utility smoke, and canonical comparison SQL.
+An earlier candidate passed a quiescent PostgreSQL 16 to 16 clone with eight-table schema/data/sequence proof and measured completion, plus operator-bound clone/progress validation by the authoritative Go parser.
+The portable Python gate passed 180 checks, including the physical fixture-baseline control; invalid selected report probes also refuse before container creation.
+Independent closing review resolved all findings, including target-name/OID binding, post-barrier marker reread, generated-output parity, and warning/factory/pipeline durability proof.
+Final Prepared10 and Clone7 profiles passed on PostgreSQL 16 and 18; formatting, 24 CLI checks (including 220 long-option and 188 short-binding cases), 180 portable tests, and the read-only inspection check also passed.
+Strict Clippy remains held on unused/dead-code diagnostics after triage found no correctable lint categories; this is not a green strict-lint gate.
+The full three-pair matrix launched once with the actual Go report probe against the final frozen 58-input manifest.
+Its first 16 to 16 attempt stopped on an unclassified harness-subprocess failure without a pair receipt; no eleven-case or three-pair pass is claimed.
+Earlier receipts do not qualify the final full workflow or an operator controller integration.
+See the [task ledger](../tasks/todo.md) for exact commands, evidence, and remaining gates.
+
+- [x] Demonstrate a focused quiescent PostgreSQL 16 to 16 plain clone with durable completion and independent schema/data/sequence verification.
+- [x] Resolve all independent closing-review repairs for target ownership, marker readback, generated output, and transaction durability proof.
+- [x] Pass the final Prepared10 and Clone7 component profiles on PostgreSQL 16 and 18.
 - [ ] Transport: pipeline mode, error classes with SQLSTATE/detail, per-operation deadlines and stall timeouts, buffered COPY relay, notices surfaced.
 - [ ] Checkpoint v2: group frontier, `certified_lsn`, per-table done markers and copy generation, per-run fence, slimmed hot path.
 - [ ] Copy order of decision 5 with `--table-jobs`, FREEZE, sequences, post-data, ANALYZE; PG16/18 gates and version-specific SQLSTATEs.
@@ -113,6 +139,9 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 - [ ] Engine E2E harness on containers (podman or docker) with Task targets per version pair; clone matrix and kill/resume cases; content checked by independent SQL fingerprints.
 
 ### M3: Follow (engine)
+
+The [M3 planning draft](superpowers/plans/2026-11-08-m3-follow-pgoutput.md) remains under review, including post-data recovery choices.
+Unknown WAL headroom remains an operator obligation, while known unsafe SQL settings must fail closed; these are planning requirements, not implemented follow support.
 
 - [ ] pgoutput v1 decoder (B, C, R, Y, I, U, D, T, O; others fatal) with relation generations; fixtures recorded from PG16 and PG18; regression cases for op#356-359 and #376; a fuzz target.
 - [ ] Receive thread with decision 3 backpressure and status rules; slot health checks; gap refusal on connect.
@@ -129,10 +158,20 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 
 ### M5: Packaging and engine CI (starts with M2)
 
+The development-only M2 harness image builds, and the documentation lint gate passes all 17 discovered Markdown files.
+M5 workflow controls (seven tests), image smoke controls (12 tests), actionlint, yamllint, and dependency license/advisory checks pass.
+The native ARM64 image passed its read-only packaging smoke with UID 65532, libpq 18.6, and client tools 16.15/18.6; later clone/schema edits mean that receipt does not bind the final source.
+Hosted AMD64 checks and the M5 closing gate remain open, and no image is published.
+These checks do not complete the released runner or hosted engine CI gates below.
+
 - [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
 - [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, engine E2E matrix on hosted runners, image build, ghcr push on tags only.
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
+
+Pure command and framing helpers passed focused checks on the separate operator branch, including legacy argv preservation and negative identity bindings.
+Production `UnsupportedEngine` activation remains unchanged, so none of the lifecycle gates below is complete.
+The actual Go producer proof covers the M2 clone/progress prerequisite; durable drain still depends on M3/M4.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
 - [ ] Preflight: `version --json` handshake into `validateNativeConfig`; native pg_restore gate by target major; skip the origin-grant probe; PG16 target allowed for native.
@@ -176,6 +215,11 @@ Parallelize the build phase as far as file ownership allows: independent owners 
 Run the independent review (at the effort its risk calls for) and the Go test suites once per milestone, at its close, not after each task; workers run only the focused tests for their own change while building.
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
 Commits are small, conventional and lint-clean; nothing is pushed or merged without the user's go-ahead.
+
+> [!important]
+> On 2026-11-08, the user approved exactly two local WIP checkpoint commits, one for `feat/native-engine` and one for the isolated operator `feat/native-contract-v1` branch, as an exception to the lint-clean-per-commit rule.
+> These checkpoints retain the strict scaffold lint hold and the first matrix attempt's harness-subprocess failure without a pair receipt; they do not close any milestone or qualify runtime support.
+> The normal lint-clean rule resumes after these two checkpoints, and M3 worktrees remain outside their scope.
 
 ## Verification
 

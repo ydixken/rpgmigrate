@@ -18,13 +18,8 @@ vars:
     {{.CARGO | default "''"}}
   PYTHON_COMMAND: >-
     {{.PYTHON | default "''"}}
-  PQ_LIB_DIR:
-    sh: >-
-      if [ "${PQ_LIB_DIR+x}" = x ]; then printf '%s' "$PQ_LIB_DIR";
-      else printf '%s' {{.ROOT_DIR | shellQuote}}/target/native/libpq/lib; fi
-  STORAGE_ROOT:
-    sh: 'printf "%s" "${STORAGE_ROOT-}"'
   # Declare CLI overrides before RUN; null leaves the inherited environment unchanged.
+  PQ_LIB_DIR: null
   CC: null
   CFLAGS: null
   CPPFLAGS: null
@@ -34,29 +29,36 @@ vars:
   PG_CONFIG: null
   CARGO_TARGET_DIR: null
   RPGMIGRATE_BIN: null
+  RPGMIGRATE_E2E_REPORT_PROBE: null
+  CONTAINER_RUNTIME: null
+  IMAGE: null
+  CONTAINER_VALUE:
+    sh: 'printf "%s" "${CONTAINER_RUNTIME-podman}"'
+  IMAGE_VALUE:
+    sh: 'printf "%s" "${IMAGE-localhost/rpgmigrate:dev}"'
+  CONTAINER_ARGUMENT: >-
+    {{if ne .CONTAINER_RUNTIME nil}}{{.CONTAINER_RUNTIME | shellQuote}}{{else}}{{.CONTAINER_VALUE | shellQuote}}{{end}}
+  IMAGE_ARGUMENT: >-
+    {{if ne .IMAGE nil}}{{.IMAGE | shellQuote}}{{else}}{{.IMAGE_VALUE | shellQuote}}{{end}}
   RPGMIGRATE_TEST_EXPECTED_PG_VERSION: null
   RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM: null
   # Inline exports preserve CLI precedence even when the inherited environment differs.
   RUN: >-
     {{.TASK_EXECUTION}}
-    {{range $name := list "CC" "CFLAGS" "CPPFLAGS" "LDFLAGS" "PKG_CONFIG_PATH" "PG_BINDIR" "PG_CONFIG"
-    "CARGO_TARGET_DIR" "RPGMIGRATE_BIN"
+    {{range $name := list "PQ_LIB_DIR" "CC" "CFLAGS" "CPPFLAGS" "LDFLAGS" "PKG_CONFIG_PATH" "PG_BINDIR" "PG_CONFIG"
+    "CARGO_TARGET_DIR" "RPGMIGRATE_BIN" "CONTAINER_RUNTIME" "RPGMIGRATE_E2E_REPORT_PROBE"
     "RPGMIGRATE_TEST_EXPECTED_PG_VERSION" "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM"}}
     {{if ne (index $ $name) nil}}export {{$name}}={{index $ $name | shellQuote}};{{end}}
     {{end}}
-    export PQ_LIB_DIR={{.PQ_LIB_DIR | shellQuote}} STORAGE_ROOT={{.STORAGE_ROOT | shellQuote}};
-    : "${PQ_LIB_DIR:?PQ_LIB_DIR must not be empty}";
+    if [ "${PQ_LIB_DIR+x}" = x ]; then : "${PQ_LIB_DIR:?PQ_LIB_DIR must not be empty}"; fi;
   UNIT_FILTERS: >-
     --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip pg::replication_live_tests::
     --skip apply::checkpoint::live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
     --skip snapshot::live_tests::
-    --skip snapshot::journal_live_tests::segmented_real_wal_reopens_and_serial_replays
-    --skip snapshot::journal_live_tests::sqlite_real_wal_reopens_and_serial_replays
-    --skip snapshot::journal_live_tests::journal_serial_crash_child
 
 tasks:
   default:
-    desc: Check all targets after native verification
+    desc: Check all Rust targets
     cmds:
       - task: check
 
@@ -68,7 +70,6 @@ tasks:
   check:
     desc: Check all Rust targets
     cmds:
-      - task: native-check
       - '{{.RUN}} {{.CARGO_COMMAND}} check --locked --all-targets'
 
   fmt-check:
@@ -80,23 +81,11 @@ tasks:
     desc: Check formatting and run strict Clippy
     cmds:
       - task: fmt-check
-      - task: native-check
       - '{{.RUN}} {{.CARGO_COMMAND}} clippy --locked --all-targets -- -D warnings'
 
-  native:
-    desc: Build the controlled libpq artifact
-    cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/build-libpq.py'
-
-  native-check:
-    desc: Verify the existing controlled libpq artifact
-    cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/build-libpq.py --verify'
-
   build:
-    desc: Build the executable after native verification
+    desc: Build the executable
     cmds:
-      - task: native-check
       - '{{.RUN}} {{.CARGO_COMMAND}} build --locked'
 
   test:
@@ -104,16 +93,11 @@ tasks:
     cmds:
       - task: test-unit
       - task: test-cli
-      - task: test-native
-      - task: test-harness
-      - task: test-storage-format
-      - task: test-storage-recovery
-      - task: test-storage-publication
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/ci/unit.py'
 
   test-unit:
     desc: Run nonempty Rust unit tests without live databases
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.CARGO_COMMAND}} test --locked --lib -- --list {{.UNIT_FILTERS}} |
         awk '/: test$/ { count++ } END { if (count == 0) { print "error: no Rust unit tests discovered"; exit 1 } }'
@@ -125,68 +109,21 @@ tasks:
       - task: build
       - '{{.RUN}} {{.PYTHON_COMMAND}} tests/cli_contract.py'
 
-  test-native:
-    desc: Test the controlled native dependency
-    cmds:
-      - task: native-check
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tests/test_native_libpq.py'
-
   test-harness:
     desc: Test the database harness
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} tools/ci/unit.py --harness'
 
-  test-storage-format:
-    desc: Verify and run the storage format inventory
-    cmds:
-      - task: native-check
-      - >-
-        {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_format -- --list |
-        awk '/: test$/ { count++ } END {
-        if (count != 31) { print "error: expected 31 storage format and identity tests"; exit 1 } }'
-      - '{{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_format -- --include-ignored'
-
-  test-storage-recovery:
-    desc: Verify and run the serial storage recovery inventory
-    cmds:
-      - task: native-check
-      - >-
-        {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery -- --list |
-        awk '/: test$/ { count++ } END {
-        if (count != 165) { print "error: expected 165 storage recovery and driver tests"; exit 1 } }'
-      - >-
-        {{.RUN}} {{.CARGO_COMMAND}} test --locked --test storage_recovery --
-        --include-ignored --test-threads=1
-
-  test-storage-publication:
-    desc: Verify process-crash publication and continuation in fresh storage
-    cmds:
-      - task: native-check
-      - |
-        set -eu
-        {{.RUN}}
-        mkdir -p {{.ROOT_DIR | shellQuote}}/target
-        publication_parent=$(mktemp -d {{.ROOT_DIR | shellQuote}}/target/storage-publication.XXXXXX)
-        {{.CARGO_COMMAND}} run --locked --example storage -- --c2-root "$publication_parent/run"
-        {{.PYTHON_COMMAND}} tools/ci/verify.py --storage-publication "$publication_parent/run/report.json"
-
-  storage-pilot:
-    desc: Run the storage pilot in the required fresh STORAGE_ROOT
-    cmds:
-      - task: native-check
-      - >-
-        {{.RUN}} {{.CARGO_COMMAND}} run --locked --release --example storage --
-        --root "${STORAGE_ROOT:?set STORAGE_ROOT to a new directory}"
-
   test-db:
-    desc: Run engine, catalog, snapshot, journal, and COPY database profiles
+    desc: Run engine, catalog, snapshot, and COPY database profiles
     cmds:
       - task: build
       - task: test-engine
       - task: test-catalog
       - task: test-source-catalog
       - task: test-source-snapshot
-      - task: test-journal-serial
+      - task: test-clone
+      - task: test-schema
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py -- {{.CARGO_COMMAND}}
         test --locked --test copy_integration -- --test-threads=1
@@ -194,26 +131,40 @@ tasks:
   test-engine:
     desc: Run the exact engine profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --engine -- {{.CARGO_COMMAND}}
         test --locked --lib -- --ignored --test-threads=1
-        --skip catalog::tests::live_cdc_ --skip catalog::tests::live_source_identity_
-        --skip snapshot::live_tests::
-        --skip snapshot::journal_live_tests::
+        --skip catalog::tests::live_cdc_ --skip catalog::tests::live_clone_admission_
+        --skip catalog::tests::live_source_identity_
+        --skip snapshot::live_tests:: --skip snapshot::clone_tests:: --skip copy::live_tests:: --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation
 
   test-catalog:
     desc: Run the live CDC catalog profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --catalog -- {{.CARGO_COMMAND}}
-        test --locked --lib catalog::tests::live_cdc_ -- --ignored --test-threads=1
+        test --locked --lib catalog::tests::live_ -- --ignored --test-threads=1
+        --skip catalog::tests::live_source_identity_ --skip catalog::tests::live_preflight_
+
+  test-clone:
+    desc: Run the seven exact isolated native clone component cases
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --clone -- {{.CARGO_COMMAND}}
+        test --locked --lib -- --ignored --test-threads=1
+        snapshot::clone_tests:: copy::live_tests:: apply::checkpoint::clone_marker_tests::
+
+  test-schema:
+    desc: Run the exact isolated schema restart guard case
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --schema -- {{.CARGO_COMMAND}}
+        test --locked --lib schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation
+        -- --ignored --test-threads=1
 
   test-source-catalog:
     desc: Run the live source identity probe profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --source-catalog -- {{.CARGO_COMMAND}}
         test --locked --lib catalog::tests::live_source_identity_ -- --ignored --test-threads=1
@@ -221,24 +172,13 @@ tasks:
   test-source-snapshot:
     desc: Run the live source snapshot and fault profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --source-snapshot -- {{.CARGO_COMMAND}}
         test --locked --lib snapshot::live_tests:: -- --ignored --test-threads=1
 
-  test-journal-serial:
-    desc: Verify source WAL, journal reopen, serial effects, and recovery
-    cmds:
-      - task: native-check
-      - >-
-        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --journal-serial -- {{.CARGO_COMMAND}}
-        test --locked --lib snapshot::journal_live_tests:: -- --ignored --test-threads=1
-        --skip snapshot::journal_live_tests::journal_serial_crash_child
-
   test-transport:
     desc: Run the live transport profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --transport -- {{.CARGO_COMMAND}}
         test --locked --lib pg::live_tests:: -- --ignored --test-threads=1
@@ -246,15 +186,14 @@ tasks:
   test-prepared:
     desc: Run the prepared execution profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --prepared -- {{.CARGO_COMMAND}}
-        test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
+        test --locked --lib pg:: -- --ignored --test-threads=1
+        --skip pg::live_tests:: --skip pg::replication_live_tests::
 
   test-replication:
     desc: Run the replication profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --replication -- {{.CARGO_COMMAND}}
         test --locked --lib pg::replication_live_tests:: -- --ignored --test-threads=1
@@ -262,7 +201,6 @@ tasks:
   test-authority:
     desc: Run the authority profile
     cmds:
-      - task: native-check
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --authority -- {{.CARGO_COMMAND}}
         test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1
@@ -272,17 +210,39 @@ tasks:
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --self-check'
 
-  ci:linux:
-    desc: Run Linux verification in its owned container
+  test-e2e-clone-unit:
+    desc: Check disposable clone harness controls without containers
     cmds:
-      - '{{.RUN}} bash tools/ci/linux.sh'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_clone.py'
+
+  test-e2e-clone-16-16:
+    desc: Qualify plain clone and recovery boundaries on PostgreSQL 16 to 16
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 16-16'
+
+  test-e2e-clone-18-18:
+    desc: Qualify plain clone and recovery boundaries on PostgreSQL 18 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 18-18'
+
+  test-e2e-clone-16-18:
+    desc: Qualify plain clone and recovery boundaries on PostgreSQL 16 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 16-18'
+
+  test-e2e-clone:
+    desc: Qualify all three declared plain-clone version pairs
+    cmds:
+      - task: test-e2e-clone-16-16
+      - task: test-e2e-clone-18-18
+      - task: test-e2e-clone-16-18
 
   image:build:
-    desc: Build one runtime image with explicit engine, platform, and output arguments
+    desc: Build the local native runner image
     cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/image/build.py {{.CLI_ARGS}}'
+      - '{{.RUN}} {{.CONTAINER_ARGUMENT}} build --tag {{.IMAGE_ARGUMENT}} --file Dockerfile .'
 
   image:smoke:
-    desc: Qualify an existing runtime image with an explicit fixture image
+    desc: Check the local runner and emit a JSON packaging receipt
     cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/image/smoke.py {{.CLI_ARGS}}'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/image/smoke.py --image {{.IMAGE_ARGUMENT}}'

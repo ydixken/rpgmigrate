@@ -6,7 +6,10 @@ use clap::ArgMatches;
 use clap::parser::ValueSource;
 
 use crate::cli::{CommandPath, Environment, Parser};
-use crate::contracts::{Conninfo, Error, ErrorKind, Invocation, Result, StateAction, StateRequest};
+use crate::contracts::{
+    CloneOptions, Conninfo, Error, ErrorKind, Invocation, RestorePolicy, Result, StateAction,
+    StateRequest,
+};
 
 const COMMON_ENV: &[(&str, &str, bool)] = &[
     ("PGCOPYDB_SOURCE_PGURI", "source", false),
@@ -108,6 +111,7 @@ impl Settings {
         if !matches!(parser, Parser::Root | Parser::Version | Parser::Group) {
             for &(name, option, boolean) in COMMON_ENV {
                 if parser != Parser::List
+                    || (option == "target" && leaf.try_contains_id("target").is_ok())
                     || matches!(
                         option,
                         "source"
@@ -230,6 +234,9 @@ impl Settings {
     }
 
     pub(crate) fn validate(&self, parser: Parser, path: &CommandPath) -> Result<()> {
+        if parser == Parser::Version && !self.operands.is_empty() {
+            return Err(self.invalid_combination(&[], "version does not accept operands"));
+        }
         if self.enabled("resume") && self.enabled("restart") {
             return Err(self.invalid_combination(
                 &["resume", "restart"],
@@ -325,7 +332,7 @@ impl Settings {
     pub(crate) fn reject_output_options(&self) -> Result<()> {
         for (name, setting) in &self.options {
             if setting.active()
-                && (name == "json" || name.starts_with("log-") || name == "debug-bin-path")
+                && ((name.starts_with("log-") && name != "log-json") || name == "debug-bin-path")
             {
                 return Err(unsupported_option(name));
             }
@@ -339,6 +346,139 @@ impl Settings {
         path: CommandPath,
         env: &Environment,
     ) -> Result<Invocation> {
+        let operator = crate::protocol::operator_identity(env)?;
+        let clone_route = path.0 == ["clone"];
+        let progress = path.0 == ["list", "progress"];
+        let compare_schema = path.0 == ["compare", "schema"];
+        let compare_data = path.0 == ["compare", "data"];
+        let native_route = clone_route || progress || compare_schema || compare_data;
+        if operator.is_some() && !native_route {
+            return Err(Error {
+                kind: ErrorKind::BadConfig,
+                message: "unimplemented operator identity state binding; no database or state action was started".into(),
+            });
+        }
+        if validate_apply_group(env)? {
+            return Err(Error {
+                kind: ErrorKind::BadConfig,
+                message: "unimplemented PGCOPYDB_APPLY_GROUP_TXNS; no database or state action was started".into(),
+            });
+        }
+        self.validate_connections(parser)?;
+        if native_route {
+            let options = self.clone_options(env, operator, !clone_route)?;
+            return Ok(if clone_route {
+                Invocation::Clone(options)
+            } else if progress {
+                Invocation::Progress {
+                    options,
+                    json: self.enabled("json"),
+                }
+            } else if compare_schema {
+                Invocation::CompareSchema(options)
+            } else {
+                Invocation::CompareData {
+                    options,
+                    json: self.enabled("json"),
+                }
+            });
+        }
+        self.runtime_invocation(path, env)
+    }
+
+    fn clone_options(
+        &self,
+        env: &Environment,
+        operator: Option<crate::contracts::OperatorIdentity>,
+        read_only: bool,
+    ) -> Result<CloneOptions> {
+        if !self.operands.is_empty() {
+            return Err(
+                self.invalid_combination(&[], "native clone commands do not accept operands")
+            );
+        }
+        for (name, setting) in &self.options {
+            if !setting.active() {
+                continue;
+            }
+            let allowed = matches!(name.as_str(), "source" | "target" | "dir" | "log-json")
+                || (read_only && name == "json")
+                || (!read_only
+                    && matches!(
+                        name.as_str(),
+                        "resume"
+                            | "restart"
+                            | "not-consistent"
+                            | "table-jobs"
+                            | "index-jobs"
+                            | "restore-jobs"
+                            | "no-owner"
+                            | "no-acl"
+                            | "no-comments"
+                            | "no-tablespaces"
+                            | "skip-large-objects"
+                    ));
+            if !allowed {
+                return Err(unsupported_option(name));
+            }
+        }
+        if self.enabled("not-consistent") && !self.enabled("resume") {
+            return Err(
+                self.invalid_combination(&["not-consistent"], "--not-consistent requires --resume")
+            );
+        }
+        let jobs = |name: &str| -> Option<usize> {
+            self.text(name)
+                .and_then(OsStr::to_str)
+                .and_then(parse_integer)
+                .and_then(|value| usize::try_from(value).ok())
+        };
+        let index_jobs = jobs("index-jobs");
+        let restore_jobs = jobs("restore-jobs");
+        if matches!((index_jobs, restore_jobs), (Some(index), Some(restore)) if index != restore) {
+            return Err(self.invalid_combination(
+                &["index-jobs", "restore-jobs"],
+                "--index-jobs and --restore-jobs must agree in the plain clone profile",
+            ));
+        }
+        let connection = |name| -> Result<Conninfo> {
+            self.text(name)
+                .ok_or_else(|| {
+                    self.invalid_combination(
+                        &[],
+                        &format!("--{name} is required for this native command"),
+                    )
+                })
+                .and_then(|value| Conninfo::new(value.to_owned()))
+        };
+        let action = if read_only || self.enabled("resume") {
+            StateAction::Resume
+        } else if self.enabled("restart") {
+            StateAction::Restart
+        } else {
+            StateAction::Create
+        };
+        Ok(CloneOptions {
+            source: connection("source")?,
+            target: connection("target")?,
+            state: StateRequest {
+                path: self.state_path(env)?,
+                action,
+            },
+            operator,
+            table_jobs: jobs("table-jobs").unwrap_or(4),
+            post_data_jobs: restore_jobs.or(index_jobs).unwrap_or(4),
+            policy: RestorePolicy {
+                no_owner: self.enabled("no-owner"),
+                no_acl: self.enabled("no-acl"),
+                no_comments: self.enabled("no-comments"),
+                no_tablespaces: self.enabled("no-tablespaces"),
+            },
+            not_consistent: self.enabled("not-consistent"),
+        })
+    }
+
+    fn validate_connections(&self, parser: Parser) -> Result<()> {
         for name in ["source", "target"] {
             if let Some(setting) = self.options.get(name) {
                 validate_value(name, setting, parser)?;
@@ -370,6 +510,27 @@ impl Settings {
                 "--target is required; use PGCOPYDB_TARGET_PGURI or an explicit connection",
             ));
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contract_values(
+        &self,
+        parser: Parser,
+        env: &Environment,
+    ) -> Result<serde_json::Value> {
+        crate::protocol::operator_run(env)?;
+        validate_apply_group(env)?;
+        self.validate_connections(parser)?;
+        Ok(serde_json::json!({
+            "effective_source": self.text("source").and_then(OsStr::to_str),
+            "effective_target": self.text("target").and_then(OsStr::to_str),
+            "table_jobs": self.text("table-jobs").and_then(OsStr::to_str),
+            "log_json": self.enabled("log-json"),
+        }))
+    }
+
+    fn runtime_invocation(&self, path: CommandPath, env: &Environment) -> Result<Invocation> {
         let copy = path.0 == ["copy", "table-data"];
         let ping = path.0 == ["ping"];
         if !copy && !ping {
@@ -450,6 +611,22 @@ impl Settings {
             };
         Ok(base.join("rpgmigrate"))
     }
+}
+
+fn validate_apply_group(env: &Environment) -> Result<bool> {
+    let Some(value) = env.0.get(OsStr::new("PGCOPYDB_APPLY_GROUP_TXNS")) else {
+        return Ok(false);
+    };
+    if !value
+        .to_str()
+        .is_some_and(|value| bounded_integer(value, 1, u64::MAX))
+    {
+        return Err(Error {
+            kind: ErrorKind::BadConfig,
+            message: "invalid PGCOPYDB_APPLY_GROUP_TXNS: expected a positive integer".into(),
+        });
+    }
+    Ok(true)
 }
 
 fn unsupported_option(name: &str) -> Error {

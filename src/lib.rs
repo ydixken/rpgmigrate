@@ -2,12 +2,16 @@ mod apply;
 mod catalog;
 mod cdc;
 mod cli;
+mod clone;
+mod compare;
 mod config;
 mod contracts;
 mod copy;
-mod copy_plan;
 mod identity;
 mod pg;
+mod progress;
+mod protocol;
+mod schema;
 mod snapshot;
 mod state;
 
@@ -19,8 +23,6 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(test)]
-use cdc::codec as format;
 use contracts::{Error, ErrorKind, Invocation, IoControl, Result};
 
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -54,7 +56,7 @@ pub fn run() -> u8 {
 fn execute(invocation: Invocation) -> Result<String> {
     match invocation {
         Invocation::Help(path) => return cli::render_help(&path),
-        Invocation::Version => return Ok(cli::render_version()),
+        Invocation::Version { json } => return Ok(cli::render_version(json)),
         Invocation::Unsupported(path) => {
             return Err(Error {
                 kind: ErrorKind::BadConfig,
@@ -64,7 +66,17 @@ fn execute(invocation: Invocation) -> Result<String> {
         _ => {}
     }
     let (mut handlers, cancelled) = SignalHandlers::install([libc::SIGINT, libc::SIGTERM])?;
-    let io = io_control(cancelled);
+    let io = if matches!(
+        invocation,
+        Invocation::Clone(_)
+            | Invocation::Progress { .. }
+            | Invocation::CompareSchema(_)
+            | Invocation::CompareData { .. }
+    ) {
+        IoControl::unbounded(cancelled)
+    } else {
+        io_control(cancelled)
+    };
     let outcome = match invocation {
         Invocation::Ping { source, target } => (|| {
             pg::ping(&source, &io).map_err(|error| endpoint_error(error, ErrorKind::Source))?;
@@ -96,10 +108,53 @@ fn execute(invocation: Invocation) -> Result<String> {
                 })
             ))
         })(),
-        Invocation::Help(_) | Invocation::Version | Invocation::Unsupported(_) => Err(Error {
-            kind: ErrorKind::Internal,
-            message: "invalid runtime invocation".into(),
-        }),
+        Invocation::Clone(options) => clone::run(options, &io),
+        Invocation::Progress { options, json } => {
+            let progress = progress::read(&options, &io)?;
+            if json {
+                protocol::copy_report(
+                    protocol::CopyCommand::Progress,
+                    progress.work.as_ref(),
+                    progress.phase,
+                    &progress.copy,
+                )
+            } else {
+                Ok(format!("phase: {}\n", progress.phase))
+            }
+        }
+        Invocation::CompareSchema(options) => {
+            let comparison = compare::schema(&options, &io)?;
+            comparison_output(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&comparison).map_err(|_| output_error())?
+                ),
+                comparison.matched(),
+            )
+        }
+        Invocation::CompareData { options, json } => {
+            let comparison = compare::data(&options, &io)?;
+            let matched = comparison.iter().all(compare::TableComparison::matched);
+            let output = if json {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&comparison).map_err(|_| output_error())?
+                )
+            } else {
+                format!(
+                    "{} tables: {}\n",
+                    comparison.len(),
+                    if matched { "match" } else { "different" }
+                )
+            };
+            comparison_output(output, matched)
+        }
+        Invocation::Help(_) | Invocation::Version { .. } | Invocation::Unsupported(_) => {
+            Err(Error {
+                kind: ErrorKind::Internal,
+                message: "invalid runtime invocation".into(),
+            })
+        }
     };
     let restored = handlers.restore();
     let output = outcome?;
@@ -111,6 +166,27 @@ fn execute(invocation: Invocation) -> Result<String> {
         });
     }
     Ok(output)
+}
+
+fn output_error() -> Error {
+    Error {
+        kind: ErrorKind::Internal,
+        message: "cannot encode command output".into(),
+    }
+}
+
+fn comparison_output(output: String, matched: bool) -> Result<String> {
+    if matched {
+        return Ok(output);
+    }
+    std::io::stdout()
+        .lock()
+        .write_all(output.as_bytes())
+        .map_err(|_| output_error())?;
+    Err(Error {
+        kind: ErrorKind::BadState,
+        message: "comparison found differences".into(),
+    })
 }
 
 fn io_control(cancelled: Arc<AtomicBool>) -> IoControl {
@@ -132,7 +208,8 @@ fn diagnostic(error: &Error) -> String {
         "level": "error",
         "category": format!("{:?}", error.kind),
         "exit_code": error.exit_code(),
-        "message": error.message,
+        "error_severity": "ERROR",
+        "message": format!("native:{:?}: {}", error.kind, error.message),
     })
     .to_string()
 }
@@ -225,10 +302,10 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn endpoint_context_preserves_native_configuration_errors() {
+    fn endpoint_context_preserves_configuration_errors() {
         let error = Error {
             kind: ErrorKind::BadConfig,
-            message: "native libpq capability is required".into(),
+            message: "transport configuration is invalid".into(),
         };
         let error = endpoint_error(error, ErrorKind::Source);
         assert_eq!(error.kind, ErrorKind::BadConfig);
@@ -268,7 +345,11 @@ mod tests {
         assert_eq!(value["level"], "error");
         assert_eq!(value["category"], "BadState");
         assert_eq!(value["exit_code"], 3);
-        assert_eq!(value["message"], error.message);
+        assert_eq!(value["error_severity"], "ERROR");
+        assert_eq!(
+            value["message"],
+            format!("native:BadState: {}", error.message)
+        );
     }
 
     #[test]

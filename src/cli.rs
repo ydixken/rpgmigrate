@@ -249,7 +249,14 @@ fn leaf(name: &'static str, parser: Parser) -> Command {
 fn group(name: &'static str, parser: Parser, leaves: &[&'static str]) -> Command {
     base(name, Parser::Group)
         .arg(flag("help", Some('h')))
-        .subcommands(leaves.iter().map(|name| leaf(name, parser)))
+        .subcommands(leaves.iter().map(|name| {
+            let command = leaf(name, parser);
+            if parser == Parser::List && *name == "progress" {
+                command.arg(value("target", Some('T')))
+            } else {
+                command
+            }
+        }))
 }
 
 fn command() -> Command {
@@ -327,7 +334,9 @@ pub(crate) fn parse(args: &[OsString], env: &Environment) -> Result<Invocation> 
     }
     if version || path.0 == ["version"] {
         settings.reject_output_options()?;
-        return Ok(Invocation::Version);
+        return Ok(Invocation::Version {
+            json: used(current, "json") || used(&matches, "json"),
+        });
     }
     let mut tree = command();
     for part in &path.0 {
@@ -363,7 +372,36 @@ pub(crate) fn render_help(path: &CommandPath) -> Result<String> {
     Ok(format!("{}\n", selected.render_help()))
 }
 
-pub(crate) fn render_version() -> String {
+#[cfg(test)]
+pub(crate) fn contract_oracle(args: &[OsString], env: &Environment) -> Result<serde_json::Value> {
+    let matches = command().try_get_matches_from(args).map_err(|_| Error {
+        kind: ErrorKind::BadArgs,
+        message: "invalid command or option syntax".into(),
+    })?;
+    let mut current = &matches;
+    let mut path = CommandPath(Vec::new());
+    while let Some((name, submatches)) = current.subcommand() {
+        path.0.push(name.to_owned());
+        current = submatches;
+    }
+    let parser = parser_for(&path.0);
+    let settings = Settings::resolve(parser, current, &matches, env)?;
+    settings.validate(parser, &path)?;
+    if path.0 == ["version"] {
+        settings.reject_output_options()?;
+        return Ok(serde_json::json!({}));
+    }
+    settings.contract_values(parser, env)
+}
+
+pub(crate) fn render_version(json: bool) -> String {
+    if json {
+        return format!(
+            "{}\n",
+            serde_json::to_string(&crate::protocol::Version::current())
+                .expect("version fields are serializable")
+        );
+    }
     format!(
         "rpgmigrate {}\nlibpq {}\n",
         env!("CARGO_PKG_VERSION"),
@@ -394,6 +432,191 @@ mod tests {
         ("PGCOPYDB_SOURCE_PGURI", "dbname=source"),
         ("PGCOPYDB_TARGET_PGURI", "dbname=target"),
     ];
+
+    #[test]
+    fn clone_uses_effective_four_job_defaults_and_admits_restore_policy() {
+        let env = [
+            ("PGCOPYDB_SOURCE_PGURI", "host=source.invalid"),
+            ("PGCOPYDB_TARGET_PGURI", "host=target.invalid"),
+        ];
+        let invocation = invoke(&["clone", "--no-owner", "--no-acl"], &env).unwrap();
+        assert!(matches!(invocation, Invocation::Clone(options)
+            if options.table_jobs == 4 && options.post_data_jobs == 4
+                && options.policy.no_owner && options.policy.no_acl));
+    }
+
+    #[test]
+    fn clone_refuses_conflicting_post_data_jobs_before_io() {
+        let env = [
+            ("PGCOPYDB_SOURCE_PGURI", "host=source.invalid"),
+            ("PGCOPYDB_TARGET_PGURI", "host=target.invalid"),
+        ];
+        let error =
+            invoke(&["clone", "--index-jobs", "2", "--restore-jobs", "3"], &env).unwrap_err();
+        assert!(error.message.contains("--index-jobs and --restore-jobs"));
+    }
+
+    #[test]
+    fn clone_explicit_jobs_and_recovery_flags_are_preserved() {
+        let Invocation::Clone(options) = invoke(
+            &[
+                "clone",
+                "--table-jobs",
+                "2",
+                "--restore-jobs",
+                "3",
+                "--resume",
+                "--not-consistent",
+            ],
+            CONNECTIONS,
+        )
+        .unwrap() else {
+            panic!("expected clone")
+        };
+        assert_eq!(options.table_jobs, 2);
+        assert_eq!(options.post_data_jobs, 3);
+        assert_eq!(options.state.action, StateAction::Resume);
+        assert!(options.not_consistent);
+        assert!(invoke(&["clone", "--not-consistent"], CONNECTIONS).is_err());
+    }
+
+    #[test]
+    fn clone_refuses_staged_features_before_database_or_state_actions() {
+        for option in [
+            "--follow",
+            "--roles",
+            "--all-databases",
+            "--drop-if-exists",
+            "--use-copy-binary",
+            "--skip-analyze",
+            "--skip-extensions",
+            "--defer-indexes",
+        ] {
+            let error = invoke(&["clone", option], CONNECTIONS).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadConfig, "{option}");
+            assert!(
+                error
+                    .message
+                    .contains("no database or state action was started"),
+                "{option}"
+            );
+        }
+    }
+
+    #[test]
+    fn measured_read_only_routes_require_both_connections_and_resume_state() {
+        assert!(
+            matches!(invoke(&["list", "progress", "--json"], CONNECTIONS).unwrap(),
+            Invocation::Progress { options, json: true } if options.state.action == StateAction::Resume)
+        );
+        assert!(matches!(
+            invoke(&["compare", "schema"], CONNECTIONS).unwrap(),
+            Invocation::CompareSchema(_)
+        ));
+        assert!(matches!(
+            invoke(&["compare", "data", "--json"], CONNECTIONS).unwrap(),
+            Invocation::CompareData { json: true, .. }
+        ));
+        assert!(invoke(&["list", "progress", "--json"], &CONNECTIONS[..1]).is_err());
+    }
+
+    #[test]
+    fn json_version_is_identity_free_and_advertises_no_runtime_capabilities() {
+        let env = [
+            ("PGCOPYDB_SOURCE_PGURI", "invalid connection"),
+            ("PGCOPYDB_TARGET_PGURI", "invalid connection"),
+            ("RPGMIGRATE_MIGRATION_UID", "invalid"),
+            ("RPGMIGRATE_RUN_ID", "invalid"),
+            ("RPGMIGRATE_WORKDIR_ID", "invalid"),
+            ("RPGMIGRATE_CHECKPOINT_GENERATION", "invalid"),
+            ("PGCOPYDB_APPLY_GROUP_TXNS", "invalid"),
+            ("PGCOPYDB_LOG_JSON", "on"),
+        ];
+        let invocation = invoke(&["version", "--json"], &env).unwrap();
+        let output = crate::execute(invocation).unwrap();
+        assert_eq!(output.lines().count(), 1);
+        assert!(output.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "protocol_version": 1,
+                "engine_version": env!("CARGO_PKG_VERSION"),
+                "capabilities": [],
+            })
+        );
+    }
+
+    #[test]
+    fn supplied_operator_identity_is_validated_and_never_mutates_standalone_state() {
+        let identity = [
+            (
+                "RPGMIGRATE_MIGRATION_UID",
+                "12345678-9abc-def0-1234-56789abcdef0",
+            ),
+            ("RPGMIGRATE_RUN_ID", "123456789abcdef0123456789abcdef0"),
+            ("RPGMIGRATE_WORKDIR_ID", "pvc-owned"),
+            ("RPGMIGRATE_CHECKPOINT_GENERATION", "1"),
+        ];
+        let mut env = CONNECTIONS.to_vec();
+        env.extend(identity);
+        let error = invoke(&["copy", "table-data"], &env).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadConfig);
+        assert!(error.message.contains("operator identity"));
+        assert!(error.message.contains("unimplemented"));
+        for (name, value) in identity {
+            let mut partial = CONNECTIONS.to_vec();
+            partial.push((name, value));
+            let error = invoke(&["copy", "table-data"], &partial).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadConfig);
+            assert!(!error.message.contains(value));
+        }
+        assert!(matches!(
+            invoke(&["--help"], &env).unwrap(),
+            Invocation::Help(_)
+        ));
+    }
+
+    #[test]
+    fn supplied_apply_group_setting_is_never_silently_ignored() {
+        for value in ["100", "0", "invalid", "18446744073709551616"] {
+            let mut env = CONNECTIONS.to_vec();
+            env.push(("PGCOPYDB_APPLY_GROUP_TXNS", value));
+            let error = invoke(&["copy", "table-data"], &env).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadConfig);
+            assert!(error.message.contains("PGCOPYDB_APPLY_GROUP_TXNS"));
+        }
+    }
+
+    #[test]
+    fn plain_version_retains_text_identity_and_libpq_version() {
+        for args in [vec!["version"], vec!["--version"]] {
+            let output = crate::execute(invoke(&args, &[]).unwrap()).unwrap();
+            assert_eq!(
+                output,
+                format!(
+                    "rpgmigrate {}\nlibpq {}\n",
+                    env!("CARGO_PKG_VERSION"),
+                    crate::pg::libpq_version()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn version_rejects_malformed_json_syntax_and_operands() {
+        for args in [
+            vec!["version", "--json=true"],
+            vec!["version", "--json", "unexpected"],
+            vec!["version", "unexpected"],
+        ] {
+            assert_eq!(
+                invoke(&args, &[]).unwrap_err().kind,
+                ErrorKind::BadArgs,
+                "{args:?}"
+            );
+        }
+    }
 
     #[test]
     fn valid_connections_and_cli_precedence_produce_ping_without_io() {

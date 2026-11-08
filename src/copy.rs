@@ -1,5 +1,4 @@
 use std::sync::atomic::Ordering;
-use std::time::Instant;
 
 use crate::catalog::{command, configure_durability, confirm_durability, qualified, rollback};
 use crate::contracts::{
@@ -7,6 +6,11 @@ use crate::contracts::{
 };
 use crate::pg::PgConnection;
 use crate::state::NativeState;
+
+mod clone;
+pub(crate) use clone::run_tables;
+#[cfg(test)]
+mod live_tests;
 
 pub(crate) fn run_copy(
     source: &mut PgConnection,
@@ -147,7 +151,7 @@ fn check_control(io: &IoControl) -> Result<()> {
             "COPY cancelled before target COMMIT",
         ));
     }
-    if Instant::now() >= io.deadline {
+    if io.is_expired() {
         return Err(failure(
             ErrorKind::Pgsql,
             "COPY deadline exceeded before target COMMIT",
@@ -195,7 +199,7 @@ mod tests {
     use crate::contracts::{Conninfo, StateAction, StateRequest};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn text_copy_validation_preserves_ordered_columns() {

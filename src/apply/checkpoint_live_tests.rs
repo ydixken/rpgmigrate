@@ -1054,18 +1054,20 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
             &format!(
                 "SELECT attname, atttypid, atttypmod, attnotnull, attcollation,
             'pg_catalog.\"C\"'::pg_catalog.regcollation::pg_catalog.oid
-            FROM pg_catalog.pg_attribute WHERE attrelid = {} AND attnum BETWEEN 20 AND 22
+            FROM pg_catalog.pg_attribute WHERE attrelid = {} AND attnum BETWEEN 20 AND 24
             ORDER BY attnum",
                 provenance.table_oid
             ),
             io,
         )
         .unwrap();
-    assert_eq!(columns.rows(), 3);
+    assert_eq!(columns.rows(), 5);
     for (row, (name, oid)) in [
         ("copy_snapshot_token", "25"),
         ("copy_consistent_point", "3220"),
         ("copy_plan_nonce", "17"),
+        ("clone_state", "25"),
+        ("certified_lsn", "3220"),
     ]
     .iter()
     .enumerate()
@@ -1078,6 +1080,8 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
     assert_eq!(columns.cell(0, 4).unwrap(), columns.cell(0, 5).unwrap());
     assert_eq!(columns.cell(1, 4).unwrap(), Some(b"0".as_slice()));
     assert_eq!(columns.cell(2, 4).unwrap(), Some(b"0".as_slice()));
+    assert_eq!(columns.cell(3, 4).unwrap(), columns.cell(3, 5).unwrap());
+    assert_eq!(columns.cell(4, 4).unwrap(), Some(b"0".as_slice()));
     authority.session.begin(io).unwrap();
     let types = authority
         .session
@@ -1086,16 +1090,20 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
         .query(
             "SELECT pg_catalog.cardinality(parameter_types),
             parameter_types[20]::pg_catalog.oid, parameter_types[21]::pg_catalog.oid,
-            parameter_types[22]::pg_catalog.oid, parameter_types[30]::pg_catalog.oid,
-            parameter_types[31]::pg_catalog.oid, parameter_types[32]::pg_catalog.oid
+            parameter_types[22]::pg_catalog.oid, parameter_types[23]::pg_catalog.oid,
+            parameter_types[24]::pg_catalog.oid, parameter_types[32]::pg_catalog.oid,
+            parameter_types[33]::pg_catalog.oid, parameter_types[34]::pg_catalog.oid,
+            parameter_types[35]::pg_catalog.oid, parameter_types[36]::pg_catalog.oid
             FROM pg_catalog.pg_prepared_statements WHERE name = 'rpgmigrate_metadata_update'",
             io,
         )
         .unwrap();
     assert_eq!(types.rows(), 1);
-    for (column, expected) in ["32", "25", "3220", "17", "25", "3220", "17"]
-        .iter()
-        .enumerate()
+    for (column, expected) in [
+        "36", "25", "3220", "17", "25", "3220", "25", "3220", "17", "25", "3220",
+    ]
+    .iter()
+    .enumerate()
     {
         assert_eq!(types.cell(0, column).unwrap(), Some(expected.as_bytes()));
     }
@@ -1390,6 +1398,7 @@ fn missing_privileges() {
         .quote_identifier(&provenance.intent.binding.schema_name)
         .unwrap();
     let table = qualified(&mut admin, &provenance);
+    let marker = format!("{schema}.copy_done");
     admin
         .query(
             &format!("GRANT USAGE ON SCHEMA {schema} TO e3_restricted"),
@@ -1402,28 +1411,39 @@ fn missing_privileges() {
             &io,
         )
         .unwrap();
-    for privilege in ["SELECT", "INSERT", "UPDATE"] {
-        admin
-            .query(
-                &format!("REVOKE {privilege} ON {table} FROM e3_restricted"),
-                &io,
-            )
-            .unwrap();
-        assert!(
-            TargetAuthority::acquire(
-                named_connection("RPGMIGRATE_TEST_AUTHORITY_RESTRICTED", &io),
-                stream,
-                &mut native,
-                &io
-            )
-            .is_err()
-        );
-        admin
-            .query(
-                &format!("GRANT {privilege} ON {table} TO e3_restricted"),
-                &io,
-            )
-            .unwrap();
+    admin
+        .query(
+            &format!("GRANT SELECT, INSERT, DELETE ON {marker} TO e3_restricted"),
+            &io,
+        )
+        .unwrap();
+    for (relation, privileges) in [
+        (&table, ["SELECT", "INSERT", "UPDATE"]),
+        (&marker, ["SELECT", "INSERT", "DELETE"]),
+    ] {
+        for privilege in privileges {
+            admin
+                .query(
+                    &format!("REVOKE {privilege} ON {relation} FROM e3_restricted"),
+                    &io,
+                )
+                .unwrap();
+            assert!(
+                TargetAuthority::acquire(
+                    named_connection("RPGMIGRATE_TEST_AUTHORITY_RESTRICTED", &io),
+                    stream,
+                    &mut native,
+                    &io
+                )
+                .is_err()
+            );
+            admin
+                .query(
+                    &format!("GRANT {privilege} ON {relation} TO e3_restricted"),
+                    &io,
+                )
+                .unwrap();
+        }
     }
     admin
         .query(
@@ -1482,6 +1502,7 @@ fn missing_privileges() {
             .quote_identifier(&provenance.intent.binding.schema_name)
             .unwrap();
         let table = qualified(&mut admin, &provenance);
+        let marker = format!("{schema}.copy_done");
         let role = admin.quote_identifier(&writer).unwrap();
         admin
             .query(
@@ -1495,6 +1516,9 @@ fn missing_privileges() {
         admin
             .query(&format!("GRANT SELECT, INSERT, UPDATE ON {table} TO {role}"), &io)
             .unwrap();
+        admin
+            .query(&format!("GRANT SELECT, INSERT, DELETE ON {marker} TO {role}"), &io)
+            .unwrap();
         let base = std::env::var("RPGMIGRATE_TEST_AUTHORITY_RESTRICTED").unwrap();
         let escaped = writer.replace('\\', "\\\\").replace('\'', "\\'");
         let conninfo = Conninfo::new(format!("{base} user='{escaped}'").into()).unwrap();
@@ -1507,15 +1531,23 @@ fn missing_privileges() {
                 pg_catalog.has_schema_privilege({schema_oid}::oid, 'USAGE'),
                 pg_catalog.has_table_privilege({table_oid}::oid, 'SELECT'),
                 pg_catalog.has_table_privilege({table_oid}::oid, 'INSERT'),
-                pg_catalog.has_table_privilege({table_oid}::oid, 'UPDATE')
+                pg_catalog.has_table_privilege({table_oid}::oid, 'UPDATE'),
+                pg_catalog.has_table_privilege({marker_oid}::oid, 'SELECT'),
+                pg_catalog.has_table_privilege({marker_oid}::oid, 'INSERT'),
+                pg_catalog.has_table_privilege({marker_oid}::oid, 'DELETE'),
+                NOT pg_catalog.has_table_privilege({marker_oid}::oid, 'UPDATE'),
+                NOT pg_catalog.has_table_privilege({marker_oid}::oid, 'TRUNCATE'),
+                NOT pg_catalog.has_table_privilege({marker_oid}::oid, 'REFERENCES'),
+                NOT pg_catalog.has_table_privilege({marker_oid}::oid, 'TRIGGER')
              FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER",
             owner = provenance.intent.binding.owner_oid,
             schema_oid = provenance.schema_oid,
             table_oid = provenance.table_oid,
+            marker_oid = provenance.marker_table_oid,
         ), &io).unwrap();
         assert_eq!(privileges.rows(), 1);
         assert_eq!(privileges.cell(0, 0).unwrap(), Some(writer.as_bytes()));
-        for column in 1..9 {
+        for column in 1..16 {
             assert_eq!(privileges.cell(0, column).unwrap(), Some(&b"t"[..]));
         }
         TargetAuthority::acquire(runtime, stream, &mut native, &io).and_then(|mut authority| {

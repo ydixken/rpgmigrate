@@ -3,7 +3,7 @@
 //! Durable commits are the only production path until E4 supplies release policy.
 //! An interrupted initial .manifest.tmp remains fail-closed in native state.
 
-mod checkpoint;
+pub(crate) mod checkpoint;
 mod metadata;
 mod plan;
 pub(crate) mod serial;
@@ -11,9 +11,9 @@ pub(crate) mod serial;
 use crate::contracts::SnapshotAnchor;
 use crate::identity::{CommitLsn, SourceEndLsn, StreamId, TxId, TxSeq};
 use checkpoint::DurableProof;
-#[cfg(test)]
-pub(crate) use checkpoint::copy_metadata_names_for_test;
-pub(crate) use checkpoint::{SnapshotProof, TargetAuthority};
+pub(crate) use checkpoint::{
+    CloneAuthority, CopyCommitOutcome, CopyPermit, CopyTxn, metadata_inventory,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Frontier {
@@ -37,6 +37,8 @@ pub(super) struct ControlRow {
     pub(super) barrier_epoch: u64,
     pub(super) barrier_counter: u64,
     pub(super) anchor: Option<SnapshotAnchor>,
+    pub(super) clone: Option<checkpoint::CloneControl>,
+    pub(super) certified_lsn: Option<SourceEndLsn>,
 }
 
 #[derive(Debug)]

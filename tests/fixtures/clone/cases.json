@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "pairs": [
+    "16-16",
+    "18-18",
+    "16-18"
+  ],
+  "max_rows": 100000,
+  "max_bytes": 67108864,
+  "tables": [
+    "empty",
+    "rows",
+    "wide",
+    "parent",
+    "child",
+    "part_low",
+    "part_high",
+    "reference"
+  ],
+  "cases": [
+    "plain",
+    "completed_resume",
+    "oracle_mutation",
+    "snapshot_writes",
+    "copy_restart",
+    "predata_handoff",
+    "postdata_refusal",
+    "foreign_collision",
+    "binary_refusal",
+    "split_refusal",
+    "large_object_refusal"
+  ],
+  "images": {
+    "16": "sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97",
+    "18": "sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6"
+  },
+  "row_counts": {
+    "empty": 0,
+    "reference": 2,
+    "rows": 100,
+    "wide": 2048,
+    "parent": 2,
+    "child": 1,
+    "part_low": 1,
+    "part_high": 1
+  }
+}

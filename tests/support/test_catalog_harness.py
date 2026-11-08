@@ -26,15 +26,18 @@ CASES = [
     "catalog::tests::live_cdc_target_rejects_metadata_mismatch",
     "catalog::tests::live_cdc_target_rejects_execution_profile",
     "catalog::tests::live_cdc_target_requires_owned_transaction_settings",
+    "catalog::tests::live_clone_admission_selects_each_heap_once_and_omits_generated_input",
+    "catalog::tests::live_clone_admission_refuses_unsupported_relations_and_trigger_states",
 ]
-COMMAND = ["cargo", "test", "--locked", "--lib", "catalog::tests::live_cdc_",
-           "--", "--ignored", "--test-threads=1"]
+COMMAND = ["cargo", "test", "--locked", "--lib", "catalog::tests::live_",
+           "--", "--ignored", "--test-threads=1", "--skip", "catalog::tests::live_source_identity_",
+           "--skip", "catalog::tests::live_preflight_"]
 OUTPUT = ("".join(f"test {name} ... ok\n" for name in CASES)
-          + "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s\n")
+          + "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s\n")
 
 
 class CatalogHarnessTests(unittest.TestCase):
-    def test_catalog_profile_requires_the_ten_independent_names(self):
+    def test_catalog_profile_requires_the_twelve_independent_names(self):
         expected = module_cases(load_manifest(), "Catalog")
         self.assertEqual(expected, CASES)
         self.assertEqual(json.loads((SUPPORT / "catalog_cases.json").read_text()), CASES)
@@ -42,13 +45,13 @@ class CatalogHarnessTests(unittest.TestCase):
     def test_catalog_cases_do_not_enter_engine_or_copy_inventory(self):
         manifest = load_manifest()
         engine = module_cases(manifest, "Engine")
-        self.assertEqual(len(engine), 41)
+        self.assertEqual(len(engine), 45)
         self.assertEqual(len(manifest["cases"]), 40)
         self.assertTrue(set(CASES).isdisjoint(engine))
         self.assertEqual(len(module_cases(manifest, "Authority")), 18)
         self.assertEqual(len(module_cases(manifest, "Replication")), 9)
 
-    def test_catalog_receipt_accepts_exact_ten_without_other_fixture_receipts(self):
+    def test_catalog_receipt_accepts_exact_twelve_without_other_fixture_receipts(self):
         validate = runpy.run_path(str(WRAPPER))["validate_module_receipt"]
         validate("Catalog", module_cases(load_manifest(), "Catalog"), OUTPUT, {})
 
@@ -63,14 +66,14 @@ class CatalogHarnessTests(unittest.TestCase):
                        OUTPUT.replace(CASES[0], "pg::live_tests::unrelated")):
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate("Catalog", expected, output, {})
-        for inventory in ([], [CASES[0]] * 10):
+        for inventory in ([], [CASES[0]] * 12):
             with self.subTest(inventory=inventory), self.assertRaises(AssertionError):
                 validate("Catalog", inventory, OUTPUT, {})
 
     def test_catalog_receipt_rejects_source_only_and_target_only_success(self):
         validate = runpy.run_path(str(WRAPPER))["validate_module_receipt"]
         expected = module_cases(load_manifest(), "Catalog")
-        for names, count in ((CASES[:6], 6), (CASES[6:], 4)):
+        for names, count in ((CASES[:6], 6), (CASES[6:], 6)):
             output = ("".join(f"test {name} ... ok\n" for name in names)
                       + f"test result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s\n")
             with self.subTest(count=count), self.assertRaises(AssertionError):
@@ -81,8 +84,8 @@ class CatalogHarnessTests(unittest.TestCase):
         expected = module_cases(load_manifest(), "Catalog")
         records, _, summary = OUTPUT.rpartition("test result:")
         for output in (records, OUTPUT + "test result:" + summary,
-                       OUTPUT.replace("10 passed", "0 passed"),
-                       OUTPUT.replace("10 passed", "6 passed"),
+                       OUTPUT.replace("12 passed", "0 passed"),
+                       OUTPUT.replace("12 passed", "6 passed"),
                        OUTPUT.replace("0 failed", "1 failed"),
                        OUTPUT.replace("0 ignored", "1 ignored"),
                        OUTPUT.replace("0 measured", "1 measured"),
@@ -94,7 +97,7 @@ class CatalogHarnessTests(unittest.TestCase):
         main = runpy.run_path(str(WRAPPER))["main"]
         for args in (["--catalog"], ["--catalog", "--"],
                      *(["--catalog", mode, "--", *COMMAND] for mode in
-                       ("--engine", "--transport", "--prepared", "--authority", "--replication", "--self-check"))):
+                       ("--engine", "--transport", "--prepared", "--authority", "--replication", "--schema", "--clone", "--self-check"))):
             with self.subTest(args=args), patch.object(sys, "argv", [str(WRAPPER), *args]), \
                     patch.dict(main.__globals__, {"OwnedCluster": self.forbid_database}), \
                     redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
@@ -154,7 +157,7 @@ class CatalogHarnessTests(unittest.TestCase):
             self.assertEqual(environment[key], f"host='/owned/socket' port='24567' dbname='{database}' "
                              f"user='{role}' connect_timeout='3' sslmode='disable' "
                              "application_name='rpgmigrate_e1_fixture' passfile='/owned/catalog/empty.pgpass'")
-        self.assertIn("Catalog verified 10 exact cases; full E1 suite not selected", output)
+        self.assertIn("Catalog verified 12 exact cases; full E1 suite not selected", output)
 
     def test_catalog_runner_propagates_child_failure(self):
         status, _, output = self.run_catalog(returncode=7)

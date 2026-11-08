@@ -352,8 +352,8 @@ class SourceSnapshotHarnessTests(unittest.TestCase):
         except ValueError:
             self.fail("SourceSnapshot profile is missing")
         self.assertEqual(actual, CASES)
-        for profile, count in (("Catalog", 10), ("SourceCatalog", 3), ("Authority", 18),
-                               ("Engine", 41), ("Replication", 9)):
+        for profile, count in (("Catalog", 12), ("SourceCatalog", 3), ("Authority", 18),
+                               ("Engine", 45), ("Replication", 9)):
             with self.subTest(profile=profile):
                 names = module_cases(manifest, profile)
                 self.assertEqual(len(names), count)

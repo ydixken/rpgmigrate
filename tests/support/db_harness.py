@@ -54,14 +54,23 @@ def load_manifest():
 
 
 def module_cases(manifest, profile):
+    if profile == "Schema":
+        return ["schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"]
+    if profile == "Clone":
+        return [
+            "snapshot::clone_tests::live_clone_snapshot_is_shared_and_exporter_lifetime_is_required",
+            "copy::live_tests::live_parallel_clone_preserves_snapshot_physical_heaps_identity_generated_and_wide_rows",
+            "copy::live_tests::live_clone_late_target_error_rolls_back_truncate_copy_and_marker",
+            "copy::live_tests::live_clone_oversize_row_refuses_before_table_commit",
+            "copy::live_tests::live_clone_established_empty_inventory_returns_zero_receipt",
+            "copy::live_tests::live_clone_rejects_replaced_snapshot_in_same_generation_before_copy",
+            "apply::checkpoint::clone_marker_tests::live_markers_commit_atomically_and_refuse_stale_generation_and_foreign_metadata",
+        ]
     if profile == "Transport":
         return manifest["transport_cases"]
     if profile == "SourceSnapshot":
         from source_snapshot_fixture import snapshot_cases
         return snapshot_cases()
-    if profile == "JournalSerial":
-        from journal_fixture import journal_cases
-        return journal_cases()
     if profile == "Catalog":
         catalog = json.loads(Path(__file__).with_name("catalog_cases.json").read_text())
         assert isinstance(catalog, list) and catalog, "missing catalog test inventory"
@@ -82,10 +91,16 @@ def module_cases(manifest, profile):
         return replication
     prepared = json.loads(Path(__file__).with_name("prepared_cases.json").read_text())
     assert isinstance(prepared, list) and prepared, "missing prepared test inventory"
+    prepared += [
+        "pg::pipeline_live_tests::pipeline_validates_ordered_rows_and_every_terminal_result",
+        "pg::pipeline_live_tests::pipeline_sql_and_callback_errors_drain_through_sync",
+        "pg::pipeline_live_tests::pipeline_drop_deadline_and_limits_fail_closed",
+    ]
     if profile == "Prepared":
         return prepared
     return (manifest["transport_cases"] + manifest["copy_cases"] + prepared
-            + module_cases(manifest, "Authority") + module_cases(manifest, "Replication"))
+            + module_cases(manifest, "Authority") + module_cases(manifest, "Replication")
+            + ["compare::tests::live_canonical_rows_preserve_only_generated_identity_null_and_duplicates"])
 
 
 def run_command(command, *, environment, cwd, timeout, capture_output=False):

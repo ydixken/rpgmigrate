@@ -123,6 +123,19 @@ fn raw_copy_handles_empty_null_escaped_bytes_and_one_oversize_frame() {
         .start_copy_in("COPY pg_transport FROM STDIN", &io)
         .unwrap();
     assert_eq!(target.finish_copy_in(&io).unwrap(), 0);
+
+    target
+        .start_copy_in("COPY pg_transport FROM STDIN", &io)
+        .unwrap();
+    target.write_copy(b"4\ttail\t\\\\x\n", &io).unwrap();
+    target.flush_copy(&io).unwrap();
+    assert_eq!(target.finish_copy_in(&io).unwrap(), 1);
+    source
+        .start_copy_out("COPY (SELECT repeat('x', 262144)) TO STDOUT", &io)
+        .unwrap();
+    let failure = source.read_copy_bounded(65536, &io).err().unwrap();
+    assert!(failure.message.contains("row limit"));
+    assert!(source.query("SELECT 1", &io).is_err());
 }
 
 #[test]
@@ -194,7 +207,7 @@ fn query_deadline_and_cancellation_stop_waiting() {
 #[test]
 #[ignore = "requires isolated harness connection"]
 fn passfile_and_service_authentication_preserve_security_checks() {
-    use super::passfile_tests::{Files, assert_child_completed, quote};
+    use super::test_support::{Files, assert_child_completed, quote};
     use std::fs::{self, DirBuilder};
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -268,10 +281,6 @@ fn passfile_and_service_authentication_preserve_security_checks() {
                 .output()
                 .unwrap();
             assert_child_completed(&output);
-            assert!(
-                output.stderr.is_empty(),
-                "native stderr escaped the SCRAM fixture; output withheld"
-            );
         }
     }
 }

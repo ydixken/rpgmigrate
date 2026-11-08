@@ -388,3 +388,8 @@ Git worktrees are allowed for parallel build work.
 Parallelize the build phase as far as file ownership allows.
 Run independent reviews and the Go test suites once per milestone, at its close, not after each task.
 Write finished plans into the repository, not only into the session plan file.
+
+Treat `docs/roadmap.md` as the primary project status overview and keep it synchronized as verified progress, blockers, and milestone closures arrive.
+Update the roadmap and task ledger in the same change without waiting for a reminder; the ledger holds detailed evidence.
+Tick completed subdeliverables, and leave milestone closing gates unchecked until their required checks pass.
+Do not use a current task ledger as a reason to leave the roadmap stale.
