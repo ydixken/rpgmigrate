@@ -59,7 +59,7 @@ These results close bounded component checks, not a native operator workflow or 
   The separate wrapper composition passed check and test gates, including 748 library tests.
   Strict lint remains red with 508 diagnostics: 504 from unwired normal-library dead code and four unused-import groups.
   The exact lint baseline delta remains unknown.
-  The qualification harness remains under design, and the authors retain HOLD.
+  Real-tool qualification on PostgreSQL 16 and 18, including 16 to 18, CLI integration, and strict lint remain open.
   No Native8 PostgreSQL execution, activation, ACK, full restart or merge qualification follows from these private checks.
 - [ ] Complete clone phases, recovery, cutover/drain, progress, verification, owned cleanup and the selected operator profile through runnable commands.
 

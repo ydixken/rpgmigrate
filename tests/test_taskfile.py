@@ -1,5 +1,6 @@
 """Exercise Task commands without compiling Rust or building native libraries."""
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
 import io
@@ -14,6 +15,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import urllib.error
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +59,9 @@ class BootstrapTests(unittest.TestCase):
                         patch.object(self.module.platform, "system", return_value="Darwin"),
                         patch.object(self.module.platform, "machine", return_value="arm64"),
                         patch.dict(self.module.SHA256, {self.key: hashlib.sha256(self.archive).hexdigest()}),
-                        patch.dict(os.environ, {}, clear=True)]
+                        patch.dict(os.environ, {}, clear=True),
+                        patch.object(self.module.urllib.request, "urlopen",
+                                     side_effect=AssertionError("unmocked bootstrap download"))]
         for item in self.patches:
             item.start()
             self.addCleanup(item.stop)
@@ -115,6 +119,139 @@ class BootstrapTests(unittest.TestCase):
         with patch.dict(os.environ, {"TASK_DRY": "true"}):
             with self.assertRaisesRegex(RuntimeError, "TASK_DRY"):
                 self.install()
+
+    def main_result(self, *arguments):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["bootstrap-task.py", *arguments]), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            status = self.module.main()
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def failure(self, phase, category, http_status=None):
+        status, stdout, stderr = self.main_result()
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout, "")
+        record = {"level": "error", "message": "Task bootstrap failed; check the platform, cache, network, and TASK_DRY",
+                  "phase": phase, "category": category}
+        if http_status is not None:
+            record["http_status"] = http_status
+        self.assertEqual(json.loads(stderr), record)
+        self.assertEqual(len(stderr.splitlines()), 1)
+        self.assertNotIn("PRIVATE_CANARY", stdout + stderr)
+
+    def test_download_failure_categories_and_redaction(self):
+        class PrivateError(RuntimeError):
+            def __str__(self):
+                raise AssertionError("exception string accessed")
+
+            def __repr__(self):
+                raise AssertionError("exception repr accessed")
+
+        url = "https://user:PRIVATE_CANARY@example.invalid/PRIVATE_CANARY"
+        cases = [(TimeoutError("PRIVATE_CANARY"), "timeout", None),
+                 (urllib.error.URLError(TimeoutError("PRIVATE_CANARY")), "timeout", None),
+                 (urllib.error.URLError("PRIVATE_CANARY"), "url", None),
+                 (ConnectionError("PRIVATE_CANARY"), "os_error", None),
+                 (PrivateError("PRIVATE_CANARY"), "unknown", None)]
+        for code, expected in ((100, 100), (503, 503), (599, 599), (99, None), (600, None),
+                               (True, None), ("PRIVATE_CANARY", None)):
+            error = urllib.error.HTTPError(url, code, "PRIVATE_CANARY", None, None)
+            self.addCleanup(error.close)
+            cases.append((error, "http", expected))
+        with patch.object(self.module, "ROOT", self.root / "PRIVATE_CANARY"), \
+                patch.object(self.module, "RELEASE", url), \
+                patch.dict(os.environ, {"PRIVATE_CANARY": "PRIVATE_CANARY"}):
+            for error, category, code in cases:
+                with self.subTest(category=category, code=code), \
+                        patch.object(self.module.urllib.request, "urlopen", side_effect=error):
+                    self.failure("download", category, code)
+
+    def test_configuration_diagnostics_preserve_refusal(self):
+        with patch.dict(os.environ, {"TASK_DRY": "PRIVATE_CANARY"}):
+            self.failure("configuration", "configuration")
+        with patch.object(self.module.platform, "machine", return_value="PRIVATE_CANARY"):
+            self.failure("configuration", "configuration")
+
+    def test_unknown_failure_does_not_infer_network_cause(self):
+        with patch.object(self.module.platform, "machine", side_effect=RuntimeError("PRIVATE_CANARY")):
+            self.failure("configuration", "unknown")
+
+    def test_filesystem_failure_does_not_expose_cache_path(self):
+        with patch.object(Path, "mkdir", side_effect=PermissionError(13, "PRIVATE_CANARY", "/PRIVATE_CANARY")):
+            self.failure("cache", "os_error")
+
+    def test_download_checksum_diagnostic_preserves_no_install(self):
+        self.module.SHA256[self.key] = "0" * 64
+        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(self.archive)):
+            self.failure("checksum", "checksum")
+        self.assertFalse((self.root / "target/tools/task/3.54.0/bin/task").exists())
+        self.assertEqual(list(self.root.rglob("*.tar.gz")), [])
+
+    def test_cached_archive_checksum_diagnostic(self):
+        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
+            self.install()
+        next(self.root.rglob("*.tar.gz")).write_bytes(b"PRIVATE_CANARY")
+        self.failure("checksum", "checksum")
+
+    def test_archive_diagnostics_preserve_validation(self):
+        contents = b"PRIVATE_CANARY"
+        self.module.SHA256[self.key] = hashlib.sha256(contents).hexdigest()
+        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(contents)):
+            self.failure("archive", "archive")
+        next(self.root.rglob("*.tar.gz")).unlink()
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:gz"):
+            pass
+        contents = stream.getvalue()
+        self.module.SHA256[self.key] = hashlib.sha256(contents).hexdigest()
+        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(contents)):
+            self.failure("archive", "archive")
+        self.assertFalse((self.root / "target/tools/task/3.54.0/bin/task").exists())
+
+    def test_publication_failure_does_not_publish_archive(self):
+        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(self.archive)), \
+                patch.object(Path, "replace", side_effect=PermissionError("PRIVATE_CANARY")):
+            self.failure("publish", "os_error")
+        self.assertEqual(list(self.root.rglob("*.tar.gz")), [])
+
+    def test_cached_binary_diagnostic_preserves_tampering_refusal(self):
+        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
+            binary = self.install()
+        binary.write_text("PRIVATE_CANARY")
+        self.failure("cache", "cache")
+        self.assertEqual(binary.read_text(), "PRIVATE_CANARY")
+
+    def test_execution_diagnostics_do_not_expose_child_output(self):
+        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
+            self.install()
+        for error, category in ((subprocess.TimeoutExpired("PRIVATE_CANARY", 10, "PRIVATE_CANARY", "PRIVATE_CANARY"), "timeout"),
+                                (subprocess.CalledProcessError(7, "PRIVATE_CANARY", "PRIVATE_CANARY", "PRIVATE_CANARY"), "process"),
+                                (PermissionError("PRIVATE_CANARY"), "os_error"),
+                                (RuntimeError("PRIVATE_CANARY"), "unknown")):
+            with self.subTest(category=category), patch.object(self.module.subprocess, "run", side_effect=error):
+                self.failure("execute", category)
+        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "PRIVATE_CANARY", "PRIVATE_CANARY")):
+            self.failure("execute", "version")
+
+    def test_success_and_offline_cache_keep_stdout_and_exit(self):
+        expected = str(self.root / "target/tools/task/3.54.0/bin/task") + "\n"
+        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
+            with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(self.archive)):
+                self.assertEqual(self.main_result(), (0, expected, ""))
+            self.assertEqual(self.main_result(), (0, expected, ""))
+
+    def test_version_only_keeps_stdout_and_skips_bootstrap(self):
+        with patch.object(self.module, "bootstrap", side_effect=AssertionError("bootstrap on version request")):
+            self.assertEqual(self.main_result("--version"), (0, "3.54.0\n", ""))
+
+    def test_unknown_exception_diagnostic_prevents_traceback(self):
+        with patch.object(self.module.urllib.request, "urlopen", side_effect=ValueError("PRIVATE_CANARY")):
+            self.failure("download", "unknown")
+        for error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(exception=type(error).__name__), \
+                    patch.object(self.module.urllib.request, "urlopen", side_effect=error):
+                with self.assertRaises(type(error)):
+                    self.main_result()
 
 
 class TaskfileTests(unittest.TestCase):

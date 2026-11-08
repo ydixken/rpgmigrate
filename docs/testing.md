@@ -42,6 +42,13 @@ Its Python inventory includes the CI receipt validator, publisher, launcher, Tas
 It then runs `task native`, `task native-check`, `task lint`, and `task test`.
 The shared bootstrap helper supplies Task 3.54.0 to local shells, CI hosts, and the fixture container.
 Verification rejects `TASK_DRY` instead of accepting a command preview as a test result.
+Bootstrap failures return exit code 1 with empty stdout and one JSON diagnostic on stderr.
+The diagnostic retains its fixed message and adds `phase` (`configuration`, `cache`, `download`, `checksum`, `archive`, `publish`, `execute`, or `unknown`) and `category` (`configuration`, `checksum`, `archive`, `cache`, `version`, `http`, `timeout`, `url`, `os_error`, `process`, or `unknown`).
+The phase identifies the operation in progress; a category identifies an explicit refusal or a known exception type, not an inferred cause.
+Download HTTP errors include `http_status` only when the status is an integer from 100 through 599.
+Unknown failures remain `unknown`; elapsed time alone does not establish a network timeout.
+Diagnostics exclude exception text, URLs, paths, child output, environment values, and credentials.
+Successful installation still prints only the verified binary path, and `--version` prints the pinned version without bootstrapping.
 The native checks verify the reviewed PostgreSQL 18.6 source, patches, installed hashes, and capability marker.
 They also require OpenSSL, GSSAPI, and libcurl OAuth support in the native receipt.
 
