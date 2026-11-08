@@ -25,3 +25,7 @@ Do not let a planning worker edit source or install dependencies without a new a
 Tests and documentation accompany behavior changes.
 Keep runtime support claims tied to passing checks in the authoritative task status.
 Commit only after required checks pass and the leader requests it.
+
+## Subagent effort
+
+Follow the canonical [global subagent-effort policy](/Users/ydixken/.codex/AGENTS.md#subagent-effort).

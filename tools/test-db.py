@@ -6,8 +6,8 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import re
 import signal
-import stat
 import subprocess
 import sys
 
@@ -18,10 +18,31 @@ from db_harness import (FIXTURES, SETTINGS, OwnedCluster, assert_equal, conninfo
 from protocol_fault import ProtocolFault
 from authority_fixture import authority_fixture, validate_authority_faults
 from replication_fixture import replication_fixture, validate_replication_faults
+from source_snapshot_fixture import source_snapshot_fixture, validate_source_snapshot_faults
+from journal_fixture import prepare_journal_fixture, validate_journal_receipts
 
 
 def validate_module_receipt(profile, expected, output, context):
     validate_libtest_output(expected, output)
+    if profile == "JournalSerial":
+        assert expected == module_cases({}, profile), "wrong journal parent inventory"
+        summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
+        assert len(summaries) == 1 and re.fullmatch(
+            r"ok\. 2 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
+            summaries[0]), "missing or inconsistent journal test summary"
+        validate_journal_receipts(context)
+    if profile == "SourceSnapshot":
+        assert expected == module_cases({}, profile), "wrong source snapshot inventory"
+        summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
+        assert len(summaries) == 1 and re.fullmatch(
+            r"ok\. 12 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
+            summaries[0]), "missing or inconsistent source snapshot test summary"
+        validate_source_snapshot_faults(context["snapshot"])
+    if profile in ("Catalog", "SourceCatalog"):
+        summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
+        assert len(summaries) == 1 and re.fullmatch(
+            rf"ok\. {len(expected)} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
+            summaries[0]), "missing or inconsistent catalog test summary"
     if profile in ("Authority", "Engine"):
         validate_authority_faults(context)
     if profile in ("Replication", "Engine"):
@@ -125,6 +146,10 @@ def main():
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
     modes.add_argument("--authority", action="store_true", help="require the exact target authority live-test inventory")
     modes.add_argument("--replication", action="store_true", help="require the exact raw CopyBoth live-test inventory")
+    modes.add_argument("--catalog", action="store_true", help="require the exact ten source and target CDC catalog live tests")
+    modes.add_argument("--source-catalog", action="store_true", help="require the exact three source identity live tests")
+    modes.add_argument("--source-snapshot", action="store_true", help="require twelve source snapshot cases and five observed fault receipts")
+    modes.add_argument("--journal-serial", action="store_true", help="require two journal parents, two killed children, and two committed Unknown faults")
     modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, replication, and catalog/COPY live tests")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -132,15 +157,16 @@ def main():
     if not args.self_check and not command:
         parser.error("provide --self-check or -- followed by the integration test command")
     manifest = load_manifest()
-    module_suite = args.transport or args.engine or args.prepared or args.authority or args.replication
+    module_suite = args.transport or args.engine or args.prepared or args.authority or args.replication or args.catalog or args.source_catalog or args.source_snapshot or args.journal_serial
     if module_suite:
-        profile = "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
+        profile = "JournalSerial" if args.journal_serial else "SourceSnapshot" if args.source_snapshot else "SourceCatalog" if args.source_catalog else "Catalog" if args.catalog else "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
         expected = module_cases(manifest, profile)
     with OwnedCluster(manifest) as cluster, ExitStack() as fixtures:
         if args.self_check:
             self_check(cluster, manifest)
             return 0
-        source, target = databases(cluster.context, "transport")
+        source, target = databases(cluster.context, "source_catalog" if args.source_catalog else "catalog" if args.catalog else "transport",
+                                   empty=args.catalog or args.source_catalog)
         receipt = cluster.root / "results.json"
         environment = dict(cluster.environment)
         environment.update({
@@ -155,11 +181,32 @@ def main():
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION": manifest["server_version"],
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM": str(manifest["server_version_num"]),
         })
-        if args.authority or args.engine:
+        if args.catalog:
+            environment.update({
+                "RPGMIGRATE_TEST_CATALOG_SOURCE": conninfo(cluster.context, source, "e1_source"),
+                "RPGMIGRATE_TEST_CATALOG_ADMIN": conninfo(cluster.context, source, "e1_admin"),
+                "RPGMIGRATE_TEST_CATALOG_TARGET": conninfo(cluster.context, target, "e1_target"),
+                "RPGMIGRATE_TEST_CATALOG_TARGET_ADMIN": conninfo(cluster.context, target, "e1_admin"),
+            })
+        if args.source_catalog:
+            psql(cluster.context, source,
+                 "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC, e1_auth; "
+                 "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO e1_source;")
+            environment.update({
+                "RPGMIGRATE_TEST_SOURCE_CATALOG_SOURCE": conninfo(cluster.context, source, "e1_source"),
+                "RPGMIGRATE_TEST_SOURCE_CATALOG_ADMIN": conninfo(cluster.context, source, "e1_admin"),
+            })
+        if args.authority or args.engine or args.journal_serial:
             environment.update(fixtures.enter_context(authority_fixture(cluster)))
-        if args.replication or args.engine:
+        if args.replication or args.engine or args.journal_serial:
             context, source_environment = fixtures.enter_context(replication_fixture(manifest))
             cluster.context["replication"] = context
+            environment.update(source_environment)
+        if args.journal_serial:
+            prepare_journal_fixture(cluster.context, cluster.context["replication"])
+        if args.source_snapshot:
+            context, source_environment = fixtures.enter_context(source_snapshot_fixture(manifest))
+            cluster.context["snapshot"] = context
             environment.update(source_environment)
         # Cargo keeps its cache/toolchain paths while test clients get a private HOME.
         for key, fallback in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
@@ -178,6 +225,11 @@ def main():
                 print("Authority faults verified 2 held COMMIT replies and observed fence releases")
             if args.replication or args.engine:
                 print("Replication faults verified 4 wire cases and observed PQflush backpressure")
+            if args.source_snapshot:
+                print("SourceSnapshot faults verified 5 observed cases and closed backends")
+            if args.journal_serial:
+                print("JournalSerial children verified 2 pre-COMMIT SIGKILL receipts")
+                print("JournalSerial faults verified 2 committed Unknown replies and released fences")
             print(f"{profile} verified {len(expected)} exact cases; full E1 suite not selected")
             return 0
         if not receipt.is_file():
@@ -192,37 +244,7 @@ def interrupted(_signum, _frame):
     raise KeyboardInterrupt
 
 
-def notify_failure(error, path):
-    if path is None:
-        return
-    try:
-        path = Path(path)
-        parent = path.parent.lstat()
-        if (not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != 0o700
-                or parent.st_uid != os.geteuid()):
-            return
-        origin = error.__traceback__
-        while origin.tb_next is not None:
-            origin = origin.tb_next
-        code = origin.tb_frame.f_code
-        context = (f"test-db-context: {type(error).__name__} at {Path(code.co_filename).name}:{origin.tb_lineno} in {code.co_name}\n").encode("ascii")
-        if len(context) > 256:
-            return
-        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            info = os.fstat(descriptor)
-            if (stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
-                    and info.st_uid == os.geteuid() and info.st_nlink == 1):
-                os.write(descriptor, context)
-        finally:
-            os.close(descriptor)
-    except Exception:
-        # Diagnostic failure must preserve the original exception and exit behavior.
-        pass
-
-
 if __name__ == "__main__":
-    context_path = os.environ.pop("RPGMIGRATE_CI_FAILURE_CONTEXT", None)
     signal.signal(signal.SIGTERM, interrupted)
     try:
         sys.exit(main())
@@ -230,8 +252,4 @@ if __name__ == "__main__":
         sys.exit(130)
     except (AssertionError, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(f"test-db: {error}", file=sys.stderr)
-        notify_failure(error, context_path)
         sys.exit(1)
-    except Exception as error:
-        notify_failure(error, context_path)
-        raise

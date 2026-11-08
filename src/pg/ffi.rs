@@ -1,5 +1,8 @@
-use super::replication::{ReplicationState, start_command};
-use super::{IdentifySystem, ReplicationFrame, ReplicationPoll, StandbyStatus, error, io};
+use super::replication::{ReplicationState, create_slot_command, start_command};
+use super::{
+    CreatedLogicalSlot, IdentifySystem, ReplicationFrame, ReplicationPoll, SlotCreateOutcome,
+    StandbyStatus, error, io,
+};
 use crate::contracts::{Conninfo, Error, IoControl, Result};
 use pq_sys as pq;
 use std::ffi::{CStr, CString, c_void};
@@ -179,6 +182,36 @@ impl PgConnection {
         // SAFETY: raw() checks that this owner still holds a live PGconn allocation.
         let status = unsafe { pq::PQtransactionStatus(raw) };
         Ok(transaction_status_from_libpq(status))
+    }
+
+    /// Reads local connection state without dispatch or a liveness probe.
+    pub(crate) fn is_replication(&self) -> Result<bool> {
+        let raw = self.raw()?;
+        // SAFETY: raw() checks the owned allocation; PQstatus reads only local connection state.
+        if unsafe { pq::PQstatus(raw) } != pq::ConnStatusType::CONNECTION_OK {
+            return Err(error("PostgreSQL connection is unavailable"));
+        }
+        Ok(self.mode == Mode::Logical)
+    }
+
+    /// Reads startup metadata; a positive PID does not prove backend liveness.
+    pub(crate) fn backend_pid(&self) -> Result<u32> {
+        // SAFETY: raw() checks the allocation and PQbackendPID only reads local metadata.
+        let pid = unsafe { pq::PQbackendPID(self.raw()?) };
+        u32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid != 0)
+            .ok_or_else(|| error("PostgreSQL backend PID is unavailable"))
+    }
+
+    /// Reads startup metadata without dispatch or a liveness probe.
+    pub(crate) fn server_version(&self) -> Result<u32> {
+        // SAFETY: raw() checks the allocation and PQserverVersion only reads local metadata.
+        let version = unsafe { pq::PQserverVersion(self.raw()?) };
+        u32::try_from(version)
+            .ok()
+            .filter(|version| *version != 0)
+            .ok_or_else(|| error("PostgreSQL server version is unavailable"))
     }
 
     /// Statements belong to this connection and must be prepared again after reconnecting.
@@ -399,6 +432,26 @@ impl PgConnection {
             .map_err(|_| error("PostgreSQL returned an invalid quoted identifier"))
     }
 
+    pub(crate) fn quote_literal(&mut self, value: &str) -> Result<String> {
+        let raw = self.raw()?;
+        if value.as_bytes().contains(&0) {
+            return Err(error("PostgreSQL literal contains a NUL byte"));
+        }
+        // SAFETY: libpq reads value.len() valid bytes and returns a terminated owned allocation.
+        let quoted = unsafe { pq::PQescapeLiteral(raw, value.as_ptr().cast(), value.len()) };
+        let quoted =
+            NonNull::new(quoted).ok_or_else(|| error("PostgreSQL literal quoting failed"))?;
+        // SAFETY: the non-null libpq allocation contains a terminated C string.
+        let bytes = unsafe { CStr::from_ptr(quoted.as_ptr()) }.to_bytes();
+        let owned = CopyBuffer {
+            raw: quoted.cast(),
+            len: bytes.len(),
+        };
+        std::str::from_utf8(owned.as_bytes())
+            .map(str::to_owned)
+            .map_err(|_| error("PostgreSQL returned an invalid quoted literal"))
+    }
+
     fn raw(&self) -> Result<*mut pq::PGconn> {
         self.raw
             .as_ref()
@@ -454,6 +507,66 @@ impl PgConnection {
                     result.cell(0, 3)?,
                 ],
             )
+        })
+    }
+
+    /// Persist resource intent before calling; Unknown closes the exporter and cannot authorize retry.
+    /// Created requires the matching receipt, completion tag, and complete result drain.
+    pub(crate) fn create_logical_slot_export(
+        &mut self,
+        slot: &str,
+        plugin: &str,
+        io: &IoControl,
+    ) -> Result<SlotCreateOutcome> {
+        self.require_mode(Mode::Logical)?;
+        let raw = self.require(Phase::Idle)?;
+        let command = create_slot_command(slot, plugin)?;
+        io::check(io)?;
+        if self.transaction_status()? != TransactionStatus::Idle {
+            return Err(error(
+                "PostgreSQL logical slot creation requires an idle transaction",
+            ));
+        }
+        self.phase = Phase::Query;
+        // PQsendQuery can partially send even on failure; every error from here has an unknown outcome.
+        let outcome = (|| {
+            // SAFETY: raw is exclusively owned and the checked command stays live while libpq copies it.
+            if unsafe { pq::PQsendQuery(raw, command.as_ptr()) } != 1 {
+                return Err(error("PostgreSQL logical slot creation dispatch failed"));
+            }
+            self.flush(io)?;
+            let result = self.drain(None, io)?;
+            // SAFETY: the fully drained connection remains exclusively owned by this handle.
+            let status = unsafe { pq::PQstatus(raw) };
+            check_slot_export_completion(status, self.transaction_status()?)?;
+            // SAFETY: result owns its PGresult; dimensions are signed nonnegative integers.
+            let columns = unsafe { pq::PQnfields(result.raw.as_ptr()) };
+            if result.status() != pq::ExecStatusType::PGRES_TUPLES_OK
+                || result.rows() != 1
+                || columns != 4
+            {
+                return Err(error("PostgreSQL logical slot creation result is invalid"));
+            }
+            CreatedLogicalSlot::parse(
+                slot,
+                plugin,
+                result.rows(),
+                &[
+                    result.cell(0, 0)?,
+                    result.cell(0, 1)?,
+                    result.cell(0, 2)?,
+                    result.cell(0, 3)?,
+                ],
+                result.command_tag()?,
+            )
+        })();
+        Ok(match outcome {
+            Ok(created) => SlotCreateOutcome::Created(created),
+            Err(failure) => {
+                self.raw.take();
+                self.phase = Phase::Idle;
+                SlotCreateOutcome::Unknown(failure)
+            }
         })
     }
 
@@ -939,6 +1052,12 @@ impl PgResult {
         unsafe { pq::PQntuples(self.raw.as_ptr()) as usize }
     }
 
+    pub(crate) fn columns(&self) -> Result<usize> {
+        // SAFETY: this result owns a live libpq allocation.
+        let count = unsafe { pq::PQnfields(self.raw.as_ptr()) };
+        usize::try_from(count).map_err(|_| error("PostgreSQL result column count is invalid"))
+    }
+
     pub(crate) fn cell(&self, row: usize, column: usize) -> Result<Option<&[u8]>> {
         // SAFETY: this result owns a live libpq allocation.
         let columns = unsafe { pq::PQnfields(self.raw.as_ptr()) } as usize;
@@ -982,6 +1101,19 @@ impl Drop for CopyBuffer {
     fn drop(&mut self) {
         // SAFETY: this allocation came from libpq and has exactly one owner.
         unsafe { pq::PQfreemem(self.raw.as_ptr().cast()) };
+    }
+}
+
+fn check_slot_export_completion(
+    status: pq::ConnStatusType,
+    transaction: TransactionStatus,
+) -> Result<()> {
+    if status == pq::ConnStatusType::CONNECTION_OK && transaction == TransactionStatus::Idle {
+        Ok(())
+    } else {
+        Err(error(
+            "PostgreSQL logical slot creation did not leave a healthy idle connection",
+        ))
     }
 }
 
@@ -1036,7 +1168,7 @@ fn prepared_cstring(bytes: &[u8]) -> Result<CString> {
 pub(super) mod replication_testing {
     use super::*;
 
-    pub(in crate::pg) fn owned_frame(bytes: &[u8]) -> super::super::ReplicationFrame {
+    pub(crate) fn owned_frame(bytes: &[u8]) -> super::super::ReplicationFrame {
         let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         let text = CString::new(format!("\\x{hex}")).unwrap();
         let mut len = 0;
@@ -1126,6 +1258,156 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(1),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn unconnected() -> PgConnection {
+        // SAFETY: the terminated invalid option is rejected before auth or socket setup.
+        let raw = unsafe { pq::PQconnectStart(c"rpgmigrate_invalid_option=1".as_ptr()) };
+        PgConnection {
+            raw: Some(Connection {
+                raw: NonNull::new(raw).unwrap(),
+                _owner: PhantomData,
+            }),
+            phase: Phase::Idle,
+            mode: Mode::Logical,
+            replication: ReplicationState::default(),
+        }
+    }
+
+    #[test]
+    fn create_slot_export_rejects_before_dispatch_and_preserves_owner() {
+        let mut connection = unconnected();
+        let io = control();
+        for (slot, plugin) in [("bad;slot", "test_decoding"), ("pgcopydb", "bad;plugin")] {
+            assert_eq!(
+                connection
+                    .create_logical_slot_export(slot, plugin, &io)
+                    .err()
+                    .unwrap()
+                    .message,
+                "PostgreSQL logical slot creation arguments are invalid"
+            );
+            assert!(connection.raw.is_some());
+            assert!(connection.phase == Phase::Idle);
+        }
+        let mut expired = control();
+        expired.deadline = Instant::now();
+        let cancelled = control();
+        cancelled
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        for (io, expected) in [
+            (&expired, "PostgreSQL operation deadline exceeded"),
+            (&cancelled, "PostgreSQL operation cancelled"),
+        ] {
+            let deadline = io.deadline;
+            let failure = connection
+                .create_logical_slot_export("pgcopydb", "test_decoding", io)
+                .err()
+                .unwrap();
+            assert_eq!(failure.message, expected);
+            assert_eq!(io.deadline, deadline);
+            assert!(connection.raw.is_some());
+            assert!(connection.phase == Phase::Idle);
+        }
+        connection.mode = Mode::Sql;
+        let failure = connection
+            .create_logical_slot_export("pgcopydb", "test_decoding", &io)
+            .err()
+            .unwrap();
+        assert!(failure.message.contains("connection mode"));
+        connection.mode = Mode::Logical;
+        connection.phase = Phase::CopyBoth;
+        let failure = connection
+            .create_logical_slot_export("pgcopydb", "test_decoding", &io)
+            .err()
+            .unwrap();
+        assert!(failure.message.contains("protocol state"));
+        assert!(connection.raw.is_some());
+        assert!(connection.phase == Phase::CopyBoth);
+    }
+
+    #[test]
+    fn create_slot_export_requires_idle_transaction_before_dispatch() {
+        let mut connection = unconnected();
+        let failure = connection
+            .create_logical_slot_export("pgcopydb", "test_decoding", &control())
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.message,
+            "PostgreSQL logical slot creation requires an idle transaction"
+        );
+        assert!(connection.raw.is_some());
+        assert!(connection.phase == Phase::Idle);
+    }
+
+    #[test]
+    fn create_slot_export_completion_requires_healthy_idle_state() {
+        check_slot_export_completion(pq::ConnStatusType::CONNECTION_OK, TransactionStatus::Idle)
+            .unwrap();
+        for (status, transaction) in [
+            (pq::ConnStatusType::CONNECTION_OK, TransactionStatus::Active),
+            (
+                pq::ConnStatusType::CONNECTION_OK,
+                TransactionStatus::InTransaction,
+            ),
+            (
+                pq::ConnStatusType::CONNECTION_OK,
+                TransactionStatus::InError,
+            ),
+            (
+                pq::ConnStatusType::CONNECTION_OK,
+                TransactionStatus::Unknown,
+            ),
+            (pq::ConnStatusType::CONNECTION_BAD, TransactionStatus::Idle),
+            (
+                pq::ConnStatusType::CONNECTION_STARTED,
+                TransactionStatus::Idle,
+            ),
+        ] {
+            assert_eq!(
+                check_slot_export_completion(status, transaction)
+                    .unwrap_err()
+                    .message,
+                "PostgreSQL logical slot creation did not leave a healthy idle connection"
+            );
+        }
+    }
+
+    #[test]
+    fn quote_literal_uses_client_escaping_and_rejects_nuls_without_dispatch() {
+        let mut connection = unconnected();
+        for (value, expected) in [
+            ("", "''"),
+            ("a'b", "'a''b'"),
+            ("a\\b", " E'a\\\\b'"),
+            ("é", "'é'"),
+        ] {
+            assert_eq!(connection.quote_literal(value).unwrap(), expected);
+        }
+        let failure = connection.quote_literal("private\0value").unwrap_err();
+        assert_eq!(failure.message, "PostgreSQL literal contains a NUL byte");
+        assert!(connection.raw.is_some());
+        assert!(connection.phase == Phase::Idle);
+    }
+
+    #[test]
+    fn connection_metadata_rejects_missing_server_values_and_closed_owner() {
+        let mut connection = unconnected();
+        assert!(connection.backend_pid().is_err());
+        assert!(connection.server_version().is_err());
+        assert!(connection.is_replication().is_err());
+        connection.raw.take();
+        assert!(connection.backend_pid().is_err());
+        assert!(connection.server_version().is_err());
+        assert!(connection.is_replication().is_err());
+        assert!(connection.quote_literal("value").is_err());
+        assert!(
+            connection
+                .create_logical_slot_export("pgcopydb", "test_decoding", &control())
+                .is_err()
+        );
     }
 
     #[test]

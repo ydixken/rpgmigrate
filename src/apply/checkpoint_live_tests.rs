@@ -1,4 +1,5 @@
 use super::*;
+use crate::cdc::contracts::{Column, Event, RelationKey};
 use crate::contracts::{Conninfo, StateAction, StateRequest};
 use crate::identity::{CommitLsn, SourceEndLsn, SourceId, TxId, TxSeq};
 use std::io::{BufRead, BufReader, Write};
@@ -81,20 +82,61 @@ fn atomic_checkpoint() {
     let mut authority =
         TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
     assert_eq!(authority.checkpoint(&io).unwrap(), None);
+    let table = qualified(&mut setup, &owned_provenance(&native, stream));
     let next = Frontier {
         commit: None,
         ..frontier(stream, 1)
     };
     let mut tx = authority.begin(next, &io).unwrap();
+    let names = ["ALL", "All\"MiXeD; --"];
+    for name in names {
+        tx.prepare(
+            name,
+            "INSERT INTO public.authority_atomic VALUES ($1)",
+            &[23],
+            &io,
+        )
+        .unwrap();
+    }
+    tx.deallocate(names[1], &io).unwrap();
+    assert!(!tx.authority.prepared.contains(names[1]));
+    assert!(tx.authority.prepared.contains(names[0]));
+    tx.execute_prepared(names[0], &[PgParam::Text(b"42")], &io)
+        .unwrap();
     tx.prepare(
-        "insert_effect",
-        "INSERT INTO public.authority_atomic VALUES ($1)",
+        names[1],
+        "INSERT INTO public.authority_atomic VALUES ($1 + 1)",
         &[23],
         &io,
     )
     .unwrap();
-    tx.execute_prepared("insert_effect", &[PgParam::Text(b"42")], &io)
+    tx.execute_prepared(names[1], &[PgParam::Text(b"42")], &io)
         .unwrap();
+    tx.deallocate(names[0], &io).unwrap();
+    assert!(!tx.authority.prepared.contains(names[0]));
+    assert!(tx.authority.prepared.contains(names[1]));
+    tx.execute_prepared(names[1], &[PgParam::Text(b"43")], &io)
+        .unwrap();
+    tx.prepare(
+        names[0],
+        "INSERT INTO public.authority_atomic VALUES ($1 + 2)",
+        &[23],
+        &io,
+    )
+    .unwrap();
+    tx.execute_prepared(names[0], &[PgParam::Text(b"43")], &io)
+        .unwrap();
+    let before = setup
+        .query(
+            &format!(
+                "SELECT applied_order, (SELECT count(*) FROM ONLY public.authority_atomic) FROM ONLY {table}"
+            ),
+            &io,
+        )
+        .unwrap();
+    assert_eq!(before.rows(), 1);
+    assert_eq!(before.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+    assert_eq!(before.cell(0, 1).unwrap(), Some(b"0".as_slice()));
     let CommitOutcome::Acknowledged {
         checkpoint,
         durable: Some(proof),
@@ -114,7 +156,6 @@ fn atomic_checkpoint() {
         TARGET_METADATA_VERSION
     );
     assert_eq!(authority.checkpoint(&io).unwrap(), Some(checkpoint));
-    let table = qualified(&mut setup, &owned_provenance(&native, stream));
     let position = setup.query(&format!(
         "SELECT applied_order, last_xid, begin_ordinal, source_commit_lsn, source_end_lsn FROM {table}"
     ), &io).unwrap();
@@ -125,10 +166,354 @@ fn atomic_checkpoint() {
     assert_eq!(position.cell(0, 3).unwrap(), None);
     assert_eq!(position.cell(0, 4).unwrap(), Some(b"0/78".as_slice()));
     let rows = setup
-        .query("SELECT value FROM public.authority_atomic", &io)
+        .query(
+            "SELECT value FROM public.authority_atomic ORDER BY value",
+            &io,
+        )
         .unwrap();
-    assert_eq!(rows.rows(), 1);
-    assert_eq!(rows.cell(0, 0).unwrap(), Some(&b"42"[..]));
+    assert_eq!(rows.rows(), 4);
+    for (row, value) in [b"42", b"43", b"44", b"45"].iter().enumerate() {
+        assert_eq!(rows.cell(row, 0).unwrap(), Some(value.as_slice()));
+    }
+
+    command(
+        &mut setup,
+        "CREATE TABLE public.authority_preflight_ok(id integer PRIMARY KEY, payload text)",
+        "CREATE TABLE",
+        &io,
+    )
+    .unwrap();
+    let relation = Event::Relation {
+        key: RelationKey {
+            oid: 1,
+            generation: 17,
+        },
+        schema: "public".into(),
+        name: "authority_preflight_ok".into(),
+        columns: vec![
+            Column {
+                name: "id".into(),
+                type_oid: 23,
+                type_mod: -1,
+                key: true,
+            },
+            Column {
+                name: "payload".into(),
+                type_oid: 25,
+                type_mod: -1,
+                key: false,
+            },
+        ],
+        replica_identity: b'd',
+    };
+    let next = frontier(stream, 2);
+    let mut tx = authority.begin(next, &io).unwrap();
+    let before = tx
+        .authority
+        .session
+        .connection()
+        .unwrap()
+        .query("SELECT pg_catalog.pg_backend_pid()", &io)
+        .unwrap();
+    assert_eq!(before.rows(), 1);
+    let pid = number(&before, 0).unwrap();
+    assert_eq!(pid, tx.authority.session.pid);
+    tx.preflight_relation(&relation, &io).unwrap();
+    let owner = tx.authority.session.connection().unwrap().query(
+        "SELECT pg_catalog.pg_backend_pid(), 'public.authority_preflight_ok'::pg_catalog.regclass::pg_catalog.oid,
+            EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'relation'
+                AND pid = pg_catalog.pg_backend_pid()
+                AND relation = 'public.authority_preflight_ok'::pg_catalog.regclass
+                AND mode = 'ShareRowExclusiveLock' AND granted)",
+        &io,
+    ).unwrap();
+    assert_eq!(owner.rows(), 1);
+    assert_eq!(number(&owner, 0).unwrap(), pid);
+    assert_ne!(number(&owner, 1).unwrap(), 1);
+    assert_eq!(owner.cell(0, 2).unwrap(), Some(b"t".as_slice()));
+    command(&mut setup, "BEGIN", "BEGIN", &io).unwrap();
+    let blocked = setup
+        .query(
+            "LOCK TABLE ONLY public.authority_preflight_ok IN ROW EXCLUSIVE MODE NOWAIT",
+            &io,
+        )
+        .err()
+        .expect("preflight did not retain its target relation lock");
+    assert!(blocked.message.contains("SQLSTATE 55P03"), "{blocked:?}");
+    command(&mut setup, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    tx.prepare(
+        "preflight_insert",
+        "INSERT INTO public.authority_preflight_ok VALUES ($1, $2)",
+        &[23, 25],
+        &io,
+    )
+    .unwrap();
+    tx.execute_prepared(
+        "preflight_insert",
+        &[PgParam::Text(b"1"), PgParam::Text(b"checked")],
+        &io,
+    )
+    .unwrap();
+    let before = setup.query(
+        &format!("SELECT applied_order, (SELECT count(*) FROM ONLY public.authority_preflight_ok) FROM ONLY {table}"),
+        &io,
+    ).unwrap();
+    assert_eq!(before.rows(), 1);
+    assert_eq!(before.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+    assert_eq!(before.cell(0, 1).unwrap(), Some(b"0".as_slice()));
+    let CommitOutcome::Acknowledged {
+        checkpoint,
+        durable: Some(proof),
+    } = tx.commit(&io).unwrap()
+    else {
+        panic!("preflight transaction produced no durable acknowledgment")
+    };
+    assert_eq!(checkpoint.applied, next);
+    assert_eq!(proof.frontier(), Some(&next));
+    let applied = setup.query(
+        &format!("SELECT c.applied_order, t.id, t.payload FROM ONLY {table} c CROSS JOIN public.authority_preflight_ok t"),
+        &io,
+    ).unwrap();
+    assert_eq!(applied.rows(), 1);
+    assert_eq!(applied.cell(0, 0).unwrap(), Some(b"2".as_slice()));
+    assert_eq!(applied.cell(0, 1).unwrap(), Some(b"1".as_slice()));
+    assert_eq!(applied.cell(0, 2).unwrap(), Some(b"checked".as_slice()));
+    command(&mut setup, "BEGIN", "BEGIN", &io).unwrap();
+    command(
+        &mut setup,
+        "LOCK TABLE ONLY public.authority_preflight_ok IN ROW EXCLUSIVE MODE NOWAIT",
+        "LOCK TABLE",
+        &io,
+    )
+    .unwrap();
+    command(&mut setup, "ROLLBACK", "ROLLBACK", &io).unwrap();
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn metadata_boundary_locks() {
+    let io = control();
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut observer = connection(&io);
+    observer
+        .query(
+            "CREATE TABLE public.authority_boundary_locks(value integer)",
+            &io,
+        )
+        .unwrap();
+    let mut authority =
+        TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+    let table = qualified(&mut observer, &owned_provenance(&native, stream));
+    let cached = authority.row.clone();
+    let probes = [
+        (
+            format!("LOCK TABLE ONLY {table} IN SHARE MODE NOWAIT"),
+            "LOCK TABLE",
+        ),
+        (
+            format!("LOCK TABLE ONLY {table} IN ROW EXCLUSIVE MODE NOWAIT"),
+            "LOCK TABLE",
+        ),
+        // ROW SHARE is compatible with SRE, so only the row lock can reject this probe.
+        (
+            format!("SELECT run_id FROM ONLY {table} FOR UPDATE NOWAIT"),
+            "SELECT 1",
+        ),
+    ];
+    let mut tx = authority.begin(frontier(stream, 1), &io).unwrap();
+    tx.prepare(
+        "boundary_lock_insert",
+        "INSERT INTO public.authority_boundary_locks VALUES ($1)",
+        &[23],
+        &io,
+    )
+    .unwrap();
+    for value in [b"1", b"2"] {
+        for (sql, _) in &probes {
+            command(&mut observer, "BEGIN", "BEGIN", &io).unwrap();
+            let error = observer
+                .query(sql, &io)
+                .err()
+                .expect("metadata lock did not block its independent contender");
+            assert!(error.message.contains("SQLSTATE 55P03"), "{error:?}");
+            command(&mut observer, "ROLLBACK", "ROLLBACK", &io).unwrap();
+        }
+        tx.execute_prepared("boundary_lock_insert", &[PgParam::Text(value)], &io)
+            .unwrap();
+    }
+    tx.rollback(&io).unwrap();
+    for (sql, tag) in &probes {
+        command(&mut observer, "BEGIN", "BEGIN", &io).unwrap();
+        command(&mut observer, sql, tag, &io).unwrap();
+        command(&mut observer, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    }
+    command(
+        &mut observer,
+        &format!("UPDATE ONLY {table} SET barrier_counter = barrier_counter + 1"),
+        "UPDATE 1",
+        &io,
+    )
+    .unwrap();
+    let error = authority
+        .begin(frontier(stream, 1), &io)
+        .err()
+        .expect("begin adopted a checkpoint changed between owned transactions");
+    assert_eq!(
+        error.message,
+        "target-authority: checkpoint changed before owned transaction"
+    );
+    assert_eq!(authority.row, cached);
+    assert!(matches!(authority.session.phase, Phase::Poisoned));
+    assert_eq!(authority.reacquire(connection(&io), &io).unwrap(), None);
+    let rows = observer
+        .query("SELECT count(*) FROM public.authority_boundary_locks", &io)
+        .unwrap();
+    assert_eq!(rows.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn transaction_boundary_faults() {
+    let io = control();
+    let mut observer = connection(&io);
+    observer
+        .query(
+            "CREATE TABLE public.authority_boundary_faults(value integer)",
+            &io,
+        )
+        .unwrap();
+    for fault in [
+        "metadata_read_denied",
+        "fence_lost",
+        "pid_mismatch",
+        "metadata_row_changed",
+        "metadata_shape_changed",
+        "raw_rollback",
+    ] {
+        let mut native = state();
+        let stream = stream_for(&native);
+        let mut authority =
+            TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+        let provenance = owned_provenance(&native, stream);
+        let table = qualified(&mut observer, &provenance);
+        let next = frontier(stream, 1);
+        let mut warm = authority.begin(next, &io).unwrap();
+        warm.prepare(
+            "boundary_fault_insert",
+            "INSERT INTO public.authority_boundary_faults VALUES ($1)",
+            &[23],
+            &io,
+        )
+        .unwrap();
+        warm.execute_prepared("boundary_fault_insert", &[PgParam::Text(b"0")], &io)
+            .unwrap();
+        warm.rollback(&io).unwrap();
+        let mut tx = authority.begin(next, &io).unwrap();
+        let expected = match fault {
+            "metadata_read_denied" => {
+                command(
+                    tx.authority.session.connection().unwrap(),
+                    &format!("REVOKE SELECT ON TABLE {table} FROM CURRENT_USER"),
+                    "REVOKE",
+                    &io,
+                )
+                .unwrap();
+                let denied = tx
+                    .authority
+                    .session
+                    .connection()
+                    .unwrap()
+                    .query(
+                        &format!(
+                            "SELECT pg_catalog.has_table_privilege({}, 'SELECT')",
+                            provenance.table_oid
+                        ),
+                        &io,
+                    )
+                    .unwrap();
+                assert_eq!(denied.rows(), 1);
+                assert_eq!(denied.cell(0, 0).unwrap(), Some(b"f".as_slice()));
+                "target-metadata: object identity, schema, or privileges are unsafe"
+            }
+            "fence_lost" => {
+                tx.authority
+                    .session
+                    .connection()
+                    .unwrap()
+                    .query("SELECT pg_catalog.pg_advisory_unlock_all()", &io)
+                    .unwrap();
+                "target-authority: physical backend, primary, or writer fence changed"
+            }
+            "pid_mismatch" => {
+                tx.authority.session.pid += 1;
+                "target-authority: physical backend, primary, or writer fence changed"
+            }
+            "metadata_row_changed" => {
+                command(
+                    tx.authority.session.connection().unwrap(),
+                    &format!("UPDATE ONLY {table} SET barrier_counter = barrier_counter + 1"),
+                    "UPDATE 1",
+                    &io,
+                )
+                .unwrap();
+                "target-authority: checkpoint changed outside its owner"
+            }
+            "metadata_shape_changed" => {
+                command(
+                    tx.authority.session.connection().unwrap(),
+                    &format!("ALTER TABLE {table} ADD COLUMN unexpected integer"),
+                    "ALTER TABLE",
+                    &io,
+                )
+                .unwrap();
+                "target-metadata: object identity, schema, or privileges are unsafe"
+            }
+            "raw_rollback" => {
+                command(
+                    tx.authority.session.connection().unwrap(),
+                    "ROLLBACK",
+                    "ROLLBACK",
+                    &io,
+                )
+                .unwrap();
+                "target-authority: transaction poisoned by an earlier DML error"
+            }
+            _ => unreachable!(),
+        };
+        let result = tx.execute_prepared("boundary_fault_insert", &[PgParam::Text(b"1")], &io);
+        if fault == "raw_rollback" {
+            let error = result
+                .err()
+                .expect("DML dispatched outside its owned transaction");
+            assert_eq!(
+                error.message,
+                "target-authority: a valid owned transaction is required"
+            );
+            assert!(tx.failed);
+        } else {
+            result.unwrap();
+            assert!(!tx.failed);
+        }
+        let before_commit = observer
+            .query("SELECT count(*) FROM public.authority_boundary_faults", &io)
+            .unwrap();
+        assert_eq!(
+            before_commit.cell(0, 0).unwrap(),
+            Some(b"0".as_slice()),
+            "{fault}"
+        );
+        let error = tx
+            .commit(&io)
+            .expect_err(&format!("COMMIT accepted {fault}"));
+        assert_eq!(error.message, expected, "{fault}");
+        assert!(matches!(authority.session.phase, Phase::Poisoned));
+        assert_eq!(authority.reacquire(connection(&io), &io).unwrap(), None);
+        let rows = observer
+            .query("SELECT count(*) FROM public.authority_boundary_faults", &io)
+            .unwrap();
+        assert_eq!(rows.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+    }
 }
 
 #[test]
@@ -565,7 +950,7 @@ fn metadata_shape_acl() {
     for commit in [None, Some(CommitLsn(0))] {
         authority.session.begin(&io).unwrap();
         let old = authority.read_row(&io).unwrap();
-        let mut stored = old;
+        let mut stored = old.clone();
         stored.applied.as_mut().unwrap().commit = commit;
         metadata::update(
             authority.session.connection().unwrap(),
@@ -575,13 +960,14 @@ fn metadata_shape_acl() {
             &io,
         )
         .unwrap();
-        let mut stale = stored;
+        let mut stale = stored.clone();
         stale.applied.as_mut().unwrap().commit = if commit.is_some() {
             None
         } else {
             Some(CommitLsn(0))
         };
-        let next = increment_barrier(stored, stored.barrier_epoch).unwrap();
+        let epoch = stored.barrier_epoch;
+        let next = increment_barrier(stored.clone(), epoch).unwrap();
         assert!(
             metadata::update(
                 authority.session.connection().unwrap(),
@@ -595,6 +981,387 @@ fn metadata_shape_acl() {
         assert_eq!(authority.read_row(&io).unwrap(), stored);
         authority.session.rollback(&io).unwrap();
         assert_eq!(authority.checkpoint(&io).unwrap(), checkpoint);
+    }
+    drop(authority);
+    installed_snapshot_anchor(&mut setup, &io);
+}
+
+fn assert_snapshot_anchor_storage(
+    observer: &mut PgConnection,
+    table: &str,
+    expected: &[&[u8]; 3],
+    order: u64,
+    effects: u64,
+    io: &IoControl,
+) -> u64 {
+    let stored = observer
+        .query(
+            &format!(
+                "SELECT copy_snapshot_token, copy_consistent_point::text,
+            pg_catalog.encode(copy_plan_nonce, 'hex'), applied_order, barrier_counter,
+            (SELECT count(*) FROM ONLY public.authority_anchor_rows) FROM ONLY {table}"
+            ),
+            io,
+        )
+        .unwrap();
+    assert_eq!(stored.rows(), 1);
+    for (column, expected) in expected.iter().enumerate() {
+        assert_eq!(stored.cell(0, column).unwrap(), Some(*expected));
+    }
+    assert_eq!(
+        stored.cell(0, 3).unwrap(),
+        Some(order.to_string().as_bytes())
+    );
+    assert_eq!(
+        stored.cell(0, 5).unwrap(),
+        Some(effects.to_string().as_bytes())
+    );
+    std::str::from_utf8(stored.cell(0, 4).unwrap().unwrap())
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
+    command(
+        observer,
+        "CREATE TABLE public.authority_anchor_rows(id integer PRIMARY KEY)",
+        "CREATE TABLE",
+        io,
+    )
+    .unwrap();
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut authority = TargetAuthority::acquire(connection(io), stream, &mut native, io).unwrap();
+    let provenance = owned_provenance(&native, stream);
+    let table = qualified(observer, &provenance);
+    let anchor = crate::contracts::SnapshotAnchor {
+        stream,
+        snapshot_token: "snapshot 'quoted' \"token\" \\\\ été".into(),
+        consistent_point: SourceEndLsn(0xF123_4567_89AB_CDE0),
+        plan_nonce: [
+            0, 0x7f, 0x80, 0xff, 0x27, 0x5c, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xaa,
+        ],
+    };
+    let expected_fields: [&[u8]; 3] = [
+        anchor.snapshot_token.as_bytes(),
+        b"F1234567/89ABCDE0",
+        b"007f80ff275c112233445566778899aa",
+    ];
+    let columns = observer
+        .query(
+            &format!(
+                "SELECT attname, atttypid, atttypmod, attnotnull, attcollation,
+            'pg_catalog.\"C\"'::pg_catalog.regcollation::pg_catalog.oid
+            FROM pg_catalog.pg_attribute WHERE attrelid = {} AND attnum BETWEEN 20 AND 22
+            ORDER BY attnum",
+                provenance.table_oid
+            ),
+            io,
+        )
+        .unwrap();
+    assert_eq!(columns.rows(), 3);
+    for (row, (name, oid)) in [
+        ("copy_snapshot_token", "25"),
+        ("copy_consistent_point", "3220"),
+        ("copy_plan_nonce", "17"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(columns.cell(row, 0).unwrap(), Some(name.as_bytes()));
+        assert_eq!(columns.cell(row, 1).unwrap(), Some(oid.as_bytes()));
+        assert_eq!(columns.cell(row, 2).unwrap(), Some(b"-1".as_slice()));
+        assert_eq!(columns.cell(row, 3).unwrap(), Some(b"f".as_slice()));
+    }
+    assert_eq!(columns.cell(0, 4).unwrap(), columns.cell(0, 5).unwrap());
+    assert_eq!(columns.cell(1, 4).unwrap(), Some(b"0".as_slice()));
+    assert_eq!(columns.cell(2, 4).unwrap(), Some(b"0".as_slice()));
+    authority.session.begin(io).unwrap();
+    let types = authority
+        .session
+        .connection()
+        .unwrap()
+        .query(
+            "SELECT pg_catalog.cardinality(parameter_types),
+            parameter_types[20]::pg_catalog.oid, parameter_types[21]::pg_catalog.oid,
+            parameter_types[22]::pg_catalog.oid, parameter_types[30]::pg_catalog.oid,
+            parameter_types[31]::pg_catalog.oid, parameter_types[32]::pg_catalog.oid
+            FROM pg_catalog.pg_prepared_statements WHERE name = 'rpgmigrate_metadata_update'",
+            io,
+        )
+        .unwrap();
+    assert_eq!(types.rows(), 1);
+    for (column, expected) in ["32", "25", "3220", "17", "25", "3220", "17"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(types.cell(0, column).unwrap(), Some(expected.as_bytes()));
+    }
+    let old = authority.read_row(io).unwrap();
+    assert_eq!(old.applied, None);
+    assert_eq!(old.anchor, None);
+    let installed = ControlRow {
+        anchor: Some(anchor.clone()),
+        ..old.clone()
+    };
+    let mut foreign = installed.clone();
+    foreign.anchor.as_mut().unwrap().stream.generation += 1;
+    let error = metadata::update(
+        authority.session.connection().unwrap(),
+        &provenance,
+        &old,
+        &foreign,
+        io,
+    )
+    .unwrap_err();
+    assert_eq!(error.message, "target-metadata: invalid snapshot anchor");
+    assert_eq!(authority.read_row(io).unwrap(), old);
+    metadata::update(
+        authority.session.connection().unwrap(),
+        &provenance,
+        &old,
+        &installed,
+        io,
+    )
+    .unwrap();
+    assert_eq!(authority.read_row(io).unwrap(), installed);
+    let invisible = observer.query(
+        &format!("SELECT copy_snapshot_token, copy_consistent_point, copy_plan_nonce FROM ONLY {table}"), io,
+    ).unwrap();
+    assert_eq!(invisible.rows(), 1);
+    for column in 0..3 {
+        assert_eq!(invisible.cell(0, column).unwrap(), None);
+    }
+    // Commit fixture metadata without constructing snapshot coverage evidence.
+    command(
+        authority.session.connection().unwrap(),
+        "COMMIT",
+        "COMMIT",
+        io,
+    )
+    .unwrap();
+    assert_eq!(
+        authority
+            .session
+            .connection()
+            .unwrap()
+            .transaction_status()
+            .unwrap(),
+        TransactionStatus::Idle
+    );
+    drop(authority);
+    let mut authority = TargetAuthority::acquire(connection(io), stream, &mut native, io).unwrap();
+    assert_eq!(authority.row.anchor.as_ref(), Some(&anchor));
+    assert_eq!(authority.checkpoint(io).unwrap(), None);
+    let installed_counter =
+        assert_snapshot_anchor_storage(observer, &table, &expected_fields, 0, 0, io);
+    for field in 0..3 {
+        authority.session.begin(io).unwrap();
+        let stored = authority.read_row(io).unwrap();
+        let mut stale = stored.clone();
+        let changed = stale.anchor.as_mut().unwrap();
+        match field {
+            0 => changed.snapshot_token.push('x'),
+            1 => changed.consistent_point.0 += 1,
+            2 => changed.plan_nonce[0] ^= 1,
+            _ => unreachable!(),
+        }
+        let next = increment_barrier(stale.clone(), stale.barrier_epoch).unwrap();
+        let error = metadata::update(
+            authority.session.connection().unwrap(),
+            &provenance,
+            &stale,
+            &next,
+            io,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message, "target-metadata: unexpected command result or affected row count",
+            "stale anchor field {field}"
+        );
+        assert_eq!(
+            authority
+                .session
+                .connection()
+                .unwrap()
+                .transaction_status()
+                .unwrap(),
+            TransactionStatus::InTransaction
+        );
+        assert_eq!(authority.read_row(io).unwrap(), stored);
+        authority.session.rollback(io).unwrap();
+        assert_eq!(
+            assert_snapshot_anchor_storage(observer, &table, &expected_fields, 0, 0, io),
+            installed_counter
+        );
+    }
+    let next = Frontier {
+        commit: Some(CommitLsn(anchor.consistent_point.0 + 0x10)),
+        end: SourceEndLsn(anchor.consistent_point.0 + 0x20),
+        ..frontier(stream, 1)
+    };
+    let mut tx = authority.begin(next, io).unwrap();
+    tx.prepare(
+        "anchor_insert",
+        "INSERT INTO public.authority_anchor_rows VALUES ($1)",
+        &[23],
+        io,
+    )
+    .unwrap();
+    tx.execute_prepared("anchor_insert", &[PgParam::Text(b"7")], io)
+        .unwrap();
+    assert_eq!(
+        assert_snapshot_anchor_storage(observer, &table, &expected_fields, 0, 0, io),
+        installed_counter
+    );
+    assert!(matches!(
+        tx.commit(io).unwrap(),
+        CommitOutcome::Acknowledged {
+            durable: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(authority.row.anchor.as_ref(), Some(&anchor));
+    let cdc_counter = assert_snapshot_anchor_storage(observer, &table, &expected_fields, 1, 1, io);
+    assert_eq!(cdc_counter, installed_counter + 1);
+    let epoch = authority.row.barrier_epoch;
+    let barrier = authority.barrier(Some(&next), epoch, io).unwrap();
+    assert_eq!(barrier.frontier(), Some(&next));
+    assert_eq!(authority.row.anchor.as_ref(), Some(&anchor));
+    let barrier_counter =
+        assert_snapshot_anchor_storage(observer, &table, &expected_fields, 1, 1, io);
+    assert_eq!(barrier_counter, cdc_counter + 1);
+    for field in 0..4 {
+        authority.session.begin(io).unwrap();
+        let stored = authority.read_row(io).unwrap();
+        let mut changed = stored.clone();
+        match field {
+            0 => changed.anchor.as_mut().unwrap().snapshot_token.push('x'),
+            1 => changed.anchor.as_mut().unwrap().consistent_point.0 += 1,
+            2 => changed.anchor.as_mut().unwrap().plan_nonce[0] ^= 1,
+            3 => changed.anchor = None,
+            _ => unreachable!(),
+        }
+        let error = metadata::update(
+            authority.session.connection().unwrap(),
+            &provenance,
+            &stored,
+            &changed,
+            io,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "target-metadata: snapshot anchor cannot be replaced or removed"
+        );
+        assert_eq!(authority.read_row(io).unwrap(), stored);
+        authority.session.rollback(io).unwrap();
+        assert_eq!(
+            assert_snapshot_anchor_storage(observer, &table, &expected_fields, 1, 1, io),
+            barrier_counter
+        );
+    }
+    authority.session.begin(io).unwrap();
+    command(
+        authority.session.connection().unwrap(),
+        &format!("UPDATE ONLY {table} SET copy_snapshot_token = pg_catalog.repeat('é', 512)"),
+        "UPDATE 1",
+        io,
+    )
+    .unwrap();
+    assert_eq!(
+        authority
+            .read_row(io)
+            .unwrap()
+            .anchor
+            .unwrap()
+            .snapshot_token,
+        "é".repeat(512)
+    );
+    authority.session.rollback(io).unwrap();
+    for (rejected, alteration, column, projected, expected_error) in [
+        (
+            "oversized_token",
+            "copy_snapshot_token = pg_catalog.repeat('x', 1025), copy_consistent_point = NULL, copy_plan_nonce = NULL",
+            19,
+            b"".as_slice(),
+            "target-metadata: partial snapshot anchor",
+        ),
+        (
+            "oversized_utf8_token",
+            "copy_snapshot_token = pg_catalog.repeat('é', 513), copy_consistent_point = NULL, copy_plan_nonce = NULL",
+            19,
+            b"".as_slice(),
+            "target-metadata: partial snapshot anchor",
+        ),
+        (
+            "oversized_nonce",
+            "copy_snapshot_token = NULL, copy_consistent_point = NULL, copy_plan_nonce = pg_catalog.decode(pg_catalog.repeat('ab', 4096), 'hex')",
+            21,
+            b"".as_slice(),
+            "target-metadata: partial snapshot anchor",
+        ),
+        (
+            "zero_point",
+            "copy_consistent_point = '0/0'::pg_catalog.pg_lsn",
+            20,
+            b"0/0".as_slice(),
+            "target-metadata: invalid snapshot anchor",
+        ),
+        (
+            "zero_nonce",
+            "copy_plan_nonce = pg_catalog.decode(pg_catalog.repeat('00', 16), 'hex')",
+            21,
+            b"00000000000000000000000000000000".as_slice(),
+            "target-metadata: invalid snapshot anchor",
+        ),
+        (
+            "empty_token",
+            "copy_snapshot_token = ''",
+            19,
+            b"".as_slice(),
+            "target-metadata: invalid snapshot anchor",
+        ),
+    ] {
+        authority.session.begin(io).unwrap();
+        command(
+            authority.session.connection().unwrap(),
+            &format!("UPDATE ONLY {table} SET {alteration}"),
+            "UPDATE 1",
+            io,
+        )
+        .unwrap();
+        // Inspect the prepared projection so invalid presence cannot disappear as SQL NULL.
+        let projection = authority
+            .session
+            .connection()
+            .unwrap()
+            .execute_prepared("rpgmigrate_metadata_read", &[], io)
+            .unwrap();
+        assert_eq!(projection.rows(), 1);
+        assert_eq!(
+            projection.cell(0, column).unwrap(),
+            Some(projected),
+            "{rejected}: invalid present field became NULL or escaped its bounded projection"
+        );
+        let error = authority.read_row(io).unwrap_err();
+        assert_eq!(error.message, expected_error, "{rejected}");
+        assert_eq!(
+            authority
+                .session
+                .connection()
+                .unwrap()
+                .transaction_status()
+                .unwrap(),
+            TransactionStatus::InTransaction
+        );
+        authority.session.rollback(io).unwrap();
+        assert_eq!(
+            assert_snapshot_anchor_storage(observer, &table, &expected_fields, 1, 1, io),
+            barrier_counter
+        );
     }
 }
 
@@ -809,6 +1576,13 @@ fn commit_rollback_tag() {
         "reserved_name",
         "excess_parameters",
         "unknown_statement",
+        "deallocate_empty",
+        "deallocate_unknown",
+        "deallocate_unowned_all",
+        "deallocate_reserved",
+        "deallocate_nul",
+        "deallocate_long",
+        "deallocate_missing_backend",
     ] {
         let mut native = state();
         let stream = stream_for(&native);
@@ -824,7 +1598,7 @@ fn commit_rollback_tag() {
         .unwrap();
         tx.execute_prepared("poison_insert", &[PgParam::Text(b"must roll back")], &io)
             .unwrap();
-        let rejected = match rejected {
+        let result = match rejected {
             "parameter_nul" => tx
                 .execute_prepared("poison_insert", &[PgParam::Text(b"bad\0value")], &io)
                 .map(|_| ()),
@@ -847,9 +1621,26 @@ fn commit_rollback_tag() {
                 &io,
             ),
             "unknown_statement" => tx.execute_prepared("unknown", &[], &io).map(|_| ()),
+            "deallocate_empty" => tx.deallocate("", &io),
+            "deallocate_unknown" => tx.deallocate("unknown", &io),
+            "deallocate_unowned_all" => tx.deallocate("ALL", &io),
+            "deallocate_reserved" => tx.deallocate("rpgmigrate_authority_guard", &io),
+            "deallocate_nul" => tx.deallocate("bad\0name", &io),
+            "deallocate_long" => tx.deallocate(&"x".repeat(64), &io),
+            "deallocate_missing_backend" => {
+                command(
+                    tx.authority.session.connection().unwrap(),
+                    "DEALLOCATE \"poison_insert\"",
+                    "DEALLOCATE",
+                    &io,
+                )
+                .unwrap();
+                tx.deallocate("poison_insert", &io)
+            }
             _ => unreachable!(),
         };
-        assert!(rejected.is_err());
+        assert!(result.is_err(), "{rejected}");
+        assert!(tx.authority.prepared.contains("poison_insert"));
         assert_eq!(
             tx.authority
                 .session
@@ -857,7 +1648,11 @@ fn commit_rollback_tag() {
                 .unwrap()
                 .transaction_status()
                 .unwrap(),
-            TransactionStatus::InTransaction
+            if rejected == "deallocate_missing_backend" {
+                TransactionStatus::InError
+            } else {
+                TransactionStatus::InTransaction
+            }
         );
         assert!(
             tx.prepare(
@@ -909,6 +1704,146 @@ fn commit_rollback_tag() {
     drop(tx);
     assert!(authority.checkpoint(&io).is_err());
     assert_eq!(authority.reacquire(connection(&io), &io).unwrap(), None);
+
+    // Release the preceding case's session fence before acquiring fresh owners.
+    drop(authority);
+    command(
+        &mut observer,
+        "CREATE TABLE public.authority_preflight_bad(id integer PRIMARY KEY)",
+        "CREATE TABLE",
+        &io,
+    )
+    .unwrap();
+    let mut admin = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    command(
+        &mut admin,
+        "CREATE TABLE public.authority_preflight_denied(id integer PRIMARY KEY)",
+        "CREATE TABLE",
+        &io,
+    )
+    .unwrap();
+    command(
+        &mut admin,
+        "GRANT SELECT ON public.authority_preflight_denied TO e1_target",
+        "GRANT",
+        &io,
+    )
+    .unwrap();
+    for rejected in [
+        "local_event",
+        "layout_mismatch",
+        "server_lock",
+        "fence_lost",
+    ] {
+        let mut native = state();
+        let stream = stream_for(&native);
+        let mut authority =
+            TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+        let mut tx = authority.begin(frontier(stream, 1), &io).unwrap();
+        tx.prepare(
+            "preflight_poison_insert",
+            "INSERT INTO public.authority_poison VALUES ($1)",
+            &[25],
+            &io,
+        )
+        .unwrap();
+        tx.execute_prepared(
+            "preflight_poison_insert",
+            &[PgParam::Text(b"must roll back")],
+            &io,
+        )
+        .unwrap();
+        let relation = RelationKey {
+            oid: 1,
+            generation: 17,
+        };
+        let expected = if rejected == "local_event" {
+            Event::Insert {
+                relation,
+                values: Vec::new(),
+            }
+        } else {
+            Event::Relation {
+                key: relation,
+                schema: "public".into(),
+                name: if rejected == "server_lock" {
+                    "authority_preflight_denied"
+                } else {
+                    "authority_preflight_bad"
+                }
+                .into(),
+                columns: vec![Column {
+                    name: "id".into(),
+                    type_oid: if rejected == "layout_mismatch" {
+                        20
+                    } else {
+                        23
+                    },
+                    type_mod: -1,
+                    key: true,
+                }],
+                replica_identity: b'd',
+            }
+        };
+        if rejected == "fence_lost" {
+            tx.authority
+                .session
+                .connection()
+                .unwrap()
+                .query("SELECT pg_catalog.pg_advisory_unlock_all()", &io)
+                .unwrap();
+        }
+        let error = tx.preflight_relation(&expected, &io).unwrap_err();
+        let status = tx
+            .authority
+            .session
+            .connection()
+            .unwrap()
+            .transaction_status()
+            .unwrap();
+        let commit_error = tx
+            .commit(&io)
+            .expect_err("a caught preflight error allowed COMMIT");
+        assert_eq!(
+            commit_error.message, "target-authority: transaction poisoned by an earlier DML error",
+            "{rejected}"
+        );
+        match rejected {
+            "local_event" => assert_eq!(
+                error.message,
+                "CDC target preflight requires relation metadata"
+            ),
+            "layout_mismatch" => assert_eq!(
+                error.message,
+                "CDC target relation metadata does not match the source relation"
+            ),
+            "server_lock" => assert!(error.message.contains("SQLSTATE 42501"), "{error:?}"),
+            "fence_lost" => assert_eq!(
+                error.message,
+                "target-authority: physical backend, primary, or writer fence changed"
+            ),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            status,
+            if rejected == "server_lock" {
+                TransactionStatus::InError
+            } else {
+                TransactionStatus::InTransaction
+            },
+            "{rejected}"
+        );
+        assert_eq!(authority.reacquire(connection(&io), &io).unwrap(), None);
+        let rows = observer
+            .query("SELECT count(*) FROM ONLY public.authority_poison", &io)
+            .unwrap();
+        assert_eq!(rows.rows(), 1);
+        assert_eq!(
+            rows.cell(0, 0).unwrap(),
+            Some(b"0".as_slice()),
+            "{rejected}"
+        );
+    }
 }
 
 #[test]

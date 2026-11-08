@@ -27,6 +27,15 @@ Remove an old system-libpq `PQ_LIB_DIR` override before using these tasks.
 Use `PKG_CONFIG_PATH` to locate the native builder's installed dependency metadata when needed.
 Stock libpq lacks the required capability and cannot silently replace this artifact for database operations.
 
+We compile the pinned bundled SQLite dependency for the private immutable COPY plan store.
+The store checks SQLite's version and source identity before opening a plan.
+WAL backend selection remains a separate qualification decision.
+
+> [!important]
+> Unset SQLite library, feature, and limit overrides before building Rust code.
+> Unset generic, host, and target `CFLAGS` overrides too, including empty values.
+> The [build policy](../build.rs) rejects these settings to preserve the reviewed bundled configuration.
+
 Set `PG_BINDIR` when the matching PostgreSQL server utilities are outside `PATH`.
 The harness can also discover them through `PG_CONFIG` or `pg_config`.
 Check out this **example** for an existing Homebrew PostgreSQL 14 installation:
@@ -150,8 +159,14 @@ Use a fresh state directory below an existing parent.
 State validation precedes the first database connection.
 E1 refuses foreign or legacy state and every prior native run, including completed runs.
 It does not resume, restart, import, or clean pgcopydb state.
-New manifests use native format version two and require a target-provenance field, which remains empty for the COPY command.
-Version-one and unknown-version manifests are rejected without conversion.
+New manifests use native format version four and require target provenance plus the nullable `source_slot` and `copy_snapshot` fields.
+The COPY command leaves target provenance empty and both nullable fields null.
+Private target authority metadata uses version three and refuses older metadata without conversion.
+Its anchor columns do not yet provide a qualified COPY snapshot proof.
+The [owning COPY contract](superpowers/specs/2026-11-07-copy-snapshot-anchor.md) requires plan publication, confirmed target provenance, native intent binding, and an internally pinned reader in that order.
+It preserves Text and Binary metadata but admits only the existing Text execution profile before transferring any table.
+Recovery of a logged target anchor does not restore a lost source snapshot or authorize source feedback.
+Earlier native versions and unknown-version manifests are rejected without conversion.
 The internal provenance recovery API does not expose public CLI resume or authorize target reuse without the fenced authority's checks.
 Target checkpoint and barrier APIs are internal library interfaces.
 This slice exposes no CDC receiver or serial-applier command.

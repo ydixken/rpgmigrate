@@ -6,16 +6,22 @@ from pathlib import Path
 import sys
 import unittest
 
-from verify import ci_unit_inventory
+from verify import ci_unit_inventory, harness_unit_inventory
 
 
 def main():
     if sys.flags.optimize:
         raise RuntimeError("optimized Python cannot run the CI unit gate")
+    arguments = sys.argv[1:]
+    if arguments not in ([], ["--harness"]):
+        raise RuntimeError("unknown unit test group")
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root / "tools/image"))
+    if arguments:
+        sys.path.insert(0, str(root / "tests/support"))
+    inventory = harness_unit_inventory(root) if arguments else ci_unit_inventory(root)
     suite = unittest.TestSuite()
-    for number, (name, expected) in enumerate(ci_unit_inventory(root).items()):
+    for number, (name, expected) in enumerate(inventory.items()):
         spec = importlib.util.spec_from_file_location(f"ci_suite_{number}", root / name)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

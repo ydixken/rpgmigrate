@@ -56,6 +56,20 @@ def load_manifest():
 def module_cases(manifest, profile):
     if profile == "Transport":
         return manifest["transport_cases"]
+    if profile == "SourceSnapshot":
+        from source_snapshot_fixture import snapshot_cases
+        return snapshot_cases()
+    if profile == "JournalSerial":
+        from journal_fixture import journal_cases
+        return journal_cases()
+    if profile == "Catalog":
+        catalog = json.loads(Path(__file__).with_name("catalog_cases.json").read_text())
+        assert isinstance(catalog, list) and catalog, "missing catalog test inventory"
+        return catalog
+    if profile == "SourceCatalog":
+        source = json.loads(Path(__file__).with_name("source_catalog_cases.json").read_text())
+        assert isinstance(source, list) and source, "missing source catalog test inventory"
+        return source
     if profile not in ("Prepared", "Authority", "Replication", "Engine"):
         raise ValueError("unknown module test profile")
     if profile == "Authority":
@@ -196,13 +210,16 @@ def psql(context, database, sql, *, role=ADMIN, canonical=True, raw=False):
 
 
 class OwnedCluster:
-    def __init__(self, manifest, *, fsync=True, logical=False, tcp=False):
+    def __init__(self, manifest, *, fsync=True, logical=False, tcp=False, logical_slots=4):
         if any(type(value) is not bool for value in (fsync, logical, tcp)):
             raise ValueError("fixture fsync, logical, and tcp settings must be boolean")
+        if type(logical_slots) is not int or not 1 <= logical_slots <= 64:
+            raise ValueError("fixture logical_slots must be an integer from 1 through 64")
         self.manifest = manifest
         self.fsync = fsync
         self.logical = logical
         self.tcp = tcp
+        self.logical_slots = logical_slots
         self.bindir = find_bindir(os.environ)
         self.environment = clean_environment(os.environ)
         self.token = secrets.token_hex(16)
@@ -247,7 +264,7 @@ class OwnedCluster:
             hba.write_text("local all e1_auth scram-sha-256\n" + network_auth + hba.read_text())
             self.log = (self.root / "postgres.log").open("wb")
             logical_options = (["-c", "wal_level=logical", "-c", "max_wal_senders=4",
-                                "-c", "max_replication_slots=4", "-c", "wal_sender_timeout=30s"]
+                                "-c", f"max_replication_slots={self.logical_slots}", "-c", "wal_sender_timeout=30s"]
                                if self.logical else [])
             self.process = subprocess.Popen([
                 str(self.bindir / "postgres"), "-D", str(self.data), "-k", str(self.socket),
@@ -277,7 +294,7 @@ class OwnedCluster:
             assert json.loads(settings) == ["0.0.0.0" if self.tcp else "", str(self.data), str(self.port), "on" if self.fsync else "off"], "fixture isolation settings differ"
             if self.logical:
                 settings = psql(self.context, "postgres", "SELECT json_build_array(current_setting('wal_level'), current_setting('max_wal_senders'), current_setting('max_replication_slots'), current_setting('wal_sender_timeout'));")
-                assert json.loads(settings) == ["logical", "4", "4", "30s"], "logical fixture settings differ"
+                assert json.loads(settings) == ["logical", "4", str(self.logical_slots), "30s"], "logical fixture settings differ"
             self.context["server_version_num"] = int(psql(self.context, "postgres", "SHOW server_version_num;"))
             assert self.context["server_version_num"] == self.manifest["server_version_num"], "unexpected server version"
             password = " PASSWORD " + quote(self.auth_password) if self.tcp else ""

@@ -1,0 +1,12 @@
+[
+  "catalog::tests::live_cdc_relation_metadata",
+  "catalog::tests::live_cdc_identity_requires_default_primary_key",
+  "catalog::tests::live_cdc_rejects_unsupported_columns",
+  "catalog::tests::live_cdc_rejects_unsupported_relations",
+  "catalog::tests::live_cdc_rejects_unsupported_indexes",
+  "catalog::tests::live_cdc_retains_caller_snapshot",
+  "catalog::tests::live_cdc_target_matches_and_retains_lock",
+  "catalog::tests::live_cdc_target_rejects_metadata_mismatch",
+  "catalog::tests::live_cdc_target_rejects_execution_profile",
+  "catalog::tests::live_cdc_target_requires_owned_transaction_settings"
+]

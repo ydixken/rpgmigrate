@@ -43,6 +43,30 @@ fn query_drains_errors_rejects_multiple_statements_and_remains_usable() {
     assert_eq!(name, "\"quoted\"\"☃\"");
     assert!(connection.quote_identifier("hidden\0tail").is_err());
     assert!(connection.query("SELECT 1\0private-row", &io).is_err());
+    for (sql, columns) in [
+        ("SELECT 1, 2, 3 WHERE false", 3),
+        ("SELECT 1, 2 WHERE false", 2),
+    ] {
+        let result = connection.query(sql, &io).unwrap();
+        assert_eq!(result.rows(), 0);
+        assert_eq!(result.columns().unwrap(), columns);
+    }
+    let begun = connection.query("BEGIN READ ONLY", &io).unwrap();
+    assert_eq!(begun.columns().unwrap(), 0);
+    connection
+        .query(
+            "DECLARE result_columns NO SCROLL CURSOR WITHOUT HOLD FOR SELECT 1, 2, 3 WHERE false",
+            &io,
+        )
+        .unwrap();
+    let fetched = connection
+        .query("FETCH FORWARD 128 FROM result_columns", &io)
+        .unwrap();
+    assert_eq!(fetched.rows(), 0);
+    assert_eq!(fetched.columns().unwrap(), 3);
+    assert_eq!(fetched.command_tag().unwrap(), "FETCH 0");
+    connection.query("CLOSE result_columns", &io).unwrap();
+    connection.query("ROLLBACK", &io).unwrap();
     ping(&fixture(), &io).unwrap();
 }
 

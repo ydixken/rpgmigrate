@@ -5,10 +5,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 use crate::cli::CommandPath;
 pub(crate) use crate::identity::RunId;
+use crate::identity::{SourceEndLsn, StreamId};
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) const MAX_SNAPSHOT_TOKEN_BYTES: usize = 1024;
+pub(crate) const COPY_PLAN_REFERENCE_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub(crate) struct Error {
@@ -118,6 +124,25 @@ pub(crate) struct CopyPlan {
     pub(crate) buffer_bytes: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CopyPlanRef {
+    pub(crate) reference_version: u32,
+    pub(crate) plan_nonce: [u8; 16],
+    pub(crate) table_count: u64,
+    pub(crate) logical_bytes: u64,
+    pub(crate) crc32: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SnapshotAnchor {
+    pub(crate) stream: StreamId,
+    pub(crate) snapshot_token: String,
+    pub(crate) consistent_point: SourceEndLsn,
+    pub(crate) plan_nonce: [u8; 16],
+}
+
 #[derive(Debug)]
 pub(crate) struct CopyReport {
     pub(crate) tables: u64,
@@ -164,6 +189,65 @@ pub(crate) enum Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_plan_reference_json_preserves_full_width_and_refuses_unknown_fields() {
+        for (tables, bytes, crc) in [(0, 0, 0), (u64::MAX, u64::MAX, u32::MAX)] {
+            let value = serde_json::json!({
+                "reference_version": 1,
+                "plan_nonce": vec![7; 16],
+                "table_count": tables,
+                "logical_bytes": bytes,
+                "crc32": crc,
+            });
+            let reference: CopyPlanRef = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(reference).unwrap(), value);
+            let mut unknown = value.clone();
+            unknown["path"] = serde_json::json!("foreign.sqlite3");
+            assert!(serde_json::from_value::<CopyPlanRef>(unknown).is_err());
+            for field in [
+                "reference_version",
+                "plan_nonce",
+                "table_count",
+                "logical_bytes",
+                "crc32",
+            ] {
+                let mut missing = value.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<CopyPlanRef>(missing).is_err(),
+                    "{field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_anchor_json_preserves_identity_and_requires_exact_fields() {
+        let value = serde_json::json!({
+            "stream": {
+                "run": vec![1; 16],
+                "source": {"system_identifier": 42, "database_oid": 7},
+                "generation": 9,
+            },
+            "snapshot_token": "owned-snapshot-token",
+            "consistent_point": 16,
+            "plan_nonce": vec![2; 16],
+        });
+        let anchor: SnapshotAnchor = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(anchor).unwrap(), value);
+        let mut unknown = value.clone();
+        unknown["proof"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<SnapshotAnchor>(unknown).is_err());
+        for field in ["stream", "snapshot_token", "consistent_point", "plan_nonce"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<SnapshotAnchor>(missing).is_err(),
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn failures_preserve_nonzero_exit_categories() {

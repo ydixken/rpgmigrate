@@ -16,6 +16,18 @@ if SCRIPT.is_file():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
 
+JOURNAL_RECEIPTS = (
+    "JournalSerial children verified 2 pre-COMMIT SIGKILL receipts\n"
+    "JournalSerial faults verified 2 committed Unknown replies and released fences\n"
+    "JournalSerial verified 2 exact cases; full E1 suite not selected\n"
+)
+SOURCE_RECEIPTS = (
+    "Catalog verified 10 exact cases; full E1 suite not selected\n"
+    "SourceCatalog verified 3 exact cases; full E1 suite not selected\n"
+    "SourceSnapshot faults verified 5 observed cases and closed backends\n"
+    "SourceSnapshot verified 12 exact cases; full E1 suite not selected\n"
+) + JOURNAL_RECEIPTS
+
 
 class VerificationTests(unittest.TestCase):
     def setUp(self):
@@ -28,18 +40,20 @@ class VerificationTests(unittest.TestCase):
 
     def test_all_task_test_suites_must_be_observed(self):
         rust = "test result: ok. 73 passed; 0 failed; 0 ignored; 7 filtered out;\n"
-        python = "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 14 tests in 1.0s\nOK\n"
+        harness = sum(runner.harness_unit_inventory().values())
+        python = f"Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan {harness} tests in 1.0s\nOK\n"
         publication = "Storage publication verified 22 cases and 20 continuations\n"
         counts = runner.validate_output("test", rust + python + publication)
-        self.assertEqual(counts, {"rust": 73, "python": [24, 20, 14], "storage_publication": 22,
+        self.assertEqual(counts, {"rust": 73, "python": [24, 20, harness], "storage_publication": 22,
                                   "storage_continuations": 20})
         for output in (rust, python, rust + python.replace("Ran 20", "Ran 0"), rust.replace("0 ignored", "1 ignored") + python):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test", output)
 
     def test_publication_footer_must_be_exact_and_unique(self):
+        harness = sum(runner.harness_unit_inventory().values())
         suites = ("test result: ok. 73 passed; 0 failed; 0 ignored;\n"
-                  "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 19 tests in 1.0s\nOK\n")
+                  f"Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan {harness} tests in 1.0s\nOK\n")
         footer = "Storage publication verified 22 cases and 20 continuations\n"
         for value in ("", footer * 2, footer.replace("22", "0"), footer.replace("22", "21"),
                       footer.replace("20", "19"), "[test] " + footer, footer + footer.replace("22", "23")):
@@ -96,11 +110,14 @@ class VerificationTests(unittest.TestCase):
     def test_database_receipts_require_both_exact_inventories_and_version(self):
         good = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
                 "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
-                "Engine verified 39 exact cases; full E1 suite not selected\n"
-                "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+                "Engine verified 41 exact cases; full E1 suite not selected\n"
+                "E1 verified 40 exact cases on PostgreSQL 17.11\n" + SOURCE_RECEIPTS)
         self.assertEqual(runner.validate_output("test-db", good),
-                         {"engine": 39, "integration": 40, "authority_faults": 2, "replication_faults": 4})
-        for output in ("", good.replace("40", "25"), good.replace("40", "38"), good.replace("17.11", "14.24"), good.splitlines()[0]):
+                         {"engine": 41, "integration": 40, "authority_faults": 2, "replication_faults": 4,
+                          "catalog": 10, "source_catalog": 3, "source_snapshot": 12, "source_snapshot_faults": 5,
+                          "journal_serial": 2, "journal_crash_children": 2, "journal_committed_unknown": 2})
+        for output in ("", good.replace("41", "39"), good.replace("41", "40"), good + good,
+                       good.replace("40", "25"), good.replace("40", "38"), good.replace("17.11", "14.24"), good.splitlines()[0]):
             with self.subTest(output=output), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test-db", output)
 
@@ -130,8 +147,8 @@ class VerificationTests(unittest.TestCase):
 
     def test_authority_faults_require_one_complete_observed_lifecycle_receipt(self):
         suites = ("Replication faults verified 4 wire cases and observed PQflush backpressure\n"
-                  "Engine verified 39 exact cases; full E1 suite not selected\n"
-                  "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+                  "Engine verified 41 exact cases; full E1 suite not selected\n"
+                  "E1 verified 40 exact cases on PostgreSQL 17.11\n" + SOURCE_RECEIPTS)
         fault = "Authority faults verified 2 held COMMIT replies and observed fence releases\n"
         for evidence in ("", fault * 2, fault.replace("2", "0"), fault.replace("2", "1"),
                          fault.replace("2", "3"), fault.replace("held", "unheld"),
@@ -142,8 +159,8 @@ class VerificationTests(unittest.TestCase):
 
     def test_replication_faults_require_one_complete_backpressure_receipt(self):
         suites = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
-                  "Engine verified 39 exact cases; full E1 suite not selected\n"
-                  "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+                  "Engine verified 41 exact cases; full E1 suite not selected\n"
+                  "E1 verified 40 exact cases on PostgreSQL 17.11\n" + SOURCE_RECEIPTS)
         fault = "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
         for evidence in ("", fault * 2, fault.replace("4", "0"), fault.replace("4", "3"),
                          fault.replace("4", "5"), fault.replace("verified", "ignored"),
@@ -152,6 +169,104 @@ class VerificationTests(unittest.TestCase):
                          fault + fault.replace("4", "0")):
             with self.subTest(evidence=evidence), self.assertRaises(runner.VerificationError):
                 runner.validate_output("test-db", evidence + suites)
+
+    def test_source_profiles_require_exact_complete_and_unique_receipts(self):
+        baseline = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
+                    "Engine verified 41 exact cases; full E1 suite not selected\n"
+                    "E1 verified 40 exact cases on PostgreSQL 17.11\n")
+        for line in SOURCE_RECEIPTS.splitlines(keepends=True):
+            others = SOURCE_RECEIPTS.replace(line, "")
+            for bad in ("", line * 2, line.replace("verified", "pending"), "[task] " + line,
+                        line.replace("10", "9").replace("12", "11").replace(" 3 ", " 2 ").replace(" 5 ", " 4 ").replace(" 2 ", " 1 "),
+                        line + "[task] " + line):
+                with self.subTest(line=line, bad=bad), self.assertRaises(runner.VerificationError):
+                    runner.validate_output("test-db", baseline + others + bad)
+        lines = SOURCE_RECEIPTS.splitlines(keepends=True)
+        for receipts in (SOURCE_RECEIPTS, "".join(reversed(lines))):
+            counts = runner.validate_output("test-db", baseline + receipts)
+            self.assertEqual(tuple(counts.get(key) for key in ("catalog", "source_catalog", "source_snapshot",
+                                                              "source_snapshot_faults")), (10, 3, 12, 5))
+
+    def test_legacy_only_harness_receipt_cannot_pass_local_gate(self):
+        output = ("test result: ok. 73 passed; 0 failed; 0 ignored;\n"
+                  "Ran 24 tests in 1.0s\nOK\nRan 20 tests in 1.0s\nOK\nRan 19 tests in 1.0s\nOK\n"
+                  "Storage publication verified 22 cases and 20 continuations\n")
+        with self.assertRaises(runner.VerificationError):
+            runner.validate_output("test", output)
+
+    def test_journal_requires_complete_unique_parent_child_and_fault_receipts(self):
+        baseline = ("Authority faults verified 2 held COMMIT replies and observed fence releases\n"
+                    "Replication faults verified 4 wire cases and observed PQflush backpressure\n"
+                    "Engine verified 41 exact cases; full E1 suite not selected\n"
+                    "E1 verified 40 exact cases on PostgreSQL 17.11\n" + SOURCE_RECEIPTS.removesuffix(JOURNAL_RECEIPTS))
+        lines = ["JournalSerial children verified 2 pre-COMMIT SIGKILL receipts\n",
+                 "JournalSerial faults verified 2 committed Unknown replies and released fences\n",
+                 "JournalSerial verified 2 exact cases; full E1 suite not selected\n"]
+        with self.assertRaises(runner.VerificationError):
+            runner.validate_output("test-db", baseline)
+        for index, line in enumerate(lines):
+            rest = "".join(lines[:index] + lines[index + 1:])
+            for invalid in ("", line + line, "[task] " + line, line.replace(" 2 ", " 1 "),
+                            line.replace(" 2 ", " 0 "), line + "JournalSerial unexpected receipt\n"):
+                with self.subTest(index=index, invalid=invalid), self.assertRaises(runner.VerificationError):
+                    runner.validate_output("test-db", baseline + rest + invalid)
+
+    def test_harness_inventory_requires_every_nonempty_module(self):
+        expected = ("tests/support/test_harness.py", "tests/support/test_catalog_harness.py",
+                    "tests/support/test_source_catalog_harness.py", "tests/support/test_source_snapshot_harness.py",
+                    "tests/support/test_journal_harness.py")
+        self.assertEqual(runner.HARNESS_SUITES, expected)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            content = "class Tests(unittest.TestCase):\n    def test_required(self): pass\n"
+            for name in expected:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            self.assertEqual(runner.harness_unit_inventory(root), dict.fromkeys(expected, 1))
+            for name in expected:
+                path = root / name
+                for content_bad in (None, "", "class Tests(unittest.TestCase): pass\n", "def invalid("):
+                    if content_bad is None:
+                        path.unlink()
+                    else:
+                        path.write_text(content_bad)
+                    with self.subTest(name=name, content=content_bad), self.assertRaises(runner.VerificationError):
+                        runner.harness_unit_inventory(root)
+                path.write_text(content)
+
+    def test_harness_runner_emits_one_footer_and_refuses_missing_or_skipped_suites(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper = root / "tools/ci/unit.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_bytes(SCRIPT.with_name("unit.py").read_bytes())
+            (helper.parent / "verify.py").write_bytes(SCRIPT.read_bytes())
+            content = "import unittest\nclass Tests(unittest.TestCase):\n    def test_required(self): pass\n"
+            expected = ("test_harness.py", "test_catalog_harness.py", "test_source_catalog_harness.py",
+                        "test_source_snapshot_harness.py", "test_journal_harness.py")
+            for name in expected:
+                path = root / "tests/support" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            def run(*flags):
+                return subprocess.run([sys.executable, *flags, str(helper), "--harness"],
+                                      capture_output=True, text=True, timeout=10)
+            good = run()
+            self.assertEqual(good.returncode, 0, good.stderr)
+            self.assertEqual(good.stderr.count("Ran 5 tests in "), 1)
+            missing = root / "tests/support/test_journal_harness.py"
+            missing.unlink()
+            self.assertNotEqual(run().returncode, 0)
+            missing.write_text(content.replace("    def test_required", "    @unittest.skip('fixture')\n    def test_required"))
+            skipped = run()
+            self.assertNotEqual(skipped.returncode, 0)
+            self.assertIn("skipped=1", skipped.stderr)
+            missing.write_text(content)
+            optimized = run("-O")
+            self.assertNotEqual(optimized.returncode, 0)
+            self.assertIn("optimized Python", optimized.stderr)
 
     def test_nonzero_child_and_missing_tool_are_safe_failures(self):
         for command in ([sys.executable, "-c", "print('password=do-not-export'); raise SystemExit(9)"], ["/nonexistent-e1-tool"]):
@@ -169,185 +284,6 @@ class VerificationTests(unittest.TestCase):
     def test_timeout_cannot_pass(self):
         with self.assertRaises(runner.VerificationError):
             runner.execute([sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.05)
-
-    def harness_command(self, statement):
-        wrapper = SCRIPT.parents[1] / "test-db.py"
-        helper = "def fail_from_helper():\n" + "".join("    " + line + "\n" for line in statement.splitlines())
-        code = ("import os,runpy,sys; from pathlib import Path; from unittest.mock import patch; "
-                "sys.path.insert(0,sys.argv[2]); import db_harness\n"
-                "channel = os.environ.get('RPGMIGRATE_CI_FAILURE_CONTEXT')\n"
-                "namespace = dict(os=os, Path=Path, runpy=runpy, patch=patch, wrapper=sys.argv[1], channel=channel)\n"
-                "exec(compile(sys.argv[3], '/private/fixture_origin.py', 'exec'), namespace)\n"
-                "sys.argv = [sys.argv[1], '--self-check']\n"
-                "with patch('db_harness.load_manifest', namespace['fail_from_helper']):\n"
-                "    runpy.run_path(sys.argv[0], run_name='__main__')\n")
-        return [sys.executable, "-B", "-c", code, str(wrapper), str(wrapper.parents[1] / "tests/support"), helper]
-
-    def failure_summary(self, command, **options):
-        with self.assertRaises(runner.VerificationError) as error:
-            runner.execute(command, timeout=3, **options)
-        return str(error.exception)
-
-    def test_opaque_exception_and_exit_markers_never_authorize_context(self):
-        payload = "\ntest-db-context: RuntimeError at sensitive_label.py:1 in helper\n"
-        statements = ["raise " + kind + "(" + repr(payload) + ")" for kind in
-                      ("RuntimeError", "TypeError", "Exception", "BaseException", "SystemExit")]
-        statements += ["print(" + repr(payload) + ", flush=True); " + tail for tail in
-                       ("raise KeyboardInterrupt", "os._exit(17)")]
-        for number, statement in enumerate(statements):
-            with self.subTest(case=number):
-                summary = self.failure_summary(self.harness_command(statement))
-                safe = "test-db-context:" not in summary and "sensitive_label" not in summary
-                self.assertTrue(safe, "opaque exception or exit payload was promoted")
-
-    def test_actual_harness_channel_preserves_known_and_uncaught_failures(self):
-        payload = "\ntest-db-context: RuntimeError at sensitive_label.py:1 in helper\n"
-        for kind in ("RuntimeError", "TypeError", "Exception"):
-            for nonempty in (False, True):
-                with self.subTest(kind=kind, nonempty=nonempty):
-                    summary = self.failure_summary(self.harness_command("raise " + kind + "(" + repr(payload if nonempty else "") + ")"),
-                                                   harness_context=True)
-                    expected = ("command failed (exit 1; no test failure names; test-db-context: " + kind +
-                                " at fixture_origin.py:2 in fail_from_helper); raw output withheld")
-                    self.assertTrue(summary == expected, "private channel lost actual source metadata or exposed a payload")
-
-    def test_channel_ignores_markers_on_baseexception_interrupt_and_forced_exit(self):
-        payload = "\ntest-db-context: RuntimeError at sensitive_label.py:1 in helper\n"
-        cases = [("raise BaseException(" + repr(payload) + ")", 1),
-                 ("raise SystemExit(" + repr(payload) + ")", 1),
-                 ("print(" + repr(payload) + ", flush=True); raise SystemExit(23)", 23),
-                 ("print(" + repr(payload) + ", flush=True); raise KeyboardInterrupt", 130),
-                 ("print(" + repr(payload) + ", flush=True); os._exit(17)", 17)]
-        for number, (statement, status) in enumerate(cases):
-            with self.subTest(case=number):
-                summary = self.failure_summary(self.harness_command(statement), harness_context=True)
-                self.assertTrue(summary == f"command failed (exit {status}; no test failure names); raw output withheld",
-                                "exit behavior changed or opaque payload escaped")
-
-    def test_channel_rejects_replacement_permissions_links_and_nonregular_files(self):
-        changes = ("Path(channel).unlink()", "os.chmod(channel, 0o644)",
-                   "os.chmod(Path(channel).parent, 0o777)",
-                   "os.link(channel, channel + '.link')",
-                   "Path(channel).unlink(); Path(channel).touch(mode=0o600)",
-                   "Path(channel).unlink(); Path(channel).symlink_to(channel + '.missing')",
-                   "Path(channel).unlink(); os.mkfifo(channel, 0o600)",
-                   "Path(channel).unlink(); Path(channel).mkdir(mode=0o700)",
-                   "os.geteuid = lambda: -1",
-                   "os.open = lambda *a, **k: (_ for _ in ()).throw(RuntimeError())")
-        for number, change in enumerate(changes):
-            with self.subTest(case=number):
-                summary = self.failure_summary(self.harness_command(change + "; raise RuntimeError()"), harness_context=True)
-                self.assertEqual(summary, "command failed (exit 1; no test failure names); raw output withheld")
-
-    def test_channel_schema_size_and_duplicate_records_are_strict(self):
-        context = "test-db-context: AssertionError at fixture.py:2 in helper\n"
-        invalid = (b"", b"broken", context.encode() * 2, (context + "extra").encode(),
-                   context.replace("fixture.py", "/private/fixture.py").encode(),
-                   context.replace("helper", "x" * 257).encode(), context.encode() + b"x" * 65536,
-                   context.replace(":2 ", ":0 ").encode(), context.replace("helper", "a/b").encode(),
-                   context.replace("AssertionError", "Érror").encode(), context.encode() + b"\0")
-        code = "import os,sys; open(os.environ['RPGMIGRATE_CI_FAILURE_CONTEXT'],'ab').write(bytes.fromhex(sys.argv[1])); sys.exit(7)"
-        for function in ("helper", "<module>", "<lambda>", "<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>"):
-            with self.subTest(function=function):
-                record = context.replace("helper", function)
-                summary = self.failure_summary([sys.executable, "-B", "-c", code, record.encode().hex()], harness_context=True)
-                self.assertEqual(summary, "command failed (exit 7; no test failure names; " + record[:-1] + "); raw output withheld")
-        file_code = "import os,sys; from pathlib import Path; open(os.environ['RPGMIGRATE_CI_FAILURE_CONTEXT'],'ab').write(Path(sys.argv[1]).read_bytes()); sys.exit(7)"
-        for number, value in enumerate(invalid):
-            with self.subTest(case=number), tempfile.TemporaryDirectory() as directory:
-                payload = Path(directory) / "payload.bin"
-                payload.touch(mode=0o600)
-                payload.write_bytes(value)
-                summary = self.failure_summary([sys.executable, "-B", "-c", file_code, str(payload)], harness_context=True)
-                self.assertEqual(summary, "command failed (exit 7; no test failure names); raw output withheld")
-
-    def test_channel_rechecks_owner_and_metadata_after_the_read(self):
-        from unittest.mock import patch
-        original_read, original_allocate = runner.os.read, runner.tempfile.mkstemp
-        for change in ("append", "permissions", "owner", "replace", "directory"):
-            with self.subTest(change=change):
-                paths = []
-
-                def allocate(*args, **kwargs):
-                    descriptor, path = original_allocate(*args, **kwargs)
-                    paths.append(Path(path))
-                    return descriptor, path
-
-                def changed_read(descriptor, size):
-                    data = original_read(descriptor, size)
-                    if size == 257:
-                        if change == "append":
-                            runner.os.write(descriptor, b"extra")
-                        elif change == "permissions":
-                            runner.os.fchmod(descriptor, 0o644)
-                        elif change == "replace":
-                            paths[0].unlink()
-                            paths[0].touch(mode=0o600)
-                        elif change == "directory":
-                            paths[0].parent.chmod(0o777)
-                    return data
-
-                with patch.object(runner.os, "read", changed_read), patch.object(runner.tempfile, "mkstemp", allocate):
-                    if change == "owner":
-                        with patch.object(runner.os, "geteuid", return_value=-1):
-                            summary = self.failure_summary(self.harness_command("raise RuntimeError()"), harness_context=True)
-                    else:
-                        summary = self.failure_summary(self.harness_command("raise RuntimeError()"), harness_context=True)
-                self.assertEqual(summary, "command failed (exit 1; no test failure names); raw output withheld")
-
-    def test_channel_allocation_failure_and_cleanup_preserve_command_behavior(self):
-        from unittest.mock import patch
-        with patch.object(runner.tempfile, "mkstemp", side_effect=OSError()):
-            summary = self.failure_summary(self.harness_command("assert channel is None; raise RuntimeError()"), harness_context=True)
-        self.assertEqual(summary, "command failed (exit 1; no test failure names); raw output withheld")
-        original = runner.tempfile.mkstemp
-        paths = []
-
-        def allocate(*args, **kwargs):
-            descriptor, path = original(*args, **kwargs)
-            paths.append((descriptor, Path(path)))
-            return descriptor, path
-
-        with patch.object(runner.tempfile, "mkstemp", allocate):
-            self.assertEqual(runner.execute([sys.executable, "-B", "-c", "print('ok')"], harness_context=True), "ok\n")
-            self.failure_summary(self.harness_command("raise RuntimeError()"), harness_context=True)
-            with self.assertRaisesRegex(runner.VerificationError, "required command unavailable"):
-                runner.execute(["/nonexistent-e1-tool"], harness_context=True)
-            with self.assertRaisesRegex(runner.VerificationError, "command deadline exceeded"):
-                runner.execute([sys.executable, "-B", "-c", "import time; time.sleep(10)"], timeout=0.05, harness_context=True)
-        for descriptor, path in paths:
-            self.assertFalse(path.parent.exists())
-            with self.assertRaises(OSError):
-                runner.os.fstat(descriptor)
-
-    def test_channel_keeps_failure_names_and_does_not_change_success_output(self):
-        statement = "print('test fixture::failing_case ... FAILED'); print('FAIL: test_python_case (fixture.Tests)'); raise RuntimeError()"
-        summary = self.failure_summary(self.harness_command(statement), harness_context=True)
-        self.assertIn("fixture::failing_case, test_python_case; test-db-context: RuntimeError", summary)
-        output = "test-db-context: RuntimeError at fixture.py:1 in helper\nordinary output\n"
-        self.assertEqual(runner.execute([sys.executable, "-B", "-c", "import sys; sys.stdout.write(sys.argv[1])", output],
-                                        harness_context=True), output)
-
-    def test_channel_is_consumed_before_nested_runpy_and_child_execution(self):
-        statement = ("assert 'RPGMIGRATE_CI_FAILURE_CONTEXT' not in os.environ\n"
-                     "try:\n"
-                     "    with patch('db_harness.load_manifest', side_effect=RuntimeError()):\n"
-                     "        runpy.run_path(wrapper, run_name='__main__')\n"
-                     "except SystemExit:\n"
-                     "    pass\n"
-                     "raise RuntimeError()")
-        summary = self.failure_summary(self.harness_command(statement), harness_context=True)
-        self.assertEqual(summary, "command failed (exit 1; no test failure names; test-db-context: RuntimeError at fixture_origin.py:8 in fail_from_helper); raw output withheld")
-        key = "RPGMIGRATE_CI_FAILURE_CONTEXT"
-        from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as directory:
-            stale = Path(directory) / "stale"
-            stale.write_text("test-db-context: RuntimeError at stale.py:1 in helper\n")
-            with patch.dict(runner.os.environ, {key: str(stale)}):
-                command = [sys.executable, "-B", "-c", "import os; assert 'RPGMIGRATE_CI_FAILURE_CONTEXT' not in os.environ; raise SystemExit(7)"]
-                self.assertEqual(self.failure_summary(command), "command failed (exit 7; no test failure names); raw output withheld")
-                summary = self.failure_summary(self.harness_command("raise SystemExit(7)"), harness_context=True)
-                self.assertEqual(summary, "command failed (exit 7; no test failure names); raw output withheld")
 
     def test_ci_checks_cannot_report_empty_or_skipped_tests(self):
         self.assertEqual(runner.validate_output("ci-unit", f"Ran {sum(runner.ci_unit_inventory().values())} tests in 0.1s\nOK\n"), {"python": [sum(runner.ci_unit_inventory().values())]})

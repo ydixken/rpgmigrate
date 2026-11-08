@@ -1,0 +1,5 @@
+[
+  "catalog::tests::live_source_identity_exact_backend",
+  "catalog::tests::live_source_identity_preserves_imported_snapshot",
+  "catalog::tests::live_source_identity_refuses_missing_control_privilege"
+]

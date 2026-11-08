@@ -107,6 +107,11 @@ An empty checkpoint proof covers zero CDC transactions.
 It cannot invent requested end positions or establish COPY snapshot coverage.
 The logged target checkpoint remains the recovery authority, not replication-origin progress alone.
 
+The [owning COPY contract](superpowers/specs/2026-11-07-copy-snapshot-anchor.md) requires copied data, its exact source-snapshot anchor, and one logged counter increment in the same synchronous target transaction.
+That transaction leaves the CDC frontier empty; the first real CDC transaction still uses sequence one.
+A fresh fenced recovery transaction must match the native intent and sealed plan, then write and confirm a barrier before producing COPY proof.
+Such proof establishes target COPY completion, not the continued availability of an importer, exporter, source slot, required WAL, or decoder context.
+
 ## Assess failure consequences
 
 The matrix concerns acknowledged transactional logged data under the storage assumptions below.

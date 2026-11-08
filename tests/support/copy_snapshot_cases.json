@@ -1,0 +1,10 @@
+[
+  "snapshot::copy_live_tests::live_copy_snapshot_atomic",
+  "snapshot::copy_live_tests::live_copy_snapshot_empty",
+  "snapshot::copy_live_tests::live_copy_snapshot_admission",
+  "snapshot::copy_live_tests::live_copy_snapshot_rollback",
+  "snapshot::copy_live_tests::live_copy_snapshot_unknown",
+  "snapshot::copy_live_tests::live_copy_snapshot_recovery_refusal",
+  "snapshot::copy_live_tests::live_copy_snapshot_source_finish_unknown",
+  "snapshot::copy_live_tests::live_copy_snapshot_advisory_counts"
+]

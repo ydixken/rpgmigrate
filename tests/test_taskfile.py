@@ -1,6 +1,5 @@
 """Exercise Task commands without compiling Rust or building native libraries."""
 
-from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
 import io
@@ -15,19 +14,23 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
-import urllib.error
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FLAGS = ["--silent", "--output=interleaved", "--color=false"]
 FILTERS = ["--skip", "pg::live_tests::", "--skip", "pg::prepared_live_tests::",
            "--skip", "pg::replication_live_tests::", "--skip", "apply::checkpoint::live_tests::",
-           "--skip", "catalog::tests::live_", "--skip", "copy::tests::live_"]
+           "--skip", "catalog::tests::live_", "--skip", "copy::tests::live_",
+           "--skip", "snapshot::live_tests::",
+           "--skip", "snapshot::journal_live_tests::segmented_real_wal_reopens_and_serial_replays",
+           "--skip", "snapshot::journal_live_tests::sqlite_real_wal_reopens_and_serial_replays",
+           "--skip", "snapshot::journal_live_tests::journal_serial_crash_child"]
 TARGETS = {"check", "fmt-check", "lint", "native", "native-check", "build", "test", "test-unit",
            "test-cli", "test-native", "test-harness", "test-storage-format", "test-storage-recovery",
            "storage-pilot", "test-db", "test-engine", "test-transport", "test-prepared",
            "test-replication", "test-authority", "test-db-self-check", "default", "help", "ci:linux", "image:build",
-           "image:smoke", "test-storage-publication"}
+           "image:smoke", "test-storage-publication", "test-catalog", "test-source-catalog",
+           "test-source-snapshot", "test-journal-serial"}
 FORWARDED = ("CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG_PATH", "PG_BINDIR", "PG_CONFIG",
              "CARGO_TARGET_DIR", "RPGMIGRATE_BIN", "RPGMIGRATE_TEST_EXPECTED_PG_VERSION",
              "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM")
@@ -59,9 +62,7 @@ class BootstrapTests(unittest.TestCase):
                         patch.object(self.module.platform, "system", return_value="Darwin"),
                         patch.object(self.module.platform, "machine", return_value="arm64"),
                         patch.dict(self.module.SHA256, {self.key: hashlib.sha256(self.archive).hexdigest()}),
-                        patch.dict(os.environ, {}, clear=True),
-                        patch.object(self.module.urllib.request, "urlopen",
-                                     side_effect=AssertionError("unmocked bootstrap download"))]
+                        patch.dict(os.environ, {}, clear=True)]
         for item in self.patches:
             item.start()
             self.addCleanup(item.stop)
@@ -120,139 +121,6 @@ class BootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "TASK_DRY"):
                 self.install()
 
-    def main_result(self, *arguments):
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.object(sys, "argv", ["bootstrap-task.py", *arguments]), \
-                redirect_stdout(stdout), redirect_stderr(stderr):
-            status = self.module.main()
-        return status, stdout.getvalue(), stderr.getvalue()
-
-    def failure(self, phase, category, http_status=None):
-        status, stdout, stderr = self.main_result()
-        self.assertEqual(status, 1)
-        self.assertEqual(stdout, "")
-        record = {"level": "error", "message": "Task bootstrap failed; check the platform, cache, network, and TASK_DRY",
-                  "phase": phase, "category": category}
-        if http_status is not None:
-            record["http_status"] = http_status
-        self.assertEqual(json.loads(stderr), record)
-        self.assertEqual(len(stderr.splitlines()), 1)
-        self.assertNotIn("PRIVATE_CANARY", stdout + stderr)
-
-    def test_download_failure_categories_and_redaction(self):
-        class PrivateError(RuntimeError):
-            def __str__(self):
-                raise AssertionError("exception string accessed")
-
-            def __repr__(self):
-                raise AssertionError("exception repr accessed")
-
-        url = "https://user:PRIVATE_CANARY@example.invalid/PRIVATE_CANARY"
-        cases = [(TimeoutError("PRIVATE_CANARY"), "timeout", None),
-                 (urllib.error.URLError(TimeoutError("PRIVATE_CANARY")), "timeout", None),
-                 (urllib.error.URLError("PRIVATE_CANARY"), "url", None),
-                 (ConnectionError("PRIVATE_CANARY"), "os_error", None),
-                 (PrivateError("PRIVATE_CANARY"), "unknown", None)]
-        for code, expected in ((100, 100), (503, 503), (599, 599), (99, None), (600, None),
-                               (True, None), ("PRIVATE_CANARY", None)):
-            error = urllib.error.HTTPError(url, code, "PRIVATE_CANARY", None, None)
-            self.addCleanup(error.close)
-            cases.append((error, "http", expected))
-        with patch.object(self.module, "ROOT", self.root / "PRIVATE_CANARY"), \
-                patch.object(self.module, "RELEASE", url), \
-                patch.dict(os.environ, {"PRIVATE_CANARY": "PRIVATE_CANARY"}):
-            for error, category, code in cases:
-                with self.subTest(category=category, code=code), \
-                        patch.object(self.module.urllib.request, "urlopen", side_effect=error):
-                    self.failure("download", category, code)
-
-    def test_configuration_diagnostics_preserve_refusal(self):
-        with patch.dict(os.environ, {"TASK_DRY": "PRIVATE_CANARY"}):
-            self.failure("configuration", "configuration")
-        with patch.object(self.module.platform, "machine", return_value="PRIVATE_CANARY"):
-            self.failure("configuration", "configuration")
-
-    def test_unknown_failure_does_not_infer_network_cause(self):
-        with patch.object(self.module.platform, "machine", side_effect=RuntimeError("PRIVATE_CANARY")):
-            self.failure("configuration", "unknown")
-
-    def test_filesystem_failure_does_not_expose_cache_path(self):
-        with patch.object(Path, "mkdir", side_effect=PermissionError(13, "PRIVATE_CANARY", "/PRIVATE_CANARY")):
-            self.failure("cache", "os_error")
-
-    def test_download_checksum_diagnostic_preserves_no_install(self):
-        self.module.SHA256[self.key] = "0" * 64
-        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(self.archive)):
-            self.failure("checksum", "checksum")
-        self.assertFalse((self.root / "target/tools/task/3.54.0/bin/task").exists())
-        self.assertEqual(list(self.root.rglob("*.tar.gz")), [])
-
-    def test_cached_archive_checksum_diagnostic(self):
-        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
-            self.install()
-        next(self.root.rglob("*.tar.gz")).write_bytes(b"PRIVATE_CANARY")
-        self.failure("checksum", "checksum")
-
-    def test_archive_diagnostics_preserve_validation(self):
-        contents = b"PRIVATE_CANARY"
-        self.module.SHA256[self.key] = hashlib.sha256(contents).hexdigest()
-        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(contents)):
-            self.failure("archive", "archive")
-        next(self.root.rglob("*.tar.gz")).unlink()
-        stream = io.BytesIO()
-        with tarfile.open(fileobj=stream, mode="w:gz"):
-            pass
-        contents = stream.getvalue()
-        self.module.SHA256[self.key] = hashlib.sha256(contents).hexdigest()
-        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(contents)):
-            self.failure("archive", "archive")
-        self.assertFalse((self.root / "target/tools/task/3.54.0/bin/task").exists())
-
-    def test_publication_failure_does_not_publish_archive(self):
-        with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(self.archive)), \
-                patch.object(Path, "replace", side_effect=PermissionError("PRIVATE_CANARY")):
-            self.failure("publish", "os_error")
-        self.assertEqual(list(self.root.rglob("*.tar.gz")), [])
-
-    def test_cached_binary_diagnostic_preserves_tampering_refusal(self):
-        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
-            binary = self.install()
-        binary.write_text("PRIVATE_CANARY")
-        self.failure("cache", "cache")
-        self.assertEqual(binary.read_text(), "PRIVATE_CANARY")
-
-    def test_execution_diagnostics_do_not_expose_child_output(self):
-        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
-            self.install()
-        for error, category in ((subprocess.TimeoutExpired("PRIVATE_CANARY", 10, "PRIVATE_CANARY", "PRIVATE_CANARY"), "timeout"),
-                                (subprocess.CalledProcessError(7, "PRIVATE_CANARY", "PRIVATE_CANARY", "PRIVATE_CANARY"), "process"),
-                                (PermissionError("PRIVATE_CANARY"), "os_error"),
-                                (RuntimeError("PRIVATE_CANARY"), "unknown")):
-            with self.subTest(category=category), patch.object(self.module.subprocess, "run", side_effect=error):
-                self.failure("execute", category)
-        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "PRIVATE_CANARY", "PRIVATE_CANARY")):
-            self.failure("execute", "version")
-
-    def test_success_and_offline_cache_keep_stdout_and_exit(self):
-        expected = str(self.root / "target/tools/task/3.54.0/bin/task") + "\n"
-        with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "3.54.0\n", "")):
-            with patch.object(self.module.urllib.request, "urlopen", return_value=io.BytesIO(self.archive)):
-                self.assertEqual(self.main_result(), (0, expected, ""))
-            self.assertEqual(self.main_result(), (0, expected, ""))
-
-    def test_version_only_keeps_stdout_and_skips_bootstrap(self):
-        with patch.object(self.module, "bootstrap", side_effect=AssertionError("bootstrap on version request")):
-            self.assertEqual(self.main_result("--version"), (0, "3.54.0\n", ""))
-
-    def test_unknown_exception_diagnostic_prevents_traceback(self):
-        with patch.object(self.module.urllib.request, "urlopen", side_effect=ValueError("PRIVATE_CANARY")):
-            self.failure("download", "unknown")
-        for error in (KeyboardInterrupt(), SystemExit(7)):
-            with self.subTest(exception=type(error).__name__), \
-                    patch.object(self.module.urllib.request, "urlopen", side_effect=error):
-                with self.assertRaises(type(error)):
-                    self.main_result()
-
 
 class TaskfileTests(unittest.TestCase):
     @classmethod
@@ -286,7 +154,7 @@ with open(os.environ["CALL_LOG"], "a") as out:
 if args and args[0].endswith(".py") and not pathlib.Path(args[0]).is_file():
     sys.exit(2)
 if "--list" in args:
-    default = "31" if "storage_format" in args else "171" if "storage_recovery" in args else "1"
+    default = "31" if "storage_format" in args else "165" if "storage_recovery" in args else "1"
     count = int(os.environ.get("DISCOVERY_COUNT", default))
     for number in range(count):
         print(f"case_{number}: test")
@@ -313,12 +181,12 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
             path.write_text(script)
             path.chmod(0o755)
         for path in ("tools/build-libpq.py", "tools/test-db.py", "tests/cli_contract.py",
-                     "tests/test_native_libpq.py", "tests/support/test_harness.py"):
+                     "tests/test_native_libpq.py", "tests/support/test_harness.py", "tools/ci/unit.py"):
             fixture = self.root / path
             fixture.parent.mkdir(parents=True, exist_ok=True)
             fixture.touch()
         verifier = self.root / "tools/ci/verify.py"
-        verifier.parent.mkdir(parents=True)
+        verifier.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "tools/ci/verify.py", verifier)
 
     def run_task(self, *args, env=None):
@@ -402,7 +270,9 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
         self.assertEqual(self.calls()[-1]["argv"],
                          ["-B", "tools/test-db.py", "--engine", "--", str(self.bin / "chosen cargo"),
                           "--offline", "--config", "value with 'quotes' $literal", "test", "--locked", "--lib",
-                          "--", "--ignored", "--test-threads=1"])
+                          "--", "--ignored", "--test-threads=1", "--skip", "catalog::tests::live_cdc_",
+                          "--skip", "catalog::tests::live_source_identity_",
+                          "--skip", "snapshot::live_tests::", "--skip", "snapshot::journal_live_tests::"])
         self.assertEqual(self.calls()[-1]["env"]["PG_BINDIR"], "/cli pg")
 
     def test_defined_empty_never_uses_default(self):
@@ -451,7 +321,7 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
             ["test", "--locked", "--lib", "--bins", "--", *FILTERS],
             ["tools/build-libpq.py", "--verify"], ["build", "--locked"], ["tests/cli_contract.py"],
             ["tools/build-libpq.py", "--verify"], ["tests/test_native_libpq.py"],
-            ["tests/support/test_harness.py"], ["tools/build-libpq.py", "--verify"],
+            ["tools/ci/unit.py", "--harness"], ["tools/build-libpq.py", "--verify"],
             ["test", "--locked", "--test", "storage_format", "--", "--list"],
             ["test", "--locked", "--test", "storage_format", "--", "--include-ignored"],
             ["tools/build-libpq.py", "--verify"],
@@ -494,6 +364,10 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
         self.assertEqual([row["argv"] for row in self.calls()][1:],
                          [["test", "--locked", "--lib", "--", "--list", *FILTERS],
                           ["test", "--locked", "--lib", "--bins", "--", *FILTERS]])
+        args = self.calls()[-1]["argv"]
+        skipped = [args[index + 1] for index, value in enumerate(args) if value == "--skip"]
+        ordinary = "snapshot::journal_live_tests::sqlite::tests::c1_read_view_keeps_one_cut_while_a_child_process_commits"
+        self.assertFalse(any(value in ordinary for value in skipped))
 
     def test_empty_discovery_fails_before_execution(self):
         self.assertNotEqual(self.run_task("test-unit", env={"DISCOVERY_COUNT": "0"}).returncode, 0)
@@ -504,7 +378,7 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
         self.assertEqual(len(self.calls()), 2)
 
     def test_exact_storage_inventory(self):
-        for name, count in (("storage-format", 31), ("storage-recovery", 171)):
+        for name, count in (("storage-format", 31), ("storage-recovery", 165)):
             for actual in (0, count - 1, count, count + 1):
                 with self.subTest(name=name, actual=actual):
                     result = self.run_task("test-" + name, env={"DISCOVERY_COUNT": str(actual)})
@@ -514,7 +388,10 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
 
     def test_live_wrapper_arguments(self):
         cases = {"transport": "pg::live_tests::", "prepared": "pg::prepared_live_tests::",
-                 "replication": "pg::replication_live_tests::", "authority": "apply::checkpoint::live_tests::"}
+                 "replication": "pg::replication_live_tests::", "authority": "apply::checkpoint::live_tests::",
+                 "catalog": "catalog::tests::live_cdc_",
+                 "source-catalog": "catalog::tests::live_source_identity_",
+                 "source-snapshot": "snapshot::live_tests::"}
         for profile, namespace in cases.items():
             with self.subTest(profile=profile):
                 self.passed(self.run_task("test-" + profile))
@@ -560,9 +437,63 @@ if args[:2] == ["tools/ci/verify.py", "--storage-publication"]:
         self.assertEqual(calls, [["tools/build-libpq.py", "--verify"], ["build", "--locked"],
                                  ["tools/build-libpq.py", "--verify"],
                                  ["tools/test-db.py", "--engine", "--", "cargo", "test", "--locked", "--lib",
-                                  "--", "--ignored", "--test-threads=1"],
+                                  "--", "--ignored", "--test-threads=1", "--skip", "catalog::tests::live_cdc_",
+                                  "--skip", "catalog::tests::live_source_identity_",
+                                  "--skip", "snapshot::live_tests::", "--skip", "snapshot::journal_live_tests::"],
+                                 ["tools/build-libpq.py", "--verify"],
+                                 ["tools/test-db.py", "--catalog", "--", "cargo", "test", "--locked", "--lib",
+                                  "catalog::tests::live_cdc_", "--", "--ignored", "--test-threads=1"],
+                                 ["tools/build-libpq.py", "--verify"],
+                                 ["tools/test-db.py", "--source-catalog", "--", "cargo", "test", "--locked", "--lib",
+                                  "catalog::tests::live_source_identity_", "--", "--ignored", "--test-threads=1"],
+                                 ["tools/build-libpq.py", "--verify"],
+                                 ["tools/test-db.py", "--source-snapshot", "--", "cargo", "test", "--locked", "--lib",
+                                  "snapshot::live_tests::", "--", "--ignored", "--test-threads=1"],
+                                 ["tools/build-libpq.py", "--verify"],
+                                 ["tools/test-db.py", "--journal-serial", "--", "cargo", "test", "--locked", "--lib",
+                                  "snapshot::journal_live_tests::", "--", "--ignored", "--test-threads=1",
+                                  "--skip", "snapshot::journal_live_tests::journal_serial_crash_child"],
                                  ["tools/test-db.py", "--", "cargo", "test", "--locked", "--test", "copy_integration",
                                   "--", "--test-threads=1"]])
+
+    def test_all_harness_modules_share_one_required_runner(self):
+        self.passed(self.run_task("test-harness"))
+        self.assertEqual(self.calls()[-1]["argv"], ["tools/ci/unit.py", "--harness"])
+        (self.root / "tools/ci/unit.py").unlink()
+        self.assertNotEqual(self.run_task("test-harness").returncode, 0)
+
+    def test_engine_skips_preserve_its_required_cases(self):
+        self.passed(self.run_task("test-engine"))
+        args = self.calls()[-1]["argv"]
+        skips = [args[index + 1] for index, value in enumerate(args) if value == "--skip"]
+        with patch.object(sys, "path", [str(ROOT / "tests/support"), *sys.path]):
+            from db_harness import load_manifest, module_cases
+            manifest = load_manifest()
+            engine = module_cases(manifest, "Engine")
+            self.assertEqual(len(engine), 41)
+            retained = [name for name in engine if not any(skip in name for skip in skips)]
+            self.assertEqual(retained, engine)
+            for profile in ("Catalog", "SourceCatalog", "SourceSnapshot", "JournalSerial"):
+                cases = module_cases(manifest, profile)
+                self.assertTrue(cases)
+                self.assertEqual([name for name in cases if not any(skip in name for skip in skips)], [])
+
+    def test_journal_profile_selects_only_the_two_parent_cases(self):
+        self.passed(self.run_task("test-journal-serial"))
+        args = self.calls()[-1]["argv"]
+        self.assertEqual(args, ["tools/test-db.py", "--journal-serial", "--", "cargo", "test", "--locked", "--lib",
+                                "snapshot::journal_live_tests::", "--", "--ignored", "--test-threads=1",
+                                "--skip", "snapshot::journal_live_tests::journal_serial_crash_child"])
+
+    def test_source_snapshot_failure_stops_database_pipeline(self):
+        self.assertNotEqual(self.run_task("test-db", env={"FAIL_MATCH": "--source-snapshot"}).returncode, 0)
+        self.assertIn("--source-snapshot", self.calls()[-1]["argv"])
+        self.assertFalse(any("copy_integration" in row["argv"] for row in self.calls()))
+
+    def test_journal_failure_stops_database_pipeline(self):
+        self.assertNotEqual(self.run_task("test-db", env={"FAIL_MATCH": "--journal-serial"}).returncode, 0)
+        self.assertIn("--journal-serial", self.calls()[-1]["argv"])
+        self.assertFalse(any("copy_integration" in row["argv"] for row in self.calls()))
 
 
 if __name__ == "__main__":

@@ -363,7 +363,9 @@ For an empty checkpoint, sequence is zero and all four transaction columns are N
 `Checkpoint.applied` remains a nonempty `Frontier`, while the internal control row and durable proof can carry `Option<Frontier>`.
 Preserve the existing 26-parameter `IS NOT DISTINCT FROM` compare-and-swap.
 Use the shared `src/state.rs` constant `TARGET_METADATA_VERSION = 2` with crate visibility as the canonical version.
-Native state `FORMAT_VERSION = 2` does not change.
+The optional-commit-position slice preserved native format two.
+The source-slot extension uses native `FORMAT_VERSION = 3`, while target metadata stays at version two.
+A later logged COPY anchor needs native format four or a new explicitly versioned record; source-only format three must not be reinterpreted.
 Refuse version-1 target objects or provenance without DDL, conversion, or adoption.
 Increment the barrier counter in both synchronous data/checkpoint commits and standalone writing barriers so each proof has positive logged-write evidence.
 Check exact object identity before querying, excluding, reowning, or removing metadata.
@@ -371,6 +373,20 @@ Store checkpoint provenance in the native manifest.
 Do not substitute replication-origin progress for this checkpoint.
 All supported trigger cases use serial execution until E7 proves a safe alternative.
 Test transactional trigger tables separately from external side effects, which require documented idempotency.
+
+We validate the dedicated backend, target writer fence, exact metadata, and complete cached control row at the owned transaction boundary.
+We retain the metadata `SHARE ROW EXCLUSIVE` table lock and `FOR UPDATE` row lock until transaction end, so other sessions cannot change the checkpoint while rows are applied.
+Prepared row execution checks the local PostgreSQL transaction state before and after dispatch.
+Every error poisons the owned transaction, and an unfinished transaction closes its connection.
+We retain validation before checkpoint compare-and-swap, after deferred constraints, and immediately before `COMMIT`.
+We still require a dedicated backend and namespace DDL quiescence.
+Transaction and statement pooling remain unsupported, and these checks do not certify arbitrary failover.
+Static call counts are seven RPCs for begin, fifteen for commit, and one per warm prepared DML execution, excluding preparation, deallocation, preflight, and provisioning.
+
+> [!important]
+> A metadata or fence violation during a transaction can permit further uncommitted eligible DML before the boundary rejects `COMMIT`.
+> This timing preserves transactional logged effects under the trusted DML profile.
+> External side effects require separate idempotency and are outside this timing equivalence.
 
 ### E4: Durability profiles and aggregate reservations
 
@@ -419,6 +435,39 @@ Zero caps permit no speculative reservations.
 Keep failure capacity charged when feedback delivery is uncertain.
 Expose reserved risk separately from actual sent feedback.
 
+## Bounded replay from the initial source point
+
+We select an internal Gate 3 qualification slice that retains an immutable first context beside the current context.
+CP is the actual nonzero slot `consistent_point` in the source receipt, with exact matching in the bound snapshot anchor.
+It is not a fabricated transaction commit position.
+The first context CAS requires a verified empty receive head and the actual fresh, pre-input Idle decoder state.
+That CAS writes identical first and current context bytes at revision 1.
+Keep the first bytes unchanged through every later update.
+Read both contexts and the receive head in one checked snapshot.
+
+Preserve the full source, records, COPY-plan, and limits bindings and the actual independent decoder seeds.
+Do not derive earlier replay identities from post-Idle counters, the last completed transaction, or an individual LSN comparison.
+Replay the full retained prefix from CP through a comparison sink, including every frame and completion and transactions with no events.
+Compare full identities, canonical bytes, and completion descriptors.
+Before issuing a source resume proof or authorizing dependent DML or feedback, require exact agreement on Idle counters, last source end, and receive head.
+Preserve buffered input after the reconciled prefix.
+
+The native context catalog uses fresh `user_version = 3` and head layout 1 and refuses version 2 without adoption or conversion.
+The standalone layout, outer native format 5, target metadata version 3, `RPGEXP02` wire format, and ACK mode policy remain unchanged.
+Retain all journal history and source WAL needed from CP; do not prune this slice.
+The source confirmed position and any sent feedback must stay at or below CP.
+
+> [!important]
+> Set explicit finite runtime, physical WAL-distance, and disk budgets before any Gate 3 PostgreSQL qualification.
+> Stop and refuse when a budget is exhausted or required WAL is lost.
+> Retaining the original point makes WAL retention grow with subsequent source traffic; this slice does not provide an advancing replay window or general crash resume.
+
+- [ ] Freeze and review the immutable-first/current catalog implementation and typed adapter.
+- [ ] Verify atomic revision-1 initialization, immutable first bytes, exact bindings, and one-snapshot context/head reads.
+- [ ] Verify complete-prefix comparisons, zero-event completions, independent seeds, and preservation of subsequent input.
+- [ ] Set and test all three finite budgets, lost-WAL refusal, and the CP feedback bound before live qualification.
+- [ ] Release the source consumer only after its proof ordering and retained pre-boundary data are sufficient.
+
 ## Verification and commit gate
 
 Extend the E0 Taskfile tasks only through the integration worker.
@@ -445,6 +494,17 @@ Keep unfinished commands explicit in generated compatibility coverage.
 
 E7 must test repeated keys, key changes, NULL/TOAST, generated columns, partition movement, cross-table foreign keys, ALWAYS triggers, cycles, and cancellation.
 Require differential and adversarial scheduling tests before raising apply concurrency above `1` in a production profile.
+
+### First E7 unit: text-session setup
+
+We approved a bounded refactor on 2026-11-08, using the measured E3 source173 `8b6e0cd5` as the private baseline.
+Keep the existing ordered eight settings as one source of truth, use bound parameters through the existing prepare and execute calls, and check all eight values with a separate fixed readback SELECT.
+These three dispatches preserve independent readback and remove 26 structural dispatch cycles per measured transaction across the source and target paths; this is not a measured speedup.
+Before writing code, verify every setting's actual transaction context and stop if SET LOCAL or transaction-control semantics are unresolved.
+Preserve all source and fence checks, checkpoint behavior, BEGIN/COMMIT order, synchronous target commit, close/error behavior, and exporter readiness.
+Do not add transport APIs, caches, interpolated setting values, production options, formats, or dependencies.
+Test each caller and peer, all eight wrong or missing readback values, and closed/error paths before a fresh independent safety review.
+After that review, compare the same 24 release-mode cases with unchanged workload, proof, resource, and cleanup requirements under a new exclusive benchmark lease.
 
 ## Self-review
 

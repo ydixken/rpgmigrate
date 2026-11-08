@@ -41,14 +41,8 @@ The entrypoint runs its Python regression tests, ShellCheck, yamllint, and actio
 Its Python inventory includes the CI receipt validator, publisher, launcher, Task/bootstrap tests, and image build/runtime/smoke tests, with one nonempty result footer.
 It then runs `task native`, `task native-check`, `task lint`, and `task test`.
 The shared bootstrap helper supplies Task 3.54.0 to local shells, CI hosts, and the fixture container.
+The library unit gate includes the same [SQLite build-policy validator](../build.rs) used by Cargo and the private immutable-plan store tests.
 Verification rejects `TASK_DRY` instead of accepting a command preview as a test result.
-Bootstrap failures return exit code 1 with empty stdout and one JSON diagnostic on stderr.
-The diagnostic retains its fixed message and adds `phase` (`configuration`, `cache`, `download`, `checksum`, `archive`, `publish`, `execute`, or `unknown`) and `category` (`configuration`, `checksum`, `archive`, `cache`, `version`, `http`, `timeout`, `url`, `os_error`, `process`, or `unknown`).
-The phase identifies the operation in progress; a category identifies an explicit refusal or a known exception type, not an inferred cause.
-Download HTTP errors include `http_status` only when the status is an integer from 100 through 599.
-Unknown failures remain `unknown`; elapsed time alone does not establish a network timeout.
-Diagnostics exclude exception text, URLs, paths, child output, environment values, and credentials.
-Successful installation still prints only the verified binary path, and `--version` prints the pinned version without bootstrapping.
 The native checks verify the reviewed PostgreSQL 18.6 source, patches, installed hashes, and capability marker.
 They also require OpenSSL, GSSAPI, and libcurl OAuth support in the native receipt.
 
@@ -57,21 +51,34 @@ It requires the exact safe configuration diagnostic, exit code 2, and no connect
 The normal native library must pass the live authentication and COPY checks.
 
 `task test-db-self-check` exercises the independent data oracle, protocol fault injection, and SCRAM controls.
-`task test-db` runs the live engine tests followed by the complete COPY integration harness.
-The engine profile requires all 39 ignored library tests.
-Its focused inventories cover [seven prepared transport cases](../tests/support/prepared_cases.json), [16 target authority cases](../tests/support/authority_cases.json), and [nine raw CopyBoth cases](../tests/support/replication_cases.json).
+`task test-db` runs the engine, catalog, source-identity, source-snapshot, journal-serial, and COPY profiles in order.
+The engine profile requires its exact 41 ignored library tests, including the E1 catalog preflight case.
+It excludes the separate CDC catalog, source-identity, snapshot, and journal-serial profiles.
+Its focused inventories cover [seven prepared transport cases](../tests/support/prepared_cases.json), [18 target authority cases](../tests/support/authority_cases.json), and [nine raw CopyBoth cases](../tests/support/replication_cases.json).
 The transport-only profile retains five cases, and the COPY profile retains 40 cases.
-The COPY harness requires version-two native state receipts with empty target provenance.
+The COPY harness requires version-four native state receipts with empty target provenance and null `source_slot` and `copy_snapshot` fields.
 The harness compares exact case names, full data fingerprints, server versions, and required fault hits against [the E1 fixture manifest](../tests/fixtures/e1/manifest.json) and the focused inventories.
 The authority and engine profiles each require two observed COMMIT-reply drops, with the old backend fence observed held and then released for each fault.
 Their private authority database keeps metadata fixtures separate from the COPY fixtures.
 The replication and engine profiles each require four source observations: `keepalive`, `duplex`, `terminal_error`, and `missing_completion`.
 The duplex receipt requires observed `PQflush == 1` backpressure while incoming traffic continues.
 These profiles use a separate owned logical source, a non-superuser replication role, and temporary `test_decoding` slots.
-The CI runner requires exactly one authority-fault footer and one replication-fault footer.
-Its report records two authority faults and four replication observations.
+The dedicated catalog and source-identity profiles require ten and three cases respectively.
+The source-snapshot profile requires twelve cases and five fault IDs, including both wrong ReadyForQuery states within the existing terminal-reply case.
+Its capability assertions use a real provider-created native binding and an ordinary SQL connection.
+The journal-serial profile requires two parent cases, two post-reap SIGKILL receipts, and two committed-Unknown fault receipts.
+It exercises the development SQLite and segmented-journal candidates with real source WAL, reopened records, serial target effects, and checkpoint reconciliation.
+The private crash child runs only through its parent's owned request and is excluded from the top-level inventory.
+The CI runner requires each profile's exact, unique receipt and its required fault or child receipts.
+Its report records two authority faults, four replication observations, five source-snapshot faults, and the journal profile's two child and two committed-Unknown observations.
 It also rejects absent or incorrect suite receipts and empty or skipped unit suites.
 Missing tools and failed commands are failures.
+The [maintained gate ledger](../tasks/todo.md#source-snapshot-and-serial-prerequisites) separates implemented checks from completed platform qualification.
+
+`task test-harness` runs five required offline modules through the existing unit runner: shared harness, catalog, source identity, source snapshot, and journal-serial.
+It checks each module's discovered count against its source and emits one combined result footer.
+Missing or empty modules, optimized Python, and skipped cases fail the gate.
+Ordinary Rust tests retain the journal adapter's reused storage tests; only the three ignored parent/child entry points are excluded from that unit command.
 
 `task test` also runs `test-storage-publication` after the format and recovery suites.
 This development-only check starts 22 fresh child processes: 20 publication-boundary kills and two complete traces across SQLite and the segmented journal.
@@ -85,20 +92,7 @@ Each run exports one JSON report capped at 64 KiB.
 It contains stage results, observed suite counts, the source snapshot hash, image ID and base digest, package and tool versions, native build identity, and executable hash.
 We export structured evidence instead of raw command output because failing database tests can expose connection strings or fixture passwords.
 Raw database logs, environment dumps, DSNs, and cluster directories are not uploaded.
-A failed report identifies the failed stage and retains recognized failing test names.
-For `test-db-self-check` and `test-db`, the CI runner creates a fresh private context file (0600) in its own private directory (0700) and retains the file descriptor.
-It passes the path through an internal environment key that `tools/test-db.py` consumes before calling `main()` or starting children.
-Other CI commands receive no channel, and successful harness invocations write no context.
-The harness records only exception class and deepest traceback basename, function, and line in one ASCII record.
-Known failures retain their human stderr and exit code; ordinary uncaught exceptions record metadata and re-raise unchanged.
-Interrupts, explicit exits, and forced process exits produce no record.
-The runner exports context only after a nonzero command exit and validates the retained descriptor against the path, ownership, permissions, link count, and file identity before and after reading.
-The complete file, including its final newline, must contain exactly one strict record of at most 256 bytes; the read limit is 257 bytes to detect overflow.
-Missing, unusable, replaced, malformed, path-bearing, oversized, trailing, or duplicate metadata keeps the existing failed-command summary.
-Notification failure does not change command behavior.
-We ignore context-shaped stdout and stderr because exception text and neighboring output do not establish producer provenance.
-Exception text, arguments, SQL, connection data, locals, full paths, and source lines stay out of the context file and CI report.
-Reproduce the failed target in the disposable fixture to investigate its cause; synthetic context fixtures do not identify a hosted failure.
+A failed report identifies the failed stage; reproduce that target in the disposable fixture to investigate it.
 
 ## Run individual tasks
 
@@ -141,7 +135,7 @@ For focused live tests, choose one of these **examples**:
      cargo test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
    ```
 
-- Run the 16-case target-authority profile.
+- Run the 18-case target-authority profile.
 
    ```sh
    task test-authority
@@ -162,6 +156,24 @@ For focused live tests, choose one of these **examples**:
    task test-replication
    ```
 
+- Run the ten catalog cases and three source-identity probes.
+
+   ```sh
+   task test-catalog test-source-catalog
+   ```
+
+- Run the twelve source-snapshot cases and five required fault observations.
+
+   ```sh
+   task test-source-snapshot
+   ```
+
+- Run the journal-serial parent cases with their required crash and committed-Unknown receipts.
+
+   ```sh
+   task test-journal-serial
+   ```
+
 - Run the same replication profile through the wrapper with an isolated Cargo target directory.
 
    ```sh
@@ -172,8 +184,12 @@ For focused live tests, choose one of these **examples**:
    ```
 
 Each focused profile requires every name in its inventory.
-Use `task test-db` for the complete 39-case engine profile and 40-case COPY profile.
-The engine command selects all ignored library tests without skips.
+Use `task test-db` for all six required database profiles: Engine41, Catalog10, SourceCatalog3, SourceSnapshot12, JournalSerial2, and COPY40.
+The engine command keeps the E1 catalog preflight case and excludes the separate CDC catalog, source-identity, snapshot, and journal live tests.
+The journal profile does not select a production backend or qualify an aborted unknown-COMMIT path, source acknowledgments, COPY snapshot coverage, or power-loss durability.
+The [owning COPY plan](superpowers/plans/2026-11-07-copy-snapshot-owning.md) defines a separate eight-group qualification package.
+Its required assertions cover all-entry admission before COPY, exact owned-target OID exclusion, atomic data and anchor completion, unknown COMMIT recovery, and failures after proof.
+The existing six profiles do not substitute for that package, and no additional command is documented until its harness registration exists.
 
 The default database fixture expects PostgreSQL 14.24 and numeric version 140024.
 The container supplies `RPGMIGRATE_TEST_EXPECTED_PG_VERSION=17.11` and `RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM=170011` from its pinned package recipe.

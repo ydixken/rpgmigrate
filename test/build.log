@@ -1,0 +1,799 @@
+[1/2] STEP 1/6: FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
+[1/2] STEP 2/6: RUN rm /etc/apt/sources.list.d/debian.sources     && printf '%s\n'       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261106T000000Z trixie main'       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security main' > /etc/apt/sources.list     && apt-get update     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends       bison flex clang python3 libssl-dev libkrb5-dev libcurl4-openssl-dev pkg-config     && rm -rf /var/lib/apt/lists/*
+Get:1 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie InRelease [140 kB]
+Get:2 https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security InRelease [43.4 kB]
+Get:3 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 Packages [9614 kB]
+Get:4 https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security/main arm64 Packages [299 kB]
+Fetched 10.1 MB in 1s (10.4 MB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+python3 is already the newest version (3.13.5-1).
+python3 set to manually installed.
+libssl-dev is already the newest version (3.5.7-1~deb13u3).
+libkrb5-dev is already the newest version (1.21.3-5+deb13u1).
+libcurl4-openssl-dev is already the newest version (8.14.1-2+deb13u7).
+The following additional packages will be installed:
+  clang-19 libclang-common-19-dev libclang-cpp19 libclang1-19 libgc1 libllvm19
+  libobjc-14-dev libobjc4 libz3-4 llvm-19-linker-tools
+Suggested packages:
+  bison-doc clang-19-doc wasi-libc build-essential flex-doc
+Recommended packages:
+  llvm-19-dev clang-tools-19 libfl-dev libclang-rt-19-dev
+The following NEW packages will be installed:
+  bison clang clang-19 flex libclang-common-19-dev libclang-cpp19 libclang1-19
+  libgc1 libllvm19 libobjc-14-dev libobjc4 libz3-4 llvm-19-linker-tools
+  pkg-config
+0 upgraded, 14 newly installed, 0 to remove and 0 not upgraded.
+Need to get 53.6 MB of archives.
+After this operation, 282 MB of additional disk space will be used.
+Get:1 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 flex arm64 2.6.4-8.2+b4 [412 kB]
+Get:2 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 bison arm64 2:3.8.2+dfsg-1+b2 [1149 kB]
+Get:3 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libz3-4 arm64 4.13.3-1 [7507 kB]
+Get:4 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libllvm19 arm64 1:19.1.7-3+b1 [23.3 MB]
+Get:5 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libclang-cpp19 arm64 1:19.1.7-3+b1 [12.0 MB]
+Get:6 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libgc1 arm64 1:8.2.8-1 [241 kB]
+Get:7 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libobjc4 arm64 14.2.0-19 [39.4 kB]
+Get:8 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libobjc-14-dev arm64 14.2.0-19 [166 kB]
+Get:9 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libclang-common-19-dev arm64 1:19.1.7-3+b1 [740 kB]
+Get:10 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 llvm-19-linker-tools arm64 1:19.1.7-3+b1 [1100 kB]
+Get:11 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 libclang1-19 arm64 1:19.1.7-3+b1 [6866 kB]
+Get:12 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 clang-19 arm64 1:19.1.7-3+b1 [113 kB]
+Get:13 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 clang arm64 1:19.0-63 [6244 B]
+Get:14 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie/main arm64 pkg-config arm64 1.8.1-4 [14.0 kB]
+Fetched 53.6 MB in 1s (56.7 MB/s)
+Selecting previously unselected package flex.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 26151 files and directories currently installed.)
+Preparing to unpack .../00-flex_2.6.4-8.2+b4_arm64.deb ...
+Unpacking flex (2.6.4-8.2+b4) ...
+Selecting previously unselected package bison.
+Preparing to unpack .../01-bison_2%3a3.8.2+dfsg-1+b2_arm64.deb ...
+Unpacking bison (2:3.8.2+dfsg-1+b2) ...
+Selecting previously unselected package libz3-4:arm64.
+Preparing to unpack .../02-libz3-4_4.13.3-1_arm64.deb ...
+Unpacking libz3-4:arm64 (4.13.3-1) ...
+Selecting previously unselected package libllvm19:arm64.
+Preparing to unpack .../03-libllvm19_1%3a19.1.7-3+b1_arm64.deb ...
+Unpacking libllvm19:arm64 (1:19.1.7-3+b1) ...
+Selecting previously unselected package libclang-cpp19.
+Preparing to unpack .../04-libclang-cpp19_1%3a19.1.7-3+b1_arm64.deb ...
+Unpacking libclang-cpp19 (1:19.1.7-3+b1) ...
+Selecting previously unselected package libgc1:arm64.
+Preparing to unpack .../05-libgc1_1%3a8.2.8-1_arm64.deb ...
+Unpacking libgc1:arm64 (1:8.2.8-1) ...
+Selecting previously unselected package libobjc4:arm64.
+Preparing to unpack .../06-libobjc4_14.2.0-19_arm64.deb ...
+Unpacking libobjc4:arm64 (14.2.0-19) ...
+Selecting previously unselected package libobjc-14-dev:arm64.
+Preparing to unpack .../07-libobjc-14-dev_14.2.0-19_arm64.deb ...
+Unpacking libobjc-14-dev:arm64 (14.2.0-19) ...
+Selecting previously unselected package libclang-common-19-dev:arm64.
+Preparing to unpack .../08-libclang-common-19-dev_1%3a19.1.7-3+b1_arm64.deb ...
+Unpacking libclang-common-19-dev:arm64 (1:19.1.7-3+b1) ...
+Selecting previously unselected package llvm-19-linker-tools.
+Preparing to unpack .../09-llvm-19-linker-tools_1%3a19.1.7-3+b1_arm64.deb ...
+Unpacking llvm-19-linker-tools (1:19.1.7-3+b1) ...
+Selecting previously unselected package libclang1-19.
+Preparing to unpack .../10-libclang1-19_1%3a19.1.7-3+b1_arm64.deb ...
+Unpacking libclang1-19 (1:19.1.7-3+b1) ...
+Selecting previously unselected package clang-19.
+Preparing to unpack .../11-clang-19_1%3a19.1.7-3+b1_arm64.deb ...
+Unpacking clang-19 (1:19.1.7-3+b1) ...
+Selecting previously unselected package clang.
+Preparing to unpack .../12-clang_1%3a19.0-63_arm64.deb ...
+Unpacking clang (1:19.0-63) ...
+Selecting previously unselected package pkg-config:arm64.
+Preparing to unpack .../13-pkg-config_1.8.1-4_arm64.deb ...
+Unpacking pkg-config:arm64 (1.8.1-4) ...
+Setting up flex (2.6.4-8.2+b4) ...
+Setting up libclang-common-19-dev:arm64 (1:19.1.7-3+b1) ...
+Setting up libz3-4:arm64 (4.13.3-1) ...
+Setting up pkg-config:arm64 (1.8.1-4) ...
+Setting up libgc1:arm64 (1:8.2.8-1) ...
+Setting up bison (2:3.8.2+dfsg-1+b2) ...
+update-alternatives: using /usr/bin/bison.yacc to provide /usr/bin/yacc (yacc) in auto mode
+Setting up libllvm19:arm64 (1:19.1.7-3+b1) ...
+Setting up libclang1-19 (1:19.1.7-3+b1) ...
+Setting up libobjc4:arm64 (14.2.0-19) ...
+Setting up libobjc-14-dev:arm64 (14.2.0-19) ...
+Setting up llvm-19-linker-tools (1:19.1.7-3+b1) ...
+Setting up libclang-cpp19 (1:19.1.7-3+b1) ...
+Setting up clang-19 (1:19.1.7-3+b1) ...
+Setting up clang (1:19.0-63) ...
+Processing triggers for libc-bin (2.41-12+deb13u4) ...
+--> 58e8e5e8074a
+[1/2] STEP 3/6: WORKDIR /opt/rpgmigrate
+--> cdd1d968e9ff
+[1/2] STEP 4/6: ENV PQ_LIB_DIR=/opt/rpgmigrate/target/native/libpq/lib     CARGO_TERM_COLOR=never     PYTHONDONTWRITEBYTECODE=1
+--> c87e688223eb
+[1/2] STEP 5/6: COPY . .
+--> 8c9c0cc317c3
+[1/2] STEP 6/6: RUN python3 tools/build-libpq.py     && python3 tools/build-libpq.py --verify     && cargo build --locked --release --bin rpgmigrate     && python3 tools/image/runtime.py --stage /runtime     && dpkg-query -W -f='${binary:Package}=${Version}\n' > /runtime/usr/share/rpgmigrate/builder-packages.txt
+{"prefix": "/opt/rpgmigrate/target/native/libpq", "library_sha256": "3c7f968cff7ca22c69066287158dc48406455bc541d57a09601d6ef3a34652df", "artifact_sha256": "3c2619e684238214be35be0e81b0732e6e3a1430addad08f6ee27c071f303117", "recipe_sha256": "e49420f6d4db7f0c1552b75f9c4590231f57ba0178ab26e16f176c7013b63a03", "capabilities": 1}
+{"prefix": "/opt/rpgmigrate/target/native/libpq", "library_sha256": "3c7f968cff7ca22c69066287158dc48406455bc541d57a09601d6ef3a34652df", "artifact_sha256": "3c2619e684238214be35be0e81b0732e6e3a1430addad08f6ee27c071f303117", "recipe_sha256": "e49420f6d4db7f0c1552b75f9c4590231f57ba0178ab26e16f176c7013b63a03", "capabilities": 1}
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded serde_core v1.0.229
+  Downloaded zmij v1.0.23
+  Downloaded itoa v1.0.18
+  Downloaded anstyle v1.0.14
+  Downloaded cfg-if v1.0.5
+  Downloaded clap_lex v1.1.1
+  Downloaded pkg-config v0.3.34
+  Downloaded quote v1.0.47
+  Downloaded unicode-ident v1.0.27
+  Downloaded pq-sys v0.7.8
+  Downloaded crc32fast v1.5.4
+  Downloaded serde_derive v1.0.229
+  Downloaded proc-macro2 v1.0.107
+  Downloaded clap v4.6.7
+  Downloaded serde v1.0.229
+  Downloaded memchr v2.8.3
+  Downloaded serde_json v1.0.154
+  Downloaded clap_builder v4.6.7
+  Downloaded syn v3.0.9
+  Downloaded libc v0.2.191
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling serde_core v1.0.229
+   Compiling pkg-config v0.3.34
+   Compiling libc v0.2.191
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.154
+   Compiling anstyle v1.0.14
+   Compiling crc32fast v1.5.4
+   Compiling clap_lex v1.1.1
+   Compiling serde v1.0.229
+   Compiling cfg-if v1.0.5
+   Compiling itoa v1.0.18
+   Compiling clap_builder v4.6.7
+   Compiling memchr v2.8.3
+   Compiling rpgmigrate v0.1.0 (/opt/rpgmigrate)
+   Compiling pq-sys v0.7.8
+   Compiling syn v3.0.9
+   Compiling serde_derive v1.0.229
+   Compiling clap v4.6.7
+warning: constant `HEADER_BYTES` is never used
+  --> src/cdc/codec.rs:10:11
+   |
+10 | pub const HEADER_BYTES: usize = 88;
+   |           ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `COMPLETED_BYTES` is never used
+  --> src/cdc/codec.rs:11:11
+   |
+11 | pub const COMPLETED_BYTES: usize = 128;
+   |           ^^^^^^^^^^^^^^^
+
+warning: constant `VERSION` is never used
+  --> src/cdc/codec.rs:12:11
+   |
+12 | pub const VERSION: u16 = 2;
+   |           ^^^^^^^
+
+warning: constant `MAGIC` is never used
+  --> src/cdc/codec.rs:13:11
+   |
+13 | pub const MAGIC: [u8; 4] = *b"RPGS";
+   |           ^^^^^
+
+warning: constant `COMMIT_PRESENT` is never used
+  --> src/cdc/codec.rs:14:7
+   |
+14 | const COMMIT_PRESENT: u8 = 0x02;
+   |       ^^^^^^^^^^^^^^
+
+warning: struct `Frame` is never constructed
+  --> src/cdc/codec.rs:17:12
+   |
+17 | pub struct Frame {
+   |            ^^^^^
+
+warning: struct `CompletedTx` is never constructed
+  --> src/cdc/codec.rs:38:12
+   |
+38 | pub struct CompletedTx {
+   |            ^^^^^^^^^^^
+
+warning: struct `Limits` is never constructed
+  --> src/cdc/codec.rs:49:12
+   |
+49 | pub struct Limits {
+   |            ^^^^^^
+
+warning: method `validate` is never used
+  --> src/cdc/codec.rs:66:19
+   |
+65 | impl Limits {
+   | ----------- method in this implementation
+66 |     pub(crate) fn validate(self) -> Result<()> {
+   |                   ^^^^^^^^
+
+warning: enum `TailPolicy` is never used
+  --> src/cdc/codec.rs:78:10
+   |
+78 | pub enum TailPolicy {
+   |          ^^^^^^^^^^
+
+warning: enum `Record` is never used
+  --> src/cdc/codec.rs:85:10
+   |
+85 | pub enum Record {
+   |          ^^^^^^
+
+warning: enum `ReadRecord` is never used
+  --> src/cdc/codec.rs:91:10
+   |
+91 | pub enum ReadRecord {
+   |          ^^^^^^^^^^
+
+warning: enum `Error` is never used
+  --> src/cdc/codec.rs:98:10
+   |
+98 | pub enum Error {
+   |          ^^^^^
+
+warning: type alias `Result` is never used
+   --> src/cdc/codec.rs:115:10
+    |
+115 | pub type Result<T> = std::result::Result<T, Error>;
+    |          ^^^^^^
+
+warning: function `encode_frame` is never used
+   --> src/cdc/codec.rs:146:8
+    |
+146 | pub fn encode_frame(frame: &Frame, limits: Limits) -> Result<Vec<u8>> {
+    |        ^^^^^^^^^^^^
+
+warning: function `decode_frame` is never used
+   --> src/cdc/codec.rs:159:8
+    |
+159 | pub fn decode_frame(bytes: &[u8], limits: Limits) -> Result<Frame> {
+    |        ^^^^^^^^^^^^
+
+warning: function `encode_completed` is never used
+   --> src/cdc/codec.rs:169:8
+    |
+169 | pub fn encode_completed(tx: &CompletedTx, limits: Limits) -> Result<Vec<u8>> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `decode_completed` is never used
+   --> src/cdc/codec.rs:190:8
+    |
+190 | pub fn decode_completed(bytes: &[u8], limits: Limits) -> Result<CompletedTx> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `write_frame` is never used
+   --> src/cdc/codec.rs:195:8
+    |
+195 | pub fn write_frame<W: Write>(writer: &mut W, frame: &Frame, limits: Limits) -> Result<usize> {
+    |        ^^^^^^^^^^^
+
+warning: function `read_record` is never used
+   --> src/cdc/codec.rs:210:8
+    |
+210 | pub fn read_record<R: Read>(
+    |        ^^^^^^^^^^^
+
+warning: function `short_record` is never used
+   --> src/cdc/codec.rs:236:4
+    |
+236 | fn short_record(policy: TailPolicy, empty: bool) -> Result<ReadRecord> {
+    |    ^^^^^^^^^^^^
+
+warning: function `read_until_eof` is never used
+   --> src/cdc/codec.rs:244:4
+    |
+244 | fn read_until_eof<R: Read>(reader: &mut R, bytes: &mut [u8]) -> Result<usize> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `allocate` is never used
+   --> src/cdc/codec.rs:257:4
+    |
+257 | fn allocate(size: usize) -> Result<Vec<u8>> {
+    |    ^^^^^^^^
+
+warning: function `pack` is never used
+   --> src/cdc/codec.rs:265:4
+    |
+265 | fn pack(header: &[u8; HEADER_BYTES], payload: &[u8]) -> Result<Vec<u8>> {
+    |    ^^^^
+
+warning: function `check_frame` is never used
+   --> src/cdc/codec.rs:275:4
+    |
+275 | fn check_frame(payload_len: usize, part: u32, last: bool, limits: Limits) -> Result<()> {
+    |    ^^^^^^^^^^^
+
+warning: function `check_completed` is never used
+   --> src/cdc/codec.rs:290:4
+    |
+290 | fn check_completed(tx: &CompletedTx) -> Result<()> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `encode_header` is never used
+   --> src/cdc/codec.rs:300:4
+    |
+300 | fn encode_header(
+    |    ^^^^^^^^^^^^^
+
+warning: struct `Header` is never constructed
+   --> src/cdc/codec.rs:329:8
+    |
+329 | struct Header {
+    |        ^^^^^^
+
+warning: methods `check_payload`, `frame`, and `completed` are never used
+   --> src/cdc/codec.rs:341:8
+    |
+340 | impl Header {
+    | ----------- methods in this implementation
+341 |     fn check_payload(&self, payload: &[u8]) -> Result<()> {
+    |        ^^^^^^^^^^^^^
+...
+348 |     fn frame(self, payload: Vec<u8>) -> Frame {
+    |        ^^^^^
+...
+358 |     fn completed(self, payload: &[u8]) -> Result<CompletedTx> {
+    |        ^^^^^^^^^
+
+warning: function `field` is never used
+   --> src/cdc/codec.rs:383:4
+    |
+383 | fn field<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
+    |    ^^^^^
+
+warning: function `decode_header` is never used
+   --> src/cdc/codec.rs:389:4
+    |
+389 | fn decode_header(raw: &[u8; HEADER_BYTES], limits: Limits) -> Result<Header> {
+    |    ^^^^^^^^^^^^^
+
+warning: function `decode_slice` is never used
+   --> src/cdc/codec.rs:442:4
+    |
+442 | fn decode_slice(bytes: &[u8], limits: Limits) -> Result<(Header, &[u8])> {
+    |    ^^^^^^^^^^^^
+
+warning: struct `TxValidator` is never constructed
+   --> src/cdc/codec.rs:460:12
+    |
+460 | pub struct TxValidator {
+    |            ^^^^^^^^^^^
+
+warning: associated items `new`, `push`, and `finish` are never used
+   --> src/cdc/codec.rs:471:12
+    |
+470 | impl TxValidator {
+    | ---------------- associated items in this implementation
+471 |     pub fn new(tx: TxId, limits: Limits) -> Result<Self> {
+    |            ^^^
+...
+484 |     pub fn push(&mut self, frame: &Frame) -> Result<()> {
+    |            ^^^^
+...
+526 |     pub fn finish(self, completed: &CompletedTx) -> Result<()> {
+    |            ^^^^^^
+
+warning: function `validate_next` is never used
+   --> src/cdc/codec.rs:544:8
+    |
+544 | pub fn validate_next(previous: &CompletedTx, next: &CompletedTx) -> Result<()> {
+    |        ^^^^^^^^^^^^^
+
+warning: struct `StreamingChecksum` is never constructed
+   --> src/cdc/codec.rs:562:12
+    |
+562 | pub struct StreamingChecksum(crc32fast::Hasher);
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `update`, and `finish` are never used
+   --> src/cdc/codec.rs:565:12
+    |
+564 | impl StreamingChecksum {
+    | ---------------------- associated items in this implementation
+565 |     pub fn new() -> Self {
+    |            ^^^
+...
+569 |     pub fn update(&mut self, bytes: &[u8]) {
+    |            ^^^^^^
+...
+573 |     pub fn finish(self) -> u32 {
+    |            ^^^^^^
+
+warning: enum `Plugin` is never used
+ --> src/cdc/contracts.rs:4:17
+  |
+4 | pub(crate) enum Plugin {
+  |                 ^^^^^^
+
+warning: struct `RelationKey` is never constructed
+  --> src/cdc/contracts.rs:11:19
+   |
+11 | pub(crate) struct RelationKey {
+   |                   ^^^^^^^^^^^
+
+warning: struct `Column` is never constructed
+  --> src/cdc/contracts.rs:17:19
+   |
+17 | pub(crate) struct Column {
+   |                   ^^^^^^
+
+warning: enum `Value` is never used
+  --> src/cdc/contracts.rs:25:17
+   |
+25 | pub(crate) enum Value {
+   |                 ^^^^^
+
+warning: enum `Event` is never used
+  --> src/cdc/contracts.rs:47:17
+   |
+47 | pub(crate) enum Event {
+   |                 ^^^^^
+
+warning: struct `DecoderPosition` is never constructed
+ --> src/cdc/decode.rs:9:19
+  |
+9 | pub(crate) struct DecoderPosition {
+  |                   ^^^^^^^^^^^^^^^
+
+warning: trait `RelationResolver` is never used
+  --> src/cdc/decode.rs:14:18
+   |
+14 | pub(crate) trait RelationResolver {
+   |                  ^^^^^^^^^^^^^^^^
+
+warning: struct `Decoder` is never constructed
+  --> src/cdc/decode.rs:18:19
+   |
+18 | pub(crate) struct Decoder {
+   |                   ^^^^^^^
+
+warning: struct `Active` is never constructed
+  --> src/cdc/decode.rs:28:8
+   |
+28 | struct Active {
+   |        ^^^^^^
+
+warning: associated items `new`, `feed`, `take_completed`, `feed_message`, `emit_relation`, and `emit_event` are never used
+   --> src/cdc/decode.rs:36:19
+    |
+ 35 | impl Decoder {
+    | ------------ associated items in this implementation
+ 36 |     pub(crate) fn new(plugin: Plugin, stream: StreamId, limits: Limits, position: DecoderPosition) -> Result<Self> {
+    |                   ^^^
+...
+ 43 |     pub(crate) fn feed(&mut self, input: &ReplicationFrame, resolver: &mut impl RelationResolver, emit: &mut impl FnMut(&Frame) -> ...
+    |                   ^^^^
+...
+ 59 |     pub(crate) fn take_completed(&mut self) -> Option<CompletedTx> { self.completed.take() }
+    |                   ^^^^^^^^^^^^^^
+ 60 |
+ 61 |     fn feed_message(&mut self, payload: &[u8], wal_start: u64, resolver: &mut impl RelationResolver, emit: &mut impl FnMut(&Frame) ...
+    |        ^^^^^^^^^^^^
+...
+114 |     fn emit_relation(&mut self, key: RelationKey, relation: &Event, emit: &mut impl FnMut(&Frame) -> Result<()>) -> Result<()> {
+    |        ^^^^^^^^^^^^^
+...
+122 |     fn emit_event(&mut self, event: &Event, emit: &mut impl FnMut(&Frame) -> Result<()>) -> Result<()> {
+    |        ^^^^^^^^^^
+
+warning: function `error` is never used
+   --> src/cdc/decode.rs:147:4
+    |
+147 | fn error(kind: ErrorKind, message: &str) -> Error { Error { kind, message: message.into() } }
+    |    ^^^^^
+
+warning: function `outside_transaction` is never used
+   --> src/cdc/decode.rs:149:4
+    |
+149 | fn outside_transaction() -> Error { error(ErrorKind::Source, "CDC change has no active transaction") }
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `overflow` is never used
+   --> src/cdc/decode.rs:151:4
+    |
+151 | fn overflow() -> Error { error(ErrorKind::BadState, "CDC decoder position or accounting overflowed") }
+    |    ^^^^^^^^
+
+warning: constant `VERSION` is never used
+ --> src/cdc/event_codec.rs:6:7
+  |
+6 | const VERSION: u8 = 1;
+  |       ^^^^^^^
+
+warning: function `encode_event` is never used
+ --> src/cdc/event_codec.rs:8:15
+  |
+8 | pub(crate) fn encode_event(event: &Event, limits: Limits) -> Result<Vec<u8>> {
+  |               ^^^^^^^^^^^^
+
+warning: function `decode_event` is never used
+  --> src/cdc/event_codec.rs:30:15
+   |
+30 | pub(crate) fn decode_event(bytes: &[u8], limits: Limits) -> Result<Event> {
+   |               ^^^^^^^^^^^^
+
+warning: function `payload_budget` is never used
+  --> src/cdc/event_codec.rs:85:4
+   |
+85 | fn payload_budget(limits: Limits) -> Result<u64> {
+   |    ^^^^^^^^^^^^^^
+
+warning: function `put_event` is never used
+  --> src/cdc/event_codec.rs:95:4
+   |
+95 | fn put_event(event: &Event, put: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+   |    ^^^^^^^^^
+
+warning: function `put_key` is never used
+   --> src/cdc/event_codec.rs:152:4
+    |
+152 | fn put_key(key: RelationKey, put: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    |    ^^^^^^^
+
+warning: function `put_len` is never used
+   --> src/cdc/event_codec.rs:157:4
+    |
+157 | fn put_len(length: usize, put: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    |    ^^^^^^^
+
+warning: function `put_bytes` is never used
+   --> src/cdc/event_codec.rs:163:4
+    |
+163 | fn put_bytes(bytes: &[u8], put: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    |    ^^^^^^^^^
+
+warning: function `put_values` is never used
+   --> src/cdc/event_codec.rs:168:4
+    |
+168 | fn put_values(values: &[Value], put: &mut impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+    |    ^^^^^^^^^^
+
+warning: struct `Reader` is never constructed
+   --> src/cdc/event_codec.rs:187:8
+    |
+187 | struct Reader<'a>(&'a [u8]);
+    |        ^^^^^^
+
+warning: multiple methods are never used
+   --> src/cdc/event_codec.rs:190:8
+    |
+189 | impl<'a> Reader<'a> {
+    | ------------------- methods in this implementation
+190 |     fn take(&mut self, length: usize) -> Result<&'a [u8]> {
+    |        ^^^^
+...
+196 |     fn fixed<const N: usize>(&mut self) -> Result<[u8; N]> {
+    |        ^^^^^
+...
+200 |     fn byte(&mut self) -> Result<u8> {
+    |        ^^^^
+...
+204 |     fn u32(&mut self) -> Result<u32> {
+    |        ^^^
+...
+208 |     fn boolean(&mut self) -> Result<bool> {
+    |        ^^^^^^^
+...
+216 |     fn key(&mut self) -> Result<RelationKey> {
+    |        ^^^
+...
+223 |     fn length(&mut self) -> Result<usize> {
+    |        ^^^^^^
+...
+227 |     fn name(&mut self) -> Result<String> {
+    |        ^^^^
+...
+238 |     fn bytes(&mut self) -> Result<Vec<u8>> {
+    |        ^^^^^
+...
+249 |     fn vector<T>(
+    |        ^^^^^^
+...
+269 |     fn values(&mut self) -> Result<Vec<Value>> {
+    |        ^^^^^^
+
+warning: enum `Message` is never used
+ --> src/cdc/plugins/test_decoding.rs:8:17
+  |
+8 | pub(crate) enum Message<'a> {
+  |                 ^^^^^^^
+
+warning: enum `RowKind` is never used
+  --> src/cdc/plugins/test_decoding.rs:20:17
+   |
+20 | pub(crate) enum RowKind {
+   |                 ^^^^^^^
+
+warning: struct `Row` is never constructed
+  --> src/cdc/plugins/test_decoding.rs:26:19
+   |
+26 | pub(crate) struct Row<'a> {
+   |                   ^^^
+
+warning: function `parse` is never used
+  --> src/cdc/plugins/test_decoding.rs:32:15
+   |
+32 | pub(crate) fn parse(payload: &[u8], limits: Limits) -> Result<Message<'_>> {
+   |               ^^^^^
+
+warning: method `decode` is never used
+  --> src/cdc/plugins/test_decoding.rs:85:19
+   |
+84 | impl Row<'_> {
+   | ------------ method in this implementation
+85 |     pub(crate) fn decode(&self, relation: &Event, limits: Limits) -> Result<Event> {
+   |                   ^^^^^^
+
+warning: function `validate_relation` is never used
+   --> src/cdc/plugins/test_decoding.rs:121:15
+    |
+121 | pub(crate) fn validate_relation<'a>(
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `invalid` is never used
+   --> src/cdc/plugins/test_decoding.rs:155:4
+    |
+155 | fn invalid() -> Error {
+    |    ^^^^^^^
+
+warning: function `limit_error` is never used
+   --> src/cdc/plugins/test_decoding.rs:162:4
+    |
+162 | fn limit_error() -> Error {
+    |    ^^^^^^^^^^^
+
+warning: struct `Budget` is never constructed
+   --> src/cdc/plugins/test_decoding.rs:166:8
+    |
+166 | struct Budget { remaining: u64 }
+    |        ^^^^^^
+
+warning: associated items `new` and `take` are never used
+   --> src/cdc/plugins/test_decoding.rs:169:8
+    |
+168 | impl Budget {
+    | ----------- associated items in this implementation
+169 |     fn new(limits: Limits) -> Result<Self> {
+    |        ^^^
+...
+175 |     fn take(&mut self, bytes: impl TryInto<u64>) -> Result<()> {
+    |        ^^^^
+
+warning: function `type_name` is never used
+   --> src/cdc/plugins/test_decoding.rs:182:4
+    |
+182 | fn type_name(oid: u32) -> Option<&'static str> {
+    |    ^^^^^^^^^
+
+warning: function `number` is never used
+   --> src/cdc/plugins/test_decoding.rs:195:4
+    |
+195 | fn number(input: &str, integer: bool) -> bool {
+    |    ^^^^^^
+
+warning: struct `Cursor` is never constructed
+   --> src/cdc/plugins/test_decoding.rs:220:8
+    |
+220 | struct Cursor<'a> { input: &'a str }
+    |        ^^^^^^
+
+warning: multiple associated items are never used
+   --> src/cdc/plugins/test_decoding.rs:223:8
+    |
+222 | impl<'a> Cursor<'a> {
+    | ------------------- associated items in this implementation
+223 |     fn new(input: &'a str) -> Self { Self { input } }
+    |        ^^^
+224 |     fn remaining(&self) -> &'a str { self.input }
+    |        ^^^^^^^^^
+225 |     fn consume(&mut self, value: &str) -> bool {
+    |        ^^^^^^^
+...
+228 |     fn expect(&mut self, value: &str) -> Result<()> {
+    |        ^^^^^^
+...
+231 |     fn finish(&self) -> Result<()> {
+    |        ^^^^^^
+...
+234 |     fn table(&mut self) -> Result<QualifiedTable> {
+    |        ^^^^^
+...
+240 |     fn identifier(&mut self) -> Result<Cow<'a, str>> {
+    |        ^^^^^^^^^^
+...
+256 |     fn type_label(&mut self) -> Result<&'a str> {
+    |        ^^^^^^^^^^
+...
+282 |     fn quoted(&mut self, quote: u8) -> Result<(&'a str, usize)> {
+    |        ^^^^^^
+...
+299 |     fn values(&mut self, columns: &[Column], keys_only: bool, update: bool, budget: &mut Budget) -> Result<Vec<Value>> {
+    |        ^^^^^^
+...
+316 |     fn value(&mut self, oid: u32, budget: &mut Budget) -> Result<Value> {
+    |        ^^^^^
+
+warning: function `unquote` is never used
+   --> src/cdc/plugins/test_decoding.rs:347:4
+    |
+347 | fn unquote(input: &str, quote: u8, length: usize) -> Result<Vec<u8>> {
+    |    ^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> src/pg/mod.rs:32:12
+   |
+32 |     expect(unused_imports, reason = "Logical source integration is pending")
+   |            ^^^^^^^^^^^^^^
+   |
+   = note: Logical source integration is pending
+   = note: `#[warn(unfulfilled_lint_expectations)]` on by default
+
+warning: `rpgmigrate` (lib) generated 77 warnings
+    Finished `release` profile [optimized] target(s) in 3.70s
+--> f9af1893cb6f
+[2/2] STEP 1/11: FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+Trying to pull docker.io/library/debian@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2...
+Getting image source signatures
+Copying blob sha256:acd43e9bebc37bc4ba7a5f47bd7598913337803e53d468f37d940f11f5d5f1ef
+Copying config sha256:37e6c80085f82a8a7f1cea2b83f036d9c084a2cd3d5be1aa6fd56d7c6f8ad7ba
+Writing manifest to image destination
+[2/2] STEP 2/11: COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+--> 0c5b6909debe
+[2/2] STEP 3/11: RUN rm /etc/apt/sources.list.d/debian.sources     && printf '%s\n'       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261106T000000Z trixie main'       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security main' > /etc/apt/sources.list     && apt-get update     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends       ca-certificates libssl3t64=3.5.7-1~deb13u3       libcurl4t64=8.14.1-2+deb13u7 libgssapi-krb5-2=1.21.3-5+deb13u1     && mkdir -p /usr/share/rpgmigrate     && dpkg-query -W -f='${binary:Package}=${Version}\n' > /usr/share/rpgmigrate/packages.txt     && rm -rf /var/lib/apt/lists/*
+Ign:1 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie InRelease
+Ign:2 https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security InRelease
+Ign:2 https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security InRelease
+Ign:1 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie InRelease
+Ign:1 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie InRelease
+Ign:2 https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security InRelease
+Err:2 https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security InRelease
+  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.130.132 443]
+  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.66.132 443]
+  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.194.132 443]
+Err:1 https://snapshot.debian.org/archive/debian/20261106T000000Z trixie InRelease
+  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.130.132 443]
+  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.66.132 443]
+  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.194.132 443]
+Reading package lists...
+W: Failed to fetch https://snapshot.debian.org/archive/debian/20261106T000000Z/dists/trixie/InRelease  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.194.132 443]
+W: Failed to fetch https://snapshot.debian.org/archive/debian-security/20261106T000000Z/dists/trixie-security/InRelease  SSL connection failed: error:0A000086:SSL routines::certificate verify failed / Success [IP: 151.101.194.132 443]
+W: Some index files failed to download. They have been ignored, or old ones used instead.
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Package ca-certificates is not available, but is referred to by another package.
+This may mean that the package is missing, has been obsoleted, or
+is only available from another source
+
+E: Package 'ca-certificates' has no installation candidate
+E: Unable to locate package libcurl4t64
+E: Unable to locate package libgssapi-krb5-2
+Error: building at STEP "RUN rm /etc/apt/sources.list.d/debian.sources     && printf '%s\n'       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261106T000000Z trixie main'       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261106T000000Z trixie-security main' > /etc/apt/sources.list     && apt-get update     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends       ca-certificates libssl3t64=3.5.7-1~deb13u3       libcurl4t64=8.14.1-2+deb13u7 libgssapi-krb5-2=1.21.3-5+deb13u1     && mkdir -p /usr/share/rpgmigrate     && dpkg-query -W -f='${binary:Package}=${Version}\n' > /usr/share/rpgmigrate/packages.txt     && rm -rf /var/lib/apt/lists/*": while running runtime: exit status 100
+

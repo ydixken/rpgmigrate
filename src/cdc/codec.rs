@@ -1,4 +1,4 @@
-//! Experiment-only packed records shared by the storage candidates.
+//! Canonical packed CDC records shared by runtime and storage experiments.
 //! `encoded_bytes` includes every frame header and the completion descriptor.
 //! The caller must prove an unpublished suffix before selecting `Unpublished`.
 
@@ -63,7 +63,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    fn validate(self) -> Result<()> {
+    pub(crate) fn validate(self) -> Result<()> {
         if !(COMPLETED_BYTES..=64 * 1024 * 1024).contains(&self.max_frame_bytes)
             || !(1..=1024 * 1024 * 1024).contains(&self.max_event_bytes)
             || !(1..=1_048_576).contains(&self.max_parts)

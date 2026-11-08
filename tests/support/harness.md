@@ -46,7 +46,7 @@ Run Python with assertions enabled: the shared harness refuses optimized executi
    python3 tools/test-db.py --prepared -- cargo test --locked --lib pg::prepared_live_tests:: -- --ignored --test-threads=1
    ```
 
-6. Run the sixteen target authority cases.
+6. Run the eighteen target authority cases.
 
    ```sh
    python3 tools/test-db.py --authority -- cargo test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1
@@ -58,7 +58,7 @@ Run Python with assertions enabled: the shared harness refuses optimized executi
    python3 tools/test-db.py --replication -- cargo test --locked --lib pg::replication_live_tests:: -- --ignored --test-threads=1
    ```
 
-8. Run all thirty-nine transport, prepared, authority, replication, catalog, and COPY module cases together.
+8. Run all forty-one transport, prepared, authority, replication, catalog, and COPY module cases together.
 
    ```sh
    python3 tools/test-db.py --engine -- cargo test --locked --lib -- --ignored --test-threads=1
@@ -83,6 +83,146 @@ Run Python with assertions enabled: the shared harness refuses optimized executi
     ```
 
 Use a separate `CARGO_TARGET_DIR` for each concurrent Rust verification worker.
+
+## Catalog profile
+
+The catalog profile reuses the owned cluster with TCP disabled and creates empty source and target databases without E1 schemas or seed data.
+`RPGMIGRATE_TEST_CATALOG_SOURCE` selects the ordinary `e1_source` role in that source database.
+`RPGMIGRATE_TEST_CATALOG_ADMIN` selects the fixture administrator in the same database for the custom-opclass refusal case only.
+`RPGMIGRATE_TEST_CATALOG_TARGET` selects the ordinary `e1_target` role in the empty target database.
+`RPGMIGRATE_TEST_CATALOG_TARGET_ADMIN` selects the fixture administrator in that target database for owned negative fixtures only.
+Administrator connections create only the owned custom-opclass, internal-trigger, or session-setting fixtures required by refusal cases.
+The catalog API receives a connection and does not perform grants or privilege elevation.
+Each case creates a fresh schema and must preserve the caller's transaction and snapshot.
+The existing `RPGMIGRATE_TEST_CONTEXT` identifies the owned cluster.
+
+1. Run the offline catalog gate regressions.
+
+   ```sh
+   python3 -W error tests/support/test_catalog_harness.py
+   ```
+
+2. Coordinate the live fixture window and isolated Cargo target with the integration owner, then run the ten catalog cases.
+
+   ```sh
+   python3 tools/test-db.py --catalog -- cargo test --locked --lib catalog::tests::live_cdc_ -- --ignored --test-threads=1
+   ```
+
+The profile requires six source cases and four target cases from [the catalog inventory](catalog_cases.json).
+Exactly one summary must report ten passed, zero failed, zero ignored, and zero measured tests.
+Missing, duplicate, extra, failed, ignored, unrelated, and zero-test selections fail the gate.
+The catalog profile cannot be combined with another profile.
+We keep its inventory separate from the engine's 41 cases and COPY's 40 cases until the E2 integration gate.
+The authority and replication receipt requirements remain unchanged.
+The E2 integration owner must register both this offline suite and the ten live cases in the default gate.
+
+The separate `--source-catalog` profile requires the three exact names in [the source catalog inventory](source_catalog_cases.json), with zero failed or ignored tests.
+It reuses an empty owned source database, grants `pg_control_system()` EXECUTE to `e1_source`, and revokes it from PUBLIC and `e1_auth` there.
+`RPGMIGRATE_TEST_SOURCE_CATALOG_SOURCE` and `RPGMIGRATE_TEST_SOURCE_CATALOG_ADMIN` select the ordinary role and administrator in that same database, with `RPGMIGRATE_TEST_CONTEXT` retained.
+The administrator uses `SET ROLE e1_auth` only for the refusal fixture, with no new roles or logical slots.
+Run `python3 -W error tests/support/test_source_catalog_harness.py` offline, then coordinate the live fixture window with the integration owner.
+Before merging, the E2 integration owner must require this offline suite and all three live cases in the default gate.
+
+## Source snapshot profile
+
+The separate `--source-snapshot` profile requires the twelve exact names in [the snapshot inventory](source_snapshot_cases.json).
+We qualify PostgreSQL 14.24 and 17.11 through the existing paired expected-version variables.
+The fixture refuses other versions before starting its source clusters.
+It creates a separate logical primary with sixteen persistent-slot positions and a second owned primary with a different system identifier.
+Both use private Unix sockets, `fsync=on`, and the existing owned-cluster cleanup.
+The ordinary LOGIN REPLICATION role has a nonce-scoped name, no superuser, database-create, role-create, or bypass-RLS rights, and only the fixture's required CONNECT, schema USAGE, and table SELECT privileges.
+The administrator grants existing `pg_catalog.pg_control_system()` EXECUTE only inside the owned positive and empty databases and explicitly denies it in the owned negative database.
+The second cluster uses the same database and role names to isolate source-identity refusal from connection-name differences.
+No production database, grant, configuration, or resource is changed.
+
+The wrapper publishes these explicit fixture connections:
+
+- `RPGMIGRATE_TEST_SNAPSHOT_CONTEXT`: the source cluster's private context, including the second cluster's identity and the owned slot names.
+- `RPGMIGRATE_TEST_SNAPSHOT_SQL`: the ordinary role in the positive database.
+- `RPGMIGRATE_TEST_SNAPSHOT_EXPORTER`: the same role and database with `replication=database`.
+- `RPGMIGRATE_TEST_SNAPSHOT_ADMIN`: the fixture administrator in the positive database.
+- `RPGMIGRATE_TEST_SNAPSHOT_OTHER_SQL`: the ordinary role in the second primary's matching database.
+- `RPGMIGRATE_TEST_SNAPSHOT_DENIED_SQL`: the ordinary role in the database without control-function EXECUTE.
+- `RPGMIGRATE_TEST_SNAPSHOT_FAULT_HELPER`: the existing-pattern packet relay controller.
+
+The fixture also supplies a nonce-scoped `PGAPPNAME` for the explicit-name and environment-fallback case.
+It retains every persistent test slot until the owned cluster is stopped and removed.
+An unknown CREATE keeps its native intent; tests never adopt, recreate, or drop that slot.
+The unchanged `OwnedCluster` default remains four slots, with its private `logical_slots` option accepting only integers from one through sixty-four.
+
+1. Run the offline acceptance and refusal checks.
+
+   ```sh
+   python3 -W error tests/support/test_source_snapshot_harness.py
+   ```
+
+2. Coordinate the exclusive PG window and isolated Cargo target with Root, then run the profile.
+
+   ```sh
+   python3 tools/test-db.py --source-snapshot -- cargo test --locked --lib snapshot::live_tests:: -- --ignored --test-threads=1
+   ```
+
+Exactly one libtest summary must report twelve passed, zero failed, zero ignored, and zero measured tests.
+Empty, missing, duplicate, extra, failed, ignored, or unrelated selections and nonzero child exits fail acceptance.
+The five fault IDs are `create_reply_lost`, `create_tail_lost`, `expired_export_refused`, `imported_identity_mismatch`, and `source_finish_unknown`.
+The CREATE-tail ID requires separate `tail_lost`, `ready_transaction`, and `ready_failed` phase receipts inside one case file.
+Those phases retain a complete positive CREATE row and command tag, observe the server's actual idle ReadyForQuery byte, and either suppress completion or edit that byte to `T` or `E`.
+An edited-Ready relay remains open until it observes client closure, so a helper disconnect cannot masquerade as the required transport refusal.
+The expiry fault terminates only the independently verified owned exporter before import and requires `22023` on PostgreSQL 14.24 or `42704` on PostgreSQL 17.11, selected from the declared profile before the operation.
+The relay, native child, and receipt validator require that profile's exact response; mismatched profiles, other SQLSTATEs, and I/O failures fail the case.
+The imported-identity fault changes the backend-PID field only after successful snapshot import.
+The finish fault loses an actual positive source COMMIT reply.
+
+Each fault requires an armed phase, exact slot and native binding, retained native format-three record, distinct stream generation nine and catalog epoch seven, observed server/backend closure, and refusal before the bounded deadline.
+The Rust child waits for a successful helper exit before recording that it reaped the helper.
+Missing, pending, duplicate, unarmed, incomplete, or unreaped receipts fail the wrapper.
+The success footers are `SourceSnapshot faults verified 5 observed cases and closed backends` and `SourceSnapshot verified 12 exact cases; full E1 suite not selected`.
+Root must register this offline suite and the dedicated live task in the required Task/CI gates before accepting runtime qualification.
+The snapshot cases remain separate from Engine41, Authority18 and its two faults, Catalog10, SourceCatalog3, the four replication fault groups, and COPY40.
+The positive snapshot case also checks the source catalog capability against its actual confirmed native receipt while the source snapshot owner retains both connections.
+It uses an ordinary SQL connection and an owned primary-key relation to check exact source OID, catalog epoch, column metadata, and replica identity.
+Each negative relation check must close that backend and leave the capability poisoned; changed native bindings must refuse acquisition.
+These subassertions add no test IDs or synthetic creation receipts and preserve stream generation nine independently of catalog epoch seven.
+
+## Journal serial profile
+
+The separate `--journal-serial` profile selects the two parent cases in [the journal inventory](journal_cases.json).
+It reuses the Engine authority and replication fixtures, their existing roles, and the `RPGMIGRATE_TEST_CONTEXT`, `RPGMIGRATE_TEST_AUTHORITY_*`, and `RPGMIGRATE_TEST_REPLICATION_*` bindings.
+The journal setup checks both owned database comments before changing fixture privileges or creating tables.
+It grants existing control-function EXECUTE, schema USAGE, and table SELECT only to the owned `replication_stream` role in `replication_source`.
+That role retains REPLICATION without superuser, database-create, role-create, bypass-RLS, or schema-create privileges.
+The setup creates matching empty `public.journal_serial_segmented` and `public.journal_serial_sqlite` tables with an integer primary key and text payload in the owned source and target databases.
+The existing `e1_target` role owns the target tables.
+The profile adds no cluster or role to the Engine fixture pattern and changes no production grants or configuration.
+
+1. Run the offline journal receipt and wrapper checks.
+
+   ```sh
+   python3 -W error tests/support/test_journal_harness.py
+   ```
+
+2. After Root's module and required Task/CI registration, independent review, and exclusive PG-window release, run the two parent cases.
+
+   ```sh
+   python3 tools/test-db.py --journal-serial -- cargo test --locked --lib snapshot::journal_live_tests:: -- --ignored --skip snapshot::journal_live_tests::journal_serial_crash_child --test-threads=1
+   ```
+
+The private `journal_serial_crash_child` runs only through a parent's exact child command and owned request file.
+Selecting it as a top-level case fails the profile.
+Exactly one summary must report two passed, zero failed, zero ignored, and zero measured tests.
+Both parents require their own post-wait `journal-<candidate>-crash-receipt.json`, with the exact child name, distinct child PID, observed pre-COMMIT witness, SIGKILL, successful reaping, and a strict deadline.
+The receipt must match the retained request, actual confirmed native source binding, stream generation nine, catalog epoch seven, and all 128 bytes of the external completed-transaction descriptor.
+The Rust parent decodes that descriptor; the Python wrapper checks its exact retained bytes and receipt spelling.
+A pre-COMMIT witness alone cannot satisfy the post-wait receipt.
+
+The two committed-Unknown fault IDs are `journal_segmented` and `journal_sqlite` in the separate `JOURNAL_CASES` choices.
+They reuse the existing held-COMMIT relay and require a real positive COMMIT tag, observed held and released fence, and closed backend connection.
+The original two Authority fault IDs remain unchanged.
+No Unknown-abort phase is selected by this profile.
+Missing, duplicate, extra, pending, unarmed, unreaped, late, failed, ignored, or unrelated evidence fails acceptance.
+The wrapper prints `JournalSerial children verified 2 pre-COMMIT SIGKILL receipts`, `JournalSerial faults verified 2 committed Unknown replies and released fences`, and `JournalSerial verified 2 exact cases; full E1 suite not selected` only after every check passes.
+This profile preserves Snapshot12 with five fault IDs and seven phases, Engine41, Authority18, Catalog10, SourceCatalog3, and COPY40.
+We use this profile to check the selected development bridge; production backend selection and historical replay remain outside its scope.
 
 ## Authority fixtures
 
@@ -198,9 +338,9 @@ The full wrapper requires one result per manifest case with no duplicates, omiss
 Every fault case requires an observed hit and nonzero exit.
 The transport-only wrapper independently checks its exact five libtest names and rejects ignored cases.
 The prepared wrapper requires the seven exact names in the independent [prepared inventory](prepared_cases.json).
-The authority wrapper requires the sixteen exact names in the independent [authority inventory](authority_cases.json).
+The authority wrapper requires the eighteen exact names in the independent [authority inventory](authority_cases.json).
 The replication wrapper requires the nine exact names in the independent [replication inventory](replication_cases.json).
-The engine wrapper requires all five transport, two catalog/COPY, seven prepared, sixteen authority, and nine replication cases.
+The engine wrapper requires all five transport, two catalog/COPY, seven prepared, eighteen authority, and nine replication cases.
 Every module profile rejects empty or duplicate expected names, missing cases, changed names, duplicate results, and ignored or failed tests.
 Running zero tests or an unrelated command cannot satisfy any suite.
 Both authority and full-engine success also require one observed COMMIT fault receipt for each of `lost_commit_reply` and `provisioning_recovery`, including the held and released backend fence evidence.
@@ -210,8 +350,8 @@ Both profiles reject a missing terminal-error phase, mismatched server or client
 Engine verification retains the two authority fault receipts in addition to the four replication receipts.
 
 The native completion receipt is `manifest.json` in the explicit run directory.
-E1 receipts require native format version `2` and an empty `target_provenance` array.
-Version `1`, unknown versions, missing provenance, and nonempty provenance fail the COPY receipt oracle.
+E1 receipts require native format version `4`, an empty `target_provenance` array, and the required nullable `source_slot` and `copy_snapshot` fields set to null.
+Versions `1`, `2`, and `3`, unknown versions, missing provenance or intent fields, and unexpected source, target, or COPY intent records fail the COPY receipt oracle.
 Successful full COPY must report two tables and 10,003 rows in `copy_complete`.
 The command's success JSON must match the manifest's run identity, state format version, and counts without publishing private paths.
 Failed or uncertain runs must leave `copy_complete` null, or leave no native manifest when refusal precedes state creation.

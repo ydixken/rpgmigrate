@@ -1,0 +1,4 @@
+[
+  "snapshot::journal_live_tests::segmented_real_wal_reopens_and_serial_replays",
+  "snapshot::journal_live_tests::sqlite_real_wal_reopens_and_serial_replays"
+]

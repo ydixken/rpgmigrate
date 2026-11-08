@@ -1,6 +1,84 @@
 use super::{CopyBuffer, error};
-use crate::contracts::Result;
+use crate::contracts::{Error, MAX_SNAPSHOT_TOKEN_BYTES, Result};
+use crate::identity::SourceEndLsn;
 use std::ffi::CString;
+
+pub(crate) struct CreatedLogicalSlot {
+    pub(crate) slot_name: String,
+    pub(crate) plugin: String,
+    pub(crate) consistent_point: SourceEndLsn,
+    pub(crate) snapshot_token: String,
+}
+
+pub(crate) enum SlotCreateOutcome {
+    Created(CreatedLogicalSlot),
+    Unknown(Error),
+}
+
+impl CreatedLogicalSlot {
+    pub(super) fn parse(
+        slot: &str,
+        plugin: &str,
+        rows: usize,
+        fields: &[Option<&[u8]>],
+        tag: &str,
+    ) -> Result<Self> {
+        let invalid = || error("PostgreSQL logical slot creation result is invalid");
+        if rows != 1 || fields.len() != 4 || tag != "CREATE_REPLICATION_SLOT" {
+            return Err(invalid());
+        }
+        let field = |index: usize| {
+            fields[index]
+                .filter(|value| !value.is_empty() && !value.contains(&0))
+                .ok_or_else(invalid)
+        };
+        if field(0)? != slot.as_bytes() || field(3)? != plugin.as_bytes() {
+            return Err(invalid());
+        }
+        let position = std::str::from_utf8(field(1)?).map_err(|_| invalid())?;
+        let (high, low) = position.split_once('/').ok_or_else(invalid)?;
+        let hex = |part: &str| -> Result<u32> {
+            if part.is_empty() || part.len() > 8 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(invalid());
+            }
+            u32::from_str_radix(part, 16).map_err(|_| invalid())
+        };
+        let consistent_point = SourceEndLsn((u64::from(hex(high)?) << 32) | u64::from(hex(low)?));
+        let token = field(2)?;
+        if token.len() > MAX_SNAPSHOT_TOKEN_BYTES {
+            return Err(invalid());
+        }
+        let snapshot_token = std::str::from_utf8(token)
+            .map_err(|_| invalid())?
+            .to_owned();
+        Ok(Self {
+            slot_name: slot.to_owned(),
+            plugin: plugin.to_owned(),
+            consistent_point,
+            snapshot_token,
+        })
+    }
+}
+
+pub(super) fn create_slot_command(slot: &str, plugin: &str) -> Result<CString> {
+    for name in [slot, plugin] {
+        if name.is_empty()
+            || name.len() > 63
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(error(
+                "PostgreSQL logical slot creation arguments are invalid",
+            ));
+        }
+    }
+    // Omitting options keeps the slot persistent and exports its initial snapshot on both profiles.
+    Ok(CString::new(format!(
+        "CREATE_REPLICATION_SLOT \"{slot}\" LOGICAL \"{plugin}\""
+    ))
+    .unwrap())
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct IdentifySystem {
@@ -287,6 +365,175 @@ fn parse_envelope(bytes: &[u8]) -> Result<ReplicationEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_slot_command_is_persistent_and_rejects_invalid_arguments() {
+        for plugin in ["pgoutput", "test_decoding", "wal2json"] {
+            let command = create_slot_command("pgcopydb", plugin).unwrap();
+            assert_eq!(
+                command.to_bytes(),
+                format!("CREATE_REPLICATION_SLOT \"pgcopydb\" LOGICAL \"{plugin}\"").as_bytes()
+            );
+        }
+        assert!(create_slot_command(&"a".repeat(63), &"b".repeat(63)).is_ok());
+        for slot in ["", "BAD", "a;b", "a\0b", "é", &"a".repeat(64)] {
+            assert!(create_slot_command(slot, "test_decoding").is_err());
+        }
+        for plugin in [
+            "",
+            "BAD",
+            "a b",
+            "a;b",
+            "a\"b",
+            "a\0b",
+            "é",
+            &"a".repeat(64),
+        ] {
+            let failure = create_slot_command("pgcopydb", plugin).unwrap_err();
+            assert_eq!(
+                failure.message,
+                "PostgreSQL logical slot creation arguments are invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn create_slot_result_preserves_actual_consistent_point() {
+        for (wire, expected) in [
+            ("0/0", 0),
+            ("1/ABC", 0x1_0000_0abc),
+            ("FFFFFFFF/FFFFFFFF", u64::MAX),
+        ] {
+            let fields = [
+                Some(&b"pgcopydb"[..]),
+                Some(wire.as_bytes()),
+                Some(&b"00000003-0000001B-1"[..]),
+                Some(&b"test_decoding"[..]),
+            ];
+            let slot = CreatedLogicalSlot::parse(
+                "pgcopydb",
+                "test_decoding",
+                1,
+                &fields,
+                "CREATE_REPLICATION_SLOT",
+            )
+            .unwrap();
+            assert_eq!(slot.slot_name, "pgcopydb");
+            assert_eq!(slot.plugin, "test_decoding");
+            assert_eq!(
+                slot.consistent_point,
+                crate::identity::SourceEndLsn(expected)
+            );
+            assert_eq!(slot.snapshot_token, "00000003-0000001B-1");
+        }
+    }
+
+    #[test]
+    fn create_slot_result_rejects_shape_tag_nulls_and_mismatches() {
+        let valid = [
+            Some(&b"pgcopydb"[..]),
+            Some(&b"1/ABC"[..]),
+            Some(&b"00000003-0000001B-1"[..]),
+            Some(&b"test_decoding"[..]),
+        ];
+        let parse = |rows, fields: &[Option<&[u8]>], tag| {
+            CreatedLogicalSlot::parse("pgcopydb", "test_decoding", rows, fields, tag)
+        };
+        for rows in [0, 2, usize::MAX] {
+            assert!(parse(rows, &valid, "CREATE_REPLICATION_SLOT").is_err());
+        }
+        for columns in 0..4 {
+            assert!(parse(1, &valid[..columns], "CREATE_REPLICATION_SLOT").is_err());
+        }
+        let mut extra = valid.to_vec();
+        extra.push(Some(b"extra"));
+        assert!(parse(1, &extra, "CREATE_REPLICATION_SLOT").is_err());
+        for tag in [
+            "",
+            "CREATE_REPLICATION_SLOT ",
+            "CREATE_REPLICATION_SLOT 1",
+            "SELECT",
+            "COPY 0",
+        ] {
+            assert!(parse(1, &valid, tag).is_err());
+        }
+        for column in 0..4 {
+            for value in [None, Some(&b""[..]), Some(&b"private\0value"[..])] {
+                let mut fields = valid;
+                fields[column] = value;
+                let failure = parse(1, &fields, "CREATE_REPLICATION_SLOT").err().unwrap();
+                assert_eq!(
+                    failure.message,
+                    "PostgreSQL logical slot creation result is invalid"
+                );
+            }
+        }
+        for (column, value) in [(0, &b"other_slot"[..]), (3, &b"pgoutput"[..])] {
+            let mut fields = valid;
+            fields[column] = Some(value);
+            assert!(parse(1, &fields, "CREATE_REPLICATION_SLOT").is_err());
+        }
+    }
+
+    #[test]
+    fn create_slot_result_rejects_invalid_lsn_and_bounds_token() {
+        let mut fields = [
+            Some(&b"pgcopydb"[..]),
+            Some(&b"1/ABC"[..]),
+            Some(&b"00000003-0000001B-1"[..]),
+            Some(&b"test_decoding"[..]),
+        ];
+        for lsn in [
+            "/1",
+            "1/",
+            "1",
+            "1/2/3",
+            " 1/2",
+            "+1/2",
+            "1/G",
+            "100000000/0",
+            "1/100000000",
+        ] {
+            fields[1] = Some(lsn.as_bytes());
+            assert!(
+                CreatedLogicalSlot::parse(
+                    "pgcopydb",
+                    "test_decoding",
+                    1,
+                    &fields,
+                    "CREATE_REPLICATION_SLOT"
+                )
+                .is_err()
+            );
+        }
+        fields[1] = Some(b"1/ABC");
+        let maximum_token = vec![b'x'; 1024];
+        fields[2] = Some(&maximum_token);
+        assert!(
+            CreatedLogicalSlot::parse(
+                "pgcopydb",
+                "test_decoding",
+                1,
+                &fields,
+                "CREATE_REPLICATION_SLOT"
+            )
+            .is_ok()
+        );
+        let oversized_token = vec![b'x'; 1025];
+        for token in [&oversized_token[..], &b"snapshot\xff"[..]] {
+            fields[2] = Some(token);
+            assert!(
+                CreatedLogicalSlot::parse(
+                    "pgcopydb",
+                    "test_decoding",
+                    1,
+                    &fields,
+                    "CREATE_REPLICATION_SLOT"
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn identify_system_validates_shape_and_fields() {

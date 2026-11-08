@@ -378,19 +378,6 @@ impl Store {
         }
     }
 
-    pub(super) fn close(mut self) -> std::result::Result<(), (Box<Self>, Error)> {
-        match self.connection.close() {
-            Ok(()) => Ok(()),
-            Err((connection, _)) => {
-                self.connection = connection;
-                Err((
-                    Box::new(self),
-                    Error::Backend("SQLite close failed; store remains open"),
-                ))
-            }
-        }
-    }
-
     pub(super) fn checkpoint(&mut self) -> Result<()> {
         self.healthy()?;
         if self.role == Role::Status {
@@ -771,53 +758,13 @@ fn sqlite_error(_: rusqlite::Error) -> Error {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::*;
     use crate::format::{Limits, RunId, SourceId, StreamId};
     use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
-
-    pub(in super::super) struct RetainedStatement(*mut rusqlite::ffi::sqlite3_stmt);
-
-    impl Drop for RetainedStatement {
-        fn drop(&mut self) {
-            // SAFETY: the test retains the failed-close connection until this statement is finalized.
-            assert_eq!(unsafe { rusqlite::ffi::sqlite3_finalize(self.0) }, 0);
-        }
-    }
-
-    pub(in super::super) fn retain_statement(store: &Store) -> RetainedStatement {
-        std::mem::forget(store.connection.prepare("SELECT 1").unwrap());
-        // SAFETY: the live connection owns the single deliberately retained statement.
-        let statement = unsafe {
-            rusqlite::ffi::sqlite3_next_stmt(store.connection.handle(), std::ptr::null_mut())
-        };
-        assert!(!statement.is_null());
-        RetainedStatement(statement)
-    }
-
-    #[test]
-    fn checked_close_returns_live_connection_until_statement_is_finalized() {
-        let fixture = Fixture::new();
-        let store = Store::create(&fixture.cfg).unwrap();
-        let statement = retain_statement(&store);
-        let (store, error) = store
-            .close()
-            .expect_err("unfinalized statement must prevent close");
-        assert_eq!(
-            error,
-            Error::Backend("SQLite close failed; store remains open")
-        );
-        assert_eq!(head(&store), CatalogHead::empty());
-        drop(statement);
-        assert!(store.close().is_ok());
-        assert_eq!(
-            head(&Store::reopen(&fixture.cfg).unwrap()),
-            CatalogHead::empty()
-        );
-    }
 
     struct Fixture {
         root: PathBuf,

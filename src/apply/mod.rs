@@ -5,9 +5,15 @@
 
 mod checkpoint;
 mod metadata;
+mod plan;
+pub(crate) mod serial;
 
+use crate::contracts::SnapshotAnchor;
 use crate::identity::{CommitLsn, SourceEndLsn, StreamId, TxId, TxSeq};
 use checkpoint::DurableProof;
+#[cfg(test)]
+pub(crate) use checkpoint::copy_metadata_names_for_test;
+pub(crate) use checkpoint::{SnapshotProof, TargetAuthority};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Frontier {
@@ -25,11 +31,12 @@ pub(crate) struct Checkpoint {
     pub(crate) barrier_counter: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ControlRow {
     pub(super) applied: Option<Frontier>,
     pub(super) barrier_epoch: u64,
     pub(super) barrier_counter: u64,
+    pub(super) anchor: Option<SnapshotAnchor>,
 }
 
 #[derive(Debug)]

@@ -6,14 +6,15 @@ Use `origin/v0.18-fixes` at `86bf908adca02d87063849dae775a02c1659c829` as the co
 Do not substitute an older upstream release or repeat the completed issue audit.
 Name the executable `rpgmigrate`.
 Never import, resume, restart, convert, or clean pgcopydb state.
-Derive release parity from actual operator argv, lifecycle, consumed outputs, configuration, and explicitly approved general controls.
-A parser inventory is regression evidence, not an obligation to implement every upstream command.
-Update the approved spec, roadmap, and matrix when the user changes scope; preserve existing evidence and safety guards.
-Trace admission defaults through generated argv; an alternate plugin test does not qualify default follow behavior.
+Derive the release command set from actual operator argv, lifecycle, consumed contracts, exposed configuration, and explicitly approved general options.
+A frozen parser inventory is compatibility evidence, not an obligation to implement every upstream command.
+Trace operator admission defaults through generated argv before choosing a qualification profile; an explicit alternate plugin does not qualify the default, and silent plugin substitution is not compatibility.
+When the user accepts a narrower contract, update the approved spec, roadmap, and matrix while preserving existing evidence and safety guards.
 Never report a scaffold or parser as completed migration functionality.
 
 ## Durability and performance
 
+Captured source records are not target progress or ACK authority; preserve canonical capture validation without imposing an unapproved namespace-absence requirement on COPY or postdata.
 Document both replay-safe acceleration and the explicitly requested loss-permitting mode.
 Keep `durable` as the default.
 Require both explicit finite transaction and byte caps for `relaxed`.
@@ -23,9 +24,12 @@ Every normal success proves complete durable target work.
 A recovery gap requires nonzero refusal and a fresh migration.
 Prepared execution and pipelines already exist in the C baseline.
 Measure applied target work before claiming improvement.
+Date measured results from retained execution timestamps and anchor unpublished-source statements to that evidence date; keep later status in the maintained tracker.
 Distinguish process-kill evidence from power-loss durability evidence.
 Verify macOS `fsync` and `F_FULLFSYNC` requirements before comparing journal barriers.
 Match SQLite `fullfsync` and `checkpoint_fullfsync` settings to those candidate barriers.
+Check PostgreSQL's existing transactional execution facilities before adding a transport protocol path; discarded client results do not imply bounded server-side memory.
+Audit every admitted mutator's actual effect session before claiming a database-wide writer fence; a newer guarded path does not serialize an older raw COPY caller.
 
 ## Planning and delegation
 
@@ -33,11 +37,18 @@ Deliver a reviewable first milestone early so independent workers can start.
 Fix exact interfaces, access rules, tests, and file ownership before parallel edits.
 Verify the actual module path before assigning ownership; source metadata lives in `src/catalog.rs`, not a parallel PG catalog module.
 Coordinate changes to frozen interfaces with the leader.
+Only Parent allocates independent reviewers.
+Authors report readiness but must not wake closed review threads or request unassigned peer reviews, even when a review skill suggests it.
+Peer coordination does not authorize concurrent test work; preserve assigned ownership and quiet resource leases without adding retroactive audits or tests.
+Use the accepted final field contract as the single source of truth; remove superseded brief fields instead of retaining duplicate identities, counters, or unused policy data in another layer.
 Keep later feature maps concise and expand their tasks before implementation.
 Use ordinary branches, never worktrees.
 Follow the current per-file assignment and transfer ownership only through the leader.
-Set worker reasoning effort through the explicit `multi_agent` reasoning-effort parameter and verify the resulting metadata.
+Apply the canonical [subagent-effort policy](../AGENTS.md#subagent-effort) before every spawn, set effort explicitly, and verify the resulting metadata.
+Distinguish global Codex policy from repository-only policy; a request for global persistence requires the effective global instruction source, with project rules linking to it.
 Do not describe an inherited high-effort worker as max effort or infer effort from the visible task label.
+Starting Codex through a subprocess is still an agent allocation and requires the leader's assignment; an explicit effort setting does not bypass that ownership boundary.
+Label author-arranged review feedback separately from the leader's independent safety and release gates.
 The integration worker owns task-status updates after the documentation handoff.
 Commit only after the leader requests it and required checks pass.
 
@@ -91,6 +102,9 @@ Dump `-F` and `-N` take required values matching their long options.
 
 ## Experiment and tool contracts
 
+Inspect the actual harness before selecting tests under a no-network boundary; loopback TCP scripted peers also use the network.
+An explicit synthetic-peer allowance covers only inspected, owned `127.0.0.1` or `::1` ephemeral listeners within the resource window; it does not permit real PostgreSQL, external DNS, remote endpoints or downloads.
+Record an unplanned test scope and its owned cleanup without relabeling it as authorized; retain the evidence for the assigned reviewer.
 Count canonical wire bytes, including each 88-byte frame header and the 128-byte completed-transaction descriptor.
 Require exact positive transaction sequence order; reserve `TxSeq(0)` and allow equal, nondecreasing LSNs.
 Only an external publication proof can authorize an unpublished tail; codec tolerance does not authorize pruning.
@@ -129,6 +143,7 @@ When replacing a task runner, test both environment and command-line overrides, 
 A quoted executable path test alone does not verify argument handling or override precedence.
 Register every new regression module in a required default gate and test refusal when that module is missing.
 Require process-level qualification receipts in the default gate as well; a manual driver command does not protect CI against missing cases or continuations.
+Treat a missing-method compiler failure as API evidence, not a behavioral regression result; use runtime negative controls before claiming the behavior is protected.
 Live acceptance checks do not replace unit tests for malformed artifacts or missing evidence.
 Build and inspect an actual runtime archive before treating fixture-only packaging checks as qualification.
 Seed a slim image's actual default trust-store path before its first HTTPS package request; the presence of a CA bundle at another path is insufficient.
@@ -147,6 +162,12 @@ Use narrow `#[expect(dead_code, reason = "E3 applier integration is pending")]` 
 For canonical plain identity values in version-two state, use the approved serde derives and reject unknown named fields instead of adding duplicate conversion types.
 Keep authority proofs and trusted constructors outside that serialization shortcut.
 Keep interim identity warnings visible until real consumers use them.
+Trace warning targets through Cargo, the library, main and actual callers before proposing an architectural change.
+For Native8, the approved private library and thin main contain genuine unwired consumers; complete their coordinator integration and real unused-import cleanup instead of moving code, widening visibility or suppressing warnings.
+Keep the exact baseline delta unknown unless comparable retained checks establish it.
+Distinguish a required lifecycle invariant from a reviewed correction artifact; verify the actual reader-release/publication/reopen path and never invent a missing patch or inherit unrelated review.
+Match fault evidence to the claimed path: a local error followed by connection-close rollback does not qualify a backend SQL-error path.
+Arm commit-loss controls only after unrelated phase commits, and keep freshness-consuming negative checks off the authority reserved for actual recovery.
 Shared benchmark imports can make a runtime-only dead-code expectation unfulfilled.
 Let a cached DML plan own its derived SQL, parameter types, index maps, keys, and operation shape instead of borrowing full relation metadata.
 Borrow row values only during binding, so metadata eviction does not require a self-referential cache.
@@ -171,6 +192,158 @@ Match a role's literal catalog name without reparsing it as an SQL identifier.
 Mixed-case, quoted, and numeric role names must retain their identity.
 Fresh object creation requires the existing rights needed for the assigned owner.
 Do not alter role membership or elevate privileges.
+Distinguish proposed persisted fields from fields that the existing state constructor validates.
+Read the canonical identity definitions before binding provenance, and keep stream generation separate from relation generation even when fixtures use similar values.
+Acquiring a SHARE ROW EXCLUSIVE lock does not prove complete CDC DML authorization.
+Check effective table DELETE, INSERT and UPDATE for every replicated column, and SELECT for every predicate key.
+Use restricted-role table, column, and inherited-grant controls; owner-only fixtures do not prove these checks.
+Compile and discover the exact live inventory from an immutable export before allocating its PostgreSQL fixture.
+Include test-only API dependencies in that export, not only the changed production module.
+Check task filters against every required profile inventory; a shared namespace can contain both an existing engine test and a separate new profile.
+Use a distinct Cargo target for every source variant and mutation control, and require the intended runtime failure rather than any nonzero exit.
+Pass `--manifest-path` with the absolute private `Cargo.toml` on every Cargo invocation in a nested private export, and set its private working directory and distinct target explicitly.
+Do not rely on the working directory alone: Cargo can discover the primary repository's manifest from a packet directory.
+Exclude interrupted attempts and binaries with ambiguous source binding from test counts; retain their evidence and bind the corrected manifest and target before verification.
+Bind the frozen source and executed test binary hashes in the same verification receipt.
+Do not infer that binding from timestamps, a later source hash, or an unrecorded author binary.
+After draining CREATE results, check both native connection health and transaction Idle before returning a positive creation receipt.
+A local idle phase or NULL result alone does not prove either property.
+Exercise helper startup, fault injection, shutdown receipts, and actual worker exit; frame-transformation tests alone do not cover controller teardown.
+Signal cancellation before closing sockets and joining a worker that can wait for another packet, while preserving any required client-EOF observation first.
+Join a concurrent reader before closing the socket descriptor it can still use; a stop flag does not protect a reader already past its loop guard.
+Do not call a race reproduction deterministic when its witness observes only shutdown EOF rather than the descriptor close that triggers the race.
+Observe required backend closure before object Drop, relay quit, or cleanup can supply the missing side effect.
+Retain actual wire observations and parent-wait results before fixture cleanup on success and failure; keep partial evidence unqualified and never reconstruct missing observations.
+Copy container evidence before deleting the container, report capture failures, and preserve an already nonzero command exit.
+After a second harness rejection, split semantic validation from evidence retention and outcome preservation, then independently review the composed boundary before PG execution.
+Offline builds may overlap review of the exact frozen candidate, but neither a build nor preparation clears unresolved safety findings.
+Validate complete unfiltered discovery before excluding exact registered names; substring filters can hide an unexpected case before validation.
+Preserve the primary child, discovery, or startup outcome independently of capture and both cleanup attempts; retain final termination output without duplicating earlier bytes or replacing the original timeout and PID.
+Open receipt leaves with `O_NONBLOCK | O_NOFOLLOW`, then require a regular file from the opened descriptor before reading.
+A path check before a blocking open cannot prevent a replaced FIFO from hanging capture and cleanup.
+Owned paths do not make file contents safe to export; keep per-file privacy admission before retention, preserve earlier admitted evidence on later failure, and omit unsafe bytes without an unchecked fallback.
+Trace the selected command through dispatch and cleanup before propagating a shared fix; a profile-specific early return can bypass that helper and leave a separate capture boundary unchanged.
+Before declaring a build-context exclusion defect, use the actual engine or prove the complete matching semantics, including parent-directory negations; withdraw a mock-based finding when engine evidence contradicts it.
+Use a bounded no-writer FIFO regression; keep this artifact boundary separate from State and store checks that must inspect live database inodes without opening them.
+Check actual PostgreSQL JSON types before writing fixture mocks; cast OIDs explicitly when the consumer requires an integer rather than loosening the consumer's type check.
+Preserve unknown keys and NULLs when normalizing known SQL fields, and check that a whole-row reference cannot resolve to an added column instead.
+Keep a source-derived contract defect separate from an unobserved runtime case or conjunct.
+Trace intermediate SQL casts, the final result type, and the actual decoder before stating an OID contract; preserve the existing output and guards in a spelling-only type fix.
+Check exact nested JSON keys and integer types before identity equality; Python treats some floats and booleans as equal to integers.
+Use the canonical unsigned widths and the consuming envelope's refinements without inventing a narrower identity range.
+Select exact SQLSTATE expectations from the independently declared and validated PostgreSQL version; do not accept multiple codes or I/O errors to hide a version-specific fixture defect.
+Record the library selected by the executable's load command before and after native verification runs; copied-prefix hashes alone do not bind an absolute macOS install-name path.
+Write coordination updates with normal spaces and short complete sentences.
+Lead with the observed result, state the scope and limits, then give one exact receipt path.
+When the leader cannot read local files, relay the requested bounded contract body directly instead of sending only its path.
+Verify the frozen hash before relaying it, and keep multipart bodies in order when the message transport imposes a size limit.
+Before parallel authors implement a shared harness, freeze its complete input, process, IPC, path and cleanup contract together.
+If both authors encounter missing lifecycle glue, pause dependent work and resolve one shared addendum instead of issuing piecemeal fields or allowing parallel inventions.
+Derive planned connection counts from actual constructors, including internal probes; captured records do not define the expected inventory.
+Match scripted peers to the actual query transport and enclosing close path; a compile or peer-framing error is not the intended behavioral RED.
+Use the requested reasoning-effort value in the actual worker dispatch and record that value in the handoff.
+An effort label in a brief does not change the spawned worker's configuration; do not present a differently configured run as equivalent.
+Keep libpq's full protocol value separate from the startup wire word.
+For protocol 3.0 and 3.2, `PQfullProtocolVersion` returns `30000` and `30002`, while the startup words are `196608` and `196610`.
+Name and test each representation independently; a qualification observation does not authorize a runtime clamp or new protocol support.
+Finish a coherent published PR independently of newer local work.
+Inspect its exact head, checks, review threads, and promised scope, then complete its readiness step instead of leaving it in draft because unrelated WIP continues.
+Ready for review does not mean approved to merge or that the broader product is complete.
+Verify externally reported GitHub changes before any mutation or retry, and stop duplicate operations once the user or another owner has completed them.
+Attribute a manual merge to its actual actor and bind later work to the observed commit and tree, preserving local WIP and index bytes.
+Apply standing user authorization to routine follow-up work while retaining required quality gates; failed checks are a technical hold, not a reason to repeat an already answered permission question.
+Keep full hashes and inverse details in receipts unless resolving a concrete identity dispute.
+Keep a failure-closure observation inside the helper's remaining lifetime and require an actual relay-state witness.
+A live helper process or a backend that disappears after cleanup does not prove that the operation closed its connection.
+Retain an unlocated intermittent failure when an unchanged rerun passes; expose its failing callsite before assigning a cause or claiming a fix.
+Prove that a negative fixture completed its setup before accepting its refusal result.
+A missing lock privilege or invalid CREATE statement cannot qualify the intended admission boundary.
+Observe stored database locale facts before treating a requested locale name as a negative fixture; PostgreSQL can normalize POSIX to C.
+Map every caller of a shared assertion before attributing its message to one phase, and retain controlled prerequisite facts without exposing connection data.
+For an exception with no message, retain its class and source basename, function, and line without locals or connection data; preserve the original exit behavior.
+Diagnostic syntax and a single marker do not prove producer identity.
+Use the approved private metadata channel for the actual command, and never promote opaque stdout or stderr into public diagnostic context.
+Exercise uncaught exceptions and forced exits through the real consumer; broader catch coverage or an extra marker does not establish provenance.
+Preserve failure behavior when trusted metadata is missing or rejected.
+Deliver an oversized negative fixture to the boundary under test without exceeding the process argument limit first.
+An execution failure before the child starts is fixture setup failure, not evidence that the metadata reader rejected the payload.
+Preserve the assertion and use bounded fixture transport, then verify the relevant process behavior on the CI platform and Python version.
+Keep large fixture bytes in private input files and prove that the child received the exact payload with the intended exit.
+A macOS pass does not qualify Linux's per-argument limit; retain each platform's execution evidence separately.
+When composing reviewed helpers, update direct test callers to the combined startup boundary while preserving their original assertions and deadlines.
+Declare every expected fixture role before the child runs, including quoted names and names derived from an independently queried owner OID.
+Do not admit arbitrary numeric users or derive expected identities from the observations being validated.
+A static registry of all accepted phase names is not a qualification inventory.
+Select the exact phase set from the declared version pair, and require the same complete set in capture, helper-reaping, and CI receipt checks.
+Check current file ownership before starting an adjacent fix, even when its scope is small.
+On reassignment, stop edits and hand over retained RED evidence; keep candidates based on different source snapshots separate.
+Name the artifact for each digest; a capture record, capture helper, native inventory, and native library are different inputs.
+Store file counts and SHA-256 digests in separate fields; never prepend a source count to a digest or describe callback phases as typed phase proofs.
+Keep the active protocol contract distinct from a descriptive amendment; preserve frozen receipts and add a binding correction instead of silently changing their meaning.
+When checked close returns a live handle, return its owning store with the error and retain the role or pin needed for retry.
+Checkpoint failure must preserve that ownership before close; best-effort Drop does not prove successful checked shutdown.
+Use the actual returned path when reporting a generated artifact directory; never guess a temporary-directory suffix before reading the command result.
+Read the actual retained source path from its handoff or directory inventory before integration.
+Do not give a remaining-alpha estimate before the owning COPY cases and the first production runtime crash/restart evidence establish a defensible critical path.
+Distinguish elapsed agent time from aggregate worker-hours, state the remaining scope, and preserve uncertainty.
+Check the mutation command's exit code and resulting file hash before updating a completion checkbox or sending a success message; a tool call that returns normally can still report a failed command.
+If primary already matches the reviewed blob, record that observed identity without claiming a source replacement.
+Determine checkpoint inclusion by comparing each captured tree blob with the reviewed handoff, not by inheriting a planned integration status or a private-export location.
+Include every executed runner helper in a selective export, and compare its blob with the reviewed implementation before verification.
+Test actual suite execution and its nonempty receipt, not only the command-line arguments sent by a task.
+Validate receipts from the harness's declared output stream; compiler diagnostics on stderr can contain names that resemble receipts.
+Retain and hash stderr separately, and reject a nonzero command even when stdout contains an apparently valid receipt.
+After a runner correction, execute a fresh gate instead of promoting the earlier failed report from a retained-output replay.
+Keep newly proposed milestone work separate from prerequisite interfaces supplied by the previous milestone; do not create a circular dependency by assigning the new work backward.
+Derive stage and case inventories from the exact selected source and its nested task definitions, not from an older public snapshot's totals.
+Adding a version must preserve every required private gate; test omission of each new required stage instead of silently reducing the inventory.
+Compare the failing export with the primary file before changing code; an omitted working helper requires an export correction, not a new parser.
+Set `RPGMIGRATE_BIN` to the emitted executable when a verification run uses an isolated `CARGO_TARGET_DIR`.
+A missing executable caused by the gate configuration is not a source regression.
+Identify the executable that actually opens PostgreSQL before checking native linkage.
+A thin test wrapper can launch the real CLI without linking libpq itself; bind that child executable and its loaded library explicitly.
+Separate dependency compilation, native linkage, direct adapter tests, and the runtime routes exercised by smoke tests; a built artifact does not prove an unused API was called.
+Express exclusive draft creation with a non-cloneable draft that retains a mutable borrow of its owner before adding a registry or interior locks.
+Keep immutable execution pins separate from that exclusive creation borrow.
+Publish immutable directories with a real directory-relative no-replace primitive; plain rename can replace an existing empty directory.
+Fail closed on unsupported platforms instead of substituting an existence check followed by rename.
+Insert an empty final directory at the last publication hook, require `EEXIST` with its inode unchanged, and prove that a plain-rename mutation fails the control.
+Read both the canonical type and the consuming envelope's qualified invariants before changing a value domain.
+A generic `SourceEndLsn` can parse zero while a confirmed source-snapshot receipt requires a nonzero point.
+Preserve that refinement in COPY anchor bindings, and test zero-point refusal without intent, proof, or DML authorization.
+Do not weaken a qualified envelope because its underlying scalar accepts more values.
+Keep independently released format changes separate in their author packages.
+Use a new preserved source copy for a required version overlay, and defer a shared primary-file change until its owner hands the file back.
+Old regressions that leave new optional SQL fields NULL do not qualify their populated storage path.
+Exercise actual installation, parameter binding, readback, preservation, and malformed-present refusal before claiming a new metadata field is qualified.
+Keep the earlier regression receipt scoped to what it executed instead of relabeling it after a coverage gap is found.
+Run the test-target lints when new tests use platform-dependent native constants.
+A conversion that is necessary on Linux can be redundant on macOS; preserve type safety without disabling the lint or its test.
+Check a custom test runner's argument handling before assuming standard unittest flags; invocation errors do not count as behavioral RED evidence.
+Explicitly unlock a raw file-lock competitor before handing ownership to the component under test when another descriptor can still refer to the same open file description.
+Retain that duplicate through the handoff so removing the unlock causes a meaningful regression; preserve production lock-release behavior and contention assertions.
+A controlled reproduction of a test assumption does not identify a withheld hosted panic; retain both evidence scopes and require fresh hosted checks on the reviewed fix.
+Include pinned source archives and dependency-cache requirements when preparing an exact verification export.
+If a missing cache stops compilation or a native-source test, retain that preparation failure and correct the inputs without treating it as a runtime defect or rebuilding unchanged native artifacts.
+Frozen evidence modes are not necessarily usable working-cache modes.
+When copying a pinned cache into a verification export, verify its bytes and restore only the copy's required lock-file write and executable permissions; preserve the frozen donor and source files.
+Prepare an owned Cargo cache from the actual image or approved existing cache before testing its availability; do not invent a preexistence requirement for a directory that the tool normally creates.
+Keep optional inspection-script failures separate from native verification, compilation, and runtime failures.
+Verify the actual Cargo release profile instead of requiring a redundant literal compiler flag; missing or enabled debug assertions must still refuse qualification.
+Retain built artifacts and their identities before optional metadata checks or cleanup, so a reporting assumption cannot discard successful compilation evidence.
+An owning handle returned after failed admission is cleanup authority, not permission to read or append data.
+Keep its role and pin for checked close while centrally refusing operations that require successful admission.
+Read the actual bound-intent phase before summarizing refusal as absence.
+Target refusal preserves an already bound `Some(intent)`; publisher refusal alone requires present-null `copy_snapshot` together with the existing native error.
+Require `copy_complete` to be present and null in both cases; a missing required-nullable field is not proof of absence.
+When a native format denotes a restricted phase profile, enforce its authority refusal even when that phase's optional intent is null; a null field must not open a CDC or frontier path before aggregate authority exists.
+Make a new restricted format an explicit internal opt-in; preserve existing creation defaults and retain the opened flavor across all later manifest writes and metadata selection.
+Test namespace loss after successful initialization as well as after failed initialization.
+Refusing publication proof must not prevent checked cleanup through held resources; preserve the required synchronization plan across retries.
+Keep a bounded core-review PASS separate from an unresolved adapter finding, and retain each frozen candidate's evidence.
+Keep a storage-interface brief separate from source iteration and COPY ownership.
+Transfer only the minimum entry fields across that boundary, and send existing findings to the assigned owner instead of starting a parallel inquiry.
+When splitting a plan, preserve explicit module ownership instead of transferring adjacent responsibilities by inference.
 
 ## Licensing and readiness
 
@@ -183,6 +356,24 @@ Do not introduce another approval gate for those decisions.
 
 ## Workflow status and estimates
 
+Use the latest explicit reviewer assignment and thread ID; do not assume the previous reviewer owns a new addendum.
+Check each tool's actual exit status before sending a dependent PASS, lease, or mutation instruction.
+Wait for cache and wrapper preparation to exit successfully before starting dependent checks; a returned session ID is still-running work, not a completed prerequisite.
+When compiled producer controls are required for review, run and bind those author controls before READY; do not make their compile window depend on the review that needs their results.
+Retain an early setup failure separately and verify the actual prerequisite before rerunning the unchanged candidate.
+Do not let a failed assertion fall through to a queued approval message.
+Initialize thread handles and mutable Events per instance before startup; preserve inherited behavior when adding passive observations.
+A completion event means the function finished, not that it succeeded or that its thread and descriptors were reaped.
+Pin the engine's absolute deadline once in the parent before launch, then convert its remaining budget once to monotonic I/O control; process startup and callbacks must not renew it.
+Keep diagnostic observers transparent to expected readiness polling; return the original result and let the actual caller decide which failure is fatal.
+After reviewing fixed execution inputs, place fresh resource checks immediately before a preauthorized bounded run so a coordination roundtrip cannot consume its execution budget.
+When an authorized run has started, retain its actual input plan and record later alternatives as unused instead of interrupting it or starting a duplicate.
+Before restricting an acquisition API, trace recovery after each owned artifact is consumed.
+Require the admitted artifact for initial provisioning, but preserve an existing-only acquisition route for checked recovery; acquisition alone grants no phase proof or replay permission.
+Distinguish existing-object reconciliation from provisioning: require a genuine pending native record, complete matching row bindings and positive durable COMMIT evidence before confirmation; refuse mismatches without repair.
+Mirror the existing phase predicate when adding an early guard: preserve matching pending schema intent and target provenance, and check full artifact bindings at the effect boundary before reuse.
+Do not extend an initial-entry records exclusion into later COPY or POSTDATA phases where canonical source capture is permitted.
+Define immutable artifact identity by the approved content and provenance bindings, not allocation identity; distinguish binding-changing substitution from a byte-identical remint without weakening held-descriptor checks or implying lost-input restart support.
 Lead progress reports with the runnable production/operator workflow and the features still missing.
 Label component test evidence by its actual scope and keep it secondary to workflow qualification.
 Distinguish aggregate agent-hours from elapsed time and state assumptions and uncertainty; estimates are not commitments.

@@ -4,6 +4,9 @@ mod native;
 mod replication;
 
 #[cfg(test)]
+pub(crate) use ffi::replication_testing::owned_frame;
+
+#[cfg(test)]
 mod live_tests;
 #[cfg(test)]
 mod passfile_tests;
@@ -22,12 +25,9 @@ pub(crate) use ffi::PgParam;
 
 pub(crate) use ffi::TransactionStatus;
 
+pub(crate) use replication::{CreatedLogicalSlot, SlotCreateOutcome};
 pub(crate) use replication::{IdentifySystem, ReplicationFrame, ReplicationPoll, StandbyStatus};
 
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "Logical source integration is pending")
-)]
 pub(crate) use replication::ReplicationEnvelope;
 
 use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};

@@ -539,21 +539,6 @@ impl Backend {
             Self::Sqlite(store) => store.advance_consumer(expected, next),
         }
     }
-    fn close(self) -> std::result::Result<(), (Box<Self>, Error)> {
-        match self {
-            Self::Segmented(store) => store
-                .close()
-                .map_err(|(store, error)| (Box::new(Self::Segmented(*store)), error)),
-            Self::Sqlite(store) => store
-                .close()
-                .map_err(|(store, error)| (Box::new(Self::Sqlite(*store)), error)),
-            Self::Redb(store) => Err((
-                Box::new(Self::Redb(store)),
-                Error::Config("checked close does not qualify redb"),
-            )),
-        }
-    }
-
     fn checkpoint(&mut self) -> Result<()> {
         match self {
             Self::Segmented(store) => store.checkpoint(),
@@ -769,28 +754,6 @@ impl Store {
         self.with_read_view(|view| view.scan_complete(after, visit))
     }
 
-    /// Failure returns ownership, including the role lock, for explicit recovery or retry.
-    pub fn close(mut self) -> std::result::Result<(), (Box<Self>, Error)> {
-        let ready = if matches!(self.backend, Backend::Redb(_)) {
-            Err(Error::Config("checked close does not qualify redb"))
-        } else if self.role == Role::Receive {
-            self.checkpoint()
-        } else {
-            self.healthy()
-        };
-        if let Err(error) = ready {
-            return Err((Box::new(self), error));
-        }
-        // Keep the role guard until checked backend closure confirms success.
-        match self.backend.close() {
-            Ok(()) => Ok(()),
-            Err((backend, error)) => {
-                self.backend = *backend;
-                Err((Box::new(self), error))
-            }
-        }
-    }
-
     pub fn checkpoint(&mut self) -> Result<()> {
         self.require_role(Role::Receive)?;
         let result = self.backend.checkpoint();
@@ -832,68 +795,10 @@ fn decode(bytes: &[u8], limits: Limits) -> Result<Record> {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::*;
     use format::{RunId, SourceEndLsn, SourceId, TxId};
     use std::cell::RefCell;
-
-    pub(in super::super) fn retain_statement(
-        store: &Store,
-    ) -> super::super::sqlite::tests::RetainedStatement {
-        match &store.backend {
-            Backend::Segmented(store) => super::super::journal::tests::retain_statement(store),
-            Backend::Sqlite(store) => super::super::sqlite::tests::retain_statement(store),
-            Backend::Redb(_) => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn checked_close_failure_retains_role_and_retries_without_publication() {
-        for candidate in [Candidate::Segmented, Candidate::Sqlite] {
-            let (mut cfg, _) = fixture();
-            let root = std::env::temp_dir().join(format!(
-                "rpgmigrate-close-{}-{candidate:?}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir(&root).unwrap();
-            cfg.dir = root.join("store");
-            let store = Store::create(candidate, &cfg).unwrap();
-            let statement = retain_statement(&store);
-            let mut published = false;
-            let (store, error) = match store.close() {
-                Ok(()) => {
-                    published = true;
-                    None
-                }
-                Err(owned) => Some(owned),
-            }
-            .expect("close failure must withhold publication");
-            assert!(!published, "close failure published success");
-            assert_eq!(
-                error,
-                Error::Backend("SQLite close failed; store remains open")
-            );
-            assert!(matches!(
-                Store::open_role(candidate, &cfg, Role::Receive, TxSeq(0)),
-                Err(Error::Busy)
-            ));
-            store
-                .with_read_view(|view| {
-                    assert_eq!(view.head(), &CatalogHead::empty());
-                    Ok(())
-                })
-                .unwrap();
-            drop(statement);
-            assert!(store.close().is_ok());
-            let reopened = Store::reopen(candidate, &cfg, TxSeq(0)).unwrap();
-            assert!(reopened.close().is_ok());
-            std::fs::remove_dir_all(root).unwrap();
-        }
-    }
 
     struct Snapshot {
         head: CatalogHead,

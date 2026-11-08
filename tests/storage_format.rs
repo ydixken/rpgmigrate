@@ -1,4 +1,4 @@
-#[path = "../bench/storage/format.rs"]
+#[path = "../src/cdc/codec.rs"]
 mod format;
 #[path = "../src/identity.rs"]
 mod identity;

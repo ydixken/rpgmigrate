@@ -1,17 +1,26 @@
 mod apply;
 mod catalog;
+mod cdc;
 mod cli;
 mod config;
 mod contracts;
 mod copy;
+mod copy_plan;
 mod identity;
 mod pg;
+mod snapshot;
 mod state;
+
+#[cfg(test)]
+#[path = "../build.rs"]
+mod build_policy;
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+use cdc::codec as format;
 use contracts::{Error, ErrorKind, Invocation, IoControl, Result};
 
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);

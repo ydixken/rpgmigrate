@@ -14,10 +14,115 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cdc::contracts::Plugin;
 use crate::contracts::{
-    CopyReport, Error, ErrorKind, Result, RunId, StateAction, StateIdentity, StateRequest,
+    COPY_PLAN_REFERENCE_VERSION, CopyPlanRef, CopyReport, Error, ErrorKind,
+    MAX_SNAPSHOT_TOKEN_BYTES, Result, RunId, SnapshotAnchor, StateAction, StateIdentity,
+    StateRequest,
 };
-use crate::identity::StreamId;
+use crate::identity::{SourceEndLsn, StreamId};
+
+mod plan_files;
+pub(crate) use plan_files::{NativePlanDraft, NativePlanPin};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CopySnapshotIntent {
+    pub(crate) anchor: SnapshotAnchor,
+    pub(crate) plan: CopyPlanRef,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceSlotBinding {
+    stream: StreamId,
+    slot_name: String,
+    plugin: Plugin,
+    catalog_epoch: u64,
+}
+
+impl SourceSlotBinding {
+    pub(crate) fn new(
+        stream: StreamId,
+        slot_name: String,
+        plugin: Plugin,
+        catalog_epoch: u64,
+    ) -> Result<Self> {
+        let binding = Self {
+            stream,
+            slot_name,
+            plugin,
+            catalog_epoch,
+        };
+        binding.validate(stream.run)?;
+        Ok(binding)
+    }
+
+    pub(crate) fn stream(&self) -> StreamId {
+        self.stream
+    }
+    pub(crate) fn slot_name(&self) -> &str {
+        &self.slot_name
+    }
+    pub(crate) fn plugin(&self) -> Plugin {
+        self.plugin
+    }
+    pub(crate) fn catalog_epoch(&self) -> u64 {
+        self.catalog_epoch
+    }
+
+    fn validate(&self, run: RunId) -> Result<()> {
+        if self.stream.run != run
+            || run.0 == [0; 16]
+            || self.stream.source.system_identifier == 0
+            || self.stream.source.database_oid == 0
+            || self.catalog_epoch == 0
+            || self.slot_name.is_empty()
+            || self.slot_name.len() > 63
+            || !self
+                .slot_name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(bad_state(
+                "state-source: source slot binding has an invalid identity, epoch, or name",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceSlotIntent {
+    pub(crate) binding: SourceSlotBinding,
+    pub(crate) nonce: [u8; 16],
+}
+
+pub(crate) struct CreatedSlotData {
+    pub(crate) consistent_point: SourceEndLsn,
+    pub(crate) snapshot_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceSlotReceipt {
+    pub(crate) intent: SourceSlotIntent,
+    pub(crate) consistent_point: SourceEndLsn,
+    pub(crate) snapshot_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "phase",
+    content = "record",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum SourceSlotProvenance {
+    Provisioning(SourceSlotIntent),
+    Confirmed(SourceSlotReceipt),
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -62,9 +167,9 @@ pub(crate) enum TargetProvenance {
 const MANIFEST: &CStr = c"manifest.json";
 const TEMP: &CStr = c".manifest.tmp";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 4;
 const MAX_TARGET_PROVENANCE: usize = 1;
-pub(crate) const TARGET_METADATA_VERSION: u32 = 2;
+pub(crate) const TARGET_METADATA_VERSION: u32 = 3;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -79,6 +184,10 @@ struct Manifest {
     #[serde(deserialize_with = "Option::deserialize")]
     copy_complete: Option<Completion>,
     target_provenance: Vec<TargetProvenance>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    source_slot: Option<SourceSlotProvenance>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    copy_snapshot: Option<CopySnapshotIntent>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -103,13 +212,15 @@ pub(crate) struct NativeState {
     directory: Directory,
     manifest: Manifest,
     manifest_file: File,
+    fresh_created: bool,
+    plans: plan_files::PlanNamespace,
 }
 
 pub(crate) fn open(request: &StateRequest) -> Result<NativeState> {
     open_native(request, false)
 }
 
-/// Reload local provenance only; the caller must verify fresh fenced target evidence before target use.
+/// Reload local records only; these do not prove a live source snapshot or fresh fenced target authority.
 /// An interrupted publication that leaves .manifest.tmp fails closed; this slice does not repair it.
 #[cfg_attr(
     not(test),
@@ -180,12 +291,14 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
     };
     directory.check()?;
     let path = directory.parent_path.join(leaf);
-    if manifest_present(&directory.handle, false)? {
+    let entries = root_entries(&directory.handle, false)?;
+    if entries.manifest {
         let (manifest, manifest_file) = read_manifest(&directory, &path)?;
+        let plans = plan_files::PlanNamespace::open(&directory)?;
         if recover_provenance {
-            if manifest.target_provenance.is_empty() {
+            if manifest.target_provenance.is_empty() && manifest.source_slot.is_none() {
                 return Err(bad_state(
-                    "state-provenance: native state has no target provisioning intent",
+                    "state-provenance: native state has no provisioning intent",
                 ));
             }
             return Ok(NativeState {
@@ -197,6 +310,8 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
                 directory,
                 manifest,
                 manifest_file,
+                fresh_created: false,
+                plans,
             });
         }
         if request.action == StateAction::Create {
@@ -214,6 +329,12 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
             "state-missing: native state manifest does not exist",
         ));
     }
+    if entries.data {
+        return Err(bad_state(
+            "state-foreign: data without native state cannot be adopted",
+        ));
+    }
+    let plans = plan_files::PlanNamespace::create(&directory)?;
     let meta = metadata(&directory.handle)?;
     let run = RunId(random_identity()?);
     let manifest = Manifest {
@@ -225,8 +346,10 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
         directory_inode: meta.ino(),
         copy_complete: None,
         target_provenance: Vec::new(),
+        source_slot: None,
+        copy_snapshot: None,
     };
-    let manifest_file = publish(&directory, &manifest, None)?;
+    let manifest_file = publish(&directory, &plans, &manifest, None)?;
     Ok(NativeState {
         identity: StateIdentity {
             run,
@@ -236,12 +359,114 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
         directory,
         manifest,
         manifest_file,
+        fresh_created: true,
+        plans,
     })
 }
 
 impl NativeState {
     pub(crate) fn identity(&self) -> &StateIdentity {
         &self.identity
+    }
+
+    pub(crate) fn bind_copy_snapshot(&mut self, intent: &CopySnapshotIntent) -> Result<()> {
+        let mut next = self.checked_manifest()?;
+        intent.validate(&next)?;
+        if let Some(existing) = &next.copy_snapshot {
+            if existing != intent {
+                return Err(bad_state(
+                    "state-copy: existing COPY snapshot intent cannot be replaced",
+                ));
+            }
+            self.open_plan_file(intent.plan.plan_nonce)?;
+            return self.synchronize_manifest();
+        }
+        self.open_plan_file(intent.plan.plan_nonce)?;
+        next.copy_snapshot = Some(intent.clone());
+        self.replace_manifest(next)
+    }
+
+    pub(crate) fn checked_copy_snapshot(&self) -> Result<Option<CopySnapshotIntent>> {
+        let current = self.checked_manifest()?;
+        if let Some(intent) = &current.copy_snapshot {
+            self.open_plan_file(intent.plan.plan_nonce)?;
+        }
+        Ok(current.copy_snapshot)
+    }
+
+    /// Only a successful durable publication authorizes the caller's single CREATE attempt.
+    pub(crate) fn begin_source_slot(
+        &mut self,
+        binding: &SourceSlotBinding,
+    ) -> Result<SourceSlotIntent> {
+        binding.validate(self.identity.run)?;
+        let mut next = self.checked_manifest()?;
+        if !self.fresh_created || next.source_slot.is_some() || next.copy_complete.is_some() {
+            return Err(bad_state(
+                "state-source: source slot intent requires a fresh incomplete run without prior source intent",
+            ));
+        }
+        let intent = SourceSlotIntent {
+            binding: binding.clone(),
+            nonce: random_identity()?,
+        };
+        next.source_slot = Some(SourceSlotProvenance::Provisioning(intent.clone()));
+        next.validate_provenance()?;
+        // Even a failed publication must not authorize a second CREATE attempt through this handle.
+        self.fresh_created = false;
+        self.replace_manifest(next)?;
+        Ok(intent)
+    }
+
+    pub(crate) fn confirm_source_slot(
+        &mut self,
+        intent: &SourceSlotIntent,
+        created: CreatedSlotData,
+    ) -> Result<SourceSlotReceipt> {
+        let receipt = SourceSlotReceipt {
+            intent: intent.clone(),
+            consistent_point: created.consistent_point,
+            snapshot_token: created.snapshot_name,
+        };
+        let replacement = SourceSlotProvenance::Confirmed(receipt.clone());
+        replacement.validate(self.identity.run)?;
+        let mut next = self.checked_manifest()?;
+        match next.source_slot.as_ref() {
+            Some(SourceSlotProvenance::Provisioning(pending)) if pending == intent => {
+                next.source_slot = Some(replacement);
+                self.replace_manifest(next)?;
+            }
+            Some(existing) if existing == &replacement => self.synchronize_manifest()?,
+            _ => {
+                return Err(bad_state(
+                    "state-source: confirmation does not match the persisted source slot intent",
+                ));
+            }
+        }
+        Ok(receipt)
+    }
+
+    /// Confirmed local records cannot reconstruct an imported snapshot or prove source history.
+    pub(crate) fn checked_source_binding(&self, expected: &SourceSlotBinding) -> Result<()> {
+        expected.validate(self.identity.run)?;
+        let current = self.checked_manifest()?;
+        if current.run != self.identity.run
+            || current.format_version != self.identity.format_version
+        {
+            return Err(bad_state(
+                "state-source: held native identity does not match source state",
+            ));
+        }
+        match current.source_slot {
+            Some(SourceSlotProvenance::Confirmed(receipt))
+                if receipt.intent.binding == *expected =>
+            {
+                Ok(())
+            }
+            _ => Err(bad_state(
+                "state-source: no exact confirmed source slot binding",
+            )),
+        }
     }
 
     /// Local provenance is neither target authority nor proof of durable target progress.
@@ -319,8 +544,22 @@ impl NativeState {
         self.replace_manifest(completed)
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_copy_complete_with_create_failure(
+        &mut self,
+        report: &CopyReport,
+    ) -> Result<()> {
+        let _failure = tests::PublicationFailure::at(tests::PublicationStep::Create);
+        self.record_copy_complete(report)
+    }
+
     fn checked_manifest(&self) -> Result<Manifest> {
+        self.checked_manifest_with_draft(None)
+    }
+
+    fn checked_manifest_with_draft(&self, draft: Option<[u8; 16]>) -> Result<Manifest> {
         self.directory.check()?;
+        self.plans.check(&self.directory, draft)?;
         if !manifest_present(&self.directory.handle, false)? {
             return Err(bad_state("state-replaced: native manifest disappeared"));
         }
@@ -338,6 +577,7 @@ impl NativeState {
         next.validate_provenance()?;
         self.manifest_file = publish(
             &self.directory,
+            &self.plans,
             &next,
             Some((&self.manifest, &self.manifest_file)),
         )?;
@@ -358,6 +598,73 @@ impl NativeState {
         })?;
         self.checked_manifest()?;
         Ok(())
+    }
+}
+
+impl SourceSlotProvenance {
+    fn intent(&self) -> &SourceSlotIntent {
+        match self {
+            Self::Provisioning(intent) => intent,
+            Self::Confirmed(receipt) => &receipt.intent,
+        }
+    }
+
+    fn validate(&self, run: RunId) -> Result<()> {
+        let intent = self.intent();
+        intent.binding.validate(run)?;
+        if intent.nonce == [0; 16] {
+            return Err(bad_state("state-source: source slot nonce must be nonzero"));
+        }
+        if let Self::Confirmed(receipt) = self
+            && (receipt.consistent_point.0 == 0
+                || receipt.snapshot_token.is_empty()
+                || receipt.snapshot_token.len() > MAX_SNAPSHOT_TOKEN_BYTES
+                || receipt.snapshot_token.contains('\0'))
+        {
+            return Err(bad_state(
+                "state-source: source slot receipt has an invalid position or snapshot token",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl CopySnapshotIntent {
+    fn validate(&self, manifest: &Manifest) -> Result<()> {
+        if self.anchor.stream.run != manifest.run
+            || self.anchor.consistent_point.0 == 0
+            || self.anchor.snapshot_token.is_empty()
+            || self.anchor.snapshot_token.len() > MAX_SNAPSHOT_TOKEN_BYTES
+            || self.anchor.snapshot_token.contains('\0')
+            || self.anchor.plan_nonce == [0; 16]
+            || self.plan.plan_nonce != self.anchor.plan_nonce
+            || self.plan.reference_version != COPY_PLAN_REFERENCE_VERSION
+        {
+            return Err(bad_state(
+                "state-copy: COPY snapshot identity or reference is invalid",
+            ));
+        }
+        match &manifest.source_slot {
+            Some(SourceSlotProvenance::Confirmed(receipt))
+                if receipt.intent.binding.stream == self.anchor.stream
+                    && receipt.consistent_point == self.anchor.consistent_point
+                    && receipt.snapshot_token == self.anchor.snapshot_token => {}
+            _ => {
+                return Err(bad_state(
+                    "state-copy: COPY snapshot requires exact confirmed source provenance",
+                ));
+            }
+        }
+        match manifest.target_provenance.first() {
+            Some(TargetProvenance::Confirmed(receipt))
+                if receipt.intent.binding.stream == self.anchor.stream =>
+            {
+                Ok(())
+            }
+            _ => Err(bad_state(
+                "state-copy: COPY snapshot requires exact confirmed target provenance",
+            )),
+        }
     }
 }
 
@@ -419,6 +726,19 @@ impl Manifest {
         }
         for record in &self.target_provenance {
             record.validate(self.run)?;
+        }
+        if let Some(source) = &self.source_slot {
+            source.validate(self.run)?;
+            if self.target_provenance.first().is_some_and(|target| {
+                target.intent().binding.stream != source.intent().binding.stream
+            }) {
+                return Err(bad_state(
+                    "state-source: source and target provenance streams differ",
+                ));
+            }
+        }
+        if let Some(intent) = &self.copy_snapshot {
+            intent.validate(self)?;
         }
         Ok(())
     }
@@ -525,7 +845,16 @@ fn open_parent(path: &Path) -> Result<File> {
     Ok(directory)
 }
 
+struct RootEntries {
+    manifest: bool,
+    data: bool,
+}
+
 fn manifest_present(directory: &File, allow_temp: bool) -> Result<bool> {
+    Ok(root_entries(directory, allow_temp)?.manifest)
+}
+
+fn root_entries(directory: &File, allow_temp: bool) -> Result<RootEntries> {
     let handle = open_at(directory, c".", DIRECTORY_FLAGS, 0)
         .map_err(|_| bad_state("state-io: cannot inspect state directory"))?;
     let fd = handle.into_raw_fd();
@@ -536,7 +865,10 @@ fn manifest_present(directory: &File, allow_temp: bool) -> Result<bool> {
         drop(unsafe { File::from_raw_fd(fd) });
         return Err(bad_state("state-io: cannot inspect state directory"));
     }
-    let mut found = false;
+    let mut found = RootEntries {
+        manifest: false,
+        data: false,
+    };
     let result = loop {
         // SAFETY: errno is thread-local, and stream remains live until closed below.
         let entry = unsafe {
@@ -555,7 +887,8 @@ fn manifest_present(directory: &File, allow_temp: bool) -> Result<bool> {
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
         match name.to_bytes() {
             b"." | b".." => (),
-            b"manifest.json" => found = true,
+            b"manifest.json" => found.manifest = true,
+            b"data" => found.data = true,
             b".manifest.tmp" if allow_temp => (),
             _ => {
                 break Err(bad_state(
@@ -665,6 +998,7 @@ fn read_manifest(directory: &Directory, path: &Path) -> Result<(Manifest, File)>
 
 fn publish(
     directory: &Directory,
+    plans: &plan_files::PlanNamespace,
     manifest: &Manifest,
     previous: Option<(&Manifest, &File)>,
 ) -> Result<File> {
@@ -675,7 +1009,7 @@ fn publish(
             "state-invalid: native manifest exceeds the control metadata limit",
         ));
     }
-    check_publication(directory, manifest, previous, false)?;
+    check_publication(directory, plans, manifest, previous, false)?;
     #[cfg(test)]
     tests::publication_step(tests::PublicationStep::Create)?;
     let mut temporary = open_at(
@@ -695,7 +1029,7 @@ fn publish(
     temporary
         .sync_all()
         .map_err(|_| bad_state("state-sync: cannot synchronize temporary native metadata"))?;
-    check_publication(directory, manifest, previous, true)?;
+    check_publication(directory, plans, manifest, previous, true)?;
     check_same(&temporary, &open_metadata(&directory.handle, TEMP)?)?;
     #[cfg(test)]
     tests::publication_step(tests::PublicationStep::Rename)?;
@@ -727,11 +1061,13 @@ fn publish(
 
 fn check_publication(
     directory: &Directory,
+    plans: &plan_files::PlanNamespace,
     manifest: &Manifest,
     previous: Option<(&Manifest, &File)>,
     allow_temp: bool,
 ) -> Result<()> {
     directory.check()?;
+    plans.check(directory, None)?;
     let present = manifest_present(&directory.handle, allow_temp)?;
     match previous {
         Some((expected, file)) if present => {
@@ -779,10 +1115,10 @@ mod tests {
         static FAIL_AT: Cell<Option<PublicationStep>> = const { Cell::new(None) };
     }
 
-    struct PublicationFailure;
+    pub(super) struct PublicationFailure;
 
     impl PublicationFailure {
-        fn at(step: PublicationStep) -> Self {
+        pub(super) fn at(step: PublicationStep) -> Self {
             FAIL_AT.with(|slot| assert!(slot.replace(Some(step)).is_none()));
             Self
         }
@@ -805,10 +1141,10 @@ mod tests {
         })
     }
 
-    struct TempDir(PathBuf);
+    pub(super) struct TempDir(pub(super) PathBuf);
 
     impl TempDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let parent = fs::canonicalize(std::env::temp_dir()).unwrap();
             loop {
@@ -825,11 +1161,11 @@ mod tests {
             }
         }
 
-        fn path(&self) -> PathBuf {
+        pub(super) fn path(&self) -> PathBuf {
             self.0.join("state")
         }
 
-        fn create(&self) -> NativeState {
+        pub(super) fn create(&self) -> NativeState {
             open(&request(self.path(), StateAction::Create)).unwrap()
         }
     }
@@ -914,14 +1250,16 @@ mod tests {
         let state = tmp.create();
         let value = manifest(&tmp.path());
         assert_eq!(value["magic"], "RPGMIGRATE");
-        assert_eq!(value["format_version"], 2);
+        assert_eq!(value["format_version"], 4);
         assert_eq!(value["canonical_path"], tmp.path().to_str().unwrap());
         assert_eq!(value["run"].as_array().unwrap().len(), 16);
         assert_ne!(value["run"], json!(vec![0; 16]));
         assert_eq!(value["copy_complete"], Value::Null);
         assert_eq!(value["target_provenance"], json!([]));
+        assert_eq!(value.get("source_slot"), Some(&Value::Null));
+        assert_eq!(value.get("copy_snapshot"), Some(&Value::Null));
         assert_eq!(state.identity().canonical_path, tmp.path());
-        assert_eq!(state.identity().format_version, 2);
+        assert_eq!(state.identity().format_version, 4);
         assert_eq!(value["run"], json!(state.identity().run.0));
         let directory = fs::metadata(tmp.path()).unwrap();
         assert_eq!(value["directory_inode"], directory.ino());
@@ -934,7 +1272,29 @@ mod tests {
                 & 0o777,
             0o600
         );
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+        for path in [tmp.path().join("data"), tmp.path().join("data/plans")] {
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o700);
+        }
+    }
+
+    #[test]
+    fn source_slot_required_nullable_field_refuses_omission() {
+        let tmp = TempDir::new();
+        drop(tmp.create());
+        change_manifest(&tmp.path(), |value| value["source_slot"] = Value::Null);
+        recovery_refusal(&tmp.path(), "state-provenance:");
+        change_manifest(&tmp.path(), |value| {
+            value.as_object_mut().unwrap().remove("source_slot");
+        });
+        recovery_refusal(&tmp.path(), "state-invalid:");
+        for action in [
+            StateAction::Create,
+            StateAction::Resume,
+            StateAction::Restart,
+        ] {
+            refusal(&tmp.path(), action, "state-invalid:");
+        }
     }
 
     #[test]
@@ -1039,7 +1399,7 @@ mod tests {
     fn unknown_version_is_rejected_before_restart() {
         let tmp = TempDir::new();
         drop(tmp.create());
-        change_manifest(&tmp.path(), |value| value["format_version"] = json!(3));
+        change_manifest(&tmp.path(), |value| value["format_version"] = json!(5));
         refusal(&tmp.path(), StateAction::Restart, "state-version:");
     }
 
@@ -1100,14 +1460,10 @@ mod tests {
         DirBuilder::new().mode(0o700).create(tmp.path()).unwrap();
         let competing = File::open(tmp.path()).unwrap();
         competing.try_lock().unwrap();
-        // A forked child can retain this description until exec.
-        let inherited = competing.try_clone().unwrap();
         refusal(&tmp.path(), StateAction::Create, "state-busy:");
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
-        competing.unlock().unwrap();
         drop(competing);
         let state = tmp.create();
-        drop(inherited);
         refusal(&tmp.path(), StateAction::Create, "state-busy:");
         drop(state);
         let released = File::open(tmp.path()).unwrap();
@@ -1180,7 +1536,7 @@ mod tests {
         let mut old_bytes = Vec::new();
         (&old_file).read_to_end(&mut old_bytes).unwrap();
         assert_eq!(old_bytes, old_manifest);
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
         let before = tree(&tmp.path());
         let error = state.record_copy_complete(&report()).unwrap_err();
         assert!(error.message.starts_with("state-complete:"), "{error:?}");
@@ -1231,6 +1587,8 @@ mod tests {
         for field in [
             "copy_complete",
             "target_provenance",
+            "source_slot",
+            "copy_snapshot",
             "run",
             "canonical_path",
             "directory_device",
@@ -1413,7 +1771,7 @@ mod tests {
             schema_name: "rpgmigrate_owned".into(),
             table_name: "checkpoint".into(),
             owner_oid: 10,
-            metadata_version: 2,
+            metadata_version: 3,
         }
     }
 
@@ -1434,12 +1792,12 @@ mod tests {
     }
 
     #[test]
-    fn metadata_version_one_is_refused_without_rewrite() {
-        for confirming in [false, true] {
+    fn prior_metadata_versions_are_refused_without_rewrite() {
+        for (version, confirming) in [(1, false), (1, true), (2, false), (2, true)] {
             let tmp = TempDir::new();
             let mut state = tmp.create();
             let mut old_binding = binding(&state);
-            old_binding.metadata_version = 1;
+            old_binding.metadata_version = version;
             let before = tree(&tmp.path());
             let error = state.begin_target_provisioning(old_binding).unwrap_err();
             assert!(error.message.starts_with("state-provenance:"), "{error:?}");
@@ -1458,9 +1816,9 @@ mod tests {
                 } else {
                     record
                 };
-                intent["binding"]["metadata_version"] = json!(1);
+                intent["binding"]["metadata_version"] = json!(version);
             });
-            assert_eq!(manifest(&tmp.path())["format_version"], 2);
+            assert_eq!(manifest(&tmp.path())["format_version"], 4);
             recovery_refusal(&tmp.path(), "state-provenance:");
             for action in [
                 StateAction::Create,
@@ -1489,7 +1847,7 @@ mod tests {
         let mut bytes = Vec::new();
         old_file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, old);
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
         drop(state);
         let before = tree(&tmp.path());
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
@@ -1704,7 +2062,7 @@ mod tests {
 
     #[test]
     fn recovery_refuses_v1_and_unknown_versions_without_conversion() {
-        for version in [1, 3] {
+        for version in [1, 2, 3, 5] {
             let tmp = TempDir::new();
             drop(tmp.create());
             change_manifest(&tmp.path(), |value| {
@@ -1725,7 +2083,7 @@ mod tests {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(recovered.identity().format_version, 2);
+        assert_eq!(recovered.identity().format_version, 4);
     }
 
     #[test]
@@ -2026,11 +2384,1111 @@ mod tests {
         fs::write(
             &path,
             original.replace(
-                "\"metadata_version\":2",
-                "\"metadata_version\":2,\"metadata_version\":2",
+                "\"metadata_version\":3",
+                "\"metadata_version\":3,\"metadata_version\":3",
             ),
         )
         .unwrap();
         recovery_refusal(&tmp.path(), "state-invalid:");
+    }
+
+    fn source_binding(state: &NativeState) -> SourceSlotBinding {
+        let mut stream = binding(state).stream;
+        stream.generation = 9;
+        SourceSlotBinding::new(stream, "pgcopydb".into(), Plugin::Pgoutput, 7).unwrap()
+    }
+
+    fn created_slot() -> CreatedSlotData {
+        CreatedSlotData {
+            consistent_point: SourceEndLsn(0x100000002),
+            snapshot_name: "00000003-0000001B-1".into(),
+        }
+    }
+
+    fn source_receipt(intent: &SourceSlotIntent) -> SourceSlotReceipt {
+        SourceSlotReceipt {
+            intent: intent.clone(),
+            consistent_point: SourceEndLsn(0x100000002),
+            snapshot_token: "00000003-0000001B-1".into(),
+        }
+    }
+
+    fn source_refusal<T: std::fmt::Debug>(result: Result<T>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadState);
+        assert!(error.message.starts_with("state-source:"), "{error:?}");
+    }
+
+    #[test]
+    fn source_slot_intent_is_published_once_before_return() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        source_refusal(state.checked_source_binding(&desired));
+        let path = tmp.path().join("manifest.json");
+        let old = fs::read(&path).unwrap();
+        let mut old_file = File::open(&path).unwrap();
+        let intent = state.begin_source_slot(&desired).unwrap();
+        assert_eq!(intent.binding, desired);
+        assert_ne!(intent.nonce, [0; 16]);
+        assert_eq!(intent.binding.stream().generation, 9);
+        assert_eq!(intent.binding.catalog_epoch(), 7);
+        assert_eq!(intent.binding.slot_name(), "pgcopydb");
+        assert_eq!(intent.binding.plugin(), Plugin::Pgoutput);
+        assert_eq!(
+            manifest(&tmp.path())["source_slot"],
+            json!({"phase": "provisioning", "record": {
+                "binding": {"stream": desired.stream(), "slot_name": "pgcopydb",
+                    "plugin": "pgoutput", "catalog_epoch": 7}, "nonce": intent.nonce}})
+        );
+        let mut bytes = Vec::new();
+        old_file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, old);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
+        source_refusal(state.checked_source_binding(&desired));
+        let before = tree(&tmp.path());
+        source_refusal(state.begin_source_slot(&desired));
+        assert_eq!(tree(&tmp.path()), before);
+        drop(state);
+        let mut recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+        source_refusal(recovered.checked_source_binding(&desired));
+        let mut changed = desired.clone();
+        changed.slot_name = "another_absent_slot".into();
+        source_refusal(recovered.begin_source_slot(&changed));
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn source_slot_begin_requires_a_fresh_handle_without_copy_completion() {
+        for reopened in [false, true] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let desired = source_binding(&state);
+            if reopened {
+                let mut target = binding(&state);
+                target.stream = desired.stream();
+                state.begin_target_provisioning(target).unwrap();
+                drop(state);
+                state = open_for_provenance_recovery(&tmp.path()).unwrap();
+            } else {
+                state.record_copy_complete(&report()).unwrap();
+            }
+            let before = tree(&tmp.path());
+            source_refusal(state.begin_source_slot(&desired));
+            assert_eq!(tree(&tmp.path()), before);
+            assert_eq!(manifest(&tmp.path()).get("source_slot"), Some(&Value::Null));
+        }
+    }
+
+    #[test]
+    fn source_slot_confirmation_requires_exact_pending_intent() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let synthetic = SourceSlotIntent {
+            binding: desired.clone(),
+            nonce: [1; 16],
+        };
+        let before = tree(&tmp.path());
+        source_refusal(state.confirm_source_slot(&synthetic, created_slot()));
+        assert_eq!(tree(&tmp.path()), before);
+        let intent = state.begin_source_slot(&desired).unwrap();
+        for variant in 0..8 {
+            let mut changed = intent.clone();
+            match variant {
+                0 => changed.nonce[0] ^= 1,
+                1 => changed.nonce = [0; 16],
+                2 => changed.binding.stream.run.0[0] ^= 1,
+                3 => changed.binding.stream.source.system_identifier += 1,
+                4 => changed.binding.stream.generation += 1,
+                5 => changed.binding.catalog_epoch += 1,
+                6 => changed.binding.plugin = Plugin::Wal2Json,
+                _ => changed.binding.slot_name.push('x'),
+            }
+            let before = tree(&tmp.path());
+            source_refusal(state.confirm_source_slot(&changed, created_slot()));
+            assert_eq!(tree(&tmp.path()), before);
+        }
+        source_refusal(state.checked_source_binding(&desired));
+    }
+
+    #[test]
+    fn source_slot_confirmed_receipt_is_exact_immutable_and_reopenable() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let intent = state.begin_source_slot(&desired).unwrap();
+        let receipt = state.confirm_source_slot(&intent, created_slot()).unwrap();
+        assert_eq!(receipt, source_receipt(&intent));
+        assert_eq!(
+            manifest(&tmp.path())["source_slot"],
+            json!({"phase": "confirmed", "record": {
+                "intent": intent, "consistent_point": 0x100000002_u64,
+                "snapshot_token": "00000003-0000001B-1"}})
+        );
+        state.checked_source_binding(&desired).unwrap();
+        let before = tree(&tmp.path());
+        assert_eq!(
+            state.confirm_source_slot(&intent, created_slot()).unwrap(),
+            receipt
+        );
+        assert_eq!(tree(&tmp.path()), before);
+        for changed in [
+            CreatedSlotData {
+                consistent_point: SourceEndLsn(0x100000003),
+                ..created_slot()
+            },
+            CreatedSlotData {
+                snapshot_name: "another-token".into(),
+                ..created_slot()
+            },
+        ] {
+            source_refusal(state.confirm_source_slot(&intent, changed));
+            assert_eq!(tree(&tmp.path()), before);
+        }
+        source_refusal(state.begin_source_slot(&desired));
+        drop(state);
+        let mut recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+        recovered.checked_source_binding(&desired).unwrap();
+        source_refusal(recovered.begin_source_slot(&desired));
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn source_slot_checked_binding_rejects_every_changed_identity() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let intent = state.begin_source_slot(&desired).unwrap();
+        state.confirm_source_slot(&intent, created_slot()).unwrap();
+        state.checked_source_binding(&desired).unwrap();
+        let before = tree(&tmp.path());
+        for variant in 0..7 {
+            let mut changed = desired.clone();
+            match variant {
+                0 => changed.stream.run.0[0] ^= 1,
+                1 => changed.stream.source.system_identifier += 1,
+                2 => changed.stream.source.database_oid += 1,
+                3 => changed.stream.generation += 1,
+                4 => changed.catalog_epoch += 1,
+                5 => changed.plugin = Plugin::TestDecoding,
+                _ => changed.slot_name.push('x'),
+            }
+            source_refusal(state.checked_source_binding(&changed));
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn source_slot_binding_rejects_invalid_identities_epoch_and_names() {
+        let tmp = TempDir::new();
+        let state = tmp.create();
+        let valid = source_binding(&state);
+        for variant in 0..12 {
+            let mut stream = valid.stream();
+            let mut epoch = 7;
+            let mut slot = "pgcopydb".to_owned();
+            match variant {
+                0 => stream.run = RunId([0; 16]),
+                1 => stream.source.system_identifier = 0,
+                2 => stream.source.database_oid = 0,
+                3 => epoch = 0,
+                4 => slot.clear(),
+                5 => slot = "a".repeat(64),
+                6 => slot = "Upper".into(),
+                7 => slot = "a-b".into(),
+                8 => slot = "a.b".into(),
+                9 => slot = "a\0b".into(),
+                10 => slot = "é".into(),
+                _ => slot = "a b".into(),
+            }
+            source_refusal(SourceSlotBinding::new(
+                stream,
+                slot,
+                Plugin::Pgoutput,
+                epoch,
+            ));
+        }
+        let mut zero_generation = valid.stream();
+        zero_generation.generation = 0;
+        SourceSlotBinding::new(zero_generation, "0_a".into(), Plugin::Pgoutput, 7).unwrap();
+    }
+
+    #[test]
+    fn source_slot_wrong_run_is_refused_before_publication() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let mut desired = source_binding(&state);
+        desired.stream.run.0[0] ^= 1;
+        let before = tree(&tmp.path());
+        source_refusal(state.begin_source_slot(&desired));
+        assert_eq!(tree(&tmp.path()), before);
+        state.begin_source_slot(&source_binding(&state)).unwrap();
+    }
+
+    #[test]
+    fn source_slot_creation_data_rejects_zero_point_and_invalid_token() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let intent = state.begin_source_slot(&desired).unwrap();
+        for invalid in [
+            CreatedSlotData {
+                consistent_point: SourceEndLsn(0),
+                ..created_slot()
+            },
+            CreatedSlotData {
+                snapshot_name: String::new(),
+                ..created_slot()
+            },
+            CreatedSlotData {
+                snapshot_name: "a\0b".into(),
+                ..created_slot()
+            },
+            CreatedSlotData {
+                snapshot_name: "a".repeat(1025),
+                ..created_slot()
+            },
+            CreatedSlotData {
+                snapshot_name: "é".repeat(513),
+                ..created_slot()
+            },
+        ] {
+            let before = tree(&tmp.path());
+            source_refusal(state.confirm_source_slot(&intent, invalid));
+            assert_eq!(tree(&tmp.path()), before);
+            source_refusal(state.checked_source_binding(&desired));
+        }
+    }
+
+    #[test]
+    fn source_slot_bounds_and_canonical_plugins_round_trip() {
+        for (plugin, spelling, point, token) in [
+            (Plugin::Pgoutput, "pgoutput", 1, "a".into()),
+            (
+                Plugin::TestDecoding,
+                "test_decoding",
+                u64::MAX,
+                "é".repeat(512),
+            ),
+            (Plugin::Wal2Json, "wal2json", 17, "x".repeat(1024)),
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let desired =
+                SourceSlotBinding::new(source_binding(&state).stream(), "a".repeat(63), plugin, 7)
+                    .unwrap();
+            let intent = state.begin_source_slot(&desired).unwrap();
+            let receipt = state
+                .confirm_source_slot(
+                    &intent,
+                    CreatedSlotData {
+                        consistent_point: SourceEndLsn(point),
+                        snapshot_name: token.clone(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(receipt.consistent_point, SourceEndLsn(point));
+            assert_eq!(receipt.snapshot_token, token);
+            assert_eq!(
+                manifest(&tmp.path())["source_slot"]["record"]["intent"]["binding"]["plugin"],
+                spelling
+            );
+            assert_eq!(manifest(&tmp.path())["copy_complete"], Value::Null);
+            drop(state);
+            open_for_provenance_recovery(&tmp.path())
+                .unwrap()
+                .checked_source_binding(&desired)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn source_slot_and_target_provenance_require_the_same_stream_in_either_order() {
+        for source_first in [false, true] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let desired = source_binding(&state);
+            let mut target = binding(&state);
+            target.stream = desired.stream();
+            target.stream.generation += 1;
+            if source_first {
+                state.begin_source_slot(&desired).unwrap();
+                let before = tree(&tmp.path());
+                source_refusal(state.begin_target_provisioning(target));
+                assert_eq!(tree(&tmp.path()), before);
+            } else {
+                state.begin_target_provisioning(target).unwrap();
+                let before = tree(&tmp.path());
+                source_refusal(state.begin_source_slot(&desired));
+                assert_eq!(tree(&tmp.path()), before);
+            }
+        }
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let intent = state.begin_source_slot(&desired).unwrap();
+        state.confirm_source_slot(&intent, created_slot()).unwrap();
+        let mut target = binding(&state);
+        target.stream = desired.stream();
+        let target = state.begin_target_provisioning(target).unwrap();
+        state
+            .confirm_target_provisioning(confirmed(&target))
+            .unwrap();
+        state.checked_source_binding(&desired).unwrap();
+        assert_eq!(
+            manifest(&tmp.path())["target_provenance"][0]["record"]["intent"]["binding"]["metadata_version"],
+            3
+        );
+    }
+
+    #[test]
+    fn source_slot_publication_failures_never_return_authorization_or_replace_local_record() {
+        for confirming in [false, true] {
+            for step in [
+                PublicationStep::Create,
+                PublicationStep::Write,
+                PublicationStep::FileSync,
+                PublicationStep::Rename,
+                PublicationStep::DirectorySync,
+                PublicationStep::Published,
+            ] {
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let desired = source_binding(&state);
+                let intent = confirming.then(|| state.begin_source_slot(&desired).unwrap());
+                let previous = state.manifest.source_slot.clone();
+                let path = tmp.path().join("manifest.json");
+                let before = fs::read(&path).unwrap();
+                let inode = fs::metadata(&path).unwrap().ino();
+                let failure = PublicationFailure::at(step);
+                let result = if let Some(intent) = &intent {
+                    state
+                        .confirm_source_slot(intent, created_slot())
+                        .map(|_| ())
+                } else {
+                    state.begin_source_slot(&desired).map(|_| ())
+                };
+                let error = result.expect_err(&format!("{confirming:?}: {step:?}"));
+                assert!(error.message.starts_with("state-test:"), "{error:?}");
+                assert_eq!(state.manifest.source_slot, previous);
+                assert!(state.checked_source_binding(&desired).is_err());
+                drop(failure);
+                assert!(state.begin_source_slot(&desired).is_err());
+                if matches!(
+                    step,
+                    PublicationStep::DirectorySync | PublicationStep::Published
+                ) {
+                    assert!(!tmp.path().join(".manifest.tmp").exists());
+                    assert_ne!(fs::metadata(&path).unwrap().ino(), inode);
+                    let expected: SourceSlotProvenance =
+                        serde_json::from_value(manifest(&tmp.path())["source_slot"].clone())
+                            .unwrap();
+                    if let Some(intent) = intent {
+                        assert_eq!(
+                            expected,
+                            SourceSlotProvenance::Confirmed(source_receipt(&intent))
+                        );
+                    } else {
+                        let SourceSlotProvenance::Provisioning(intent) = expected else {
+                            panic!("unexpected source confirmation")
+                        };
+                        assert_eq!(intent.binding, desired);
+                        assert_ne!(intent.nonce, [0; 16]);
+                    }
+                    drop(state);
+                    let mut recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+                    assert_eq!(
+                        recovered.checked_source_binding(&desired).is_ok(),
+                        confirming
+                    );
+                    source_refusal(recovered.begin_source_slot(&desired));
+                } else {
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+                    assert_eq!(
+                        tmp.path().join(".manifest.tmp").exists(),
+                        step != PublicationStep::Create
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_slot_identical_confirmation_retries_must_synchronize() {
+        for step in [PublicationStep::FileSync, PublicationStep::DirectorySync] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let desired = source_binding(&state);
+            let intent = state.begin_source_slot(&desired).unwrap();
+            state.confirm_source_slot(&intent, created_slot()).unwrap();
+            let before = tree(&tmp.path());
+            let failure = PublicationFailure::at(step);
+            let error = state
+                .confirm_source_slot(&intent, created_slot())
+                .unwrap_err();
+            assert!(error.message.starts_with("state-test:"), "{error:?}");
+            assert_eq!(tree(&tmp.path()), before);
+            drop(failure);
+            assert_eq!(
+                state.confirm_source_slot(&intent, created_slot()).unwrap(),
+                source_receipt(&intent)
+            );
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn source_slot_manifest_bound_is_checked_before_publication_files() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let mut target = binding(&state);
+        target.stream = desired.stream();
+        target.schema_name = "a".repeat(13000);
+        state.begin_target_provisioning(target).unwrap();
+        let intent = state.begin_source_slot(&desired).unwrap();
+        let before = tree(&tmp.path());
+        let error = state
+            .confirm_source_slot(
+                &intent,
+                CreatedSlotData {
+                    snapshot_name: "\u{1}".repeat(1024),
+                    ..created_slot()
+                },
+            )
+            .unwrap_err();
+        assert!(error.message.starts_with("state-invalid:"), "{error:?}");
+        assert_eq!(tree(&tmp.path()), before);
+        assert!(
+            fs::metadata(tmp.path().join("manifest.json"))
+                .unwrap()
+                .len()
+                <= 16384
+        );
+        source_refusal(state.checked_source_binding(&desired));
+    }
+
+    #[test]
+    fn source_slot_checked_binding_rechecks_the_held_manifest() {
+        for (variant, code) in [
+            (0, "state-replaced:"),
+            (1, "state-replaced:"),
+            (2, "state-replaced:"),
+            (3, "state-invalid:"),
+            (4, "state-version:"),
+            (5, "state-replaced:"),
+            (6, "state-permissions:"),
+            (7, "state-source:"),
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let desired = source_binding(&state);
+            let intent = state.begin_source_slot(&desired).unwrap();
+            state.confirm_source_slot(&intent, created_slot()).unwrap();
+            state.checked_source_binding(&desired).unwrap();
+            let path = tmp.path().join("manifest.json");
+            match variant {
+                0 => {
+                    let original = tmp.0.join("original.json");
+                    fs::rename(&path, &original).unwrap();
+                    fs::copy(&original, &path).unwrap();
+                }
+                1 => change_manifest(&tmp.path(), |value| value["source_slot"] = Value::Null),
+                2 => change_manifest(&tmp.path(), |value| {
+                    value["source_slot"]["record"]["intent"]["binding"]["catalog_epoch"] = json!(8);
+                }),
+                3 => change_manifest(&tmp.path(), |value| {
+                    value.as_object_mut().unwrap().remove("source_slot");
+                }),
+                4 => change_manifest(&tmp.path(), |value| value["format_version"] = json!(2)),
+                5 => fs::remove_file(&path).unwrap(),
+                6 => fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap(),
+                _ => state.identity.format_version = 2,
+            }
+            let before = tree(&tmp.0);
+            let error = state.checked_source_binding(&desired).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadState);
+            assert!(error.message.starts_with(code), "{variant}: {error:?}");
+            assert_eq!(tree(&tmp.0), before);
+        }
+    }
+
+    #[test]
+    fn source_slot_recovery_validates_every_persisted_intent() {
+        for confirming in [false, true] {
+            for (pointer, invalid, code) in [
+                ("/nonce", json!(vec![0; 16]), "state-source:"),
+                ("/binding/stream/run", json!(vec![0; 16]), "state-source:"),
+                ("/binding/stream/run", json!(vec![7; 16]), "state-source:"),
+                (
+                    "/binding/stream/source/system_identifier",
+                    json!(0),
+                    "state-source:",
+                ),
+                (
+                    "/binding/stream/source/database_oid",
+                    json!(0),
+                    "state-source:",
+                ),
+                ("/binding/catalog_epoch", json!(0), "state-source:"),
+                ("/binding/slot_name", json!(""), "state-source:"),
+                ("/binding/slot_name", json!("a".repeat(64)), "state-source:"),
+                ("/binding/slot_name", json!("a\0b"), "state-source:"),
+                ("/binding/slot_name", json!("UPPER"), "state-source:"),
+                ("/binding/plugin", json!("unknown_plugin"), "state-invalid:"),
+            ] {
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let intent = state.begin_source_slot(&source_binding(&state)).unwrap();
+                if confirming {
+                    state.confirm_source_slot(&intent, created_slot()).unwrap();
+                }
+                drop(state);
+                change_manifest(&tmp.path(), |value| {
+                    let record = &mut value["source_slot"]["record"];
+                    let intent = if confirming {
+                        &mut record["intent"]
+                    } else {
+                        record
+                    };
+                    *intent.pointer_mut(pointer).unwrap() = invalid.clone();
+                });
+                recovery_refusal(&tmp.path(), code);
+            }
+        }
+    }
+
+    #[test]
+    fn source_slot_recovery_validates_receipt_and_required_fields() {
+        for (pointer, value, code) in [
+            ("/record/consistent_point", json!(0), "state-source:"),
+            ("/record/snapshot_token", json!(""), "state-source:"),
+            ("/record/snapshot_token", json!("a\0b"), "state-source:"),
+            (
+                "/record/snapshot_token",
+                json!("x".repeat(1025)),
+                "state-source:",
+            ),
+            ("/record/snapshot_token", Value::Null, "state-invalid:"),
+            ("/phase", json!("copy_anchor"), "state-invalid:"),
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = state.begin_source_slot(&source_binding(&state)).unwrap();
+            state.confirm_source_slot(&intent, created_slot()).unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |manifest| {
+                *manifest["source_slot"].pointer_mut(pointer).unwrap() = value.clone();
+            });
+            recovery_refusal(&tmp.path(), code);
+        }
+        for (pointer, field) in [
+            ("", "phase"),
+            ("", "record"),
+            ("/record", "intent"),
+            ("/record", "consistent_point"),
+            ("/record", "snapshot_token"),
+            ("/record/intent", "nonce"),
+            ("/record/intent", "binding"),
+            ("/record/intent/binding", "stream"),
+            ("/record/intent/binding", "slot_name"),
+            ("/record/intent/binding", "plugin"),
+            ("/record/intent/binding", "catalog_epoch"),
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = state.begin_source_slot(&source_binding(&state)).unwrap();
+            state.confirm_source_slot(&intent, created_slot()).unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                assert!(
+                    value["source_slot"]
+                        .pointer_mut(pointer)
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(field)
+                        .is_some()
+                );
+            });
+            recovery_refusal(&tmp.path(), "state-invalid:");
+        }
+    }
+
+    #[test]
+    fn source_slot_recovery_refuses_unknown_duplicate_and_non_utf8_fields() {
+        for pointer in [
+            "",
+            "/record",
+            "/record/intent",
+            "/record/intent/binding",
+            "/record/intent/binding/stream",
+            "/record/intent/binding/stream/source",
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = state.begin_source_slot(&source_binding(&state)).unwrap();
+            state.confirm_source_slot(&intent, created_slot()).unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                value["source_slot"]
+                    .pointer_mut(pointer)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unknown".into(), json!(1));
+            });
+            recovery_refusal(&tmp.path(), "state-invalid:");
+        }
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let intent = state.begin_source_slot(&source_binding(&state)).unwrap();
+        state.confirm_source_slot(&intent, created_slot()).unwrap();
+        drop(state);
+        let path = tmp.path().join("manifest.json");
+        let original = fs::read_to_string(&path).unwrap();
+        let needle = "\"catalog_epoch\":7";
+        assert_eq!(original.matches(needle).count(), 1);
+        fs::write(
+            &path,
+            original.replace(needle, "\"catalog_epoch\":7,\"catalog_epoch\":7"),
+        )
+        .unwrap();
+        recovery_refusal(&tmp.path(), "state-invalid:");
+        let mut bytes = original.into_bytes();
+        let start = bytes
+            .windows(b"00000003-0000001B-1".len())
+            .position(|window| window == b"00000003-0000001B-1")
+            .unwrap();
+        bytes[start] = 0xff;
+        fs::write(path, bytes).unwrap();
+        recovery_refusal(&tmp.path(), "state-invalid:");
+    }
+
+    #[test]
+    fn source_slot_deleted_intent_cannot_make_a_reopened_handle_fresh() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let desired = source_binding(&state);
+        let intent = state.begin_source_slot(&desired).unwrap();
+        let mut target = binding(&state);
+        target.stream = desired.stream();
+        state.begin_target_provisioning(target).unwrap();
+        drop(state);
+        change_manifest(&tmp.path(), |value| {
+            assert!(
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_slot")
+                    .is_some()
+            );
+        });
+        recovery_refusal(&tmp.path(), "state-invalid:");
+        for action in [
+            StateAction::Create,
+            StateAction::Resume,
+            StateAction::Restart,
+        ] {
+            refusal(&tmp.path(), action, "state-invalid:");
+        }
+        change_manifest(&tmp.path(), |value| value["source_slot"] = Value::Null);
+        let mut recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
+        let before = tree(&tmp.path());
+        source_refusal(recovered.checked_source_binding(&desired));
+        source_refusal(recovered.begin_source_slot(&desired));
+        source_refusal(recovered.confirm_source_slot(&intent, created_slot()));
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn source_slot_old_versions_and_e1_reuse_remain_refused_without_conversion() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let intent = state.begin_source_slot(&source_binding(&state)).unwrap();
+        state.confirm_source_slot(&intent, created_slot()).unwrap();
+        drop(state);
+        refusal(&tmp.path(), StateAction::Create, "state-exists:");
+        for action in [StateAction::Resume, StateAction::Restart] {
+            refusal(&tmp.path(), action, "state-recovery-unsupported:");
+        }
+        for version in [1, 2, 3, 5, u32::MAX] {
+            change_manifest(&tmp.path(), |value| {
+                value["format_version"] = json!(version);
+                value.as_object_mut().unwrap().remove("source_slot");
+            });
+            recovery_refusal(&tmp.path(), "state-version:");
+            for action in [
+                StateAction::Create,
+                StateAction::Resume,
+                StateAction::Restart,
+            ] {
+                refusal(&tmp.path(), action, "state-version:");
+            }
+        }
+    }
+
+    fn copy_snapshot_intent(state: &mut NativeState) -> CopySnapshotIntent {
+        let source = source_binding(state);
+        let pending = state.begin_source_slot(&source).unwrap();
+        let receipt = state.confirm_source_slot(&pending, created_slot()).unwrap();
+        let mut target = binding(state);
+        target.stream = source.stream();
+        let pending = state.begin_target_provisioning(target).unwrap();
+        state
+            .confirm_target_provisioning(confirmed(&pending))
+            .unwrap();
+        state.create_plan_file([42; 16]).unwrap().publish().unwrap();
+        CopySnapshotIntent {
+            anchor: SnapshotAnchor {
+                stream: source.stream(),
+                snapshot_token: receipt.snapshot_token,
+                consistent_point: receipt.consistent_point,
+                plan_nonce: [42; 16],
+            },
+            plan: CopyPlanRef {
+                reference_version: 1,
+                plan_nonce: [42; 16],
+                table_count: 0,
+                logical_bytes: 0,
+                crc32: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn copy_count_create_failure_preserves_intent_and_clears_guard() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let intent = copy_snapshot_intent(&mut state);
+        state.bind_copy_snapshot(&intent).unwrap();
+        let report = CopyReport {
+            tables: 0,
+            rows: 0,
+            bytes: 0,
+        };
+        let before = tree(&tmp.path());
+        let error = state
+            .record_copy_complete_with_create_failure(&report)
+            .unwrap_err();
+        assert_eq!(error.message, "state-test: injected publication failure");
+        assert_eq!(tree(&tmp.path()), before);
+        assert!(state.checked_manifest().unwrap().copy_complete.is_none());
+        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent.clone()));
+        assert_eq!(FAIL_AT.with(Cell::get), None);
+        drop(state);
+
+        let mut state = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
+        assert_eq!(tree(&tmp.path()), before);
+        state.record_copy_complete(&report).unwrap();
+        assert!(state.checked_manifest().unwrap().copy_complete.is_some());
+        let error = state
+            .record_copy_complete_with_create_failure(&report)
+            .unwrap_err();
+        assert!(error.message.starts_with("state-complete:"));
+        assert_eq!(FAIL_AT.with(Cell::get), None);
+    }
+
+    #[test]
+    fn copy_snapshot_intent_is_exact_immutable_and_reopens() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        assert_eq!(state.checked_copy_snapshot().unwrap(), None);
+        let intent = copy_snapshot_intent(&mut state);
+        state.bind_copy_snapshot(&intent).unwrap();
+        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent.clone()));
+        assert_eq!(manifest(&tmp.path())["copy_snapshot"], json!(intent));
+        let before = tree(&tmp.path());
+        state.bind_copy_snapshot(&intent).unwrap();
+        assert_eq!(tree(&tmp.path()), before);
+        for variant in 0..5 {
+            let mut changed = intent.clone();
+            match variant {
+                0 => changed.plan.crc32 = 1,
+                1 => changed.plan.table_count = 1,
+                2 => changed.plan.logical_bytes = 1,
+                3 => {
+                    changed.plan.plan_nonce = [43; 16];
+                    changed.anchor.plan_nonce = [43; 16];
+                }
+                _ => changed.anchor.snapshot_token.push('x'),
+            }
+            assert!(state.bind_copy_snapshot(&changed).is_err());
+            assert_eq!(tree(&tmp.path()), before);
+        }
+        drop(state);
+        let state = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
+        assert_eq!(tree(&tmp.path()), before);
+    }
+
+    #[test]
+    fn copy_snapshot_rejects_invalid_identity_version_nonce_and_zero_point_before_publication() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let intent = copy_snapshot_intent(&mut state);
+        for variant in 0..10 {
+            let mut invalid = intent.clone();
+            match variant {
+                0 => invalid.anchor.consistent_point = SourceEndLsn(0),
+                1 => invalid.anchor.stream.run.0[0] ^= 1,
+                2 => invalid.anchor.stream.source.system_identifier += 1,
+                3 => invalid.anchor.stream.generation += 1,
+                4 => invalid.anchor.snapshot_token.push('x'),
+                5 => invalid.anchor.plan_nonce = [0; 16],
+                6 => invalid.plan.plan_nonce = [0; 16],
+                7 => invalid.plan.plan_nonce = [41; 16],
+                8 => invalid.plan.reference_version = 0,
+                _ => invalid.plan.reference_version = 2,
+            }
+            let before = tree(&tmp.path());
+            let error = state.bind_copy_snapshot(&invalid).unwrap_err();
+            assert!(
+                error.message.starts_with("state-copy:"),
+                "{variant}: {error:?}"
+            );
+            assert_eq!(state.checked_copy_snapshot().unwrap(), None);
+            assert_eq!(
+                manifest(&tmp.path()).get("copy_snapshot"),
+                Some(&Value::Null)
+            );
+            assert!(manifest(&tmp.path())["copy_complete"].is_null());
+            assert_eq!(tree(&tmp.path()), before);
+        }
+        state.bind_copy_snapshot(&intent).unwrap();
+    }
+
+    #[test]
+    fn copy_snapshot_requires_confirmed_source_and_target_and_existing_plan() {
+        for variant in 0..5 {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = copy_snapshot_intent(&mut state);
+            match variant {
+                0 => state.manifest.source_slot = None,
+                1 => {
+                    let Some(SourceSlotProvenance::Confirmed(receipt)) =
+                        &state.manifest.source_slot
+                    else {
+                        panic!("missing source")
+                    };
+                    state.manifest.source_slot =
+                        Some(SourceSlotProvenance::Provisioning(receipt.intent.clone()));
+                }
+                2 => state.manifest.target_provenance.clear(),
+                3 => {
+                    let TargetProvenance::Confirmed(receipt) = &state.manifest.target_provenance[0]
+                    else {
+                        panic!("missing target")
+                    };
+                    state.manifest.target_provenance[0] =
+                        TargetProvenance::Provisioning(receipt.intent.clone());
+                }
+                _ => {
+                    fs::remove_dir_all(tmp.path().join("data/plans").join("2a".repeat(16))).unwrap()
+                }
+            }
+            // Publish the controlled prerequisite change so held-file checks do not mask provenance refusal.
+            let bytes = serde_json::to_vec(&state.manifest).unwrap();
+            fs::write(tmp.path().join("manifest.json"), bytes).unwrap();
+            let before = tree(&tmp.path());
+            let error = state.bind_copy_snapshot(&intent).unwrap_err();
+            let code = if variant == 4 {
+                "state-plan:"
+            } else {
+                "state-copy:"
+            };
+            assert!(error.message.starts_with(code), "{variant}: {error:?}");
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn copy_snapshot_preserves_u64_reference_fields_and_zero_crc_without_sqlite_narrowing() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let mut intent = copy_snapshot_intent(&mut state);
+        intent.plan.table_count = u64::MAX;
+        intent.plan.logical_bytes = u64::MAX;
+        state.bind_copy_snapshot(&intent).unwrap();
+        assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
+    }
+
+    #[test]
+    fn copy_snapshot_required_nullable_field_and_unknown_fields_refuse_corruption() {
+        let tmp = TempDir::new();
+        let state = tmp.create();
+        assert_eq!(state.checked_copy_snapshot().unwrap(), None);
+        drop(state);
+        change_manifest(&tmp.path(), |value| {
+            assert!(
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("copy_snapshot")
+                    .is_some()
+            );
+        });
+        recovery_refusal(&tmp.path(), "state-invalid:");
+        for action in [
+            StateAction::Create,
+            StateAction::Resume,
+            StateAction::Restart,
+        ] {
+            refusal(&tmp.path(), action, "state-invalid:");
+        }
+        for pointer in ["", "/anchor", "/plan"] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = copy_snapshot_intent(&mut state);
+            state.bind_copy_snapshot(&intent).unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                value["copy_snapshot"]
+                    .pointer_mut(pointer)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("unknown".into(), json!(1));
+            });
+            recovery_refusal(&tmp.path(), "state-invalid:");
+        }
+    }
+
+    #[test]
+    fn copy_snapshot_publication_and_identical_resync_failures_return_no_success() {
+        for repeating in [false, true] {
+            for step in [
+                PublicationStep::Create,
+                PublicationStep::Write,
+                PublicationStep::FileSync,
+                PublicationStep::Rename,
+                PublicationStep::DirectorySync,
+                PublicationStep::Published,
+            ] {
+                if repeating
+                    && !matches!(
+                        step,
+                        PublicationStep::FileSync | PublicationStep::DirectorySync
+                    )
+                {
+                    continue;
+                }
+                let tmp = TempDir::new();
+                let mut state = tmp.create();
+                let intent = copy_snapshot_intent(&mut state);
+                if repeating {
+                    state.bind_copy_snapshot(&intent).unwrap();
+                }
+                let previous = state.manifest.copy_snapshot.clone();
+                let failure = PublicationFailure::at(step);
+                let error = state.bind_copy_snapshot(&intent).unwrap_err();
+                assert!(
+                    error.message.starts_with("state-test:"),
+                    "{repeating} {step:?}: {error:?}"
+                );
+                assert_eq!(state.manifest.copy_snapshot, previous);
+                drop(failure);
+            }
+        }
+    }
+
+    #[test]
+    fn copy_snapshot_checked_lookup_refuses_changed_control_or_missing_plan() {
+        for (variant, code) in [
+            (0, "state-replaced:"),
+            (1, "state-invalid:"),
+            (2, "state-version:"),
+            (3, "state-plan:"),
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = copy_snapshot_intent(&mut state);
+            state.bind_copy_snapshot(&intent).unwrap();
+            assert_eq!(state.checked_copy_snapshot().unwrap(), Some(intent));
+            match variant {
+                0 => change_manifest(&tmp.path(), |value| value["copy_snapshot"] = Value::Null),
+                1 => change_manifest(&tmp.path(), |value| {
+                    value.as_object_mut().unwrap().remove("copy_snapshot");
+                }),
+                2 => change_manifest(&tmp.path(), |value| value["format_version"] = json!(3)),
+                _ => {
+                    fs::remove_dir_all(tmp.path().join("data/plans").join("2a".repeat(16))).unwrap()
+                }
+            }
+            let before = tree(&tmp.path());
+            let error = state.checked_copy_snapshot().unwrap_err();
+            assert!(error.message.starts_with(code), "{variant}: {error:?}");
+            assert_eq!(tree(&tmp.path()), before);
+        }
+    }
+
+    #[test]
+    fn copy_snapshot_recovery_revalidates_nonzero_point_and_exact_reference() {
+        for (pointer, invalid) in [
+            ("/anchor/consistent_point", json!(0)),
+            ("/anchor/snapshot_token", json!("different")),
+            ("/plan/reference_version", json!(2)),
+            ("/plan/plan_nonce", json!(vec![0; 16])),
+            ("/anchor/plan_nonce", json!(vec![41; 16])),
+        ] {
+            let tmp = TempDir::new();
+            let mut state = tmp.create();
+            let intent = copy_snapshot_intent(&mut state);
+            state.bind_copy_snapshot(&intent).unwrap();
+            drop(state);
+            change_manifest(&tmp.path(), |value| {
+                *value["copy_snapshot"].pointer_mut(pointer).unwrap() = invalid.clone();
+            });
+            recovery_refusal(&tmp.path(), "state-copy:");
+        }
+    }
+
+    #[test]
+    fn copy_snapshot_keeps_the_manifest_bound_before_creating_publication_files() {
+        let tmp = TempDir::new();
+        let mut state = tmp.create();
+        let source = source_binding(&state);
+        let pending = state.begin_source_slot(&source).unwrap();
+        let receipt = state
+            .confirm_source_slot(
+                &pending,
+                CreatedSlotData {
+                    snapshot_name: "\u{1}".repeat(1024),
+                    ..created_slot()
+                },
+            )
+            .unwrap();
+        let mut target = binding(&state);
+        target.stream = source.stream();
+        target.schema_name = "a".repeat(6000);
+        let pending = state.begin_target_provisioning(target).unwrap();
+        state
+            .confirm_target_provisioning(confirmed(&pending))
+            .unwrap();
+        state.create_plan_file([42; 16]).unwrap().publish().unwrap();
+        let intent = CopySnapshotIntent {
+            anchor: SnapshotAnchor {
+                stream: source.stream(),
+                snapshot_token: receipt.snapshot_token,
+                consistent_point: receipt.consistent_point,
+                plan_nonce: [42; 16],
+            },
+            plan: CopyPlanRef {
+                reference_version: 1,
+                plan_nonce: [42; 16],
+                table_count: 0,
+                logical_bytes: 0,
+                crc32: 0,
+            },
+        };
+        let before = tree(&tmp.path());
+        let error = state.bind_copy_snapshot(&intent).unwrap_err();
+        assert!(error.message.starts_with("state-invalid:"), "{error:?}");
+        assert_eq!(state.checked_copy_snapshot().unwrap(), None);
+        assert_eq!(tree(&tmp.path()), before);
     }
 }

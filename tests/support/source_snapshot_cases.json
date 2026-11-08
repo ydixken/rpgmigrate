@@ -1,0 +1,14 @@
+[
+  "snapshot::live_tests::live_owned_snapshot",
+  "snapshot::live_tests::live_empty_snapshot",
+  "snapshot::live_tests::live_existing_slot_refused",
+  "snapshot::live_tests::live_control_permission_denied",
+  "snapshot::live_tests::live_wrong_source_refused",
+  "snapshot::live_tests::live_reused_intent_refused",
+  "snapshot::live_tests::live_create_reply_lost",
+  "snapshot::live_tests::live_create_tail_lost",
+  "snapshot::live_tests::live_expired_export_refused",
+  "snapshot::live_tests::live_imported_identity_mismatch",
+  "snapshot::live_tests::live_source_finish_unknown",
+  "snapshot::live_tests::live_application_name_preserved"
+]

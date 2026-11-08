@@ -1,0 +1,35 @@
+{
+  "archive_sha256": "555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+  "cases": [
+    {
+      "source": "postgresql-18.6/contrib/test_decoding/expected/ddl.out",
+      "line": 96,
+      "message": "table public.replication_example: INSERT: id[integer]:1 somedata[integer]:1 text[character varying]:'1'"
+    },
+    {
+      "source": "postgresql-18.6/contrib/test_decoding/expected/toast.out",
+      "line": 68,
+      "message": "table public.xpto: UPDATE: id[integer]:1 toasted_col1[text]:unchanged-toast-datum rand1[double precision]:123.456 toasted_col2[text]:unchanged-toast-datum rand2[double precision]:1578"
+    },
+    {
+      "source": "postgresql-18.6/contrib/test_decoding/expected/toast.out",
+      "line": 74,
+      "message": "table public.xpto: DELETE: id[integer]:1"
+    },
+    {
+      "source": "postgresql-18.6/contrib/test_decoding/expected/truncate.out",
+      "line": 18,
+      "message": "table public.tab1: TRUNCATE: (no-flags)"
+    },
+    {
+      "source": "postgresql-18.6/contrib/test_decoding/expected/truncate.out",
+      "line": 21,
+      "message": "table public.tab1: TRUNCATE: restart_seqs cascade"
+    },
+    {
+      "source": "postgresql-18.6/contrib/test_decoding/expected/truncate.out",
+      "line": 24,
+      "message": "table public.tab1, public.tab2: TRUNCATE: (no-flags)"
+    }
+  ]
+}

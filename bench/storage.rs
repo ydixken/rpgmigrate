@@ -1,6 +1,6 @@
 #[path = "storage/config.rs"]
 pub mod config;
-#[path = "storage/format.rs"]
+#[path = "../src/cdc/codec.rs"]
 pub mod format;
 #[path = "../src/identity.rs"]
 mod identity;
