@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 
 
@@ -42,13 +43,18 @@ def local_path(path):
     raise RuntimeError("Task cache must remain inside the checkout")
 
 
-def bootstrap():
+def bootstrap(diagnostic=None):
+    diagnostic = {} if diagnostic is None else diagnostic
+    diagnostic.update(phase="configuration", category="unknown")
     if os.environ.get("TASK_DRY", "false").lower() not in ("", "0", "false"):
+        diagnostic["category"] = "configuration"
         raise RuntimeError("unset TASK_DRY before executing verification tasks")
     architecture = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine())
     key = f"{platform.system().lower()}_{architecture}"
     if key not in SHA256:
+        diagnostic["category"] = "configuration"
         raise RuntimeError("unsupported Task platform; use macOS or Linux on amd64 or arm64")
+    diagnostic["phase"] = "cache"
     cache = ROOT / "target/tools/task" / VERSION
     local_path(cache)
     cache.mkdir(parents=True, exist_ok=True)
@@ -61,28 +67,43 @@ def bootstrap():
         if not archive.exists():
             with tempfile.TemporaryDirectory(prefix="download-", dir=cache) as temporary:
                 download = Path(temporary) / "task.tar.gz"
+                diagnostic["phase"] = "download"
                 with urllib.request.urlopen(f"{RELEASE}/{archive.name}", timeout=60) as response, download.open("wb") as output:
                     shutil.copyfileobj(response, output)
+                diagnostic["phase"] = "checksum"
                 if digest(download) != SHA256[key]:
+                    diagnostic["category"] = "checksum"
                     raise RuntimeError("Task archive SHA-256 mismatch")
+                diagnostic["phase"] = "publish"
                 download.replace(archive)
+        diagnostic["phase"] = "checksum"
         if not archive.is_file() or digest(archive) != SHA256[key]:
+            diagnostic["category"] = "checksum"
             raise RuntimeError("cached Task archive SHA-256 mismatch")
+        diagnostic["phase"] = "cache"
         binary = cache / "bin/task"
         local_path(binary)
         binary.parent.mkdir(exist_ok=True)
+        diagnostic["phase"] = "archive"
         with tarfile.open(archive, "r:gz") as source:
             for name, destination in (("task", binary), ("LICENSE", cache / "LICENSE")):
+                diagnostic["phase"] = "archive"
                 members = [member for member in source.getmembers() if member.name == name]
                 if len(members) != 1 or not members[0].isfile():
+                    diagnostic["category"] = "archive"
                     raise RuntimeError(f"Task archive lacks a regular {name} file")
+                diagnostic["phase"] = "cache"
                 local_path(destination)
+                diagnostic["phase"] = "archive"
                 with source.extractfile(members[0]) as stream:
                     contents = stream.read()
+                diagnostic["phase"] = "cache"
                 if destination.exists():
                     if not destination.is_file() or destination.read_bytes() != contents:
+                        diagnostic["category"] = "cache"
                         raise RuntimeError("cached Task binary or license differs from verified archive")
                 else:
+                    diagnostic["phase"] = "publish"
                     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
                         staged = Path(output.name)
                         try:
@@ -92,8 +113,10 @@ def bootstrap():
                             staged.replace(destination)
                         finally:
                             staged.unlink(missing_ok=True)
+        diagnostic["phase"] = "execute"
         version = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=10, check=True)
         if version.stdout.strip() != VERSION:
+            diagnostic["category"] = "version"
             raise RuntimeError("cached Task binary version differs from configured version")
         return binary
 
@@ -102,11 +125,33 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="store_true", help="print the configured version without installing or verifying")
     args = parser.parse_args()
+    diagnostic = {"phase": "unknown", "category": "unknown"}
     try:
-        print(VERSION if args.version else bootstrap())
+        print(VERSION if args.version else bootstrap(diagnostic))
         return 0
-    except (OSError, RuntimeError, tarfile.TarError, subprocess.SubprocessError):
-        print(json.dumps({"level": "error", "message": "Task bootstrap failed; check the platform, cache, network, and TASK_DRY"}), file=sys.stderr)
+    except Exception as error:
+        category = diagnostic["category"]
+        status = None
+        if category == "unknown":
+            if diagnostic["phase"] == "download" and isinstance(error, urllib.error.HTTPError):
+                category = "http"
+                if type(error.code) is int and 100 <= error.code <= 599:
+                    status = error.code
+            elif isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+                category = "timeout"
+            elif diagnostic["phase"] == "download" and isinstance(error, urllib.error.URLError):
+                category = "timeout" if isinstance(error.reason, TimeoutError) else "url"
+            elif isinstance(error, OSError):
+                category = "os_error"
+            elif isinstance(error, tarfile.TarError):
+                category = "archive"
+            elif isinstance(error, subprocess.SubprocessError):
+                category = "process"
+        record = {"level": "error", "message": "Task bootstrap failed; check the platform, cache, network, and TASK_DRY",
+                  "phase": diagnostic["phase"], "category": category}
+        if status is not None:
+            record["http_status"] = status
+        print(json.dumps(record), file=sys.stderr)
         return 1
 
 
