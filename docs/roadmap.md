@@ -173,7 +173,7 @@ The leader decomposes, assigns one owner per file or subtree, and reviews; verif
 Effort per task: xhigh for WAL, apply, recovery, durability and safety reviews; high for bounded implementation and tests; medium for docs and CI; each brief states the reason.
 Each milestone gets a detailed implementation plan (superpowers:writing-plans) before work starts.
 Parallelize the build phase as far as file ownership allows: independent owners work at the same time, each in its own git worktree off `feat/native-engine` (user-approved 2026-11-08, overriding the earlier no-worktree rule), and the leader integrates.
-Review each change once with the reviewer its risk calls for, and run each test suite (cargo, Python, Go) once per changed input; do not repeat a review or a test run on unchanged code.
+Run the independent review (at the effort its risk calls for) and the Go test suites once per milestone, at its close, not after each task; workers run only the focused tests for their own change while building.
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
 Commits are small, conventional and lint-clean; nothing is pushed or merged without the user's go-ahead.
 

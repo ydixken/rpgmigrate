@@ -386,5 +386,5 @@ Trust `AGENTS.md`, the approved design and this file; do not use the removed tas
 The [roadmap](../docs/roadmap.md) amendments supersede conflicting entries above, including the patched-libpq requirement and the never-worktrees rule.
 Git worktrees are allowed for parallel build work.
 Parallelize the build phase as far as file ownership allows.
-Review each change once and run each test suite once per changed input; do not repeat reviews or test runs on unchanged code.
+Run independent reviews and the Go test suites once per milestone, at its close, not after each task.
 Write finished plans into the repository, not only into the session plan file.

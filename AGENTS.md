@@ -24,7 +24,7 @@ Coordinate shared signature changes before editing them.
 Do not let a planning worker edit source or install dependencies without a new assignment.
 Tests and documentation accompany behavior changes.
 Parallelize the build phase as far as file ownership allows.
-Review each change once and run each test suite once per changed input.
+Run independent reviews and the Go test suites once per milestone, at its close, not after each task.
 Keep runtime support claims tied to passing checks.
 Commit only after required checks pass and the leader requests it.
 
