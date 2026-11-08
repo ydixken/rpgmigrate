@@ -105,6 +105,8 @@ Help and version output alone cannot qualify the image.
 
 The builder records the three actual utility version responses, the configured bindir, and the same-version source and library identities.
 The OCI validator independently reads ELF dependencies and checks the recorded inventory against files, architectures, sonames, interpreter aliases, and hashes in the image.
+It retains `/usr/lib64` entries so usrmerge interpreter chains through `/lib64` reach their recorded canonical loader.
+Resolved interpreters must match the recorded canonical ELF path and file hashes.
 This static inventory check does not prove which library the final runtime loader selects.
 The smoke helper runs all three version commands and the actual bindir query inside the loaded nonroot image as part of its runtime-file check.
 Its mandatory `client-loader-resolution` check traces each client utility and shared object with the final image's `ldd`, under the image's configured environment and working directory.

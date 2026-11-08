@@ -369,7 +369,8 @@ def _inspect_archive(path):
                                 documents.pop(previous, None)
                                 objects.pop(previous, None)
                         continue
-                    system = name in ('/lib', '/lib64') or name.startswith(('/usr/lib/', '/lib/', '/lib64/'))
+                    # /lib64 can reach the canonical loader through /usr/lib64.
+                    system = name in ('/lib', '/lib64', '/usr/lib64') or name.startswith(('/usr/lib/', '/usr/lib64/', '/lib/', '/lib64/'))
                     relevant = name == BINARY or name.startswith((PREFIX + '/', CLIENT_PREFIX + '/', EVIDENCE)) or system
                     required_directory = name in ('/usr/lib', PREFIX, CLIENT_PREFIX, EVIDENCE.rstrip('/')) or any(
                         path.startswith(name + '/') for path in (BINARY, PREFIX, CLIENT_PREFIX, EVIDENCE.rstrip('/')))

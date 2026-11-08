@@ -74,6 +74,53 @@ def dynamic_elf(machine=183, *, needed=(), soname=None, runpath=None, interprete
     return bytes(header) + load + dynamic + interp + b''.join(struct.pack('<QQ', *e) for e in entries) + strings + (interpreter.encode() + b'\0' if interpreter else b'')
 
 
+def usrmerge_fixture(files, config, *, variant='relative', libc_needs_loader=True):
+    clients = '/opt/rpgmigrate/target/native/pgtools'
+    amd64 = config['architecture'] == 'amd64'
+    machine, triplet, soname = (62, 'x86_64-linux-gnu', 'ld-linux-x86-64.so.2') if amd64 else (183, 'aarch64-linux-gnu', 'ld-linux-aarch64.so.1')
+    requested = ('/lib64/' if amd64 else '/lib/') + soname
+    terminal = ('/usr/lib64/' if amd64 else '/usr/lib/') + soname
+    canonical = '/usr/lib/' + triplet + '/' + soname
+    relative = ('../lib/' if amd64 else '') + triplet + '/' + soname
+    document, client_name = '/usr/share/rpgmigrate/runtime.json', '/usr/share/rpgmigrate/client-artifact.json'
+    value, client = json.loads(files[document]), json.loads(files[client_name])
+    graph = value['clients']['dependencies']
+    files.pop('/usr/lib/' + soname)
+    graph[canonical] = graph.pop('/usr/lib/' + soname)
+    loader = dynamic_elf(machine, soname=soname)
+    files[canonical] = {'data': loader, 'mode': 0o755}
+    graph[canonical]['sha256'] = digest(loader)
+    if amd64:
+        files['/lib64'] = ('usr/lib64',)
+        files['/usr/lib64'] = {'kind': 'directory', 'mode': 0o755}
+    files[terminal] = (canonical if variant == 'absolute' else relative,)
+    if variant == 'chained':
+        files[terminal] = ('loader-hop.so',)
+        files[str(Path(terminal).parent / 'loader-hop.so')] = (relative,)
+    if variant == 'direct':
+        requested = canonical
+    libc = '/usr/lib/' + triplet + '/libc.so.6'
+    files.pop('/usr/lib/libc.so.6')
+    graph[libc] = graph.pop('/usr/lib/libc.so.6')
+    for node in graph.values():
+        node['needed'] = {key: libc if target == '/usr/lib/libc.so.6' else target for key, target in node['needed'].items()}
+    for name in ('pg_dump', 'pg_restore', 'pg_config'):
+        path = clients + '/bin/' + name
+        data = dynamic_elf(machine, needed=tuple(graph[path]['needed']), runpath=clients + '/lib', interpreter=requested)
+        files[path] = {'data': data, 'mode': 0o755}
+        graph[path]['sha256'], graph[path]['interpreter'] = digest(data), canonical
+        client['files']['bin/' + name] = digest(data)
+        value['files'][path] = {'sha256': digest(data)}
+    needed = (soname,) if libc_needs_loader else ()
+    data = dynamic_elf(machine, needed=needed, soname='libc.so.6', interpreter=requested)
+    files[libc] = {'data': data, 'mode': 0o755}
+    graph[libc] = {'sha256': digest(data), 'needed': {name: canonical for name in needed}, 'interpreter': canonical}
+    client['artifact_sha256'] = digest(json.dumps(client['files'], sort_keys=True).encode())
+    files[client_name] = encode(client)
+    value['clients']['receipt_sha256'] = digest(files[client_name])
+    files[document] = encode(value)
+
+
 def write_fixture(directory, *, mutate=None, extra_layer=None, architecture='arm64', client_version='18.6'):
     """Provide independent fixture bytes for smoke and publisher validation tests."""
     prefix = '/opt/rpgmigrate/target/native/libpq'
@@ -329,6 +376,100 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(value['alias_count'], 12)
         self.assertEqual(len(value['aliases']), 8)
         self.assertLess(len(facts), 8192)
+
+    def test_hosted_interpreter_tar_hop_is_retained_before_validation(self):
+        from unittest.mock import patch
+        terminal = '/usr/lib64/ld-linux-x86-64.so.2'
+        for version in ('16.15', '18.6'):
+            with self.subTest(version=version):
+                path, _ = write_fixture(self.root, client_version=version, architecture='amd64', mutate=usrmerge_fixture)
+                with tarfile.open(path.parent / 'image.oci.tar') as outer:
+                    index = json.load(outer.extractfile('index.json'))
+                    manifest = json.load(outer.extractfile('blobs/sha256/' + index['manifests'][0]['digest'][7:]))
+                    with tarfile.open(fileobj=outer.extractfile('blobs/sha256/' + manifest['layers'][0]['digest'][7:])) as layer:
+                        item = layer.getmember(terminal.lstrip('/'))
+                        self.assertTrue(item.issym())
+                        self.assertEqual(item.linkname, '../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
+                captured = {}
+                validate = self.runtime.validate_clients
+                def observe(*args):
+                    captured.update(args[4])
+                    return validate(*args)
+                with patch.object(self.runtime, 'validate_clients', side_effect=observe):
+                    try:
+                        actual = self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+                    except RuntimeError as error:
+                        self.fail('archive terminal retained=' + str(terminal in captured) + '; ' + str(error))
+                self.assertEqual(captured[terminal], {'link': '../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'})
+                self.assertEqual(self.runtime.resolve_archive_path('/lib64/ld-linux-x86-64.so.2', captured),
+                                 '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
+                self.assertIn('/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2', actual['runtime']['clients']['dependencies'])
+
+    def test_usrmerge_absolute_relative_chained_and_direct_interpreter_controls(self):
+        for version in ('16.15', '18.6'):
+            for architecture in ('amd64', 'arm64'):
+                for variant in ('relative', 'absolute', 'chained', 'direct'):
+                    with self.subTest(version=version, architecture=architecture, variant=variant):
+                        path, _ = write_fixture(self.root, client_version=version, architecture=architecture,
+                                                mutate=lambda files, config: usrmerge_fixture(files, config, variant=variant))
+                        actual = self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+                        graph = actual['runtime']['clients']['dependencies']
+                        expected = '/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2' if architecture == 'amd64' else '/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1'
+                        self.assertEqual(graph['/opt/rpgmigrate/target/native/pgtools/bin/pg_restore']['interpreter'], expected)
+                        libc = expected.rsplit('/', 1)[0] + '/libc.so.6'
+                        self.assertEqual(graph[libc]['needed'], {expected.rsplit('/', 1)[1]: expected})
+
+    def test_usrmerge_invalid_hops_missing_foreign_and_tampered_loaders_refuse(self):
+        terminal, loader = 'usr/lib64/ld-linux-x86-64.so.2', 'usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'
+        data = dynamic_elf(62, soname='ld-linux-x86-64.so.2')
+        cases = (
+            ('missing-hop', {'usr/lib64/.wh.ld-linux-x86-64.so.2': b''}, 'interpreter target'),
+            ('cycle', {terminal: ('ld-linux-x86-64.so.2',)}, 'symlink cycle|excessive depth'),
+            ('escape', {terminal: ('../../../outside-loader.so',)}, 'interpreter target'),
+            ('foreign-same-bytes', {terminal: ('/usr/lib/foreign-loader.so',), 'usr/lib/foreign-loader.so': {'data': data, 'mode': 0o755}}, 'interpreter target'),
+            ('missing-loader', {'usr/lib/x86_64-linux-gnu/.wh.ld-linux-x86-64.so.2': b''}, 'interpreter target'),
+            ('wrong-machine', {loader: {'data': dynamic_elf(183, soname='ld-linux-x86-64.so.2'), 'mode': 0o755}}, 'ELF machine'),
+            ('tamper', {loader: {'data': data + b'changed loader bytes', 'mode': 0o755}}, 'dependency identity'),
+        )
+        for version in ('16.15', '18.6'):
+            for name, layer, message in cases:
+                with self.subTest(version=version, fault=name):
+                    # Isolate PT_INTERP absence from libc's earlier DT_NEEDED check.
+                    path, _ = write_fixture(self.root, client_version=version, architecture='amd64',
+                                            mutate=lambda files, config: usrmerge_fixture(files, config, libc_needs_loader=name != 'missing-loader'),
+                                            extra_layer=layer)
+                    with self.assertRaisesRegex(RuntimeError, message) as refusal:
+                        self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+                    if name == 'missing-loader':
+                        facts = json.loads(str(refusal.exception).split(': ', 1)[1])
+                        self.assertEqual(facts['recorded_interpreter'], '/' + loader)
+                        self.assertEqual(facts['resolved_interpreter'], '/' + loader)
+                        self.assertFalse(facts['recorded_is_elf'])
+                        self.assertIsNone(facts['recorded_sha256'])
+
+    def test_usr_lib64_keeps_existing_protected_directory_and_file_checks(self):
+        for name, value in (
+            ('usr/lib64', {'kind': 'directory', 'uid': 1000}),
+            ('usr/lib64', {'kind': 'directory', 'mode': 0o777}),
+            ('usr/lib64/object.so', {'data': dynamic_elf(), 'mode': 0o4755}),
+            ('usr/lib64/object.so', {'data': dynamic_elf(), 'uid': 1000}),
+            ('usr/lib64/object.so', {'data': b'file', 'mode': 0o666}),
+        ):
+            with self.subTest(name=name, value=value):
+                path, _ = write_fixture(self.root, extra_layer={name: value})
+                with self.assertRaisesRegex(RuntimeError, 'ownership|permissions|root-owned|setuid|writable'):
+                    self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+        from unittest.mock import patch
+        captured = {}
+        validate = self.runtime.validate_clients
+        def observe(*args):
+            captured.update(args[4])
+            return validate(*args)
+        path, _ = write_fixture(self.root, extra_layer={'usr/lib640/spare': b'unrelated', 'usr/lib64-other/spare': b'unrelated'})
+        with patch.object(self.runtime, 'validate_clients', side_effect=observe):
+            self.runtime.inspect_archive(path.parent / 'image.oci.tar')
+        self.assertNotIn('/usr/lib640/spare', captured)
+        self.assertNotIn('/usr/lib64-other/spare', captured)
 
     def test_dependency_collection_requires_every_needed_library(self):
         from unittest.mock import patch
