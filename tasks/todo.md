@@ -702,6 +702,15 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ### Current composed Go closing profile and blockers
 
+The [2026-11-09 explicit-file/cap amendment](../docs/roadmap.md#m6-explicit-connection-file-and-cap-amendment-2026-11-09) and [approved plan](../docs/superpowers/plans/2026-11-09-m6-explicit-file-binding.md) authorize sealed mode-0400 memfd inputs and the sole immutable missing path before connecting, preserving raw libpq DSN/explicit-empty/permission/optional-absence behavior.
+The main-only caps are 122880 source bytes and 126976 complete argument bytes including NUL; wire/relay/prelude limits are unchanged and native evidence Job JSON is limited to 1 MiB.
+The Linux 131072-byte minimum per-argument limit clears no aggregate argv/env/stack, Kubernetes/proxy, or opaque Secret-length gate; exact image/read-only-rootfs/mount-shadow/runtime tests remain required.
+Two disjoint source owners are building the four-file helper and two-file admission delta; the final decorated native create-site size check remains future integration and generic `ensureJob` stays unchanged.
+Numeric-alpha resolver research `c567134f` is proposal only; resolver/service/PVC/image/activation remain unqualified.
+
+- [x] Record the root-approved explicit-file/cap plan with private-source provenance.
+- [ ] Integrate and qualify explicit-file binding and cap boundaries under the plan’s runtime and failure controls.
+
 Task 0's final five-file pure-helper export is frozen at `/Users/ydixken/.codex/tmp/m6-python-mechanism-export-20261109/manifest.json`, SHA-256 `12a3a70804466b2079eb14e3098009f7e3683c6b5e7bc27cb2b283fcf06dd3e4`.
 Its sibling `proof.json`, SHA-256 `bb09761a5e4591f53d72e4bb676e0d071211c70cab9be0bde210f7cbddf42af1`, records nineteen Python and eighteen focused Go tests, with three mutation controls and exact PG16/18 SQL fixture equality.
 The admission-reader export is frozen at `/Users/ydixken/.codex/tmp/m6-admission-reader-export-20261109/manifest.json`, SHA-256 `e8d43f56bb813a64ddaa88fe140ab160b04bf04aa4425db1b4a9e961f8c51728`; sibling proof SHA-256 is `22cfb4fad23271dd072b286f822590ca2aab959cb2e4b96b9732644f00b62284`.
@@ -873,7 +882,8 @@ Independent recovery observation: `/private/var/tmp/rpgmigrate-m7-kubeconfig-saf
 The approved exact three-container cleanup passed: containers/processes/cgroups are absent and the kind reservation is released.
 Final proof: `/private/var/tmp/rpgmigrate-m7-second-exception-cleanup-7xoc3tat/cleanup-proof.json`, SHA-256 `7ef026e0161d9d8ea48c20dc2a2eec9dbe16dc4fb3ba5f4855fcad4ca60ae6b7`.
 Volume metadata, images, immutable network properties, original four services, backup hashes, all 530 source entries, and every RUN byte remain preserved with phase `creating`; this exception disposal is not guarded DOWN qualification.
-After two bootstrap-contract failures, the leader is re-planning bounded startup/DOWN metadata fixtures before any third UP; this is not a broad repository audit or lifecycle qualification.
+The two-comparison guard export `6277b1f1` and realistic fixture export `aa76c08c` compose GREEN: 87 focused checks and one 175-check full wrapper run, with original-guard RED.
+This is source-level contract testing only; new source composition is next, with no third UP, readiness/API or lifecycle qualification, RUN repair, or broad repository audit claimed.
 The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
 Corrected fresh source, a source-bound manager, and a fresh RUN remain required; source readiness is not a repaired UP or lifecycle qualification.
 The exact user-exception cleanup is independently verified at `/private/var/tmp/rpgmigrate-m7-exception-cleanup-xz08ws2q/final-exception-cleanup-verification.json`, SHA-256 `846f6314b9a729fb291adc53947e0464a540687f49c5f65bdda14a8675eaa759`.

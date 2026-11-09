@@ -277,7 +277,7 @@ The new relay export passed 29 Python and nineteen focused Go tests (including t
 The new transport export passed 97 checks/92 leaf cases; these are focused mechanism proofs, without runtime qualification.
 These focused checks do not qualify packaged Python/libpq, database, Kubernetes/PVC, or opaque-file runtime behavior.
 Checked WebSocket transport has focused passing checks; the [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) replaces the default-disabled split-log prerequisite, with implementation and qualification pending.
-Opaque file preconsumption/service handling and exact packaged-libc resolver qualification remain unresolved; these blockers do not permanently narrow the approved contracts.
+The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) is approved and building; ordinary-file runtime proof, service handling, and exact packaged-libc resolver qualification remain unresolved without permanently narrowing the approved contracts.
 The approved Python/ctypes/libpq exception and no-added-Secret-read/RBAC boundary remain in force: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than latest-Secret-version attestation.
 The user explicitly approved existing operator-feature GitLab mirroring on 2026-11-09; the prior authorization hold is resolved, with CI/mirror outcomes tracked separately below.
 One independent whole-M6 review belongs at milestone close, and users retain write fencing/outstanding-transaction duties through cutover.
@@ -324,7 +324,8 @@ Corrected fresh source, a source-bound manager, and a fresh RUN remain required;
 The real frozen-marker probe passed root-owned mode-0600 readback, no-clobber, and exact owned-probe absence checks; the [ledger](../tasks/todo.md) binds its receipt.
 Fresh source `78a663` prepared successfully, and its first UP verified all three node caps before refusing a kubeconfig kind-prefix mismatch.
 The fresh RUN remains `creating`; guarded DOWN refused the same naming check, and the approved exact three-container cleanup passed exact absence/preservation checks.
-After two bootstrap-contract failures, the leader is re-planning bounded startup/DOWN metadata fixtures before any third UP, without RUN repair or a broad repository audit.
+The two-comparison guard export `6277b1f1` and realistic fixture export `aa76c08c` now compose GREEN: 87 focused checks and one 175-check full wrapper run, with original-guard RED.
+These are source-level contract tests; new source composition is next, with no third UP, readiness/API qualification, RUN repair, or broad repository audit.
 The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
 The one-off user-exception cleanup passed for exactly the three failed-node containers, with no volume flags or other deletions.
 The source and every old RUN file remain unchanged in creating/empty state; volumes, kind network, images, backups, and original services are retained.
@@ -370,6 +371,17 @@ Reject replacement, restart, failed or ambiguous state; successful post-exec ter
 Construct completion authority only after checked relay evidence, terminal main success, and final independent live/private closure validation all pass.
 Three disjoint source owners are building this correction; earlier focused transport/helper/reader proofs remain historical inputs and do not qualify the changed delivery path.
 Runtime, packaged image/libc resolver, opaque-file/service, TLS, and PVC gates remain open; production native admission remains disabled and no new RBAC or feature gate is authorized.
+
+## M6 explicit connection-file and cap amendment, 2026-11-09
+
+We approved the [explicit-file binding plan](superpowers/plans/2026-11-09-m6-explicit-file-binding.md), preserving earlier approved plans as historical inputs.
+Before connecting either role, capture ordinary passfile/TLS inputs into sealed mode-0400 memfd snapshots while preserving raw libpq DSN, explicit-empty, original permission, and optional-absence semantics.
+The only stable-absence route is `/usr/share/rpgmigrate/.native-file-absent`, an immutable missing path in the existing image; add no file, mount, or metadata and require exact-image, read-only-rootfs, mount-shadow, and runtime qualification.
+The approved internal main source cap is 122880 bytes and complete main argument cap is 126976 bytes including NUL; wire, relay, and prelude limits remain unchanged, and native evidence Job JSON is capped at 1 MiB.
+Linux's minimum 131072-byte per-argument boundary does not qualify aggregate argv/environment, stack, Kubernetes/proxy delivery, or opaque Secret length; required runtime tests remain open.
+A dedicated native helper's final decorated create-site size check remains future integration; generic `ensureJob` remains unchanged.
+Two disjoint owners are building the four-file helper and two-file admission changes; resolver, service, PVC, image, and activation gates remain open.
+Numeric-alpha resolver research `c567134f` remains a proposal, without qualification clearance.
 
 ## User-authorized continuation, 2026-11-09
 
