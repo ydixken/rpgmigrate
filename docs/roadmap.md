@@ -273,7 +273,8 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
 Production native admission still returns `UnsupportedEngine`; M4's engine and mocked-Kubernetes helper evidence does not qualify the operator lifecycle.
-The clean central operator checkpoint is `a9bbc487975cf35054a8d1cff00f28b8b31a888d`, with env-value-cleared privacy correlation hashing and source-only head/informational-lag client, strict codec/Python, and golden coverage.
+The clean central operator checkpoint is `1dbad97c4476d342be6ff19f5c5083ab11b1233b`, with central capability mirror `b590`, structural credential-free helper `bcefa1`, ACK `7d221416`, and recovery `1dbad97` source packets.
+ACK transport and recovery/actual-Reader composition have focused passing checks, while interfaces/dispatch, runtime target-retry producer/Reader, and owned-cleanup comparison remain open; `UnsupportedEngine` is unchanged.
 Full canonical in-memory admission remains authoritative; correlation hashes and informational lag supply no target durability or completion authority, runtime acceptance, or new image qualification.
 Task 0's five-file pure-helper export is frozen with nineteen Python and eighteen focused Go tests passing, including exact PG16/18 SQL fixture equality.
 The earlier admission-reader handoff separately passed thirteen top-level tests and 330 focused checks with zero failures or skips; the final relay-aware Reader composition passed fourteen top-level tests and 344 focused checks with zero failures/skips against the exact new relay/transport inputs.
@@ -291,8 +292,8 @@ The dormant preflight source checkpoint is fast-forwarded into the clean central
 Canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides; runtime qualification and activation remain closed.
 The preflight field is not injected and resolver policy still always refuses; remaining consumers, runtime, whole-M6 review, and closing gates remain open.
 Engine checkpoint `96d37073716768c21993c3b2df724d6c3b425415` publishes the fixed ordered six-name discovery set and keeps metadata inside the fixture contract; see the [native protocol](native-protocol.md#discovery).
-The operator six-capability fixture candidate `7b9` is not central yet; source discovery does not qualify a newly built executable or image.
-The engine and separate operator fixture candidate retain identical fixtures, including the historical accepted empty array and the new qualified-profile producer golden; the operator central handoff is pending.
+The operator six-capability fixture mirror `b590` is now central; source discovery still does not qualify a newly built executable or image.
+The engine and central operator capability mirror retain identical fixtures, including the historical accepted empty array and the new qualified-profile producer golden; runtime qualification remains separate.
 The producer/help, portable fixture/consumer, and packaging-smoke packets have focused source evidence only.
 No newly built executable or image is qualified by those packets or by the historical M5 `b463`/hosted `7c04dff` receipts.
 Fresh ARM packaging must precede the actual-image M6 three-pair native acceptance; AMD64 retains packaging-only scope until exact-image native database qualification in M10.
@@ -331,7 +332,9 @@ The final 532-entry dirty-source freeze `d5698bf5f130519336382828ecbfcf89995937d
 Source-equal controller/API/CRD/module evidence binds accepted M4 `c262322`, without qualifying all M7.
 The later legacy gate failed before CNPG apply: the pinned kubectl renderer emits 26 concatenated JSON objects, which the old single-document `json.loads` rejected.
 A read-only exact-renderer reproduction confirms that framing defect; successor source `8af5c480741caa760294c52ece74c4a89c586bab80d4995a522acd4dcc3be65d` changes only three files with 529 peers preserved and matches the 214 focused passing checks.
-Phase-1 retirement removed the exact S2 and three nodes while retaining all 206 volumes; the later independent unused barrier passed and only three exact nonforced volume removals are authorized under the existing disk approval, with reclaim effects pending.
+Phase-1 retirement retained all 206 volumes; the later independently barred, exact nonforced reclaim removed only the three new unused volumes and preserved the protected 203.
+The approved disk resize from 128 to 160 GiB passed with the same fourteen CPUs/32 GiB, preserved PostgreSQL 16/18 IDs/ports, restored M0 and three original running services, and retired f8 still stopped.
+Fresh `8af` preparation is running in a new RUN, without PREPARE PASS, UP, or acceptance.
 The successor requires a new manager, archive, and RUN; old acceptance is not reusable and no M7 stage completion follows.The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the fresh preparation inputs.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
@@ -356,7 +359,7 @@ The exact frozen wrapper enforces a 10-GiB VM floor and 2-GiB host floor; its se
 The pre-maintenance read-only baseline had 12,565,581,824 free bytes and only 419,700,736 conservatively reclaimable allocated bytes, insufficient against the prior envelope.
 That read-only check made no resource change; the later authorized maintenance preserved all existing images/volumes and pruned nothing.
 M5 image peak and M7 full-phase growth remain unqualified despite the increased disk capacity.
-Final maintenance passed: rootless AppleHV is stable at 14 CPUs, 32 GiB memory, and a 128-GiB disk with vda4/XFS grown; the lease is released.
+The earlier 128-GiB preservation maintenance passed with fourteen CPUs/32 GiB and vda4/XFS grown; the later verified 160-GiB resize is recorded above.
 PostgreSQL 18 now uses a verified persistent replacement on the same name/port and preserved database identity/settings/data; the old tmpfs container is retired, stopped, retained, and must never restart.
 Original PostgreSQL 16 and M0 identities/configuration/tools are preserved; all pre-existing images and volumes remain retained, with zero pruning.
 The maintenance included an idle M0 PID1 forced stop, unexpected first VM stop, stale API-socket failed restart, and corrected detached launch; PostgreSQL 16/18 recovered ready with zero PANIC/FATAL, so this was not an unconditionally graceful restart.
@@ -498,7 +501,7 @@ Each milestone gets a detailed implementation plan (superpowers:writing-plans) b
 Parallelize the build phase as far as file ownership allows: independent owners work at the same time, each in its own git worktree off `feat/native-engine` (user-approved 2026-11-08, overriding the earlier no-worktree rule), and the leader integrates.
 Run the independent review (at the effort its risk calls for) and the Go test suites once per milestone, at its close, not after each task; workers run only the focused tests for their own change while building.
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
-The verified VM allocation is 14 CPUs, 32 GiB memory, and a 128-GiB disk; the final maintenance proof records preservation and released-lease checks.
+The verified VM allocation is fourteen CPUs, 32 GiB memory, and a 160-GiB disk; the [ledger](../tasks/todo.md) binds the latest resize/preservation proof.
 The original 21:35 UTC startup failure predates the CPU/memory resize.
 Maintenance and failed-node quiet reservations are released; preserve host Cargo headroom and the approved resource budgets for subsequent M6/M7 execution.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.

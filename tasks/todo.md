@@ -701,17 +701,16 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ## M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
-### Capability discovery source candidate, 2026-11-09
+### Capability discovery source checkpoints, 2026-11-09
 
 - [x] Compose the exact fixture, producer/help, and packaging-smoke packets on engine baseline `ef37214b55e7a082f6e2ee949768649e83163ea4`, with a separate fixture/consumer candidate on operator baseline `727e45da94a5b2d099e97380e086a36206e68451`.
 - [x] Verify packet manifests, every exported and baseline blob, intended modes, preserved peer files, and identical 133-file fixture trees.
 - [x] Update discovery/profile documentation without changing the three-field DTO, command-specific reports, historical empty parser fixture, or operator activation gates.
-- [ ] Complete the reviewed operator fixture central handoff; the engine discovery source checkpoint is recorded below.
 - [ ] Qualify fresh ARM and AMD64 packaging artifacts from the exact new source and retain observed executable digests.
 - [ ] Bind the new ARM executable/image to the scheduled M6 helper/preflight/controller and three-pair native acceptance packet.
 - [ ] Qualify exact-image AMD64 native database runtime in M10 before claiming multi-architecture runtime support.
 
-Engine source checkpoint `96d37073716768c21993c3b2df724d6c3b425415` contains the discovery implementation; the operator six-capability fixture candidate `7b9` is not central yet.
+Engine source checkpoint `96d37073716768c21993c3b2df724d6c3b425415` contains discovery; the operator six-capability fixture mirror `b590` is now central, without fresh runtime/image qualification.
 The [native protocol](../docs/native-protocol.md#discovery) records the six ordered names, restrictions, and fixture-only `qualified_capabilities` metadata.
 Retained source checks cover sixteen fixture tests, ten protocol tests, 31 CLI unit tests, 28 executable CLI tests, 28 smoke tests, focused Go capability/fixture tests, strict Clippy/formatting, and zero focused Go lint findings.
 Input hashes match the retained producer Cargo/CLI scope (217 files), fixture-tool scope (134 files), and focused operator package scope (286 files).
@@ -724,7 +723,10 @@ M0 through M5 stay closed; M6 through M10 remain open.
 
 ### Current composed Go closing profile and blockers
 
-The authoritative clean central operator HEAD is `a9bbc487975cf35054a8d1cff00f28b8b31a888d`, including privacy env-value-cleared correlation hashing, source-only head/informational lag, strict codec/Python, and golden coverage.
+The authoritative clean central operator HEAD is `1dbad97c4476d342be6ff19f5c5083ab11b1233b`, tree `4c1f25e501c2e30fc0a867b3ef2c21596dc23d3c`, with capability mirror `b590`, structural credential-free helper `bcefa1`, ACK `7d221416`, and recovery `1dbad97` packets.
+ACK transport passed nine focused tests with zero lint; recovery passed four top-level/43 subcases through actual Reader composition with zero lint, as component evidence only.
+Fast-forward proof: `/tmp/rpgmigrate-m6-ack-integration-20261109/fast-forward-proof.json`, SHA-256 `5c167ff85f802d716aa1655219a6d2d4c1717a06032f7f6f6ef49e0e2c432c5e`.
+Interfaces/dispatch, runtime target-retry producer/Reader, owned-cleanup comparison, and activation remain open; `UnsupportedEngine` is unchanged.
 Full canonical in-memory admission remains authoritative; these source-only clients and correlation hashes grant no target durability/completion authority, production native acceptance, or new image qualification.
 The four clean M6 source/tool commits `ccda81f3`, `3d1bfe6f`, `f6f7de44`, and `32dbcfc` are fast-forwarded into the central operator feature branch at `32dbcfc`; remote origin remains `5616d82`, without a checkpoint push.
 The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings, retaining focused tests; no M6 activation, whole review, full-Go, or runtime closure follows.
@@ -894,7 +896,10 @@ Successor `/private/var/tmp/rpgmigrate-m7-manifest-integration-rgpbyxg6/source` 
 It requires a new manager/archive/RUN; no old acceptance reuse, CNPG stage completion, or new runtime qualification is claimed.
 Phase-1 retirement proof: `/private/var/tmp/rpgmigrate-m7-phase1-retirement-kf0hbluu/phase1-final-proof.json`, SHA-256 `9c7b65266a8a1fd0d567e60afae3099f79c1682fe534d72e6c59b93d38fecd61`: exact S2 and three node containers/processes/cgroups are absent while all 206 volumes, images/network/originals, source, and RUN evidence remain preserved.
 The later independent unused barrier passed: `/private/var/tmp/rpgmigrate-m7-independent-unused-barrier-n3eby4u2/independent-unused-barrier-proof.json`, SHA-256 `01e1de3b257925a8fc7d3850f2950907737d6c8d9b213da13383cc1a9a0000f3`.
-Root authorized only the three exact nonforced unused-volume removals under the existing disk approval; reclaim effects remain pending, without a deletion or guarded-DOWN qualification claim.
+The exact nonforced reclaim removed only the three new unused volumes, preserving the protected 203; proof `/private/var/tmp/rpgmigrate-m7-phase2-exact-volume-reclaim-hjg32s04/final-proof.json`, SHA-256 `ddad85dae180a6f13aacab59f9cc3ca13fca40c4c5f3852cac8d939fe223ae67`.
+The approved 128-to-160-GiB resize passed with the same fourteen CPUs/32768 MiB, PostgreSQL 16/18 IDs/ports preserved, M0 restored and three original services running, retired f8 still stopped.
+Resize proof: `/private/var/tmp/rpgmigrate-m7-disk160-maintenance-yy9hryp5/final-resize-proof.json`, SHA-256 `77f1fc3753b91123e8583ae44b4246832bd681ec8b0547b9f1ebade617327394`.
+Fresh `8af` preparation is running in RUN `/private/var/tmp/rpgmigrate-m7-manifest-run-o9aaccp_`, RunID `2f06271bc8dd494ba1ba7025d91dc76e`; no PREPARE PASS, UP, or acceptance is claimed.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-loaded-retirement-ai592_0t/retirement-proof.json`, SHA-256 `32c45afc9b3962979c2cde03c8d4a847fb9c3ffc0266b6d6b94d6777b114e513`.
@@ -953,7 +958,7 @@ It binds the existing creation/source-preflight/cleanup logs and canonicalized r
 Bounded M5 image peak and M7 full-phase growth remain unqualified; no image/kind execution qualification follows from this read-only check.
 The authorized maintenance passed and the exclusive lease is released, with stability verified across the launcher and two later tool exits.
 Final proof: `/private/var/tmp/rpgmigrate-vm-maintenance-1qbpv5lh/final-maintenance-proof.json`, SHA-256 `8049b048872366a5ae98e37f7325f053d7a1bf603b83be2eb8a8ecadf30e9f5f`; the earlier `85bf` proof is provisional.
-The rootless AppleHV VM has fourteen CPUs, 32768 MiB memory, and 128 GiB disk, with vda4/XFS grown; `/var` has 41,988,149,248 free bytes and the host has 237,409,554,432.
+That earlier rootless AppleHV maintenance established fourteen CPUs, 32768 MiB memory, and 128 GiB disk with vda4/XFS grown; its receipt recorded `/var` 41,988,149,248 free bytes and host 237,409,554,432, before the later 160-GiB resize above.
 Persistent PostgreSQL 18 CID `2474b0a76854696548c79e05d2ff23ccde9158b1ef305855b6027f14c87745a4` uses volume `rpgmigrate-pg18-persistent-07949d733b9b4c1d8a199dd7f8077f1f`.
 It preserves name/loopback port 38209, system ID `7705919902701522967`, timeline 1, settings, database/role/configuration, and data fingerprints.
 Old CID `f8ebf039713a75e4b69208d4871b1c6b9238c0b207995ff0044bd604b680651b` is retired, stopped, and retained: never restart it.
@@ -1037,7 +1042,7 @@ The later checker must require a nonempty expected inventory and parseable findi
 
 ## Capacity and parallel execution, user update 2026-11-08
 
-The verified VM allocation is fourteen CPUs, 32768 MiB memory, and a 128-GiB disk; final maintenance is accepted and its lease released.
+The verified VM allocation is fourteen CPUs, 32768 MiB memory, and a 160-GiB disk; the M7 section binds the latest resize/preservation proof.
 The original 21:35 UTC startup failure predates the CPU/memory resize.
 The earlier M7/database overlap permission remains subject to measured capacity and host Cargo headroom; failed-node cleanup and the leader's resource-budget release precede an M5 runtime build.
 The two-database-track window reserves six CPUs per track plus two reserve CPUs, totaling fourteen CPUs and 18 GiB.

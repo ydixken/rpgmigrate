@@ -465,3 +465,8 @@ Keep targeted materialization boundary checks separate from actual Kubernetes, P
 
 Capture the pinned external renderer’s real output before defining parser fixtures; `-o json` does not by itself promise one JSON document.
 Keep framing coverage faithful to that output and retain bounded object/identity checks, then require a fresh source-bound manager/archive/RUN after a bootstrap parser change instead of reusing old acceptance.
+
+## Keep active execution data separate from completed proof requests
+
+Use `ExecutionData` for active/source/retry observations and reserve `ExecutionRequest` for completed-only proof requests.
+Never broaden the completed validator or fabricate persisted E to make an active client fit; retain route-specific validation and the independent completion authority boundary.
