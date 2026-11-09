@@ -273,8 +273,9 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
 Production native admission still returns `UnsupportedEngine`; M4's engine and mocked-Kubernetes helper evidence does not qualify the operator lifecycle.
-The clean central operator checkpoint is `1dbad97c4476d342be6ff19f5c5083ab11b1233b`, with central capability mirror `b590`, structural credential-free helper `bcefa1`, ACK `7d221416`, and recovery `1dbad97` source packets.
-ACK transport and recovery/actual-Reader composition have focused passing checks, while interfaces/dispatch, runtime target-retry producer/Reader, and owned-cleanup comparison remain open; `UnsupportedEngine` is unchanged.
+The clean central operator checkpoint is `d28dd9c2b8d87344d337c3dad9c837306d8bb074`, integrating control `058d8c42` and retry Reader `d28dd9c` against the unchanged 105031-byte Python source.
+Control and retry Reader have focused source/lint evidence only; interfaces/dispatch, runtime target-retry producer/Reader, and owned-cleanup comparison remain open, without activation or new producer/image qualification.
+A private 111754-byte Python successor passed 54 mechanism tests, with canonical source/registry/golden atomic integration in progress; comparison parser/transport/helper work and the bounded isolated Rust sealed-child-FD change remain private and unqualified.
 Full canonical in-memory admission remains authoritative; correlation hashes and informational lag supply no target durability or completion authority, runtime acceptance, or new image qualification.
 Task 0's five-file pure-helper export is frozen with nineteen Python and eighteen focused Go tests passing, including exact PG16/18 SQL fixture equality.
 The earlier admission-reader handoff separately passed thirteen top-level tests and 330 focused checks with zero failures or skips; the final relay-aware Reader composition passed fourteen top-level tests and 344 focused checks with zero failures/skips against the exact new relay/transport inputs.
@@ -334,8 +335,13 @@ The later legacy gate failed before CNPG apply: the pinned kubectl renderer emit
 A read-only exact-renderer reproduction confirms that framing defect; successor source `8af5c480741caa760294c52ece74c4a89c586bab80d4995a522acd4dcc3be65d` changes only three files with 529 peers preserved and matches the 214 focused passing checks.
 Phase-1 retirement retained all 206 volumes; the later independently barred, exact nonforced reclaim removed only the three new unused volumes and preserved the protected 203.
 The approved disk resize from 128 to 160 GiB passed with the same fourteen CPUs/32 GiB, preserved PostgreSQL 16/18 IDs/ports, restored M0 and three original running services, and retired f8 still stopped.
-Fresh `8af` preparation is running in a new RUN, without PREPARE PASS, UP, or acceptance.
-The successor requires a new manager, archive, and RUN; old acceptance is not reusable and no M7 stage completion follows.The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the fresh preparation inputs.
+The fresh `8af` RUN passed PREPARE/CHECK/UP/LOAD with six archives/eighteen image pairs, then the legacy gate failed in 334.581 seconds (Task 201) before the Go suite.
+CloudNativePG hit CreateContainerError because CRI normalized the existing raw import alias to a missing `docker.io/library/import-2026-11-09@sha256:2e4051608564bbe757b099067e2df55f5c4a960b6191837ce448ec3d1760b297` key; retained content and source evidence establish no alias-deletion cause.
+One exact nonforced post-failure alias addition on the Pod host made the same original CloudNativePG Pod Ready with restart count zero; this mechanism experiment leaves the historical gate FAILED and supplies no Go/M7 pass.
+Source-aware load-alias/actual-CRI-imageID planning is in progress; the failed RUN and S2 retain the original hard deadline without renewal.
+A separate four-CPU/4-GiB focused Linux Rust window with a 6-GiB growth envelope is being planned; it is not a benchmark reservation or result.
+The earlier successor required a new manager/archive/RUN; old acceptance was not reused and no M7 stage completion follows.
+The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the failed handoff and experiment separately.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 The leader accepted the [M7 bootstrap slice](superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for code-only implementation by separate lifecycle and suite owners on isolated operator branches.

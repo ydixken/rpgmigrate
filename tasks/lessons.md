@@ -470,3 +470,9 @@ Keep framing coverage faithful to that output and retain bounded object/identity
 
 Use `ExecutionData` for active/source/retry observations and reserve `ExecutionRequest` for completed-only proof requests.
 Never broaden the completed validator or fabricate persisted E to make an active client fit; retain route-specific validation and the independent completion authority boundary.
+
+## Qualify the actual container creation image path
+
+Content presence or successful image inspection does not prove the runtime’s CreateContainer reference path.
+Bind normalized CRI references through the exact node-local OCI index, selected manifest, and config chain; an actual CloudNativePG normalized-index imageID must not be admitted by silently stripping reference strings.
+Keep a post-failure alias experiment separate from the failed historical gate, and require the reviewed source/import/runtime profile before claiming workflow acceptance.

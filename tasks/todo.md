@@ -723,7 +723,11 @@ M0 through M5 stay closed; M6 through M10 remain open.
 
 ### Current composed Go closing profile and blockers
 
-The authoritative clean central operator HEAD is `1dbad97c4476d342be6ff19f5c5083ab11b1233b`, tree `4c1f25e501c2e30fc0a867b3ef2c21596dc23d3c`, with capability mirror `b590`, structural credential-free helper `bcefa1`, ACK `7d221416`, and recovery `1dbad97` packets.
+The authoritative clean central operator HEAD is `d28dd9c2b8d87344d337c3dad9c837306d8bb074`, tree `1ad0ccc51dff948ac3e9d67ba051a1d3ab2333e3`, integrating control `058d8c428bfcff17bdba59cc65237227e6bd41cd` and retry Reader `d28dd9c`; the 105031-byte Python source is unchanged.
+Control passed 78 named checks/zero lint and retry Reader passed six focused checks/zero lint; these retained source proofs grant no activation or new Python/image qualification.
+Fast-forward proof: `/tmp/rpgmigrate-m6-control-retry-integration-20261110/fast-forward-proof.json`, SHA-256 `2e1a86f86e7add5f47831584fa5acd1d7d6c379c71fab39df3e3e9b14e9e56b1`.
+The private two-file Python export `d1abd09` has 111754 source bytes/54 mechanism tests and is not central; canonical source/registry/golden atomic integration is in progress.
+Comparison parser/transport/helper work is private; the real-child sealed-FD gap has a bounded Rust change isolated under `/tmp/rpgmigrate-m6-compare-sealed-files`, without runtime/support qualification.
 ACK transport passed nine focused tests with zero lint; recovery passed four top-level/43 subcases through actual Reader composition with zero lint, as component evidence only.
 Fast-forward proof: `/tmp/rpgmigrate-m6-ack-integration-20261109/fast-forward-proof.json`, SHA-256 `5c167ff85f802d716aa1655219a6d2d4c1717a06032f7f6f6ef49e0e2c432c5e`.
 Interfaces/dispatch, runtime target-retry producer/Reader, owned-cleanup comparison, and activation remain open; `UnsupportedEngine` is unchanged.
@@ -899,7 +903,13 @@ The later independent unused barrier passed: `/private/var/tmp/rpgmigrate-m7-ind
 The exact nonforced reclaim removed only the three new unused volumes, preserving the protected 203; proof `/private/var/tmp/rpgmigrate-m7-phase2-exact-volume-reclaim-hjg32s04/final-proof.json`, SHA-256 `ddad85dae180a6f13aacab59f9cc3ca13fca40c4c5f3852cac8d939fe223ae67`.
 The approved 128-to-160-GiB resize passed with the same fourteen CPUs/32768 MiB, PostgreSQL 16/18 IDs/ports preserved, M0 restored and three original services running, retired f8 still stopped.
 Resize proof: `/private/var/tmp/rpgmigrate-m7-disk160-maintenance-yy9hryp5/final-resize-proof.json`, SHA-256 `77f1fc3753b91123e8583ae44b4246832bd681ec8b0547b9f1ebade617327394`.
-Fresh `8af` preparation is running in RUN `/private/var/tmp/rpgmigrate-m7-manifest-run-o9aaccp_`, RunID `2f06271bc8dd494ba1ba7025d91dc76e`; no PREPARE PASS, UP, or acceptance is claimed.
+Fresh `8af` RUN `/private/var/tmp/rpgmigrate-m7-manifest-run-o9aaccp_`, RunID `2f06271bc8dd494ba1ba7025d91dc76e`, passed PREPARE/CHECK/UP/LOAD with six archives/eighteen image pairs; the legacy gate then failed in 334.581 seconds (Task 201) before Go.
+CloudNativePG CreateContainerError came from normalizing an existing raw import alias to missing key `docker.io/library/import-2026-11-09@sha256:2e4051608564bbe757b099067e2df55f5c4a960b6191837ce448ec3d1760b297`; content/digests/snapshot exist, and no alias deletion is observed or asserted.
+Sealed failed handoff: `/private/var/tmp/rpgmigrate-m7-manifest-legacy-gate-0uu04_9w/sealed-handoff-manifest.json`, SHA-256 `0d1b1bd8fe8631ab99e1d19d4eed411df7a61018d0a1784ea5d7489ad4970a41`.
+The single authorized nonforced alias addition on the Pod host made the same original CloudNativePG Pod Ready/restart zero; the historical gate remains FAILED, with no Go/M7 pass.
+Sealed experiment: `/private/var/tmp/rpgmigrate-m7-CNPG-alias-experiment-r5ad002c/sealed-experiment-manifest.json`, SHA-256 `f59ae83815c0e1b80107e2abf71df7240f82bfe9334cd3311121d2e5f68163f9`.
+Source-aware load-alias/actual-CRI-imageID research is in progress; source/RUN/S2 retain original hard deadline `2026-11-10T01:02:25.725552Z`, without renewal or old acceptance repair.
+The VM remains fourteen CPUs/32 GiB/160 GiB with originals protected; a separate four-CPU/4-GiB focused Linux Rust window with 6-GiB growth is planning only, without benchmark execution.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-loaded-retirement-ai592_0t/retirement-proof.json`, SHA-256 `32c45afc9b3962979c2cde03c8d4a847fb9c3ffc0266b6d6b94d6777b114e513`.
