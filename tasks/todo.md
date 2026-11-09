@@ -5,7 +5,8 @@ The [M0 implementation plan](../docs/superpowers/plans/2026-11-08-m0-preserve-re
 Keep implementation evidence separate from parser compatibility and operator runtime qualification.
 M0–M5 are closed; M4 engine source and six accepted behavior documents are integrated at `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`, with separate operator test-only commit `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 M6–M10 remain open; production native operator admission, kind E2E, power-loss/performance, and release qualification remain unqualified.
-Continue the user-approved M5/M6/M7 plans under the dated maintenance and runner-dependency authorizations below; M4 evidence does not activate the operator or qualify the new mechanism.
+On 2026-11-09, the user directed us to push through M10: execute the approved remaining M6–M10 gates and do not stop at intermediate planning or checkpoint stages.
+Closure still requires evidence; benchmark runs and VM reservations remain unapproved, main/tag/release/GHCR boundaries persist, and performance ranges are inferences without measured speedup or an ETA.
 
 ## User authorization and active ownership, 2026-11-09
 
@@ -705,6 +706,11 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 The four clean M6 source/tool commits `ccda81f3`, `3d1bfe6f`, `f6f7de44`, and `32dbcfc` are fast-forwarded into the central operator feature branch at `32dbcfc`; remote origin remains `5616d82`, without a checkpoint push.
 The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings, retaining focused tests; no M6 activation, whole review, full-Go, or runtime closure follows.
 Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m6-checkpoint-ff-gp9fk58d/fast-forward-proof.json`, SHA-256 `17e8dd22a95c8b1412f9a50cfe60cefd08e4128cfce7548bce0082e5cb3b1ab8`.
+The second clean packet (`f28c450`, `b8c6f51`, `1a569b7`, `4ecbd69`) is accepted and fast-forwarded into the central operator feature branch at `4ecbd69cc9e56e4710096b6f0475fc7d2a62fe8b`, tree `978f450c0976ef9f6d21a1feb0d42438eac7a943`, with exact four commits/fourteen paths/560 files verified clean and index empty.
+Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m6-components-ff-gnwrr55e/fast-forward-proof.json`, SHA-256 `6ab717a902a583d57ad04c376280655f2293fb5cfe9857dbc24a52a05d086e8b`; original checkout and all 44 other worktree refs are preserved, with no new push/CI/runtime result.
+The real native worker producer/dispatch remains missing and is being planned; no runtime activation, whole-M6 review, or full-Go closure is claimed.
+Resolver disposition: `/Users/ydixken/.codex/tmp/m6-containerd-dns-research-20261109/existing-containerd-dns-disposition.md`, SHA-256 `b78e83c046be9441e8d0fd25362b500af30cfb8180e1c4a824a7d7a8d7f24a00`, favors qualifying the existing standard ClusterFirst sandbox resolver.
+Actual runtime/NSS/HOME bindings remain gaps; no ConfigMap, numeric-only restriction, or HOME change is authorized.
 The approved [Jobs/lifecycle plan](../docs/superpowers/plans/2026-11-09-m6-native-helper-jobs-lifecycle-direct-image.md) and [dated amendment](../docs/roadmap.md#m6-native-helper-jobslifecycle-amendment-2026-11-09) use canonical pure policy exports, fresh bounded 90-second Job/operation, earlier persisted E, and administrator-selected immutable image expectations; D1 exports are frozen and Jobs/lifecycle focused verification is joined, configuration later.
 The future status.Image display-only correction preserves exact spec/imageID equality; actual direct runtime, identical-E acknowledgment, PVC/file/resolver gates remain open.
 D1 manifest: `/Users/ydixken/.codex/tmp/m6-d1-policy-export-20261109/manifest.json`, SHA-256 `3571c6de4d1cd3a27045fbeeaa31f967f080d1f410b99e4ab1bb3a409ca344ae`; sibling proof SHA-256 `93f72c0797215f9c03bcaf3e5a0c3432b39beb4c997d4406e8fa47c55e4eb400`, recording seven tests/86 checks and zero native lint findings, without activation.
@@ -833,7 +839,9 @@ The watch-only replacement restored monitoring under the original deadline with 
 The blocked Loaded workflow was then retired under standing container-only authorization, with the watch intentionally stopped before expiry rather than a fabricated deadline event.
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda` (manifest `2f46f044`); fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 Fresh PREPARE/CHECK proof: `/private/var/tmp/rpgmigrate-m7-check-index-preparation-mlwoh9ym/final-preparation-proof.json`, SHA-256 `4d89e0731c37a2f8331f07af03bdda713d28b8f7823bcba540ae6e46d9cd394d`; the new manager/RUN has no UP result, and the retired Loaded RUN remains preserved.
-The approved watch-handover plan `5149c85d` has fourteen fake controls; live handover remains unqualified, no lease is renewed, and metrics permission is approved but unapplied.
+The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified, with no lease renewal.
+The tracked kind-only Go pre-uninstall build-info hook plan `6324b61a` awaits exact contract review and supersedes the private observer implementation proposal; metrics permission remains approved but unapplied.
+The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-loaded-retirement-ai592_0t/retirement-proof.json`, SHA-256 `32c45afc9b3962979c2cde03c8d4a847fb9c3ffc0266b6d6b94d6777b114e513`.

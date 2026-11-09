@@ -100,6 +100,8 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
+On 2026-11-09, the user directed us to push through M10: continue all approved M6–M10 execution gates rather than stopping at intermediate plans or source checkpoints.
+Milestone closure still requires evidence, benchmark runs remain unapproved, and main/tag/release/GHCR boundaries remain unchanged; no ETA or measured speedup is implied.
 Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explicit; M4 engine qualification does not activate the operator.
 
 ### M0: Preserve and reset (rpgmigrate)
@@ -278,6 +280,10 @@ The new transport export passed 97 checks/92 leaf cases; these are focused mecha
 These focused checks do not qualify packaged Python/libpq, database, Kubernetes/PVC, or opaque-file runtime behavior.
 Four clean M6 source/tool commits (`ccda81f3`, `3d1bfe6f`, `f6f7de44`, `32dbcfc`) are integrated by fast-forward in the central operator feature branch.
 The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings and retained focused tests; remote origin remains `5616d82`, without a checkpoint push or M6 activation/review/full-Go/runtime closure.
+The second four-commit M6 packet (`f28c450`, `b8c6f51`, `1a569b7`, `4ecbd69`) is accepted and fast-forwarded into the central operator feature branch at `4ecbd69cc9e56e4710096b6f0475fc7d2a62fe8b`, with all fourteen paths/560 files verified and clean.
+This checkpoint adds no push, CI, or runtime result.
+The real native worker producer/dispatch remains missing and is being planned; production activation, whole-M6 review, full-Go, and runtime closure remain open.
+The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.
 The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
 The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) has a cap-only admission handoff with nine tests/105 checks on the old relay input; it does not qualify the new Python binding implementation.
 A tiny actual Linux ARM primitive probe passed six nonconnecting groups on M5 image `b463`; TLS/database/Kubernetes/full-helper, ordinary-file, service, and resolver qualification remain open.
@@ -300,7 +306,9 @@ The original finite supervisor hit a read timeout during load; guarded DOWN corr
 The watcher was restored under the original deadline with a recorded 648.049941-second gap, then intentionally stopped before expiry when the blocked Loaded workflow was retired.
 Exact three-node container/process/cgroup removal is complete under standing approval; all 203 volumes, 339 images, immutable network properties, original four services, backups, source, and Loaded RUN evidence remain preserved, with actual CPU/RAM reservation released.
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
-The approved watch-handover plan has fourteen fake controls; live handover remains unqualified, no lease is renewed, and metrics permission remains approved but unapplied.
+The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified and no lease is renewed.
+The tracked kind-only Go pre-uninstall build-info hook plan `6324b61a` awaits exact contract review and supersedes the private observer implementation proposal; existing metrics permission is unapplied.
+The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 The leader accepted the [M7 bootstrap slice](superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for code-only implementation by separate lifecycle and suite owners on isolated operator branches.

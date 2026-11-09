@@ -443,3 +443,8 @@ After repeated bootstrap-contract failures, re-plan bounded startup/DOWN metadat
 The user approved the bounded temporary metrics observer policy for owned kind E2E runs; reuse this authorization without asking again only after fresh source/RUN/namespace/manager/deadline admission.
 Keep automount false, GET `/metrics` only, one exact ServiceAccount binding, one in-memory 600-second token without renewal, and the admitted owned-Pod loopback TLS tunnel.
 Clean exact recorded observer UIDs/resourceVersions on every bounded exit; preserve replacements and never expand this approval to production RBAC, Secrets, new namespaces, lease renewal, or benchmark execution.
+
+## Continue through the approved milestone gates, 2026-11-09
+
+The user directed us to push through M10; continue approved M6–M10 execution instead of treating intermediate plans or source checkpoints as the end of the assignment.
+Keep roadmap and todo synchronized, require evidence for closure, and retain the benchmark hold and main/tag/release/GHCR boundaries; performance ranges are inferences until measured.
