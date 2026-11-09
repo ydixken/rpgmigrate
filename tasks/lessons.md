@@ -454,3 +454,9 @@ Keep roadmap and todo synchronized, require evidence for closure, and retain the
 Approved milestone scope already permits owned M7 UP/load/legacy/native tests and ordinary fresh owned fault fixtures; enforce source/ownership/resource guards without inventing another blanket user-approval gate.
 Keep the actual benchmark artifact/argv hold and out-of-scope shared-VM/original-resource/main/tag/release/GHCR boundaries explicit.
 Attribute runtime-synthesized HOME/passwd observations to that runtime; they do not prove immutable-image metadata or a different container runtime’s defaults.
+
+## Canonical secret-bearing temporary storage
+
+Keep secret-bearing temporary storage in one canonical materialization policy and require builders and independent admission to consume the same output.
+For the native helper/preflight profile, preserve the canonical Memory-backed 64-MiB `/tmp`; a builder-local override can silently break both credential isolation and exact admission even when its own tests pass.
+Keep targeted materialization boundary checks separate from actual Kubernetes, PVC, resolver, and runtime qualification.

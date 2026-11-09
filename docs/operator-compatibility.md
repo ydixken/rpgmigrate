@@ -107,6 +107,9 @@ The M2 plain-clone implementation covers schema, parallel text COPY, post-data, 
 Binary COPY, splitting, large objects, and full operator configuration behavior remain unqualified and explicitly staged.
 M3/M4 follow and cutover implementation does not qualify the complete operator workflow; use the task ledger for the exact closing gates.
 The M7 vertical slice explicitly switches off binary COPY, splitting, and large objects; M8 qualifies them before using operator defaults.
+In the explicitly narrowed native profile, an effective split threshold of zero makes the operator native renderer omit both `--split-tables-larger-than` and `--split-max-parts`, including when max-parts is otherwise positive.
+This is a renderer rule, not a relaxation of engine parser admission; the default/nonzero split profile and binary COPY still require their qualified capabilities, and the legacy renderer remains unchanged.
+Dormant native worker construction and passing CLI vectors do not establish production native support or the M7 runtime profile.
 DropIfExists and filters are excluded from the native E2E profile.
 M1 freezes precise native option and environment admission rather than inferring support from the inventory above.
 

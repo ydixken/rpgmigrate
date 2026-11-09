@@ -282,10 +282,12 @@ Four clean M6 source/tool commits (`ccda81f3`, `3d1bfe6f`, `f6f7de44`, `32dbcfc`
 The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings and retained focused tests; remote origin remains `5616d82`, without a checkpoint push or M6 activation/review/full-Go/runtime closure.
 The second four-commit M6 packet (`f28c450`, `b8c6f51`, `1a569b7`, `4ecbd69`) is accepted and fast-forwarded into the central operator feature branch at `4ecbd69cc9e56e4710096b6f0475fc7d2a62fe8b`, with all fourteen paths/560 files verified and clean.
 This checkpoint adds no push, CI, or runtime result.
-The approved [worker construction/dispatch plan](superpowers/plans/2026-11-09-m6-native-worker-construction-dispatch.md) has frozen Commands (91 focused plus thirteen legacy checks, zero lint) and worker builder (52 checks, zero lint, three new connection goldens with legacy preserved) handoffs, not yet committed.
-Lifecycle focused tests passed 94 checks, with final owned-test lint repairs underway; the native optimistic status patch is approved and top-level `UnsupportedEngine` remains unchanged.
-Actual Linux executable parity is assigned to a network-none ephemeral M5 container, without a result yet; discovery/preflight planning must not reuse legacy raw-DSN argv or raw-stderr scripts.
-Production activation, whole-M6 review, full-Go, and runtime closure remain open.
+The [worker construction/dispatch packet](superpowers/plans/2026-11-09-m6-native-worker-construction-dispatch.md) is now integrated in the central operator branch at `cba3fa03fe051432da3ef2650db2db2c8a9b2ad4`, with eleven paths/566 source files verified, each commit prefix lint-qualified, final joined lint zero, lifecycle 108 checks, and eleven exact Linux engine CLI cases passing.
+The integration-only retry display-label lint correction was refrozen under strict lint; it is not a gate exception, and top-level `UnsupportedEngine` remains unchanged.
+The approved [discovery/preflight plan](superpowers/plans/2026-11-09-m6-native-discovery-preflight.md) separates a credential-free version Job from fixed Python DB preflight, requires actual capabilities before credentials, and reuses no legacy raw-DSN argv or raw stderr.
+Frozen successor transport/helper/preflight handoffs remain uncommitted and unactivated; canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides.
+Jobs/controller preflight implementation is active; resolver policy still always refuses, and actual DNS/NSS/HOME/TLS/image qualification remains open.
+This packet adds no DB/operator-migration qualification, push, CI, whole-M6 review, or full-Go result; production activation and runtime closure remain open.
 The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.
 The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
 The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) has a cap-only admission handoff with nine tests/105 checks on the old relay input; it does not qualify the new Python binding implementation.
@@ -312,7 +314,8 @@ Exact three-node container/process/cgroup removal is complete under standing app
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified and no lease is renewed.
 The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is building with bounded installed-client-go sanitization/cancellation fixes; metrics permission remains unapplied.
-The Python handoff passed 198 source-level tests; neither handoff establishes live qualification or a new UP.
+The Python handoff passed 198 source-level tests; the Go hook is finishing 124 focused checks plus actual installed-SDK tests, without live qualification or a new UP.
+The guide update is assigned, and the old prepared RUN remains obsolete after successor source changes.
 The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
