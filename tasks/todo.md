@@ -25,8 +25,13 @@ The user authorized pushing `rpgmigrate` `feat/native-engine` and the operator n
 Feature branches only are authorized, with no main push/merge, tags, releases, or GHCR publication; no push or CI result is recorded by this decision.
 The one-off cleanup exception permits exactly three failed kind-node containers for the failed RUN, not volumes, networks, images, backups, original services, RUN markers, or a general guard bypass.
 Final independent verification accepts the exact three-container cleanup; preserve all source RUN creating/empty files without mutation and use corrected fresh source/RUN.
-Operator preflight exposed all-ref/tag GitLab mirroring and skipped tests; the assigned two-workflow guard/hosted-test slice is separate from the pending default-main GitLab mirror authorization.
-Operator feature push remains held, with no GitLab publication inferred; exact engine feature pushes and their hosted outcomes are recorded under M5.
+Operator preflight exposed existing all-ref/tag GitLab mirroring and skipped tests; the earlier hold prevented inferring downstream authorization from the origin-only decision.
+On 2026-11-09, the user explicitly approved the existing GitLab mirroring triggered by the operator native feature branch.
+We resolved the publication P1 by authorization and keep the existing mirror enabled; this decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
+The CI owner restored its mirror-guard edits to baseline and committed only `ci.yml` as `ccde83912cdbc9e152f0bc51c47c49954ede8a9d`, parent `c262322909ac03a7101ea3bfac2c4823efa62e95`; normal push to `origin/test/m4-closing-m6-composed-20261109` is verified.
+Early receipt: `/tmp/rpgmigrate-feature-ci-preflight-20261109/operator-ccde839-push-early-receipt.json`, SHA-256 `689243c6b62ae2549c1fce755530a3723988ae5e0cc0e1aaa1f165f71a57d149`.
+[Operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254706) is running and the [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254999) is queued at this receipt; neither outcome is accepted yet.
+Exact engine feature pushes and their hosted outcomes remain recorded under M5.
 
 ## M0: Preserve and reset (rpgmigrate)
 
@@ -681,7 +686,7 @@ Hosted AMD64 image is `e545dff41f51892da0802feb1be12da35b4ad0c7571168165df1d9d9f
 M5 is complete after the same reviewer’s final acceptance of hosted multi-architecture, read-only runtime, source/artifact, clone-inventory, and retained stock PostgreSQL 16/18 evidence bindings.
 The retained database evidence preserves its original 266-case subset and forty-case sampling/composite provenance; exact source/Cargo/build/Taskfile/test/harness bindings are unchanged from `67f7fcb` to `7c04dff`.
 This acceptance claims neither a fresh aggregate database run nor migration using the production image; broad operator Go checks are not applicable to engine-only packaging.
-The operator-publication P1 remains an open, separate blocked action; absent operator push does not invalidate engine M5 qualification.
+The operator-publication P1 is resolved by the dated explicit GitLab mirror authorization; it remains separate from engine M5 qualification.
 No tags, releases, or GHCR publication are authorized, and these checks do not close M10.
 
 - [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
@@ -698,7 +703,13 @@ The admission-reader export is frozen at `/Users/ydixken/.codex/tmp/m6-admission
 Its observed thirteen top-level tests and 330 focused checks passed without failures or skips, using exact peer inputs and same-E/live-binding controls; these are separate from the pure-helper counts.
 All Task 0 source handoffs are frozen, without integration, production admission activation, or broad milestone closure.
 Runtime qualification and production activation remain false; exact packaged-libc resolver bounds and opaque-file stability before first consumption, including service expansion, are unresolved.
-Checked WebSocket transport has focused passing checks; default Kubernetes 1.36 split-log-gate behavior currently fails closed for required result delivery pending the planned correction.
+Checked WebSocket transport has focused passing checks; the approved [delivery correction](../docs/superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md) replaces the default-disabled split-log prerequisite, with three disjoint source owners building it.
+The [dated roadmap amendment](../docs/roadmap.md#m6-default-kubernetes-delivery-amendment-2026-11-09) keeps SQL in main, separate result streams in checked exec, and terminal Job success/complete empty ordinary logs as a separate requirement; no Stream query is used.
+Require Running before exec and the same incarnation Running or successful exit 0/signal 0 afterward; neither post-exec state bypasses terminal Job verification.
+Earlier focused handoffs do not qualify this correction; runtime/image/resolver/file/TLS/PVC gates and production admission remain open.
+
+- [x] Record the root-approved 2026-11-09 default Kubernetes delivery amendment and preserve the reviewed private plan provenance.
+- [ ] Integrate and qualify the delivery correction under its required protocol, default-cluster, closure, and failure controls.
 Actual/defaulted Pod execution, private file/SQL identity admission, packaging, and real PVC permissions still need their assigned qualification; no permanent contract reduction is accepted.
 
 The 546-file composition has tree `7442e438270f2d3ae47317447f7f07299fcf5322` and source hash `732fcf1f9fefe21db5b6ae15f4f3e3508fc31f8899bfb5e489281358602edd1c`.
@@ -846,7 +857,10 @@ The missing `podman exec -i` source fix is ready with 81 focused checks and a se
 Frozen 530-entry manifest: `/private/var/tmp/rpgmigrate-m7-marker-stdin-4q0vvk_e/manifest.json`, SHA-256 `252beb9266dd1df454e75e9b48a09d92f373f330f1b83e78d4c9b6afee08a223`.
 Sibling `focused-green.json` has SHA-256 `a0743c7e5ede8d3bbad0eb42d419f06c1409db844bebc681fba2d1aa51e069bd`; `whole-harness.json` has SHA-256 `9bcbfd77efce0ffd4d1481c2b8b9828f075acfcaa65c38bf94701440cbc2ed95`.
 The new source integration preserves 527 unowned paths while changing exactly three fix/guide files; its 530-path manifest is `/private/var/tmp/rpgmigrate-m7-marker-guide-integration-ysunzd95/manifest.json`, SHA-256 `bc3d7721cd999bbd8156b5cbedafe80ced7ef2044d45575584b4acb60c122fbd`.
-The runtime owner is authorized only for a tiny capped real-marker probe and fresh manager/RUN preparation, stopping before kind UP; no M7 runtime qualification is claimed.
+The real frozen-marker probe passed root-owned mode-0600 readback, no-clobber, and exact owned-probe absence checks.
+Proof: `/private/var/tmp/rpgmigrate-m7-marker-roundtrip-1q0do84i/final.json`, SHA-256 `376d4e3a680ea4a0520bafc6b2ce9f38e76f698dc19f35a09600235dcd323de3`.
+Fresh RUN `/private/var/tmp/rpgmigrate-m7-marker-fixed-run-0x7obi5w` has manager preparation running, stopping before kind UP; no M7 workflow qualification is claimed.
+The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
 Corrected fresh source, a source-bound manager, and a fresh RUN remain required; source readiness is not a repaired UP or lifecycle qualification.
 The exact user-exception cleanup is independently verified at `/private/var/tmp/rpgmigrate-m7-exception-cleanup-xz08ws2q/final-exception-cleanup-verification.json`, SHA-256 `846f6314b9a729fb291adc53947e0464a540687f49c5f65bdda14a8675eaa759`.
 The approved containers were `5a59d137a4039907737030d0bf07ec1a511568a3222ea6a27413bef3935371e7`, `ed1456fddbb6c6fbe42178e6699f0c551d00f25ad0ba83374a93b294140a261f`, and `ec087f13078d0ebc16c1c21fce55cc42cc807f7b204f9b8b8a3346610cbe74de`.

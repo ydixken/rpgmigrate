@@ -425,3 +425,8 @@ Treat the failed-kind cleanup exception as exactly three approved container iden
 Keep creating/empty failed-RUN markers unchanged, require confirmed cleanup and the leader's resource-budget release before the held M5 build, and use fresh source/RUN after the diagnosed fix.
 
 Origin feature-branch push approval does not authorize downstream default-main GitLab mirroring or all-ref/tag publication; inspect workflow side effects and keep unresolved publication scope separate from CI readiness.
+
+## Existing operator GitLab mirror authorization, 2026-11-09
+
+The user explicitly approved the existing GitLab mirroring of the operator native feature branch, resolving its publication P1 and prior authorization hold.
+Keep the existing mirror enabled and retain the earlier origin-only rationale as history; do not ask again for the approved scope or infer repository settings/main edits, tags, releases, or GHCR permission.

@@ -261,7 +261,7 @@ Hosted AMD64/ARM64 images passed uid 65532/stock-libpq checks on the exact 65-fi
 M5 is complete after the same reviewer’s final acceptance of hosted multi-architecture, read-only runtime, source/artifact, clone-inventory, and retained stock PostgreSQL 16/18 evidence bindings.
 The retained database evidence preserves its original 266-case subset and forty-case sampling/composite provenance; exact source/Cargo/build/Taskfile/test/harness bindings are unchanged from `67f7fcb` to `7c04dff`.
 This acceptance claims neither a fresh aggregate database run nor migration using the production image; broad operator Go checks are not applicable to engine-only packaging.
-The operator-publication P1 remains an open, separate blocked action; absent operator push does not invalidate engine M5 qualification.
+The operator-publication P1 is resolved by the dated explicit GitLab mirror authorization; it remains separate from engine M5 qualification.
 No tags, releases, or GHCR publication are authorized, and these checks do not close M10.
 
 - [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
@@ -274,10 +274,10 @@ Production native admission still returns `UnsupportedEngine`; M4's engine and m
 Task 0's five-file pure-helper export is frozen with nineteen Python and eighteen focused Go tests passing, including exact PG16/18 SQL fixture equality.
 The admission-reader handoff separately passed thirteen top-level tests and 330 focused checks with zero failures or skips; all Task 0 source handoffs are frozen but not integrated.
 These focused checks do not qualify packaged Python/libpq, database, Kubernetes/PVC, or opaque-file runtime behavior.
-Checked WebSocket transport has focused passing checks, while default Kubernetes 1.36 split-log-gate behavior leaves current result delivery fail-closed pending its planned correction.
+Checked WebSocket transport has focused passing checks; the [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) replaces the default-disabled split-log prerequisite, with implementation and qualification pending.
 Opaque file preconsumption/service handling and exact packaged-libc resolver qualification remain unresolved; these blockers do not permanently narrow the approved contracts.
 The approved Python/ctypes/libpq exception and no-added-Secret-read/RBAC boundary remain in force: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than latest-Secret-version attestation.
-Operator feature push remains held for the default-main GitLab mirror authorization question; no GitLab publication is inferred from origin feature-push approval.
+The user explicitly approved existing operator-feature GitLab mirroring on 2026-11-09; the prior authorization hold is resolved, with CI/mirror outcomes tracked separately below.
 One independent whole-M6 review belongs at milestone close, and users retain write fencing/outstanding-transaction duties through cutover.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
@@ -319,6 +319,9 @@ The first M7 UP failed after tracked check/source/37-output and capacity admissi
 The omitted `podman exec -i` source fix is ready with 81 focused checks and the separate 169-check full wrapper/self-check run; these overlapping counts are not additive.
 The diagnosed fake marker/label controls did not retain state; the [ledger](../tasks/todo.md) binds the frozen source and check receipts.
 Corrected fresh source, a source-bound manager, and a fresh RUN remain required; no repaired UP qualification is claimed.
+The real frozen-marker probe passed root-owned mode-0600 readback, no-clobber, and exact owned-probe absence checks; the [ledger](../tasks/todo.md) binds its receipt.
+Fresh manager/RUN preparation/check is running, stopping before kind UP; this probe does not qualify the M7 workflow.
+The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
 The one-off user-exception cleanup passed for exactly the three failed-node containers, with no volume flags or other deletions.
 The source and every old RUN file remain unchanged in creating/empty state; volumes, kind network, images, backups, and original services are retained.
 The quiet reservation is released; this is neither guarded DOWN nor UP qualification.
@@ -353,6 +356,17 @@ No manual proof JSON or lease renewal is allowed.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
 - [ ] Independent reviews of durability, recovery and the operator diff; final matrix on the exact image digest.
 
+## M6 default Kubernetes delivery amendment, 2026-11-09
+
+We approved the [default Kubernetes delivery correction](superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md), superseding only the earlier split-log result-collection prerequisite.
+SQL authority stays in the admitted helper Job main process; one checked-exec relay carries the separate operation stdout/stderr streams without repeating SQL or creating authority.
+Before exec, require the exact admitted container to be Running; after strict exec success, accept that same incarnation either Running or successfully terminated with exit 0 and signal 0.
+Reject replacement, restart, failed or ambiguous state; successful post-exec termination does not replace separate terminal Job verification.
+`JobCompletedNative` requires the original Job/container's terminal success and complete empty ordinary combined logs without a Stream query, then final unchanged identity/status checks.
+Construct completion authority only after checked relay evidence, terminal main success, and final independent live/private closure validation all pass.
+Three disjoint source owners are building this correction; earlier focused transport/helper/reader proofs remain historical inputs and do not qualify the changed delivery path.
+Runtime, packaged image/libc resolver, opaque-file/service, TLS, and PVC gates remain open; production native admission remains disabled and no new RBAC or feature gate is authorized.
+
 ## User-authorized continuation, 2026-11-09
 
 The user authorized continuing the existing M5/M6/M7 plans and pruning unused Podman images, volumes, and build cache, plus growing `podman-machine-default`.
@@ -370,9 +384,12 @@ This authorizes feature branches only: do not push or merge to main, create tags
 The user separately authorized one-off removal of exactly the three failed kind-node containers identified for the failed RUN.
 That exception covers no volumes, networks, images, backups, original services, RUN-marker edits, or generic guard bypass; final independent verification now accepts its exact three-container cleanup.
 The cleanup result is recorded separately from its approval; no push, hosted-CI, image-build, or kind workflow success is claimed.
-Operator preflight exposed all-ref/tag GitLab mirroring and skipped tests; the assigned two-workflow guard/hosted-test slice remains separate from the unresolved default-main mirror authorization.
-Engine feature pushes of `34208b6` and `7c04dff` are recorded with their exact hosted-run scopes above; operator push stays held for the default-main GitLab mirror decision.
-No GitLab publication is authorized, and no feature CI result closes a milestone by itself.
+Operator preflight exposed existing all-ref/tag GitLab mirroring and skipped tests; the earlier hold prevented inferring downstream authorization from the origin-only decision.
+On 2026-11-09, the user explicitly approved the existing GitLab mirroring triggered by the operator native feature branch.
+We resolved the publication P1 by authorization and keep the existing mirror enabled; this decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
+The CI owner restored its mirror-guard edits to baseline and committed only hosted checks in `ccde83912cdbc9e152f0bc51c47c49954ede8a9d`, parent `c262322909ac03a7101ea3bfac2c4823efa62e95`.
+The normal feature push to `origin/test/m4-closing-m6-composed-20261109` is verified; [operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254706) and its [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254999) have no accepted outcome yet.
+Engine feature pushes of `34208b6` and `7c04dff` retain their exact hosted-run scopes above; no feature CI result closes a milestone by itself.
 
 ## Execution model
 
