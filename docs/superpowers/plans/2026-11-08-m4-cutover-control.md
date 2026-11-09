@@ -85,7 +85,7 @@ The following paths and line numbers refer to the frozen donor, not newer primar
   Restart deletion in `src/snapshot/follow.rs:118` supplies an absence/receipt pattern, not a general cleanup authority: its creation-point-only slot check cannot accept a legitimately advanced follow slot.
 - `Error` at `src/contracts.rs:18` preserves a constructor origin and private cancellation marker; `Error::is_cancelled` at line 66 is the discriminator.
   `src/follow.rs:437` preserves a real coordinator error and substitutes a queued worker cause only for typed cancellation; keep that behavior and never classify cancellation from diagnostic text.
-- `protocol::copy_report` at `src/protocol.rs:165` provides operator `native-report: ` framing and standalone JSON for COPY payloads; it is not a generic replication/cleanup builder.
+- `protocol::copy_report` at `src/protocol.rs:165` provides operator framing (`native-report:` followed by one ASCII space) and standalone JSON for COPY payloads; it is not a generic replication/cleanup builder.
   Shared owns the new command payload builders and must preserve those framing rules, strict M1 fields, and the empty discovery capability list until qualification.
 
 The donor registers FollowAuthority 11, FollowApply 11, FollowReceive 4, FollowSource 7, and FollowSnapshot 9 required live cases, plus 21 full follow E2E cases.
