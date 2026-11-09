@@ -258,7 +258,7 @@ Formatting and strict Clippy passed; the two-file utility-routing export is froz
 The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
 Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
 The production ARM64 image build disk peak remains unqualified despite cached base images.
-Measured headroom is 2.32 GiB above the 10-GiB floor; the unknown exact build peak prevents a capacity claim.
+The latest baseline is 12,565,581,824 free bytes; the unknown exact build peak prevents a capacity claim.
 Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
 The final-source image, AMD64 and hosted checks, and the M5 closing gate remain unqualified.
 These checks do not complete the released runner or hosted engine CI gates below.
@@ -315,9 +315,11 @@ No tracked check or up followed, all owned containers were proved absent, and ac
 Task 13 corrective planning found another producer boundary: Podman removal deletes transient CID files, leaving declared CID receipts missing.
 The Task 13 correction separates transient CID files from immutable receipts and validates complete version-output framing.
 The later tracked prepare and check passed on source `6222196c83af94e5652e72921b1e4010c72160221a90a58cab702942a10ce1bf`, with all 530 source entries unchanged.
-Kind up remains blocked by the fresh disk check: 13,300,498,432 bytes available versus 14,780,850,176 required, a shortfall of 1,480,351,744 bytes.
-The requirement includes the 10-GiB floor, three-node work bound, and 1-GiB margin.
-First up remains blocked on the disk reserve and explicit approval of the read-only AppleHV 100-to-128-GiB resize plan.
+The earlier 14.78-GB demand was a planning envelope, not a freshly verified hard threshold or a field in the frozen wrapper/receipts.
+The exact frozen wrapper enforces a 10-GiB VM floor and 2-GiB host floor; its seven prepared archives total 798,203,904 bytes.
+The latest read-only baseline has 12,565,581,824 free bytes and only 419,700,736 conservatively reclaimable allocated bytes, insufficient against the prior envelope.
+No deletion or resource change occurred; M5 image peak and M7 full-phase growth remain unqualified, so these facts establish no execution capacity.
+The 128-GiB maintenance decision remains pending after PostgreSQL 18 persistent preservation; no resize or restart approval is inferred.
 Backup Phase A is verified and Phase B is pending.
 The original PostgreSQL 18 data uses tmpfs and requires a tested persistent replacement before any VM or original-container restart.
 No up, prune, or resize is authorized by the preparation receipt.

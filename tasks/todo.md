@@ -650,7 +650,7 @@ Formatting and strict Clippy passed; the exact `schema.rs`/`runner-image.md` exp
 The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
 Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
 The production ARM64 image build disk peak remains unqualified despite cached base images.
-Measured headroom is 2.32 GiB above the 10-GiB floor; the unknown exact build peak prevents a capacity claim.
+The latest baseline is 12,565,581,824 free bytes; the unknown exact build peak prevents a capacity claim.
 Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
 The local ARM64 read-only packaging smoke binds an older source snapshot; final-source image, AMD64, and hosted qualification remain open.
 
@@ -679,7 +679,7 @@ Current-engine/current-Go actual seven-case PostgreSQL 18 interoperability passe
 
 Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify Python 3 plus stock libpq for password-bearing URI Secrets without secret argv.
 The original PostgreSQL 18 tmpfs requires a tested persistent replacement before restart; disk resize/restart remains unapproved.
-M7 preparation may overlap PostgreSQL tests under the approved capacity budget and host Cargo headroom, while actual kind/image operations must preserve the 10-GiB floor and additional work reserve.
+M7 preparation may overlap PostgreSQL tests under the approved capacity budget and host Cargo headroom, while actual kind/image operations must preserve the enforced disk floors, and unqualified phase growth still needs capacity validation.
 The host proof of concept passed nine URI cases and a PostgreSQL 18 connection/empty COMMIT, but is research rather than a package addition or production mechanism choice.
 The measured `0b36` tool image lacks Python/ctypes and Perl DBI/DBD::Pg/FFI.
 Capability receipt: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m6-libpq-connection-poc-rwasyp5n/tool-capabilities.json`, SHA-256 `bb073df851a6a709a6f5a874ac50f30e43e6b9bea9edd0d5166fa29448f1c265`.
@@ -779,10 +779,16 @@ The Task 13 correction separates transient CID files from immutable receipts and
 Tracked prepare and check then passed once each against source `6222196c83af94e5652e72921b1e4010c72160221a90a58cab702942a10ce1bf`, with all 530 entries unchanged.
 The retained run directory is `/private/var/tmp/rpgmigrate-m7-task13-run-0sv9j84y`.
 Final inspection: `/private/var/tmp/m7-fourth-tracked-control-p42xzbbk/final-preparation-inspection.json`, SHA-256 `e8fbe8d88d3dd40daba6ca2bcf726d2937efd5a72605f83a1ca86c62705573c3`.
-Kind up was not attempted: fresh free disk is 13,300,498,432 bytes versus 14,780,850,176 required, short by 1,480,351,744 bytes.
-The requirement preserves the 10-GiB floor plus a three-node work bound and 1-GiB margin.
-No owned reclaim of at least 1.5 GB is proved; no prune ran.
-First up remains blocked on the disk reserve and explicit approval of the read-only AppleHV 100-to-128-GiB resize plan.
+Kind up was not attempted; the earlier 14.78-GB demand was a planning envelope incorporating a three-node work bound and margin, not a freshly verified hard requirement.
+The exact frozen `hack/e2e-kind.py` wrapper at source `6222196c` enforces only the recorded 10-GiB VM and 2-GiB host floors; no 14.78-GB aggregate-demand field or receipt was found in this bounded check.
+Its seven prepared archives total 798,203,904 bytes; the wrapper hash `1c884fe724126e688f11de57a72af7cd8a69b147288358ca4bb2884602799eab` matches the frozen source manifest.
+The latest read-only owned-cache check starts from 12,565,581,824 free bytes and finds 419,700,736 allocated bytes conservatively reclaimable.
+Whole target plus Cargo upper bounds total 583,225,344 bytes, and the whole-prefix upper bound is 589,815,808 bytes; those upper bounds are not the conservative reclaim claim.
+No deletion, prune, or resource change occurred, and the conservative reclaim is insufficient against the prior planning envelope.
+Capacity receipt: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/capacity-receipt-final.json`, SHA-256 `e9593bb2f2306c6917227a9a2a06d0f2438d5b4138a84108a00ecf623d733f9a`.
+It binds the existing creation/source-preflight/cleanup logs and canonicalized read-only capacity observations without claiming a nonexistent raw transcript; no repeated measurement or inspection occurred at receipt finalization.
+Bounded M5 image peak and M7 full-phase growth remain unqualified; no image/kind execution qualification follows from this read-only check.
+The data-preserving AppleHV 100-to-128-GiB maintenance decision remains pending after PostgreSQL 18 persistent preservation, without implied approval.
 Backup Phase A is verified; Phase B is pending.
 The original PostgreSQL 18 data uses tmpfs and needs a tested persistent replacement before any VM or original-container restart.
 Preparation success does not authorize restart, resize, or kind creation.
@@ -831,7 +837,7 @@ The capped kind window is 14 CPUs and 24 GiB: kind six CPUs/12 GiB, database tes
 Do not overlap image preparation, full database load, and kind.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
 Retain at least four host CPUs of headroom when assigning Cargo jobs on the 18-CPU host.
-Preserve the 10-GiB VM disk floor and the additional first-up work reserve recorded under M7.
+Preserve the enforced 10-GiB VM and 2-GiB host floors; the earlier M7 first-up envelope is a planning estimate, not a verified wrapper threshold.
 The M7 section records the pending persistent PostgreSQL 18 replacement, backup Phase B, and explicit resize approval.
 Do not restart the VM or original PostgreSQL 18 container before that persistent replacement is tested.
 Do not resize the VM or purge caches under this capacity notice.
