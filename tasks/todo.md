@@ -717,9 +717,12 @@ The approved [discovery/preflight plan](../docs/superpowers/plans/2026-11-09-m6-
 Preflight failure exits 1 with no positive output or new failure envelope; refusal classes stay private, and a cleaned internal work timeout remains paced pending under original total/work/cleanup ceilings of 90/60/30 seconds, without renewal or adoption.
 Completed-output transport manifest `/tmp/rpgmigrate-m6-version-transport-20261109/manifest.json`, SHA-256 `71142624e1d3a3ca69fe823b1bab15e63c25c5ff51dd0a99a6f74d8c971fbcf8`, is frozen with 171 named checks/zero lint, strong owner-UID uniqueness, and caller-supplied canonical execution hash; quiet evidence proof remains unchanged.
 The new Python helper manifest `37aebdd5` passed 44 tests with 89227 source bytes; Go preflight successor `8e68af8e` passed 54 composed top-level/role cases plus five tmpfs-focused successor checks, with zero native lint.
-The new sixteen-path/575-file preflight candidate exactly matches the 114-check/zero-lint source; four checkpoint commits are being made, without a final commit-hash or central fast-forward claim.
+The preflight packet is fast-forwarded into clean central operator HEAD `727e45da94a5b2d099e97380e086a36206e68451`, tree `a25b24dc3c73f2c652e9acc2304e8a58cb7fb1fa`, with 575 source paths verified.
+The four commits are `2d895828` (native), `1041e59d` (Jobs), `f02373ab` (transport), and `727e45da` (lifecycle); exact qualified prefix/source receipts are reused without broad reruns.
+Fast-forward proof: `/Users/ydixken/.codex/tmp/m6-preflight-integration-evidence-20261109-fyhieb3e/central-fast-forward-proof.json`, SHA-256 `22c2086a759b8361d8d060b0dba684eec231e614a93ede924bae92d60ad62665`.
 Canonical `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical output without overriding it; no runtime/guard activation follows.
-Jobs/controller preflight implementation is active; resolver policy always refuses and actual DNS/NSS/HOME/TLS/image qualification remains open.
+The preflight field is not injected; resolver always refuses and native capabilities, remaining consumers, runtime, whole-M6 review, and closing gates remain open.
+The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is recorded as the final route, and no push/CI/activation is claimed.
 No runtime activation, whole-M6 review, or full-Go closure is claimed.
 Resolver disposition: `/Users/ydixken/.codex/tmp/m6-containerd-dns-research-20261109/existing-containerd-dns-disposition.md`, SHA-256 `b78e83c046be9441e8d0fd25362b500af30cfb8180e1c4a824a7d7a8d7f24a00`, favors qualifying the existing standard ClusterFirst sandbox resolver.
 Actual runtime/NSS/HOME bindings remain gaps; no ConfigMap, numeric-only restriction, or HOME change is authorized.
@@ -838,6 +841,7 @@ Task 0 acceptance uses the approved root-reviewed addendum; one independent xhig
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both Manual and Automatic modes; no new fencing subsystem is authorized.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
+- [x] Implement and checkpoint dormant native discovery/preflight source, retaining the closed runtime/activation gates.
 - [ ] Preflight: `version --json` handshake into `validateNativeConfig`; native pg_restore gate by target major; skip the origin-grant probe; PG16 target allowed for native.
 - [ ] Phase from `native-report:` lines; native drain verification bound to status endpos plus a psql read of the owned control row; cleanup requires `complete=true`; plain-clone completion fails closed on a missing report.
 - [ ] ORed application_name patterns for the retry-gate census, sampler and zombie reaper; native error-class prefixes in the log matchers.
@@ -854,11 +858,13 @@ The blocked Loaded workflow was then retired under standing container-only autho
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda` (manifest `2f46f044`); fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 Fresh PREPARE/CHECK proof: `/private/var/tmp/rpgmigrate-m7-check-index-preparation-mlwoh9ym/final-preparation-proof.json`, SHA-256 `4d89e0731c37a2f8331f07af03bdda713d28b8f7823bcba540ae6e46d9cd394d`; the new manager/RUN has no UP result, and the retired Loaded RUN remains preserved.
 The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified, with no lease renewal.
-The approved [tracked kind-only Go pre-uninstall build-info hook plan](../docs/superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal; Go implementation is building with bounded installed-client-go sanitization/cancellation fixes, and metrics permission remains approved but unapplied.
+The approved [tracked kind-only Go pre-uninstall build-info hook plan](../docs/superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is included in the final source freeze; metrics permission remains approved but unapplied.
 The final Go six-file packet `9fcb71e2` passed 160 checks with zero lint; Python 198 (wrapper `fa4038`, tests `9670d6`) and the guide are final.
-The 532-entry candidate aggregate is `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f`; its full Git delta has 31 paths including inherited changes, with the qualification map being resolved.
-No source checkpoint, fresh manager/RUN, or UP is claimed; the old prepared RUN remains obsolete.
-The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
+The final 532-entry dirty-source freeze is `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f`, manifest SHA-256 `d3f80323d7641c2a66730011cf360cad92a6e4c9711cff0cde99d1dc44fc46f5`; the full 31-path Git delta includes inherited changes and is neither committed nor lint-clean.
+Legacy source-provenance gaps remain explicit; source-equal controller/API/CRD/module evidence binds accepted M4 `c262322`, without qualifying all M7.
+Fresh RUN `/private/var/tmp/rpgmigrate-m7-manager-runtime-run-85za8902` has preparation evidence under `/private/var/tmp/rpgmigrate-m7-manager-runtime-preparation-fulc261h`.
+The manager build exited 0 with image `0584f2e5fea8ab4cc2c0145b7f55927787f9909ade8e3d3106c1585cbc74fdf1` and source-bound build argv/expected version `m7-d5698bf5f130`; this is not an observed runtime-version claim.
+Final PREPARE/CHECK proof is pending; no UP, live lease, or nodes are claimed, and the old `5dcceda`/`47a` preparation is obsolete.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-loaded-retirement-ai592_0t/retirement-proof.json`, SHA-256 `32c45afc9b3962979c2cde03c8d4a847fb9c3ffc0266b6d6b94d6777b114e513`.

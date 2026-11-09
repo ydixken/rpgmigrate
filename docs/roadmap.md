@@ -285,9 +285,10 @@ This checkpoint adds no push, CI, or runtime result.
 The [worker construction/dispatch packet](superpowers/plans/2026-11-09-m6-native-worker-construction-dispatch.md) is now integrated in the central operator branch at `cba3fa03fe051432da3ef2650db2db2c8a9b2ad4`, with eleven paths/566 source files verified, each commit prefix lint-qualified, final joined lint zero, lifecycle 108 checks, and eleven exact Linux engine CLI cases passing.
 The integration-only retry display-label lint correction was refrozen under strict lint; it is not a gate exception, and top-level `UnsupportedEngine` remains unchanged.
 The approved [discovery/preflight plan](superpowers/plans/2026-11-09-m6-native-discovery-preflight.md) separates a credential-free version Job from fixed Python DB preflight, requires actual capabilities before credentials, and reuses no legacy raw-DSN argv or raw stderr.
-The new sixteen-path/575-file preflight candidate exactly matches its 114-check/zero-lint source; four checkpoint commits are being made, without a final commit or central fast-forward claim.
+The dormant preflight source checkpoint is fast-forwarded into the clean central operator branch at `727e45da94a5b2d099e97380e086a36206e68451`, with 575 source paths verified against the accepted prefix/source receipts; no broad rerun, push, CI, or activation follows.
 Canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides; runtime qualification and activation remain closed.
-Jobs/controller preflight implementation is active; resolver policy still always refuses, and actual DNS/NSS/HOME/TLS/image qualification remains open.
+The preflight field is not injected, resolver policy still always refuses, and native capabilities, remaining consumers, runtime, whole-M6 review, and closing gates remain open.
+The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is a final route.
 This packet adds no DB/operator-migration qualification, push, CI, whole-M6 review, or full-Go result; production activation and runtime closure remain open.
 The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.
 The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
@@ -299,6 +300,7 @@ The user explicitly approved existing operator-feature GitLab mirroring on 2026-
 One independent whole-M6 review belongs at milestone close, and users retain write fencing/outstanding-transaction duties through cutover.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
+- [x] Implement and checkpoint dormant native discovery/preflight source, retaining the closed runtime/activation gates.
 - [ ] Preflight: `version --json` handshake into `validateNativeConfig`; native pg_restore gate by target major; skip the origin-grant probe; PG16 target allowed for native.
 - [ ] Phase from `native-report:` lines; native drain verification bound to status endpos plus a psql read of the owned control row; cleanup requires `complete=true`; plain-clone completion fails closed on a missing report.
 - [ ] ORed application_name patterns for the retry-gate census, sampler and zombie reaper; native error-class prefixes in the log matchers.
@@ -314,11 +316,12 @@ The watcher was restored under the original deadline with a recorded 648.049941-
 Exact three-node container/process/cgroup removal is complete under standing approval; all 203 volumes, 339 images, immutable network properties, original four services, backups, source, and Loaded RUN evidence remain preserved, with actual CPU/RAM reservation released.
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified and no lease is renewed.
-The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is building with bounded installed-client-go sanitization/cancellation fixes; metrics permission remains unapplied.
+The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is included in the final source freeze; metrics permission remains unapplied.
 The final Go six-file packet `9fcb71e2` passed 160 source checks with zero lint; Python 198 and the guide are final.
-The 532-entry integration candidate `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f` has a full 31-path Git delta including inherited changes; its qualification map is being resolved, without source checkpoint, fresh manager/RUN, or UP.
-The old prepared RUN remains obsolete after successor source changes.
-The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
+The final 532-entry dirty-source freeze `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f` retains legacy provenance gaps; the full 31-path Git delta is neither committed nor lint-clean.
+Source-equal controller/API/CRD/module evidence binds accepted M4 `c262322`, without qualifying all M7.
+A fresh source-bound manager build passed with expected version `m7-d5698bf5f130`; final PREPARE/CHECK proof is pending, without a runtime-version, UP, live-lease, or node claim.
+The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the fresh preparation inputs.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 The leader accepted the [M7 bootstrap slice](superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for code-only implementation by separate lifecycle and suite owners on isolated operator branches.
