@@ -29,13 +29,55 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 COPY --from=builder /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/pgdg.list
 RUN apt-get update && apt-get install -y --no-install-recommends \
-       'libpq5=18.*' postgresql-client-16 postgresql-client-18 coreutils sed dash \
+       'libpq5=18.*' postgresql-client-16 postgresql-client-18 coreutils sed dash python3 \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o 65532 -g 65532 -m 0700 /work
 COPY --from=builder /build/target/release/rpgmigrate /usr/local/bin/rpgmigrate
 COPY --from=builder /build/NOTICE /usr/share/rpgmigrate/NOTICE
 COPY --from=builder /build-inputs.sha256 /usr/share/rpgmigrate/build-inputs.sha256
 COPY --from=builder /dependency-notices/ /usr/share/rpgmigrate/dependency-notices/
+RUN /usr/bin/python3 -I -B <<'PYTHON'
+import ctypes
+import hashlib
+import json
+import os
+import stat
+import subprocess
+
+
+def query(*args):
+    return subprocess.run(['/usr/bin/dpkg-query', *args], check=True, text=True,
+                          capture_output=True, timeout=30).stdout.strip()
+
+
+architecture = {'aarch64': 'arm64', 'x86_64': 'amd64'}[os.uname().machine]
+package, version, package_arch, status = query('-W', '-f=${Package}\t${Version}\t${Architecture}\t${Status}', 'libpq5').split('\t')
+assert package == 'libpq5' and package_arch == architecture and status == 'install ok installed'
+assert 0 < len(version) <= 256 and all(33 <= ord(char) <= 126 for char in version)
+paths = {os.path.realpath(path) for path in query('-L', 'libpq5').splitlines()
+         if os.path.basename(path).startswith('libpq.so.5') and os.path.isfile(path)}
+assert len(paths) == 1
+path = paths.pop()
+assert os.path.isabs(path) and stat.S_ISREG(os.lstat(path).st_mode)
+assert query('-S', path) == 'libpq5:' + architecture + ': ' + path
+library = ctypes.CDLL(path)
+library.PQlibVersion.argtypes = []
+library.PQlibVersion.restype = ctypes.c_int
+libpq_version = library.PQlibVersion()
+assert 180000 <= libpq_version < 190000
+with open(path, 'rb') as source:
+    digest = hashlib.sha256(source.read()).hexdigest()
+metadata = {'version': 1, 'architecture': architecture, 'library_path': path,
+            'library_sha256': digest, 'libpq_version': libpq_version,
+            'package_name': package, 'package_version': version}
+data = (json.dumps(metadata, sort_keys=True, separators=(',', ':')) + '\n').encode('ascii')
+assert len(data) <= 4096
+path = '/usr/share/rpgmigrate/python-libpq-runtime.json'
+with open(path, 'xb') as target:
+    target.write(data)
+os.chown(path, 0, 0)
+os.chmod(path, 0o444)
+PYTHON
 ENV PATH="/usr/local/bin:/usr/lib/postgresql/18/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 USER 65532:65532
 WORKDIR /work

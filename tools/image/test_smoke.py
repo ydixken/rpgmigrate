@@ -2,12 +2,19 @@
 """Offline refusal controls for the production image smoke."""
 
 import copy
+import contextlib
 import importlib.util
 import json
+import hashlib
+import io
+import os
+import stat
+import tempfile
+import types
 from pathlib import Path
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 PATH = Path(__file__).with_name("smoke.py")
@@ -41,6 +48,33 @@ class SmokeTests(unittest.TestCase):
         self.package = {"path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18",
                         "owner": "libpq5:arm64: /usr/lib/aarch64-linux-gnu/libpq.so.5.18",
                         "package": "libpq5\t18.1-1.pgdg13+2\tarm64\tinstall ok installed"}
+        manifest = self.smoke.source_manifest()
+        self.observed["inputs_manifest"] = manifest.rstrip("\n")
+        self.observed["inputs"] = hashlib.sha256(manifest.encode()).hexdigest() + "  /usr/share/rpgmigrate/build-inputs.sha256"
+        runtime = self.runtime_metadata()
+        names = ("python3", "python3-minimal", "python3.13", "python3.13-minimal", "libpython3.13-stdlib",
+                 "libpython3.13-minimal", "libffi8", "libc6", "libpq5", "libssl3t64",
+                 "postgresql-client-16", "postgresql-client-18")
+        packages = {name: {"version": "1", "architecture": "arm64", "source": name, "source_version": "1",
+                          "copyright_path": "/usr/share/doc/" + name + "/copyright", "copyright_sha256": "d" * 64}
+                    for name in names}
+        packages["libpq5"]["version"] = runtime["package_version"]
+        self.python = {"version": "3.13.5", "isolated": True,
+                       "modules": ["ctypes", "_ctypes", "os", "stat", "fcntl", "selectors", "select", "time",
+                                   "json", "hashlib", "struct", "errno", "sys", "binascii", "resource"],
+                       "symbols": ['PQlibVersion', 'PQconnectStart', 'PQconnectPoll', 'PQsetnonblocking', 'PQsocket',
+                                   'PQstatus', 'PQtransactionStatus', 'PQbackendPID', 'PQsetNoticeReceiver',
+                                   'PQresultErrorField', 'PQsendQueryParams', 'PQflush', 'PQconsumeInput', 'PQisBusy',
+                                   'PQgetResult', 'PQresultStatus', 'PQcmdStatus', 'PQcmdTuples', 'PQntuples',
+                                   'PQnfields', 'PQgetisnull', 'PQgetlength', 'PQgetvalue', 'PQclear', 'PQfinish',
+                                   'PQescapeIdentifier', 'PQfreemem'],
+                       "metadata": runtime, "metadata_sha256": "e" * 64,
+                       "mapped_library": runtime["library_path"], "ctypes": True, "private_input": True,
+                       "packages": packages, "python_license": {"path": "/usr/share/doc/libpython3.13-stdlib/copyright",
+                                                              "sha256": "d" * 64},
+                       "dependency_notices": {"unicode-ident-1.0.27/LICENSE-UNICODE": "f" * 64},
+                       "notice_sha256": hashlib.sha256((PATH.parents[2] / "NOTICE").read_bytes()).hexdigest()}
+        self.observed["python"] = json.dumps(self.python)
         self.calls = []
         self.fail_at = None
 
@@ -58,6 +92,241 @@ class SmokeTests(unittest.TestCase):
     def probe(self):
         with patch.object(self.smoke.subprocess, "run", side_effect=self.invoke):
             return self.smoke.probe("localhost/test:dev", "podman")
+
+
+    def test_python_observation_is_required(self):
+        del self.observed["python"]
+        with self.assertRaises(RuntimeError):
+            self.probe()
+
+    def runtime_namespace(self):
+        self.assertTrue(hasattr(self.smoke, "PYTHON_RUNTIME"), "runtime probe must validate real metadata")
+        namespace = {"__name__": "test_runtime"}
+        exec(compile(self.smoke.PYTHON_RUNTIME, "image-python-probe", "exec"), namespace)
+        return namespace
+
+    def runtime_metadata(self):
+        return {"version": 1, "architecture": "arm64",
+                "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18",
+                "library_sha256": "c" * 64, "libpq_version": 180001,
+                "package_name": "libpq5", "package_version": "18.1-1.pgdg13+2"}
+
+    def test_runtime_metadata_refuses_malformed_json_and_types(self):
+        parse = self.runtime_namespace()["parse_metadata"]
+        valid = self.runtime_metadata()
+        self.assertEqual(parse(json.dumps(valid).encode()), valid)
+        changes = {"version": [True, 1.0, "1", 2], "architecture": ["aarch64", "s390x"],
+                   "library_path": ["relative", "/usr/lib/../lib/libpq.so.5", "/lib//libpq.so.5"],
+                   "library_sha256": ["C" * 64, "c" * 63], "libpq_version": [True, 180001.0, 170001, 190000],
+                   "package_name": ["libpq5:arm64", "foreign"],
+                   "package_version": ["", "a" * 257, "18.1 x", "18.1\n", "é"]}
+        for key, values in changes.items():
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                    parse(json.dumps({**valid, key: value}).encode())
+        encoded = json.dumps(valid).encode()
+        bad = [b"", encoded + b"{}", b" " * 4097,
+               encoded.replace(b'"version": 1,', b'"version": 1,"version": 1,'),
+               encoded.replace(b'"version": 1,', b'"version": 1e0,'),
+               json.dumps({**valid, "extra": 1}).encode()]
+        bad += [json.dumps({k: v for k, v in valid.items() if k != key}).encode() for key in valid]
+        for value in bad:
+            with self.subTest(value=value[:100]), self.assertRaises(RuntimeError):
+                parse(value)
+
+    def test_checked_files_reject_symlinks_writes_and_wrong_owners(self):
+        namespace = self.runtime_namespace()
+        check = namespace["read_owned"]
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "metadata"
+            file.write_bytes(b"facts")
+            file.chmod(0o444)
+            # Host test directories need not belong to image root.
+            with patch.dict(namespace, {"check_ancestors": lambda path: None}):
+                real_fstat = os.fstat
+                def root_stat(descriptor):
+                    values = list(real_fstat(descriptor))
+                    values[4:6] = [0, 0]
+                    return os.stat_result(values)
+                with patch.object(namespace["os"], "fstat", side_effect=root_stat):
+                    self.assertEqual(check(str(file), 4096, exact_mode=0o444), b"facts")
+                    with self.assertRaises(RuntimeError):
+                        check(str(file), 4, exact_mode=0o444)
+                if os.getuid() != 0:
+                    with self.assertRaises(RuntimeError):
+                        check(str(file), 4096, exact_mode=0o444)
+                link = Path(directory) / "link"
+                link.symlink_to(file)
+                with self.assertRaises((RuntimeError, OSError)):
+                    check(str(link), 4096, exact_mode=0o444)
+                file.chmod(0o666)
+                with self.assertRaises(RuntimeError):
+                    check(str(file), 4096, exact_mode=0o444)
+                with self.assertRaises(RuntimeError):
+                    check(directory, 4096, exact_mode=0o444)
+
+
+    def test_runtime_loads_only_hashed_absolute_package_library_with_explicit_abi(self):
+        namespace = self.runtime_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "libpq.so.5.18"
+            path.write_bytes(b"actual library bytes")
+            metadata = {**self.runtime_metadata(), "library_path": str(path.resolve()),
+                        "library_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            library = Mock()
+            library.PQlibVersion.return_value = 180001
+            info = path.stat()
+            maps = "0000-1000 r-xp 00000000 %02x:%02x %d %s\n" % (
+                os.major(info.st_dev), os.minor(info.st_dev), info.st_ino, path.resolve())
+            bindings = {"package_for": lambda path: "libpq5", "read_owned": lambda path, limit: Path(path).read_bytes(),
+                        "open": lambda *args, **kwargs: io.StringIO(maps)}
+            with patch.dict(namespace, bindings):
+                with patch.object(namespace["ctypes"], "CDLL", return_value=library) as load:
+                    namespace["verify_library"](metadata)
+                    load.assert_called_once_with(str(path.resolve()))
+                    self.assertEqual(library.PQlibVersion.argtypes, [])
+                    self.assertIs(library.PQlibVersion.restype, namespace["ctypes"].c_int)
+                with patch.object(namespace["ctypes"], "CDLL", side_effect=OSError("private loader output")):
+                    with self.assertRaises(OSError):
+                        namespace["verify_library"](metadata)
+                for version in (170001, 180002):
+                    library.PQlibVersion.return_value = version
+                    with patch.object(namespace["ctypes"], "CDLL", return_value=library), self.assertRaises(RuntimeError):
+                        namespace["verify_library"](metadata)
+                library.PQlibVersion.return_value = 180001
+                with patch.object(namespace["ctypes"], "CDLL", return_value=object()), self.assertRaises(AttributeError):
+                    namespace["verify_library"](metadata)
+                with patch.object(namespace["ctypes"], "CDLL") as load, self.assertRaises(RuntimeError):
+                    namespace["verify_library"]({**metadata, "library_sha256": "0" * 64})
+                load.assert_not_called()
+                with patch.dict(namespace, {"package_for": lambda path: "foreign"}), self.assertRaises(RuntimeError):
+                    namespace["verify_library"](metadata)
+                with patch.dict(namespace, {"open": lambda *args, **kwargs: io.StringIO(maps.replace("\n", " (deleted)\n"))}), \
+                     patch.object(namespace["ctypes"], "CDLL", return_value=library), self.assertRaises(RuntimeError):
+                    namespace["verify_library"](metadata)
+
+    def test_runtime_main_emits_the_verified_library_identity(self):
+        namespace = self.runtime_namespace()
+        metadata = self.runtime_metadata()
+        rows = "\n".join("\t".join((name, item["version"], item["architecture"], "installed",
+                                  item["source"], item["source_version"]))
+                         for name, item in self.python["packages"].items())
+        system = types.SimpleNamespace(version_info=types.SimpleNamespace(major=3, minor=13),
+                                       flags=types.SimpleNamespace(isolated=True), dont_write_bytecode=True,
+                                       version="3.13.5 test", stdin=types.SimpleNamespace(buffer=io.BytesIO(b"rpgmigrate-private-input-canary")))
+        bindings = {"sys": system, "verify_library": lambda value: self.assertEqual(value, metadata),
+                    "read_owned": lambda path, limit, **kwargs: json.dumps(metadata).encode() if path == namespace["METADATA"] else b"notice",
+                    "command": lambda *args: rows, "package_for": lambda path: "libpython3.13-stdlib",
+                    "hashes": lambda path: self.python["dependency_notices"],
+                    "open": lambda *args, **kwargs: io.BytesIO(b"/usr/bin/python3\0-I\0-B\0/private.py")}
+        output = io.StringIO()
+        with patch.dict(namespace, bindings), patch.object(namespace["os"], "uname", return_value=types.SimpleNamespace(machine="aarch64")), \
+             contextlib.redirect_stdout(output):
+            namespace["main"]()
+        observed = json.loads(output.getvalue())
+        self.assertEqual(observed["mapped_library"], metadata["library_path"])
+        self.assertTrue(observed["private_input"])
+        self.assertNotIn("rpgmigrate-private-input-canary", output.getvalue())
+
+    def test_build_metadata_uses_actual_installed_library_and_package(self):
+        dockerfile = (PATH.parents[2] / "Dockerfile").read_text()
+        self.assertIn("coreutils sed dash python3", dockerfile)
+        generator = dockerfile.split("RUN /usr/bin/python3 -I -B <<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            library_path = Path(directory) / "libpq.so.5.18"
+            library_path.write_bytes(b"installed package library")
+            metadata_path = Path(directory) / "runtime.json"
+            real_open = open
+            def output_open(path, *args, **kwargs):
+                if path == "/usr/share/rpgmigrate/python-libpq-runtime.json":
+                    path = metadata_path
+                return real_open(path, *args, **kwargs)
+            def query(argv, **kwargs):
+                if "-W" in argv:
+                    value = "libpq5\t18.6-1.pgdg13+1\tarm64\tinstall ok installed"
+                elif "-L" in argv:
+                    value = str(library_path)
+                elif "-S" in argv:
+                    value = "libpq5:arm64: " + str(library_path.resolve())
+                else:
+                    self.fail("unexpected package query")
+                return subprocess.CompletedProcess(argv, 0, value, "")
+            library = Mock()
+            library.PQlibVersion.return_value = 180006
+            with patch("subprocess.run", side_effect=query), patch("ctypes.CDLL", return_value=library) as load, \
+                 patch("os.uname", return_value=types.SimpleNamespace(machine="aarch64")), \
+                 patch("os.chown") as chown, patch("os.chmod") as chmod:
+                exec(compile(generator, "Dockerfile runtime generator", "exec"), {"open": output_open})
+            metadata = self.runtime_namespace()["parse_metadata"](metadata_path.read_bytes())
+            self.assertEqual(metadata["library_path"], str(library_path.resolve()))
+            self.assertEqual(metadata["library_sha256"], hashlib.sha256(library_path.read_bytes()).hexdigest())
+            self.assertEqual(metadata["package_version"], "18.6-1.pgdg13+1")
+            self.assertEqual(metadata["libpq_version"], 180006)
+            load.assert_called_once_with(str(library_path.resolve()))
+            chown.assert_called_once_with("/usr/share/rpgmigrate/python-libpq-runtime.json", 0, 0)
+            chmod.assert_called_once_with("/usr/share/rpgmigrate/python-libpq-runtime.json", 0o444)
+
+    def test_runtime_ancestor_checks_refuse_symlinks_and_foreign_or_writable_parents(self):
+        namespace = self.runtime_namespace()
+        check = namespace["check_ancestors"]
+        for mode, uid, gid in ((stat.S_IFLNK | 0o777, 0, 0), (stat.S_IFDIR | 0o755, 1, 0),
+                               (stat.S_IFDIR | 0o755, 0, 1), (stat.S_IFDIR | 0o775, 0, 0),
+                               (stat.S_IFDIR | 0o757, 0, 0)):
+            observed = types.SimpleNamespace(st_mode=mode, st_uid=uid, st_gid=gid)
+            with patch.object(namespace["os"], "lstat", return_value=observed), self.assertRaises(RuntimeError):
+                check("/usr/share/rpgmigrate/python-libpq-runtime.json")
+        owned = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+        with patch.object(namespace["os"], "lstat", return_value=owned) as observe:
+            check("/usr/share/rpgmigrate/python-libpq-runtime.json")
+        self.assertEqual([call.args[0] for call in observe.call_args_list], ["/usr/share/rpgmigrate", "/usr/share", "/usr", "/"])
+
+    def test_python_evidence_refuses_independent_binding_and_missing_capabilities(self):
+        changes = [("version", "2.7.18"), ("isolated", False), ("ctypes", False), ("private_input", False),
+                   ("modules", self.python["modules"][:-1]), ("symbols", self.python["symbols"][:-1]),
+                   ("mapped_library", "/foreign/libpq.so.5"), ("metadata_sha256", ""),
+                   ("packages", {}), ("python_license", {"path": "/usr/LICENSE", "sha256": ""}),
+                   ("dependency_notices", {}), ("notice_sha256", "0" * 64)]
+        for key, value in changes:
+            with self.subTest(key=key):
+                observed = {**self.python, key: value}
+                with self.assertRaises(RuntimeError):
+                    self.smoke.validate_python(observed, "arm64", self.package, 180001)
+        for key, value in (("architecture", "amd64"), ("library_path", "/usr/lib/foreign/libpq.so.5.18"),
+                           ("package_version", "18.2-1.pgdg13+2"), ("libpq_version", 180002)):
+            with self.subTest(key=key):
+                observed = {**self.python, "metadata": {**self.python["metadata"], key: value}}
+                with self.assertRaises(RuntimeError):
+                    self.smoke.validate_python(observed, "arm64", self.package, 180001)
+
+    def test_source_manifest_binds_contents_and_not_only_digest(self):
+        self.observed["inputs_manifest"] += "\n" + "0" * 64 + "  foreign"
+        manifest = self.observed["inputs_manifest"] + "\n"
+        self.observed["inputs"] = hashlib.sha256(manifest.encode()).hexdigest() + "  /usr/share/rpgmigrate/build-inputs.sha256"
+        with self.assertRaisesRegex(RuntimeError, "source inputs mismatch"):
+            self.probe()
+
+    def test_duplicate_python_json_and_unexpected_probe_records_are_refused(self):
+        self.observed["python"] = self.observed["python"].replace('"isolated": true,', '"isolated": false,"isolated": true,')
+        with self.assertRaisesRegex(RuntimeError, "duplicate JSON"):
+            self.probe()
+        self.observed["python"] = json.dumps(self.python)
+        self.observed["unexpected"] = "surprise"
+        with self.assertRaisesRegex(RuntimeError, "unexpected or missing"):
+            self.probe()
+
+    def test_loader_environment_in_image_is_refused_before_run(self):
+        self.metadata[0]["Config"]["Env"] = ["PATH=/usr/bin", "LD_PRELOAD=/tmp/hostile.so"]
+        with self.assertRaisesRegex(RuntimeError, "loader environment"):
+            self.probe()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_probe_uses_fixed_private_isolated_invocation(self):
+        self.assertIn("/usr/bin/env -u LD_PRELOAD -u LD_LIBRARY_PATH /usr/bin/python3 -I -B", self.smoke.PROBE)
+        self.assertIn("/usr/share/rpgmigrate/python-libpq-runtime.json", self.smoke.PYTHON_RUNTIME)
+        self.assertNotIn("find_library", self.smoke.PYTHON_RUNTIME)
+        self.assertNotIn("ctypes.CDLL('libpq", self.smoke.PYTHON_RUNTIME)
+        self.assertIn('mkfifo -m 0600', self.smoke.PROBE)
+        self.assertIn('chmod 0400', self.smoke.PROBE)
 
     def test_real_probe_contract_and_immutable_binding(self):
         receipt = self.probe()
