@@ -199,6 +199,23 @@ It carries stream identity and one authorized source end, and its accessor suppl
 A COPY anchor may set the reconnect starting point; initial status may remain at the captured `confirmed_flush_lsn` until actual applied/certified proof exists.
 Received frame positions, later BEGINs, channel enqueue, empty libpq output, and target row visibility never construct feedback authority.
 
+### Keepalive certification source proof
+
+For the qualified stock logical sender, keepalive W represents processed logical progress, not the global durable WAL head.
+In [PG16.15 walsender.c](https://github.com/postgres/postgres/blob/REL_16_15/src/backend/replication/walsender.c#L3782-L3794) and [PG18.6 walsender.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/replication/walsender.c#L4116-L4128), `WalSndKeepalive` writes `sentPtr` unless given an explicit progress pointer.
+`XLogSendLogical` advances `sentPtr` only after `LogicalDecodingProcessRecord` returns: PG16 lines 3159-3161 and PG18 lines 3485-3487.
+`WalSndWaitForWal` uses `GetFlushRecPtr` to decide whether reading can continue, but its keepalive call still uses `sentPtr`: PG16 lines 1634-1661 and PG18 lines 1899-1934.
+The sole explicit-pointer path is `WalSndUpdateProgress` for a skipped transaction: PG16 lines 1542-1546 and PG18 lines 1717-1721.
+[PG16 pgoutput](https://github.com/postgres/postgres/blob/REL_16_15/src/backend/replication/pgoutput/pgoutput.c#L622-L647) and [PG18 pgoutput](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/replication/pgoutput/pgoutput.c#L630-L655) mark it skipped only when no relevant BEGIN/change was emitted.
+The [PG16 commit wrapper](https://github.com/postgres/postgres/blob/REL_16_15/src/backend/replication/logical/logical.c#L958-L965) and [PG18 commit wrapper](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/replication/logical/logical.c#L955-L962) supply that transaction's actual end LSN.
+
+The source-code inference is that every relevant committed transaction ending at or below W has already been emitted, or intentionally skipped by pgoutput, before that keepalive enters the same ordered output stream.
+During a large transaction or pending writes, timer keepalives retain the previous `sentPtr`; `ProcessPendingWrites` does not advance it and queues keepalives behind existing output.
+Admit certification only for the exact bound stock pgoutput-v1 source, an actual keepalive W observed while B..C decoding is idle, and its ordered FIFO marker consumed after all preceding transactions are durable.
+Then write the logged synchronous certification barrier before constructing feedback.
+FIFO ordering alone cannot certify an arbitrary global WAL-head value; `pg_current_wal_insert_lsn`, XLogData envelope positions, and later-BEGIN witnesses remain excluded from ACK construction.
+Test a partially emitted large transaction, omitted/filtered commits, blocked sender output, and a keepalive preceding a later higher-end transaction.
+
 ### Finite working budgets
 
 Use the existing pipeline limits and the M2 sixteen-MiB permitted row/frame limit.

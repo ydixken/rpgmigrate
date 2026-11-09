@@ -7,7 +7,8 @@ The roadmap amendments approved on 2026-11-08 narrow the native profile and defi
 The original source audit is pinned to `pgcopydb-operator` commit `639bdf997f2ed32b6e0b88420455428cb5112c06`; it inspected production callers and API renderers, not executed operator E2E.
 
 > [!IMPORTANT]
-> The runnable CLI includes plain clone, progress, and schema/data comparison, with a focused PostgreSQL 16 to 16 workflow recorded in the roadmap.
+> Plain clone and ongoing follow passed all three engine pair profiles, including independent comparisons and actual Go clone-report checks.
+> Engine M3 is committed at `7b6037f9ac8214696936a21c865cd97307cc5c6e`; cutover and native operator activation remain unqualified.
 > No native operator workflow is qualified by the existing component results.
 > Use the [maintained task ledger](../tasks/todo.md) for exact implementation and qualification evidence.
 
@@ -47,6 +48,8 @@ Accept and record `--origin`, but never create or own a replication origin; clea
 The production call sites are the [job builders][op-jobs], [verification controller][op-verify], [rehearsal builder][op-rehearsal], and [cutover exec][op-sentinel].
 There is no production standalone `follow` launch: follow is appended to `clone`.
 The first worker attempt uses `--restart`; retries use `--resume --not-consistent`, and permitted snapshot-loss start-over adds cleanup.
+Native startup admits the first restart only through checked absent/private-empty initialization, or a matching resource-free native INIT retry; it never rebinds foreign or legacy state.
+A completed native retry with `--resume --not-consistent` verifies existing durable completion and preserves generation and table markers instead of recopying.
 Native recovery must prove that these requests are safe; legacy flag spelling never authorizes unsafe snapshot reuse or state adoption.
 
 ## Finite option contract

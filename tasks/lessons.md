@@ -393,3 +393,20 @@ Treat `docs/roadmap.md` as the primary project status overview and keep it synch
 Update the roadmap and task ledger in the same change without waiting for a reminder; the ledger holds detailed evidence.
 Tick completed subdeliverables, and leave milestone closing gates unchecked until their required checks pass.
 Do not use a current task ledger as a reason to leave the roadmap stale.
+
+Before reusing a catalog planner on a new call path, trace its nested SQL transaction requirements, including `LOCK TABLE`, and preserve the established caller transaction boundary.
+Separately passing source API checks do not qualify preliminary planning on an idle connection.
+
+Validate costly E2E fixture DML against real PostgreSQL in a rolled-back transaction before launching the full workflow.
+Preserve identity-column legality and independent primary-key mutation coverage when correcting the fixture.
+
+Verify required bytes, modes, and explicit absences when overlaying a frozen worktree; copying present files alone can resurrect dropped code.
+
+Honor the user's explicit capacity and concurrency updates over an older exclusive resource lease.
+Verify actual VM capacity and free disk before applying a proposed parallel budget, preserve host Cargo headroom, and do not infer causality from a resize that happened after a failed run.
+
+Measure account and server contents in the actual running tool container before changing environment assumptions.
+An immutable image does not prove the contents of a mutated running container; do not override HOME to bypass that check.
+
+Use `followup_task` to assign new work to a completed agent.
+An idle `send_message` does not start its next turn.

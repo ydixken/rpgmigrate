@@ -1,7 +1,7 @@
 # rpgmigrate
 
 rpgmigrate is a Rust PostgreSQL migration engine for database operators.
-The executable implements plain clone, progress, and schema/data comparison; the [roadmap](docs/roadmap.md) records verified workflows and the remaining recovery, follow, and operator gates.
+The executable implements plain clone and pgoutput follow on PostgreSQL 16 to 16, 18 to 18, and 16 to 18; the [roadmap](docs/roadmap.md) records verified engine workflows and remaining cutover, operator, and durability gates.
 
 [TOC]
 
@@ -11,6 +11,7 @@ The executable implements plain clone, progress, and schema/data comparison; the
 2. **Plain clone:** restore schema, stream parallel text COPY, restore post-data, synchronize sequences, and analyze.
 3. **Native receipts:** bind target ownership and copy generation, and publish completion only after durable target proof.
 4. **Verification:** inspect measured progress and compare schema and full table rows through read-only commands.
+5. **Follow:** receive pgoutput v1, replay committed transactions, and resume within the admitted recovery profile.
 
 ## Structure
 

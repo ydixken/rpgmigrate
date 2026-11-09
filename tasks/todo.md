@@ -21,10 +21,10 @@ Keep implementation evidence separate from parser compatibility and operator run
 - [x] Install plain GitHub Actions checks for formatting, clippy, and tests; defer the replacement runner image to M5.
 - [x] Reconcile the approved design with its dated 2026-11-08 revision and fix stale links.
 - [x] Update README, operator compatibility, testing instructions, and notices for the implemented scaffold.
-- [ ] Integrate reviewed worker outputs and run `task check lint test` on the integrated tree.
-- [ ] Run stock-libpq live transport/authentication checks for PostgreSQL 16 and 18 and the retained harness self-check.
-- [ ] Complete one independent review at milestone close and resolve findings through their file owners.
-- [ ] Record the closing results and limitations below; commit only when the leader requests it after checks pass.
+- [x] Integrate reviewed worker outputs and run `task check lint test` on the integrated tree.
+- [x] Run stock-libpq live transport/authentication checks for PostgreSQL 16 and 18 and the retained harness self-check.
+- [x] Complete one independent review at milestone close and resolve findings through their file owners.
+- [x] Record the closing results and limitations below; commit only when the leader requests it after checks pass.
 
 ### M0 baseline evidence
 
@@ -73,25 +73,30 @@ Its first portable run failed three Linux copy-controller socket-closure control
 The test-only repair demonstrated RED then GREEN for the three controls on Linux and macOS.
 The final Linux `python3 -W error tools/ci/unit.py` passed all 134 portable checks; its log is `/tmp/rpgmigrate-m0-linux-harness-repair.log`.
 After the narrow unused-import-only cleanup, `task fmt-check check` passed.
-These constituent results do not establish a green strict lint gate; M0 remains open solely on structural clippy errors in the retained scaffold.
-The independent reviewer completed the fixture-repair follow-up without a finding; structural clippy is the sole M0 hold.
+Those constituent results left M0 open on structural Clippy errors in the retained scaffold.
+The independent reviewer completed the fixture-repair follow-up without a finding; the later M3 candidate clears those diagnostics, the later primary M3 checks resolve the technical blocker, and the leader accepted the recorded earlier closure criteria.
 No operator migration workflow is qualified by these component results.
 
 ### Sequencing decision, user-approved 2026-11-08
 
 The user approved: "Keep M0 open; proceed with approved milestones".
-We may plan and execute the approved later milestones while the retained scaffold lint blocker keeps M0 open.
+That sequencing decision allowed later approved milestones while the retained scaffold lint blocker kept M0 open.
+The primary M3 strict gates now resolve that technical blocker; the leader accepted M0 closure using the recorded checks and prior review.
 Preserve strict lint; do not suppress its errors, mark M0 complete, or make commits while the required gate is red.
 This changes milestone sequencing, not the runtime contract or the required closing checks.
 
 ### M0 closing review
 
-- [ ] Record focused worker checks and their changed-file lists.
-- [ ] Record the integrated broad-gate command, exit status, and nonempty test evidence.
+The leader accepted M0 closure using the retained PostgreSQL 16/18 transport five-plus-five results, harness self-check, and prior independent review.
+The integrated strict gates and actual primary `task check` at source commit `7b6037f9ac8214696936a21c865cd97307cc5c6e` resolve its former scaffold lint hold.
+Go checks are not applicable to the Rust-only M0 scope; this classification is not a new Go execution.
+
+- [x] Record focused worker checks and their changed-file lists.
+- [x] Record the integrated broad-gate command, exit status, and nonempty test evidence.
 - [x] Record selected stock libpq and exact PostgreSQL 16/18 live test versions and results.
 - [x] Record the independent review outcome and any remaining findings.
-- [ ] Record Go checks as not applicable if M0 remains engine-only, with no operator changes.
-- [ ] Record the final reviewed tree before authorizing any commit.
+- [x] Record Go checks as not applicable if M0 remains engine-only, with no operator changes.
+- [x] Record the final reviewed tree before authorizing any commit.
 
 ## M1: Contract freeze (both repos)
 
@@ -121,7 +126,7 @@ Escalate any gap in the shared parser-oracle contract through the leader before 
 - [x] Receive the engine DTO/CLI handoff with focused checks.
 - [x] Receive the operator validator handoff with focused Parse checks.
 - [x] Receive the final shared-fixture and documentation handoff.
-- [ ] Run the integrated M1 closing gates and independent review.
+- [x] Run the integrated M1 closing gates and independent review.
 
 `m1_engine` completed changes in `src/protocol.rs`, `src/cli.rs`, `src/config.rs`, `src/contracts.rs`, and `src/lib.rs`.
 Its focused checks passed 17 CLI tests, three protocol tests, and one diagnostics test.
@@ -145,13 +150,14 @@ The PostgreSQL 16 helper gate passed 508 of 510 tests including subtests, with t
 The PostgreSQL 18 helper gate passed all 158 tests including subtests and 17 top-level tests, including generated virtual columns.
 Top-level counts are included in the corresponding subtest totals and package runs may overlap; do not aggregate them as independent cases.
 The independent review reported no remaining findings, and both repositories passed `git diff --check`.
-The contract build, tests, and review are complete, but M0 and M1 remain open on the inherited strict lint gate under the user-approved sequencing decision.
-No commits were made, and these results qualify no native migration workflow.
+The contract build, tests, and review are complete.
+The leader accepted M0 and M1 closure after the later M3 primary integration and strict gates passed.
+These contract results qualify no native migration workflow.
 
 ## M2: Clone slice (engine)
 
 The [M2 implementation plan](../docs/superpowers/plans/2026-11-08-m2-clone-slice.md) records the leader's plain-clone scope decisions, seven-owner map, shared API bootstrap, and closing acceptance gates.
-The leader approved the M2 draft scope and seven-owner decomposition; parallel source work waits for the shared-interface handoff.
+The leader approved the M2 draft scope and seven-owner decomposition; parallel source work waited for the shared-interface handoff before implementation began.
 
 - [x] Prepare the bounded M2 implementation plan and return its proposed interfaces and ownership for leader review.
 - [x] Record leader approval of the draft scope, seven-owner decomposition, and explicit recovery boundaries.
@@ -159,11 +165,14 @@ The leader approved the M2 draft scope and seven-owner decomposition; parallel s
 - [x] Demonstrate a focused quiescent PostgreSQL 16 to 16 plain clone with durable completion and independent schema/data/sequence verification.
 - [x] Resolve all independent closing-review repairs for target ownership, marker readback, generated output, and transaction durability proof.
 - [x] Pass the final Prepared10 and Clone7 component profiles on PostgreSQL 16 and 18.
-- [ ] Transport: pipeline mode, error classes with SQLSTATE/detail, per-operation deadlines and stall timeouts, buffered COPY relay, notices surfaced.
-- [ ] Checkpoint v2: group frontier, `certified_lsn`, per-table done markers and copy generation, per-run fence, slimmed hot path.
-- [ ] Copy order of decision 5 with `--table-jobs`, FREEZE, sequences, post-data, ANALYZE; PG16/18 gates and version-specific SQLSTATEs.
-- [ ] Plain clone `--restart` and `--resume --not-consistent`; `list progress --json`; `compare schema`; `compare data --json` with pinned GUCs and the operator's shapes.
-- [ ] Engine E2E harness on containers (podman or docker) with Task targets per version pair; clone matrix and kill/resume cases; content checked by independent SQL fingerprints.
+- [x] Pass the eleven-case 16 to 16, 18 to 18, and 16 to 18 profiles, each with six actual Go report checks.
+- [x] Transport: noncommitting pipeline validation, private error/warning classification, observed commit proof, per-operation I/O budgets, and buffered COPY.
+- [x] COPY authority: logged per-table markers, copy generation, exact owned identities, per-run fence, and durable unknown-COMMIT resolution.
+- [x] Accept the M3 grouped CDC frontier/`certified_lsn` producer/API and apply hot-path qualification as the M2 handoff.
+- [x] Plain-clone order: SQL-exported snapshot, matching-major pre-data, parallel physical-heap COPY with FREEZE, post-data, sequence sync, and ANALYZE on all three pairs.
+- [x] Plain clone `--restart` and `--resume --not-consistent`; `list progress --json`; `compare schema`; `compare data --json` with pinned GUCs and the operator's shapes.
+- [x] Podman engine E2E targets for all three pairs, controlled partial-copy/utility interruption and resume cases, and independent schema/data/sequence oracles.
+- [x] Close M2 using the staged three-pair clone receipts, prior review, and later strict M3 closing checks; no M2 aggregate rerun is claimed.
 
 ### M2 assignments
 
@@ -181,19 +190,253 @@ No worker implementation starts before the concrete shared handoff, and no miles
 
 The leader assigned `m2_harness_docs` ownership of roadmap status maintenance as well as this ledger.
 We keep the roadmap's completed subdeliverables synchronized with these observed results while leaving milestone closing gates open.
-The first combined green integration point must resolve the inherited M0/M1 strict lint hold before any commit; this does not imply that earlier milestones had green standalone commits.
+Normal lint-clean commits require resolution of the inherited M0/M1 strict lint hold; the two explicitly approved WIP checkpoints below are the only exceptions.
 The portable Python gate passed 154 checks after the first M2 harness and live-test inventory additions.
-Later clone/catalog inventory changes still require a fresh focused run, and the engine E2E matrix has not run.
+That preparation receipt preceded the later clone/catalog inventory updates and the qualified staged pair receipts recorded below.
+
+The leader accepted M2 closure from its reviewed staged 33 clone cases and eighteen actual Go clone validations, plus the later exact-input M3 closing checks and current strict lint.
+The grouped CDC/certified-LSN handoff is accepted from M3; this does not qualify M4 cutover.
+No canonical M2 aggregate target rerun is claimed.
 
 ## M3: Follow (engine)
 
-- [ ] pgoutput v1 decoder (B, C, R, Y, I, U, D, T, O; others fatal) with relation generations; fixtures recorded from PG16 and PG18; regression cases for op#356-359 and #376; a fuzz target.
-- [ ] Receive thread with decision 3 backpressure and status rules; slot health checks; gap refusal on connect.
-- [ ] Applier: RI FULL keyless (ctid single-row), RI INDEX, unchanged TOAST, multi-relation TRUNCATE (ONLY, never CASCADE), identity and generated columns, non-built-in types as text; pipeline groups; strict dedupe.
-- [ ] Data-phase restart of decision 8; resume after anchor.
-- [ ] Fault tests: kill in every phase and around COMMIT, target restart, walsender termination, apply blocked longer than `wal_sender_timeout`, idle source with filtered WAL, round-trip counter test, smoke catch-up benchmark.
+An earlier assembled M3 candidate passed `cargo check --all-targets`; focused component proofs do not establish integrated follow qualification.
+The guarded join integrated 25 paths from 12 approved manifests; its interim manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-coherent-join-ebh3aa96/manifest.json`, SHA-256 `3eccdff141d85205beaab2260793040cd0f95f710292e470ea105c3cf9de9ff2`.
+That interim join is not qualification; the later product candidate and qualified money/Catalog13 handoffs below supersede its incomplete input status.
+The first actual 16 to 16 follow smoke failed at startup with command exit 1, engine exit 4, and SQLSTATE `25P01`, before publication/slot intents and before a positive streaming report.
+The retained receipt is `/tmp/rpgmigrate-m3-first-smoke-attempt-1.json`, SHA-256 `30449f01fb1cc001cbc6ca1b907bd8a7a745f05d9f67428da71478c21cfab8dd`.
+After the planning-transaction fix, the second smoke reached validated `driver.ready()` and then failed when harness SQL tried to update the `GENERATED ALWAYS` identity primary key.
+Its immutable attempt receipt is `/tmp/rpgmigrate-m3-second-smoke-attempt-2.json`, SHA-256 `2b58e59edc651c8a7d50fea7bb8bf8b6845f49b1dc9e7866adf4ea43bbf3b76f`, bound to the exact input manifest recorded there.
+The raw startup report was not retained, and no convergence receipt was emitted.
+The source workload repair reproduced the actual PostgreSQL 16 identity-update failure, then passed eight corrected SQL checks and 14 portable controls.
+The third interim smoke against candidate `499ce675` passed startup and corrected source workload, then failed the independent target exact-owned-relation oracle; no convergence or success receipt was emitted, and a product cause is unconfirmed.
+Its immutable proof is `/tmp/rpgmigrate-m3-interim-smoke-attempt-3.json`, SHA-256 `7b5669544ec8bcaa928b1273d342b523fe48532224a683a095096d4eb11c7eb0`.
+The independent SQL/JSON-shape audit on PostgreSQL 16.15 and 18.6 identified string-valued OID projections as the oracle failure; explicit OID-only bigint casts passed full authority checks and 13 identity-negative controls per major.
+The SQL-only research receipt is `/tmp/rpgmigrate-m3-oracle-YuST2D/receipt.json`; it does not qualify engine execution.
+The narrow two-file implementation passed 15 portable checks and mutation controls, frozen at `/tmp/rpgmigrate-m3-oracle-oid-export-0tx7b5kq/manifest.json`, SHA-256 `80cda83eb287ec1ea12ac8450da81e69bf4b45999ce6e5c71b7a696009e97f60`.
+Authority V3 passed six focused live cases per major and 43 unit tests; the receiver binary passed two cases per major, without establishing whole-workflow qualification.
+The leader accepted `/tmp/rpgmigrate-m3-source-snapshot-fault-plan.md` and assigned its nine-case native replacement to `m3_snapshot_fault_build`, owning the new fault module and minimal clone-identity PID guard.
+The guard appends SQL `pg_backend_pid()` as the fifth identity field and compares it with libpq's PID in the same query, preserving the tuple contract and privilege requirements.
+After actual PostgreSQL 16 RED, the minimal guard passed two focused cases each on PostgreSQL 16.15 and 18.6; its manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-snapshot-pidguard-hibubx0c/manifest.json`, SHA-256 `adb00f732bb66df625ddb970aee76c88780c592511500d7c87f0136651e26b51`.
+The full nine-case native source-snapshot profile passed exactly nine cases on PostgreSQL 16.15 and nine on 18.6, with zero ignored cases.
+Independent validation accepted five fault receipts per major, including three tail phases; the 294-file runtime source-input manifest stayed unchanged.
+The qualified PID guard is unchanged; the final three-file builder export awaits formatting, and aggregate/default-gate qualification remains open.
+The old twelve-case `SourceSnapshot` stage still hard-codes PostgreSQL 14/17 and native format 4.
+The nine-case per-major prerequisite is satisfied; the later full-profile and native closing proofs below authorize retirement, whose private integrated candidate is recorded below.
+The money restore-parse defect reproduced on actual PostgreSQL 16; the two-file fix is frozen at `/tmp/rpgmigrate-m3-source-money-candidate/manifest.json`, SHA-256 `77690530cdc6a26c4472929ae1b4f4e554b03a9fd29ba59ddde255bd04812e63`.
+The exact candidate product bytes passed one actual money/cross-locale case on PostgreSQL 16.15 and one on 18.6, retained at `/tmp/rpgmigrate-m3-source-money-qualified/manifest.json`, SHA-256 `67288f984c65e228552e5e99a5171e97d44c90866f74708e5bf9a9f53708416f`.
+Ordinary non-superuser German/US role defaults, permission to set C locale, actual SQL snapshot, dump/pre-post restore/parallel COPY, money scalar/array/NULL/negative values, and restored-default INSERT all passed.
+The harness Catalog13 registration export is complete; the final combined broad gate and follow convergence remain open.
+The assembled product candidate passed `cargo clippy --locked --all-targets --message-format=json -- -D warnings` with exit zero and no compiler diagnostics or lint allowances.
+Its manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-product-candidate-qtdju59t/manifest.json`, SHA-256 `499ce675a828a1eecf2e60a027554859cc084dc35da58274d2b3d92804bc05ee`, covering 289 files and 48 absent paths.
+Retained command output is `/tmp/rpgmigrate-m3-product-clippy.jsonl` and `/tmp/rpgmigrate-m3-product-clippy.stderr`; the integrator also observed `cargo fmt --all -- --check` exit zero.
+This clears the archived scaffold diagnostic blocker on that candidate only, without a primary-tree/Task gate pass, full required tests, or independent milestone review.
+The joined PID/oracle candidate `447a81f5` passed renewed strict Clippy and formatting without allowances.
+Attempt four passed startup and corrected source DML, then follow exited before convergence; the harness discarded engine stderr/status, so the actual cause is unknown and no live authority-oracle pass is retained.
+The immutable RED proof is `/tmp/rpgmigrate-m3-guarded-smoke-attempt-4.json`, SHA-256 `97affd987b52851a0b9ae84bb6780bc4039835d2c2650b4a93a6b70c109da0f4`.
+Safe error-origin metadata is assigned as a mechanical `Error::new`/`track_caller` change across 58 constructors, adding stderr `error_origin { file, line, column }` while preserving error categories/messages and M1 report/state contracts.
+The harness owner must capture matching structured origins before cleanup, with a subprocess regression, before one changed-input reproduction; the actual engine cause remains unknown until that run.
+Attempt five retained only secondary cancellation at `io.rs:44:20`, without convergence or source-confirmed completion; its proof is `/tmp/rpgmigrate-m3-origin-smoke-attempt-5.json`, SHA-256 `aa2117ad20322ca7ce7e61853baa4ffb8a1c0f58cfac52e64c8a33623a8124dd`.
+Read-only tracing proved that a worker enqueues its primary error before cancellation, but health SQL cancellation bypassed that queued error.
+The bounded typed-cancellation fix preserves a queued worker error only on cancellation, retaining genuine health failures, deadlines, and external cancellation behavior.
+Its manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-error-precedence-export-1qy0uoeg/manifest.json`, SHA-256 `afe5db00e0c3e49f86487ff4aef64e3f702f389cfc2658e137b811728d4fa7d3`; 42 focused tests, check, strict Clippy, and formatting passed.
+The joined candidate `21222aa8bfd191b76bd3a215e5c28f1c8cfd66cedc08d14eee3db4dfd6c0340a` also passed strict Clippy and formatting; no runtime success or primary-cause claim follows.
+Attempt six against `21222aa8` retained primary SQLSTATE `428C9` at target DML: UPDATE assigned every non-TOAST column, including an unchanged `GENERATED ALWAYS` identity.
+Its immutable proof is `/tmp/rpgmigrate-m3-primary-smoke-attempt-6.json`, SHA-256 `b902877e4631e9cdaa24dab4171669b7cf632494694d421f44edbb2f21f996a6`; no convergence or success receipt was emitted.
+The leader approved the complete [identity UPDATE fix plan](../docs/superpowers/plans/2026-11-08-m3-identity-update-fix.md), copied from the reviewed handoff with repository Markdown formatting only, and assigned five parallel format/source/apply/transport/authority owners.
+The planned native 7 / metadata 5 contract persists actual and optional partition-root identity modes, normalizes representable 16 to 18 inherited modes, and refuses independent PG16 leaf identity DDL that PG18 cannot represent.
+Normal UPDATE requires old/key proof that ALWAYS values are unchanged; actual or unproved identity changes use one atomic exact-row DELETE RETURNING to INSERT OVERRIDING statement, without silently omitting changes.
+The all-ALWAYS/REPLICA trigger guard includes internal FK triggers; the joined native 7 / metadata 5 candidate passed all-target check, strict Clippy, and formatting.
+All five identity packages are frozen; format checks passed nine contract and 105 state tests.
+Source catalog passed five exact live cases per major with exact-inventory audit; its manifest is `/tmp/identity-source-final/manifest.json`, SHA-256 `e29e7ba1e5c0853e539a2c5bd02f1a2cf34e856e9927c3b00d7a57de20c759e6`.
+Authority passed six exact cases per major, including one generic origin-only case; apply passed six exact cases per major, including actual source-valid deferred-UNIQUE permutation/parity and sequence nonadvance, and both exact-inventory audits passed.
+The apply manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-identity-apply-final-f19d4aph/manifest.json`, SHA-256 `0a7d878a28c7602829d5fbc0ac206c412dbb6ebbfb62dc68d6d070a500f4699e`.
+Transport14 passed on each major, but its copied tree contained 48 stale unselected storage files; this is not exact-inventory qualification.
+Engine50 includes all fourteen transport cases exactly once and must close that exact-tree gap without a duplicate Prepared run.
+Earlier discovery assigned 126 ignored library tests exactly once; the later closing-gate discovery below supersedes that inventory with 116 required current cases per major and twelve explicitly excluded legacy cases.
+The registered inventories include Engine50, FollowApply11, FollowAuthority11, and FollowReceive4, including the exact 70-second cadence case.
+The discovery and focused receipts are not aggregate results; the later native closing proof records the combined profile outcome.
+Replica apply suppresses ordinary origin-only deferred UNIQUE rechecks; require a source-valid deferred-UNIQUE permutation with exact row parity and target sequence nonadvance, preserving deferred-failure rollback only in generic origin-mode Authority.
+This ruling adds no admission delta and retains all ALWAYS/REPLICA callback refusals, including internal triggers.
+The first native 7 / metadata 5 PostgreSQL 16 to 16 ongoing-follow smoke passed against exact input `2b4faad37a5a7880ae6c011e7ef8acb1ff370e7c0dd89833c4949927421034d0`, with command exit zero and one selected case.
+Actual servers were PostgreSQL 16.15 and linked libpq was 18.6; initial COPY, valid workload, independent schema/data parity, target frontier `27638344`, forwarded status, and actual source confirmed flush all passed.
+The smoke proof is `/tmp/rpgmigrate-m3-native7-smoke-attempt-7.json`, SHA-256 `a7e1b0949aa2aa333fe86988edc4749c460a86d0b86b70b4c53ed8c96921844b`; its public receipt is `target/e2e/follow-smoke-16-16.json`, SHA-256 `deaab47548d8f1a21858689701855726561a1a0a8fbf1cf92f49c7592a9ab59d`.
+All 295 candidate file bytes/modes and 48 absences matched after the run, and owned containers were cleaned.
+The remaining 18 to 18 and 16 to 18 smokes passed one selected case each on the same frozen input and Linux binary, with target progress, independent parity, forwarded feedback, and actual source confirmation.
+The 18 to 18 proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-smoke-18-18-psfz6qm1/proof.json`, SHA-256 `0c26006b37a23c2e3893eff7ebe1791d44780ed616bf0135c14074c7df6cf3a2`; its public receipt SHA-256 is `737104288b62b6d5642dd6a4b4b36d2d3f8c69a63f73718d145488d7e2a2f8aa`.
+The 16 to 18 proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-smoke-16-18-qfiee7ub/proof.json`, SHA-256 `1ef3f87c325b538c089b2c564d3c0e33cfbd74e319414b60d9ccefcacccac7f2`; its public receipt SHA-256 is `cde88da73fc75d6fe29dadf543c4f5ce9e7cd546ebf7e533b2dd84e92ea9eba4`.
+All three ongoing-follow smokes passed, with all 295 file bytes/modes and 48 absences unchanged and owned containers/networks absent after cleanup.
+The observational ACK evidence adds no production feedback authority.
+At that smoke gate, the harness controlled an ongoing-follow stop with `successful_follow_exit=false`, without a full-profile or milestone claim.
+The later full matrix and closing evidence supersede that partial scope; M4 cutover remains unqualified and prior RED receipts remain retained.
+The independent PostgreSQL 16/18 SQL-only oracle proof remains separate and valid; the old twelve-case stage was unretired at that smoke gate.
+
+### M3 full-profile attempt, 2026-11-08
+
+The frozen full-matrix source manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-full-matrix-candidate-195jxlj_/manifest.json`, SHA-256 `ce32008f4ff359d5762901db3ed999a08febd6dc78407309999dfb860bfd1c2e`.
+The first full 21-case PostgreSQL 16 to 16 run stopped RED at the `before_commit_rollback` initial startup wait.
+No passed-case count or full 21-case receipt was produced, and the full 18 to 18 and 16 to 18 profiles were not started.
+The retained observations show zero B/C/status counts, target metadata format 5 with order zero and no anchor, and an inactive source slot.
+No native Error, SQLSTATE, or stderr was retained.
+The immutable proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-full-16-16-red-8kudh4n3/proof.json`, SHA-256 `77d2743502d145f123d86d2a5a98d538d88be950ee119d8d73d77fc9baded010`.
+All four owned containers and the owned network were proved absent after cleanup.
+Six threaded tests confirmed that the harness proxy misclassifies ordinary COPY `r`/`w` without a logical handshake.
+The minimal two-file patch passed all 38 portable checks; its export is `/private/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-proxy-classification-umez92in/export/manifest.json`, SHA-256 `6ae257f94bff91a979f9146cf3240a09f4a4a431420c50d63cb8f2e119f740d8`.
+The bounded PostgreSQL 16 diagnostic stopped RED at the same initial readiness wait before fault injection or rollback, with both proxy error counts zero and no B/C/status observations.
+Target metadata remained format 5, applied order zero, and no anchor; Rust was unchanged, and the fixed harness does not explain the original startup failure.
+The proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-diagnostic-red-9yjq1b3w/proof.json`, SHA-256 `2fc533713fa6524f3fab79849ef014a9509323cfa84b3e258cfb0f3cdb9a7630`.
+Research completed the comparison of passing source-only proxy smoke and failing source-and-target proxy startup; all fault gates were armed without an inadvertent hold.
+Code-derived counter four bounds committed Copying through before PostDataPending, or waiting for counter-four reply; it is not an observed phase.
+The leader approved observability-only ordinary-proxy phase/frame counters, backend waits, process basenames, and exact owned IDs at 45 seconds and failure before cleanup.
+The capture patch passed 53 follow and 13 clone portable checks before the next captured RED at 2026-11-08 22:50:55 UTC.
+That proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-live-capture-red-dxg8ilgi/proof.json`, SHA-256 `3527a6bdaa65c9aabca27b17208dc31c66eeb7160dcc1ebf9f7d3169d6017408`.
+Between 45 and 60 seconds, COPY workers progressed and closed, the last 207 ms before failure; no fault was held, SQL error retained, or lock wait sampled, and readiness correctly waited for post-data and anchor.
+Replanning confirmed that the Q-only before-COMMIT gate misses the engine's extended-protocol P/B/D/E/S COMMIT.
+Actual Linux measurements for identical 25-exchange workloads were direct 2.130 ms, default relay 2086.426 ms, and two TCP_NODELAY options 7.236 ms; all nine trials retained identical bytes.
+The Linux receipt is `/private/tmp/rpgmigrate-m3-tcp-probe-20261108/linux/receipt.json`, SHA-256 `fe22f492eec3589f16c48b943b45d84054f60a175b6381af34e75470f6bde318`; the earlier macOS negative remains separate evidence and cannot exclude Linux behavior.
+The leader approved only the two harness socket options and bounded extended-COMMIT/actual-data-transaction witness gates; no next runtime precedes the frozen fix, and engine Rust/deadlines remain unchanged.
+Likely proxy latency is measured, but startup repair and engine WAL speedup are not established.
+The diagnostic input manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-diagnostic-candidate-l95cydv_/manifest.json`, SHA-256 `2348f106d5e5c0f12cc62e8b6d9428fbf7180e0acfab0969059cce69e914c786`.
+Rust is unchanged; the patched harness passed 47 follow and 13 clone portable checks, including the abort-held-frame fix for confirmed queued COMMIT forwarding after backend death.
+Require post-crash checkpoint and fingerprint observations after held COMMIT and backend closure, before resume; pre-kill invisibility alone is insufficient.
+
+### M3 full matrix and closing gates, 2026-11-09
+
+The full 21-case profile passed on PostgreSQL 16 to 16, 18 to 18, and 16 to 18: 63 named case executions and 42 actual clone-bound Go report validations while fixtures were alive.
+The aggregate proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-full21-matrix-pass-aehu4grh/matrix-proof.json`, SHA-256 `9a63d833bfc38749d90cf04812824f6b37794532f9442c0ba57cb660782187da`.
+It binds input manifest `3cbef490709f949db02bb9853c0d959d90b064b2c52a7492362fa28f6621d331`, native format 7 / metadata 5, and engine `dee3822a8a4fbea158ac744b43bbb3478fd08e6b1de51822e356b29bc34d4909`.
+All twelve exact owned containers and three private networks were cleaned; prior RED attempts remain retained.
+These controlled ongoing-follow stops (`successful_follow_exit=false`) qualify follow, not cutover or power-loss durability; later closing checks and review establish M3 closure.
+The legacy twelve-case SourceSnapshot stage is removed in the later private retirement candidate below.
+
+The closing native gate stopped at PostgreSQL 16 Engine50: 49 PASS, one FAIL, zero ignored, Cargo exit 101.
+`apply::checkpoint::live_tests::async_barrier` at `src/apply/checkpoint_live_tests.rs:795` expects `fsync on`, while the shared producer diagnostic says `fsync and full_page_writes on`.
+The unsafe target was refused; this assertion failure does not qualify Engine50.
+At that attempt, the other nine profiles and all PostgreSQL 18 profiles were unrun; discovery assigned 116 cases per major and excluded the twelve legacy cases.
+The retained gate proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-native-gates-xjbjoep0/gate-proof.json`, SHA-256 `c812e4fd96679fc5274035ea13ddd6b0a28527003b899dd67fc689e5ab051b97`.
+The later assertion-only successor is integrated at `/private/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-assertion-successor-1llvusfd/manifest.json`, SHA-256 `d85e84396608751e161646a3ecc43bba4eaa30ca360c474e037edd62fb57e8ec`.
+It preserves 295 of 296 files unchanged and all 48 explicit absences; only the stale test assertion changes.
+Independent successor verification passed PostgreSQL 16 Engine50, including the repaired `async_barrier` assertion and six live-fault receipts.
+Catalog13 then stopped with twelve PASS and one FAIL; the other eight PostgreSQL 16 profiles and all PostgreSQL 18 profiles were unrun at that point.
+The gate proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-native-successor-gates-9sl848l6/gate-proof.json`, SHA-256 `d3ee0f66e92ff067b3a5a352f9019fbfb3e1199f995ea08c0385e28e3ab8bee1`.
+The retained diagnosis is the sibling `catalog-diagnosis.json`, SHA-256 `6e3b841b552dd3bcc05e5b55a9755357ab23b70689f81eab7e7d6b07acad5211`.
+CDC tests intentionally commit real heaps into the shared catalog/clone database; the clone collision guard correctly refuses the leaked fixture state.
+`operator_lint_repair` owns the bounded isolation fix in `tools/test-db.py` and `tests/support/test_catalog_harness.py`: provide a fresh empty clone pair without changing Rust production code or weakening the collision guard.
+The two-file isolation successor is frozen at `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-catalog-isolation-successor-btnxznjw/manifest.json`, SHA-256 `69086a1592f1885d948d85de380e7f5537e5e540c44aaf4c7cbf61a04d36057f`.
+All fourteen focused checks pass, including the distinct-pair regression and truthful Engine50/Authority19 inventory assertions.
+Exact integration preserves 294 other files and all 48 explicit absences; only the two assigned paths change, both mode 0644.
+The integration proof is the sibling `integration-proof.json`, SHA-256 `e9817ed5093813798da44704b8921c6a88ef26d14ca9bc8979a821b6e299df73`.
+After correcting matching PGDG 16 tool PATH, PostgreSQL 16 reached ninety qualified native cases: retained Engine50 plus fresh Catalog13, SourceCatalog3, Clone7, Schema1, FollowSource7, and FollowSnapshot9.
+FollowAuthority11 stopped with ten PASS and one FAIL in `follow_cancelled_sync_wait_never_proves_group_or_certification`.
+The actual outcome was not printed; the test checks `reload_conf()==t` without a SHOW-policy wait, asserts Unknown before cancellation-observer join, and retains no positive SyncRep/cancellation witness.
+The focused Step 1 diagnostic reproduced an Acknowledged outcome without a same-PID COMMIT/SyncRep witness and with `cancel=false`; this is not production warning-classifier proof.
+Receipt: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-sync-cancel-diagnostic-4hoq3_xj/receipt.json`, SHA-256 `3d2511b40c86b34bc4adf525ec87c28f0061254d1ef4b9a171cd4a97a130acc9`.
+Three actual owned servers were cleaned and six fixture paths proved absent; two version probes included in the broader handle list are not additional servers.
+The leader approved test-only Step 2 exact SHOW-policy and CHECKPOINT readiness checks, preserving positive cancellation witnesses and unchanged safety assertions.
+The later test-only readiness successor completed the remaining profiles without a production fix or assertion weakening.
+Gate proof: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-native-isolated-gates-x8kkfk2v/gate-proof.json`, SHA-256 `1b07a04d5c849312af3ad3fc3ad1200d03e46da5483a84c310a871f154582870`.
+All owned fixtures and processes are absent; the earlier gate above remains a partial result.
+The final native gate passed all ten required profiles on PostgreSQL 16.15 and 18.6: 116 tests per major, 232 PASS, zero failed or ignored.
+The proof is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-native-sync-gates-eef3_vhc/gate-proof.json`, SHA-256 `42c3a6860e41aa52ed36954949f6185687b3784607b1c32936445bf4ae6c0298`.
+It combines 142 fresh tests on manifest `c155b7c3775dbb7f063dadfcaa054b77d086b193f808b73b9f06d5d50a347839` with ninety retained PostgreSQL 16 tests whose selected test, helper, and production inputs remain unchanged.
+All owned fixtures and processes were cleaned; retained tests were not rerun.
+Legacy-stage retirement is authorized across eleven paths with two deletions, preserving native116 and COPY40 inventories.
+The two-path Rust export is `/private/tmp/rpgmigrate-retire-rust-qmz6voe9/manifest.json`, SHA-256 `b18e664cbf7f12ace67231c52b1454ea1813a0957a3148df8ca6b059a20c759f`.
+It removes twelve legacy cases from compiled Rust and passes four primitive unit checks plus one clone-ticket unit check.
+The five-path harness export is `/private/tmp/rpgmigrate-retire-harness-o4c00xdd/manifest.json`, SHA-256 `8f6786fd25e39cba7fd10a13faf41c614fe938475f7f1b56f769ecb1b661f1eb`.
+It passes 34 Taskfile and fifteen FollowSnapshot checks.
+The four-path portable-inventory export is joined with the Rust and harness exports across all eleven disjoint paths.
+The private candidate is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m3-closing-retired-6whavatu/manifest.json`, SHA-256 `3a9e30d41b0fb93da5df02aca8e7abbb78f5189d317361be67a21c7a9ad008c2`.
+It contains 294 files and fifty explicit absences, without a production behavior change; native116 and COPY40 inventories remain intact.
+The portable inventory registers thirteen suites and 254 tests.
+The closing integration worker passed formatting, strict Clippy, 433 Rust tests, 24 CLI tests, and 254 portable tests.
+Eighty COPY tests and all 232 native profile tests passed with their recorded exact-source provenance.
+
+Canonical operator lint ran against exact checkpoint `5e8cbcbbe7ad9b89cb80a7edc1d5004af5cd4e58` and failed with 25 diagnostics: 24 `goconst`, one `unparam`.
+All other lint stages passed, with no source changes; receipt: `/tmp/rpgmigrate-m3-operator-close-20261109/receipt.json`.
+Canonical `task test` passed all 15 packages uncached at exact clean operator checkpoint `5e8cbcbbe7ad9b89cb80a7edc1d5004af5cd4e58`, using a fresh empty Go cache, `GOFLAGS=-p=2`, and `GOMAXPROCS=2`, without a bridge or source overlay.
+PostgreSQL 16 cluster-free race checks passed 508 checks with two expected skips: generated virtual columns require PostgreSQL 18, and the live-writer helper is a subprocess entry point.
+PostgreSQL 18 Coverage/StampedSchemas race checks passed 158 checks without skips; the cluster-driven `TestE2E` was deliberately excluded from both runs.
+Both exact owned PostgreSQL containers and private etcd/kube-apiserver PIDs were proved absent after cleanup.
+The evidence is `/tmp/rpgmigrate-m3-operator-close-20261109/go-final-receipt.json`, SHA-256 `3c0204aa37c4040bd6896bfd83f1c1279a22686ae48c4672225dd1069f20b751`.
+The minimal twelve-path lint repair passed 37 focused checks and is independently integrated at tree `d9003a7939eac53ffe471134196440906794f45f`.
+It changes test constants plus one production comment explaining why, without a production behavior change.
+The repaired successor passed full canonical lint: all sixteen stages, zero issues.
+Its full source hash `f9993ced4f02d262c2e41336a08a3c8667f38dd08ce6c3ad31bf459a7c4b8d54` was unchanged before and after the run.
+Receipt: `/tmp/rpgmigrate-m3-operator-successor-lint-20261109/receipt.json`, SHA-256 `a69aae6f77cb059d9801ac580f51ebbdce8600016b01833ee61667cb2acfa44a`.
+Retain the earlier 25-diagnostic failure and clean-checkpoint Go PASS as distinct exact-source evidence.
+The repair uses equivalent test constants and one production comment; no successor Go rerun is claimed.
+M3 closing checks and the independent xhigh whole-M3 safety review passed with no actionable findings.
+The source and testing guide are committed as `7b6037f9ac8214696936a21c865cd97307cc5c6e` on `feat/native-engine`.
+Actual primary `task check` returned zero; formatting, strict Clippy, 433 Rust tests, 24 CLI tests, 254 portable tests, and eighty COPY tests passed.
+The 232 native cases and 63 follow cases with 42 Go clone-report checks retain their exact-source receipts; they are not additional offline test counts.
+The separate operator lint repair is committed as `2bdc7614c04bc6aa8a8f4c709a84cbcc07340b5c`, tree `d9003a7939eac53ffe471134196440906794f45f`.
+M4 cutover, M6 native activation, M8 widening, and M9 power-loss/performance qualification remain open.
+The operator checks above retain their exact-source scope and do not qualify native operator runtime.
+
+- [x] pgoutput v1 decoder (B, C, R, Y, I, U, D, T, O; others fatal) with relation generations and PostgreSQL 16/18 regression coverage.
+- [x] Receive thread with decision 3 backpressure and status rules; slot health checks; gap refusal on connect.
+- [x] Applier: RI FULL keyless (ctid single-row), RI INDEX, unchanged TOAST, multi-relation TRUNCATE (ONLY, never CASCADE), identity and generated columns, non-built-in types as text; pipeline groups; strict dedupe.
+- [x] Phase-aware restart/resume admission and recovery within the qualified profile, including resume after the anchor.
+- [x] Pass native 7 ongoing-follow smokes on all three declared pairs with independent convergence and actual source-confirmation evidence.
+- [x] Pass the exact nine-case native source-snapshot profile on PostgreSQL 16 and 18 with independent fault receipts.
+- [x] Pass the full 21-case follow profile on all three declared pairs, with 42 actual clone-bound Go report validations.
+- [x] Pass all ten native profiles on PostgreSQL 16.15 and 18.6: 116 tests per major, zero failures or ignored tests.
+- [x] Join all eleven authorized legacy-stage retirement paths in the private candidate.
+- [x] Pass the retired candidate offline closing gates and integrate the reviewed result into the primary tree.
+- [x] Complete the independent whole-M3 safety review and commit source as `7b6037f9ac8214696936a21c865cd97307cc5c6e`.
+- [x] Pass the declared M3 fault/recovery, filtered-WAL, keepalive, and round-trip controls.
+Parser fuzzing and measured catch-up performance remain M10 and M9 qualification gates.
 
 ## M4: Cutover, drain proof, cleanup (engine)
+
+The leader accepted the revised [M4 plan](../docs/superpowers/plans/2026-11-08-m4-cutover-control.md) design and contracts conditionally on the exact final M3 hash/interface/version freeze.
+On 2026-11-08, isolated M4 build work started from the exact `2b4` donor; authority, control, receiver, and apply owners use xhigh effort.
+The frozen seven-file authority candidate passed 125 state, 26 metadata, 12 checkpoint, and 12 pure follow-authority checks; its 17 live cases have discovery proof only.
+Its manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-authority-candidate1-dl3azsfz/manifest.json`, SHA-256 `6f5b496b1e34997070b17b5bb35e600597ed1cb23e9b409ba1701a40d05c4483`.
+The frozen control export passed 18 pure checks including reopen/seal; strict lint awaits consumer wiring.
+The three-file receiver export passed 11 receiver, five transport, and five channel checks plus strict library Clippy, without PostgreSQL or new live qualification.
+The coordinator passed 23 actual focused checks; the final two-file apply export passed 14 pure checks and is frozen at manifest SHA-256 `f579cd38e1a096d1e05bb14a0f24bfaaca0328b3af34f9aaa791139d9c75fe4f`, included in the later assembled candidate.
+The authority empty-receipt guard repair passed four cleanup and 12 follow-state checks in successor `db2d1006`, without database qualification.
+All owner exports are assembled at `/tmp/rpgmigrate-m4-guarded-integration`, covering 304 files and 48 absences, manifest SHA-256 `8fb8750a1d28e9854af94caaaab486dfb1fab84967aaf0f13e0f24cfea392d1f`.
+Formatting and all-target check passed on the assembled source; strict all-target Clippy failed on three authority unused/obsolete-expectation diagnostics.
+The owner removed the unused `DurableFollowSnapshot.request_floor` field/accessor and obsolete expectation only, preserving `read_endpos_floor` and first/changed-publication veto semantics.
+The repair export SHA-256 is `3a06813e4d78ecc1304b3bf6ec0cf2b16fa768eb3759506dc43e11c7880046d23`; 12 focused authority checks passed, with 17 live cases compiled only.
+The changed-input assembled candidate then passed formatting and `cargo clippy --all-targets -- -D warnings`, both exit zero, with all 304 files and 48 absences unchanged.
+The frozen partial manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-candidate-static3-_55101kj/manifest.json`, SHA-256 `efa9e8646e06bec55300ae092359ee5d51275397f8c8fbbac382a2bc4d07db80`.
+Static provenance is `/tmp/rpgmigrate-m4-integration-ledger/rust-static3.json`, SHA-256 `bd7192d4cb9e4ebc2734da23209dd2347c56ce6b0685d6260d3c5164f9d80964`.
+The approved plan-only successor `1367c9ad` changes no Rust input and requires no repeated Clippy run.
+These isolated M4 checks do not qualify runtime, Go producer proof, E2E, or M4 closure.
+Catalog13 discovery passed after adding two ignore attributes in `src/catalog.rs`; the successor manifest is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-candidate-catalog13-scer5mea/manifest.json`, SHA-256 `948ba09a37baa0065ddb7010af7d752a4eaa66e872f03d40266ef22745bbe526`.
+Rust bodies retain the prior static-green evidence; the attribute-only successor has no database qualification.
+Completed-positive Go validation depends explicitly on M6 independent reader evidence; old clone probe `f06` cannot accept EndLSN, Checkpoint, and Resources, so producer checks alone do not pass that Go gate.
+The five-document export checked 29 DDL cases, 30 links, and 22 Task references; cleanup passed three cleanup and eight catalog pure checks, with five live cases compiled only.
+The M4 harness is frozen with 217 focused checks passing.
+The full candidate is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-harness-final-xpv6a7le/candidate/manifest.json`, SHA-256 `6b63e0a9bff0bd33a5798a51cedd41feb0baccea4b7d560950455aecd87b221f`, covering 306 files and 48 explicit absences.
+The offline native-8 build passed against integrated source `9158fef5601fa3b9c3d7c5c0c1223a761071a0aafce8d9e635ca207f79edb155`.
+Its binary is SHA-256 `c185bedf97c021558092b0930815ff7b17fcc9e85c5a666552bb779607af2187`, linked to libpq 180006.
+The private capped tool runner and owned internal network are approved for serial nine-case producer runs on three pairs, starting with PostgreSQL 16 to 16; no runtime qualification result is claimed.
+Positive cutover Go qualification awaits the independent M6 reader, and M4 runtime, E2E, and closing review stay open.
+The first actual PostgreSQL 16 to 16 producer case failed the active-fence assertion; zero M4 runtime cases are qualified.
+Failure summary: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-producer-integration-6z_7deja/runtime/failure-summary.json`, SHA-256 `43806493f8f06570b34c536961966c4d003389e8b071b89f4711829a660f8f07`.
+The later retained sentinel result is CLI `BadArgs` exit 1, caused by trailing-capture parsing; post-teardown worker Target7 is not causal evidence.
+All three exact owned containers and the network were proved absent.
+The two-file retention repair is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-fence-retention-an15cuee/export/manifest.json`, SHA-256 `e5404197bf902d72aa3b99875ea163a12f2ef83210232aa3663b37657c61fcee`.
+Its 93 focused checks pass.
+The one-file CLI correction `39b791fd` passed 31 parser checks; the Linux rebuild and first-case retry are unrun.
+The harness peer passed six portable checks and registered cases, without actual M4 E2E.
+The frozen eight-file CLI export passed 31 adapter/parser checks only; no assembled-source or runtime result follows.
+All 41 implementation steps remain open; these static checks establish no M4 runtime qualification.
+The 2026-11-08 [M4 plan](../docs/superpowers/plans/2026-11-08-m4-cutover-control.md) clarifications freeze endpos/frontier handling, fresh reproof, durable final sealing, guarded closure, and boxed proof without lint allowances.
+The plan API text now omits the unused snapshot-floor accessor and refers to the plain publication floor at sealing, preserving the unfenced admission-veto contract.
+The reconciled plan has 490 lines and SHA-256 `1367c9ad707381e36032cb203346e19406c78ba60f072dcf9ecde5dd1e1d6e8b`.
+The M4 version sentences now use the planned native 7 / metadata 5 identity-fix baseline and conditional native 8 / metadata 6 successor; neither format is qualified by this documentation update.
+No informational JSON may expose unproven certified or durability counters; local endpos reads are allowed, while replay, drained, and proof reads require positive fenced observation or bounded explicit refusal when busy or unknown.
+The native operator must sample and persist one E, then retry that identical E explicitly after a bounded refusal.
+The worker processes persisted E independently of acknowledgment; the M6 standalone helper retries identical E for final positive proof after the worker exits.
+We add no IPC or fence handoff for this path.
+Native 8 / metadata 6 is conditional on acceptance of the planned M3 identity-fix baseline as 7 / 5.
+Exclusive slot administration is an accepted prerequisite; uncertain incarnation or reappearance requires preservation and refusal, without an invented slot OID or new privilege mechanism.
 
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
@@ -202,10 +445,35 @@ Later clone/catalog inventory changes still require a fresh focused run, and the
 
 ## M5: Packaging and engine CI (starts with M2)
 
+The local ARM64 read-only packaging smoke binds an older source snapshot; final-source image, AMD64, and hosted qualification remain open.
+
 - [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
 - [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, engine E2E matrix on hosted runners, image build, ghcr push on tags only.
 
 ## M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
+
+Command and framing helpers have focused evidence only; production `UnsupportedEngine` activation remains blocked pending the native lifecycle gates.
+A high-effort planning worker is preparing the remaining native client/evidence/lifecycle plan against clean checkpoint `5e8cbcb` and the frozen M4 contract.
+The leader confirmed that independent `CheckpointEvidence` cannot derive from engine reports or native acknowledgments; the plan uses a bounded fail-closed existing-psql/private-PVC qualification spike.
+Saved E uses the existing status optimistic patch without a CRD addition.
+The corrected M6 plan, SHA-256 `d4bfd6731cd97dc456ca1495392e33e3c2dd742d24ee25e74efcee94ce741484`, passed root review for Task 0 only.
+Task 0 mechanics are frozen at `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m6-evidence-mechanics-ru5y4n1m/manifest.json`, SHA-256 `7c8c421ea3b7ca8ff2436d08da7fbacf8ad96d3abd4a8fdf0d10cf362dcd3a35`.
+The final export passed 53 focused leaf cases with zero skips, including 15 exact PostgreSQL 18 live cases; the earlier 13 PostgreSQL 16 cases do not qualify the changed final export.
+Synchronous-warning exit-zero/COMMIT and post-COMMIT loss with exit-zero/empty-stderr were refused by the required warning/closure guards.
+All 32 tool containers, PostgreSQL 16/18 containers, and the network were proved absent, and the pool was released.
+The later test-only boundary prototype passed 194 cases: 120 without a database, 37 on PostgreSQL 16, and 37 on PostgreSQL 18.
+That receipt does not complete Task 0, establish a production constructor/helper API, or authorize native activation; qualification and a reviewed addendum remain required.
+Opaque `CheckpointEvidence` must never derive from reports or native acknowledgments; consumer interfaces and native activation remain unfrozen/refused pending evidence and review.
+The leader accepted final M6 plan SHA-256 `c3ba6a68ac5dc4ca2ad269ccf0cd3d6949a2ffc15d5fb888ad28b1815d9b47ac`, retaining informational source-slot telemetry for the existing two-sample `CaughtUp` decision.
+Twenty-second freshness uses new private constant-size state on the existing Sampler run, without a CRD or new cache.
+It adds no CLI, DTO, application-fence subsystem, or `CheckpointEvidence` authority.
+The composed 21-file test-only successor `031f9d4` passed 67 focused Go checks and eight Perl checks.
+The actual PostgreSQL 16 live run uses a new owned two-CPU/1-GiB database container and a half-CPU/256-MiB helper.
+The run recorded 26 PostgreSQL 16 passes before the lost-COMMIT case failed to qualify; all owned resources were cleaned.
+Fifteen fault stages and relay COMMIT/Idle observations prove the lost reply, without completion evidence.
+A fresh retry refused target open; the source-backed hypothesis is that absent environment values became empty.
+A pure environment correction is under work; no healthy retry or PostgreSQL 18 result is qualified, and Task 0/production activation remain open.
+Application write fencing and ending outstanding transactions remain the operator user’s duty in both Manual and Automatic modes; no new fencing subsystem is authorized.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
 - [ ] Preflight: `version --json` handshake into `validateNativeConfig`; native pg_restore gate by target major; skip the origin-grant probe; PG16 target allowed for native.
@@ -214,6 +482,52 @@ Later clone/catalog inventory changes still require a fresh focused run, and the
 - [ ] Unit and envtest coverage; operator docs for the native engine.
 
 ## M7: Operator-driven E2E
+
+The leader accepted the [M7 bootstrap slice](../docs/superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for two code-only owners based on operator checkpoint `5e8cbcb`: lifecycle in `/Users/ydixken/development/pgcopydb-operator-m7-bootstrap` on `feat/m7-kind-bootstrap`, and suite in `/Users/ydixken/development/pgcopydb-operator-m7-suite` on `feat/m7-kind-suite`.
+The read-only image provenance research at `/tmp/m7-image-research.json` resolves the approved major-17 image to 17.11 and retains the existing OTel 0.162.0 constant and approved CNPG 1.30.1 manifest hash.
+The bootstrap receipt must prove an actual executed/passed legacy case count and selected spec name, Complete/CutoverCompleted, nonempty data and sequence checks, and fixture cleanup.
+Final kind teardown is a separate observed outcome, not part of a fixture-cleanup success claim.
+The exact eleven-file M7 join is frozen at `/private/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m7-integrated-handoff-2v5s7huy/join-manifest.json`, SHA-256 `542c39179e542486dce4d4478851d273ae90ec4bd7746c52bb5e84af581654b8`.
+It includes 57 passing bootstrap controls and its self-check plus the focused suite checks.
+A compatible custom-lint tool passed focused proof while preserving the log check; the full required closing lint remains pending.
+Actual artifact preparation pulled six exact missing images and recorded eight image identities, then refused the pinned legacy runner binary: observed `0.18.129.gd7547b5`, required `0.18.144.g86bf908`, with a different hash from the pinned builder binary.
+The refusal is retained at `/private/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m7-v2-run-0mjhw18_/legacy-baseline-rejection.json`.
+Both owned inspection containers were removed and absence proved; no manager build, archives, artifact check, or cluster followed, and source files were unchanged.
+That attempt returned the resource window to M3; the later user capacity override below permits parallel M7 preparation without an exclusive database lease.
+A separate local ARM64 v0.25.0 candidate passed the executable/tool/nonroot/workdir contract with version `0.18.144.g86bf908` and the exact trusted builder binary hash; owned cleanup was proved.
+Its receipt is `/private/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m7-runner-v025-qualification-3fh3l5q2/candidate-qualification.json`, SHA-256 `33bb7d4a33ae0518985a546da3d1d827e107d569b2044fd8eb14d2adcea66f71`.
+The ARM inventory-pin correction is guarded-joined into source `6ae1557f82057f898574bcd499ce785d5e3ec8440ab5a4a8c58e770d3eb2f20b`; AMD64 runtime qualification, manager artifact, archive/bundled-storage provenance, and the full gates remain open.
+The original runner refusal remains valid evidence for its old pin.
+The ARM manager build passed against unchanged pinned source `6ae1557f82057f898574bcd499ce785d5e3ec8440ab5a4a8c58e770d3eb2f20b`, covering 529 files.
+Podman OCI save was rejected because gzip recompression changed the pinned manifest; neither pin relaxation nor a configuration-only pass is accepted.
+Artifact preparation then passed byte/receipt checks using existing VM skopeo 1.22.2 with `--preserve-digests`, retaining published pins without a new dependency or custom assembler.
+Seven OCI role archives total `798203904` bytes, with 65 role-blob references and 28 embedded storage blobs; the node upstream index and selected ARM child remain distinct identities.
+The actual archived legacy runner binary matches the retained trusted builder and qualified `86bf908` binary.
+Evidence is `/private/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m7-v4-run-p5ajdpha/artifact-preparation-evidence.json`, SHA-256 `292dc3ae493b442f068e4ebd5c23d6c6fa7d611ca5eaba95a98408ddc53dc73d`.
+Private files are mode 0600 and directories 0700; observed minimum VM free disk was `19568111616` bytes, above the 10 GiB floor.
+The approved reproducibility/capacity plan is SHA-256 `831ebb2e4ac1b723b98c5d4c3e1311fce6a1b1f14e9138888cf7aaf3c00418d2`.
+Task 10 is frozen at `/private/tmp/m7-task10-producers-frozen-7d5xow85/manifest.json`, SHA-256 `5069c96437b0268ce7db86507d7f7d4c5e804fbc992197ee540a86cea6d1a4fb`, with 131 focused checks passing.
+Task 12 is frozen at `/private/tmp/m7-task12-node-limits-frozen-iyjphj8s/manifest.json`, SHA-256 `85399fc3e8ebde3aa55a5c8101fd9114503c7c4ef7466e39bb0e82d0e3acfaab`, with 153 focused checks and its self-check passing.
+Task 11 documentation is frozen; third tracked preparation ran against exact source `1b7ca392fa63d4bd2c0662b355e3299f334df84fb19c3704a2b24d63baa2df46`.
+The source-bound manager build and all seven archive roles passed, but the baseline stage refused the multiline version-probe parser.
+Refusal: `/private/var/tmp/m7-third-tracked-control-718nbi5s/tracked-preparation-refusal.json`, SHA-256 `34a6bf8e9684d81648c8cc74c6c77491d5d6ecc796447e4652a6071478af722b`.
+No tracked check or up followed; all owned containers were proved absent.
+Task 13 corrective planning found that Podman removal deletes transient CID files, leaving declared CID receipts missing.
+The Task 13 correction separates transient CID files from immutable receipts and validates complete version-output framing.
+Tracked prepare and check then passed once each against source `6222196c83af94e5652e72921b1e4010c72160221a90a58cab702942a10ce1bf`, with all 530 entries unchanged.
+The retained run directory is `/private/var/tmp/rpgmigrate-m7-task13-run-0sv9j84y`.
+Final inspection: `/private/var/tmp/m7-fourth-tracked-control-p42xzbbk/final-preparation-inspection.json`, SHA-256 `e8fbe8d88d3dd40daba6ca2bcf726d2937efd5a72605f83a1ca86c62705573c3`.
+Kind up was not attempted: fresh free disk is 13,300,498,432 bytes versus 14,780,850,176 required, short by 1,480,351,744 bytes.
+The requirement preserves the 10-GiB floor plus a three-node work bound and 1-GiB margin.
+No owned reclaim of at least 1.5 GB is proved; no prune ran.
+The read-only AppleHV 100-to-128-GiB resize plan awaits final PGDATA-preservation checks; user approval was neither requested nor executed.
+Earlier partial runs remain preserved and never adopted.
+Actual kind remains unrun, with no created kind resources.
+The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap.
+Its receipt is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m7-node-cap-aligned-probe-8ktx3pxr/receipt.json`, SHA-256 `ab3d8ba884a56203f2f58b8fa384e06e21371a3b870fa806f2d7e4ed01c80d39`.
+That existing-container update does not qualify actual kind topology or cluster resource caps.
+The successful preparation binds only its exact source; actual kind topology/caps, legacy workflow, and AMD64 remain unqualified.
+No manual proof JSON, renewed lease, or new schema is allowed.
 
 - [ ] kind (podman provider) bootstrap with pinned CNPG, CRD apply and image load as Task targets; validated first with engine=pgcopydb on 17:17 (can start right after M1).
 - [ ] Suite knobs: `E2E_ENGINE`, `E2E_RUNNER_IMAGE`, `E2E_SMALL`; DropIfExists off and filters dropped under native; engine-aware `checkMajors`; a positive `native` label set.
@@ -240,6 +554,25 @@ Later clone/catalog inventory changes still require a fresh focused run, and the
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
 - [ ] Independent reviews of durability, recovery and the operator diff; final matrix on the exact image digest.
 
+## Capacity and parallel execution, user update 2026-11-08
+
+At approximately 21:45 UTC, the user stopped and restarted idle `podman-machine-default` after resizing it from 9 CPUs / 12 GiB to 14 CPUs / 32 GiB; its 100 GiB disk is unchanged.
+The stock `rpgmigrate-m0-stock-20261108` and `m1-contract-pg16` / `m1-contract-pg18` containers were restarted; PostgreSQL 16 accepts on `127.0.0.1:46631` and PostgreSQL 18 on `127.0.0.1:38209`.
+The 21:35 UTC startup RED predates the resize and is unrelated to it.
+The user revoked the old exclusive M7 database lease and permits kind/image preparation alongside M3/M4 PostgreSQL tests, subject to verified capacity and host Cargo headroom.
+The integrator observed 14 VM CPUs, MemTotal `32781892` kB and MemAvailable `31862904` kB (about 31.3 / 30.4 GiB), and graph-disk free `21256830976` bytes (about 19.8 GiB).
+The host has 18 CPUs / 48 GiB; its observed free disk was 267 GiB.
+Packaging uses Podman client 6.1.4 and server 5.8.3; retain a 10 GiB VM disk floor without cache purging.
+The current two-PostgreSQL-track window allocates six CPUs per track plus two reserve CPUs, totaling fourteen CPUs / 18 GiB.
+M7 image preparation waits until one PostgreSQL track is idle.
+The approved preparation window is 11 CPUs / 17 GiB: PostgreSQL six CPUs / 6 GiB, image preparation three CPUs / 5 GiB, and reserve two CPUs / 6 GiB.
+The capped kind steady window is 14 CPUs / 24 GiB: kind six CPUs / 12 GiB, PostgreSQL six CPUs / 6 GiB, and reserve two CPUs / 6 GiB.
+Do not overlap image preparation, full PostgreSQL load, and kind.
+Initial uncapped kind creation requires PostgreSQL and host Cargo idle until exact kind caps are proved.
+Preserve at least four host CPUs of headroom when allocating Cargo jobs; a VM cap is not permission to oversubscribe the 18-CPU host.
+Do not resize the VM or purge caches under this update.
+All milestone closing gates remain open, and no additional commit is authorized.
+
 ## Executable command scope
 
 The M0 reset does not implement additional operator command paths.
@@ -251,7 +584,7 @@ The [operator compatibility contract](../docs/operator-compatibility.md) defines
 The catalog owner's exact two new admission cases and stock utility pre-data smoke passed on PostgreSQL 16.15 and 18.6.
 The comparison owner's exact canonical SQL case passed on PostgreSQL 16.15 with libpq 18.6; its retained result is `/work/m2-compare/result.log` in the isolated development container.
 The snapshot/COPY owner's six clone cases passed on PostgreSQL 16.15 and 18.6, including RED then GREEN for replaced-snapshot refusal.
-The PostgreSQL 18 test binary passed six cases, but its wrapper refused because the required inventory grew to seven during that lease; the expanded exact receipt remains pending.
+The PostgreSQL 18 test binary passed six cases, but its wrapper refused because the required inventory grew to seven during that lease; this preparation failure is distinct from the later passing seven-case receipt.
 The updated portable gate `python3 -W error tools/ci/unit.py` passed 156 tests.
 The development-only E2E image built as `aa4c2ab94e0ffd4c57319c221f61a099b40d06cd2184d18f8be0b275531994a7` with stock PGDG clients 16.15 and 18.6 and libpq 18.6.
 These component checks do not establish the container recovery matrix or operator qualification.
@@ -330,7 +663,7 @@ Independent review subsequently resolved generated-output parity and then the sy
 M6 command helpers passed focused controller/legacy argv checks across the assigned four helper files on the separate operator branch.
 The framing worker reported three top-level framing tests and 65 subcases passing with negative binding controls; the counts are not aggregated.
 Production `UnsupportedEngine` behavior remains unchanged, so helper evidence does not activate or qualify the native operator lifecycle.
-The M3 draft keeps unknown WAL headroom as an operator obligation and known unsafe SQL settings as fail-closed checks; post-data recovery options remain under review with no implementation claim.
+The M3 plan keeps unknown WAL headroom as an operator obligation and known unsafe SQL settings as fail-closed checks; candidate component evidence and the failed first follow smoke are recorded in the M3 status above.
 The transport owner narrowed pipelines to noncommitting windows and routed transaction completion through an observed-commit path with pinned warning visibility and unknown outcome on any warning.
 Those private proof semantics add no report fields or ignored test names and still require the closing warning/durability checks.
 
@@ -345,27 +678,75 @@ The accepted proof path keeps private warning text out of diagnostics, preserves
 - [x] Resolve warning visibility, connection-factory, and noncommitting pipeline proof findings through independent changed-portion review.
 - [x] Receive final Prepared10 and Clone7 receipts on PostgreSQL 16 and 18 for the frozen input.
 - [x] Record final formatting, CLI, portable, and inspection checks and classify new M2 Clippy findings separately from staged carry.
-- [ ] Pass the strict broad engine closing gate, including the carried lint hold.
-- [ ] Complete the three-pair matrix with eleven-case receipts for every declared pair.
+- [x] Accept the later integrated M3 strict broad closing gate as resolving the carried M2 lint hold.
+- [x] Complete the staged three-pair matrix with eleven-case receipts for every declared pair.
 
 The final runtime, harness, and CLI input manifest contains 58 entries at `/tmp/rpgmigrate-m2-close-xq1Ljk/source-inputs-final.json`.
 Prepared10 and Clone7 passed independently on PostgreSQL 16 and 18, each with exact inventory, zero failures, and zero ignored required cases.
 Formatting, the 24 CLI contract tests (including 220 long-option and 188 short-binding cases), all 180 portable tests, and `state::clone_state::tests::inspection_overlaps_owner_without_lock_or_write` passed.
 The final strict Clippy triage retains 165 library and 19 library-test errors, all unused/dead code, with zero correctable lint categories.
-Six newly introduced M2 pipeline staged diagnostics are recorded separately from the older retained scaffold and assigned to M3; strict lint remains red.
+Six newly introduced M2 pipeline staged diagnostics were recorded separately from the older retained scaffold and assigned to M3; strict lint was red at that attempt.
 The full matrix launched once through `task test-e2e-clone` with the selected actual Go `ParseReport` probe after the component and triage conditions were satisfied.
 Its first 16 to 16 attempt stopped at `clone-e2e: owned harness subprocess failed`; no pair receipt or eleven-case success was emitted.
-The failing subprocess stage remains unclassified, and the matrix has not been rerun or repaired by this documentation update.
+The original inner stderr was later recovered from Podman journals: the observer waited for TRUNCATE while the engine correctly blocked earlier at its explicit ACCESS EXCLUSIVE lock.
 The matrix logs are `/tmp/rpgmigrate-m2-close-xq1Ljk/matrix.stdout` and `/tmp/rpgmigrate-m2-close-xq1Ljk/matrix.stderr`.
-M0/M1 closing gates, M2's five broader deliverables, and full M2 closure remain unchecked until their required qualification receipts and strict gates exist.
+M0/M1 and full M2 closure remained unchecked at that attempt; later primary M3 gates and the leader's acceptance above close them.
 
 The M3 workspace completed a stable baseline copy at `/tmp/rpgmigrate-m3-baseline-hnl9za4t/manifest.json` before this roadmap/ledger update.
 These documentation edits are later primary-checkout changes and must be preserved during owned-file integration; runtime/harness inputs were not edited.
 
 ## User-approved WIP checkpoints, 2026-11-08
 
-The user approved exactly two local checkpoint commits: the reviewed M0/M1/M2/M5 work and plans on `feat/native-engine`, and the M1 contract plus M6 pure helpers on the isolated operator `feat/native-contract-v1` branch.
-This is an exception to the lint-clean-per-commit rule for these two WIP commits only; the normal rule resumes afterward.
-Strict scaffold lint remains red, and the first matrix attempt failed in an unclassified harness subprocess before any pair receipt.
+The user approved exactly two local checkpoint commits: `e544f2d0e7da76d6f2fc55f2c0270b3a85ae4496` for the reviewed M0/M1/M2/M5 work and plans on `feat/native-engine`, and `5e8cbcbbe7ad9b89cb80a7edc1d5004af5cd4e58` for the M1 contract plus M6 pure helpers on the isolated operator `feat/native-contract-v1` branch.
+Both checkpoint commits are complete, and the two-commit exception is consumed; the normal lint-clean-per-commit rule has resumed.
+The assembled M3 candidate later passed strict all-target Clippy without allowances, but that does not establish a primary full `task check lint test` pass.
+The checkpoint decision left M0 open until its integrated strict gates passed; the later normal M3 commit resolves that hold.
+These checkpoints preceded the later qualified staged receipts recorded below; the first matrix failure's stale TRUNCATE observation boundary does not invalidate the final pair results.
 No milestone closing gate changes, runtime qualification, push, or merge is authorized by this checkpoint decision.
 M3 worktrees, archive and stash refs, original operator user work, and the pgcopydb fork remain outside the checkpoint scope.
+
+### M2 staged closing pair receipts
+
+After the user-approved WIP checkpoint `e544f2d`, the owned harness observer changed only to the exact pre-TRUNCATE ACCESS EXCLUSIVE lock statement.
+Private failure capture now retains redacted stderr in 0600 files under 0700 directories, and public output contains only safe command kind, return code, diagnostic ID, and source basename/function/line.
+The original failure is a stale observation predicate, not the separately discovered initial operator restart-admission gap.
+State/driver startup repairs passed 89 state tests and 11 driver tests and cleared targeted independent review before the new pair ran.
+The first operator launch uses `--restart`; the existing completed retry uses `--resume --not-consistent` and checks unchanged data, generation, and marker row identity.
+
+The valid PostgreSQL 16 to 16 pair exited zero with all eleven cases and six actual Go report validations, server/tools 16.15, and libpq 18.6.
+Its receipt is `target/e2e/16-16.json`, SHA-256 `a96e99eaba7cdbc89ddff9507d9e7a39f3462e5dbd9ce748ebe7f0e6fb30c19d`.
+It observed seven prior committed table markers, overlapping read-only progress, default-drift refusal, and a fresh COPY generation from one to two.
+The PostgreSQL 18 to 18 pair also passed eleven cases and six Go report validations; its receipt SHA-256 is `f2e2c2b3aaa16551df8a3343bcedc62f4c909d2a0f8e864e840db1806fb074ba`.
+Those staged runs used the revised 58-entry manifest `/tmp/rpgmigrate-m2-close-xq1Ljk/source-inputs-restart-lock-final.json`, SHA-256 `38e34de96f8c6f9f6d1d31b8415a2c66a862e556df668083cc33270ddd7d835c`, with runtime hashes unchanged during execution.
+No aggregate `task test-e2e-clone` exit-zero claim follows from separately successful pair tasks.
+
+The first 16 to 18 attempt stopped at an independent oracle mismatch without a pair receipt and was not retried unchanged.
+Read-only comparison of the successful same-major receipts showed that only the schema fingerprint differed, with table and sequence fingerprints equal.
+A fresh owned schema-only PostgreSQL 16.15/18.6 proof reproduced the raw mismatch solely through three validated PG18 table NOT NULL catalog rows; `attnotnull`, all other constraints, indexes, and triggers were identical.
+Dropping a non-PK NOT NULL remained detectable through `attnotnull`; a real unvalidated PG18 NOT NULL constraint demonstrated why blindly filtering all n rows would be unsound.
+The oracle now omits only n rows from the other-constraint stream and explicitly refuses unvalidated NOT NULL, with unchanged FK/CHECK/primary-key/index/trigger checks.
+The private metadata proof is `/work/m2-oracle-proof/schema-proof.private.json`, SHA-256 `0556212217316c79d440d5b9931cb5813d5e69f3d0c8e2c5997def14785809b0` in the retained development container.
+The new guard demonstrated RED then GREEN; all 13 harness checks and 183 portable checks passed.
+The repaired harness is frozen at `a56ddabc72f25374522bf0e62e6e806575025b8a5f0108811f43104c42888d85` for `tools/e2e/clone.py` and `2ce695adb5782fa3716c303baf448e68d9cd6f4f69ead09f369171047fc77e34` for its portable tests.
+Integration ran the authorized current-input test attempt and the repaired cross-pair once; the final constituent receipts below supersede the earlier pending state without claiming an aggregate Task exit zero.
+No engine source, M3 worktree, case count, or Go report count changed for the schema oracle repair.
+
+### M2 plain-clone alpha qualification
+
+The repaired 16 to 18 pair exited zero with all eleven cases and six actual operator Go report validations, server 16.15 to 18.6, client tools 18.6, and libpq 18.6.
+Its receipt is `target/e2e/16-18.json`, SHA-256 `deb11b8206404d2c90c903a19baf63f937534f8f99b4ac57c2f1d8e31b1a000c`.
+Together with the preserved same-major receipts, the staged profile comprises 33 case executions (eleven per pair) and 18 actual Go report validations (six per pair).
+The same-major oracle amendment was proved semantically neutral before retaining those receipts, including actual NOT NULL negative coverage and refusal of unvalidated NOT NULL.
+The final frozen 58-entry runtime/harness/CLI manifest is `/tmp/rpgmigrate-m2-close-xq1Ljk/source-inputs-final-qualified.json`, SHA-256 `98724ebfa70e82798c2eace4609104fe5b349e4b2c2d7ee87a4bd5e5b312263d`, and remained unchanged after the final run.
+The summary is `/tmp/rpgmigrate-m2-close-xq1Ljk/final-staged-results.json`.
+
+Final staged tests passed 417 Rust tests, 24 CLI tests, and 183 portable tests; the Rust receipt separately records 12 ignored live cases and 68 filtered cases, not additional passing tests.
+Formatting and diff checks passed, and all independent M2 engine/startup review findings are resolved.
+The aggregate `task test` and `task test-e2e-clone` commands were not rerun as a whole after their earlier failures; no aggregate exit-zero result is claimed.
+The staged M2 strict-lint result was red at 165 library and 19 library-test unused/dead-code errors, including six separately tracked M2 pipeline locations.
+The later integrated M3 strict gate passes without allowances.
+The COPY marker/generation/fence, consistent COPY order, supported restart/resume, progress/compare, and declared E2E subdeliverables are checked for the qualified alpha scope.
+The leader accepted the M3 grouped CDC frontier/producer/API handoff and later strict gate as satisfying the remaining M2 closure criteria.
+Unknown pre-data handoff, uncertain post-data recopy, unsupported binary/split/large-object profiles, and generated full-row admission limits remain explicit boundaries.
+This is plain-clone engine alpha qualification, not an operator-controller, follow/drain, failover, hosted AMD64, release-image, or universal crash-recovery claim.
+The two WIP checkpoints retain their historical scope; normal source commit `7b6037f` follows the later strict gates and leader acceptance.
