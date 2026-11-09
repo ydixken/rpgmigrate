@@ -2,6 +2,7 @@
 """Offline refusal controls for the production image smoke."""
 
 import copy
+import ast
 import contextlib
 import importlib.util
 import json
@@ -9,6 +10,8 @@ import hashlib
 import io
 import os
 import stat
+import shlex
+import sys
 import tempfile
 import types
 from pathlib import Path
@@ -228,10 +231,33 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue(observed["private_input"])
         self.assertNotIn("rpgmigrate-private-input-canary", output.getvalue())
 
+    def build_generator(self):
+        dockerfile = (PATH.parents[2] / "Dockerfile").read_text()
+        instructions = [line for line in dockerfile.replace("\\\n", "").splitlines()
+                        if line.strip() and not line.lstrip().startswith("#")]
+        supported = {"FROM", "RUN", "WORKDIR", "COPY", "ENV", "USER", "CMD"}
+        self.assertTrue(all(line.split()[0] in supported for line in instructions),
+                        "generator must remain inside one continued Dockerfile RUN for older Buildah")
+        commands = [line[4:] for line in instructions if line.startswith("RUN ") and "/usr/bin/python3 -I -B" in line]
+        self.assertEqual(len(commands), 1)
+        command = commands[0]
+        subprocess.run(["/bin/sh", "-n", "-c", command], check=True, capture_output=True)
+        capture = shlex.join([sys.executable, "-I", "-B", "-c", "import sys; sys.stdout.write(sys.stdin.read())"])
+        result = subprocess.run(["/bin/sh", "-c", command.replace("/usr/bin/python3 -I -B", capture)],
+                                check=True, text=True, capture_output=True, timeout=30)
+        ast.parse(result.stdout)
+        return result.stdout
+
+    def test_build_generator_delivery_preserves_reviewed_python_bytes(self):
+        generator = self.build_generator()
+        # Keep shell quoting changes from silently changing the reviewed metadata generator.
+        self.assertEqual(hashlib.sha256(generator.encode()).hexdigest(),
+                         "02bbc68bd71bbd5cb40448cedc835b835b3a5fd065b5912dd3f72d044b91622f")
+
     def test_build_metadata_uses_actual_installed_library_and_package(self):
         dockerfile = (PATH.parents[2] / "Dockerfile").read_text()
         self.assertIn("coreutils sed dash python3", dockerfile)
-        generator = dockerfile.split("RUN /usr/bin/python3 -I -B <<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+        generator = self.build_generator()
         with tempfile.TemporaryDirectory() as directory:
             library_path = Path(directory) / "libpq.so.5.18"
             library_path.write_bytes(b"installed package library")
