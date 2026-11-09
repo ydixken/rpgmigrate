@@ -217,7 +217,9 @@ Authority17 produced eleven PASS and six FAIL when empty advancing serial transa
 Independent xhigh diagnosis found a lazy-BEGIN omission in the serial route; the active pipeline route already handles it.
 The `ensure_transaction` repair and test-only synchronization successor passed all seventeen FollowAuthority cases on PostgreSQL 16.15 and all seventeen on 18.6, with zero failed or ignored cases.
 The focused source is `866981b9176e4e3e6d0abc93872d0e56f64818e707efec57e87a3ae1168e8edd`; this library-test result does not qualify the final runtime or broad engine gates.
-The approved schema-utility effective-connection repair is assigned to separate implementation and harness owners.
+The schema-utility exports assembled at manifest `6a92ea235076e7d5438997203842af512c3ed4e45c67c3e499b69f2c918a1879`; canonical `task lint test` passed formatting, then stopped at two strict-Clippy test assertions.
+The repaired `87a0` successor passed canonical `task lint test`: formatting/strict Clippy, 499 Rust tests, 27 CLI tests, and 308 portable tests; `task check` also passed.
+The Rust result separately records 22 ignored and 107 filtered cases; Linux build and fresh Schema/live acceptance remain pending.
 It pins the validated SQL owner's resolved connection and selected peer; the required Schema profile expands to three cases using the existing TCP/SCRAM fixture and an owned relay for peer-loss checks.
 The earlier `ef4` engine-producer 27-case PASS and `134`/`d75` actual seven-case Go interoperability PASS are ancestor evidence pending fresh current-code matrices.
 The composed operator Go closing profile is green on 546 source files, source hash `732fcf1f9fefe21db5b6ae15f4f3e3508fc31f8899bfb5e489281358602edd1c` and tree `7442e438270f2d3ae47317447f7f07299fcf5322`.
@@ -233,6 +235,7 @@ Native 8 / metadata 6 applies only if the accepted M3 identity-fix baseline is 7
 
 - [x] Retain the ancestor 27-case engine-producer PASS across all three pairs.
 - [x] Pass the exact seventeen-case FollowAuthority profile on PostgreSQL 16.15 and 18.6 for the focused repair successor.
+- [x] Pass canonical host `task lint test` and `task check` on the repaired utility successor.
 - [ ] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
@@ -268,7 +271,8 @@ Owned cleanup, exact source/staged identity, and credential/canary checks passed
 
 A confirmed engine utility-routing defect blocks native alpha: explicit or inherited `PGSERVICE` can redirect schema child utilities from validated database alpha to beta.
 The snapshot-bound dump refused the wrong database, but exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
-The effective-connection/selected-peer repair plan is approved, and separate implementation and harness owners are building it.
+The effective-connection/selected-peer repair is frozen in the assembled closing candidate; final acceptance remains pending.
+TLS evidence covers option bytes and selected hostname/address mapping with TLS disabled, not handshakes, client certificates, or encrypted keys.
 Fresh three-case Schema acceptance and final runtime/current-engine interoperability remain pending; the unchanged Go closing proof is retained without repeated broad Go suites.
 
 Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify a Python 3 plus stock-libpq helper for password-bearing URI Secrets without secret argv.

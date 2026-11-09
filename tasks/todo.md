@@ -409,6 +409,25 @@ The leader assigned disjoint `m4_utility_connection_fix` implementation and `m4_
 The three-case Schema profile must reuse the existing TCP/SCRAM fixture; the Rust-owned selected-peer relay must not stop a shared cluster.
 The six-file harness export passed four focused harness and nine Task checks, freezing exact Schema3 at `/Users/ydixken/.codex/tmp/rpgmigrate-m4-utility-harness-j7m0gd8j/manifest.json`, SHA-256 `933af15c163ca320c5b656ad64a3530e176687b5d6f3c440b477f4db32743850`.
 All 348 other identities and fifty absences remain unchanged; this export does not establish integrated live qualification.
+Both approved exports are now verified and assembled at `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/utility-final-successor/manifest.json`, SHA-256 `6a92ea235076e7d5438997203842af512c3ed4e45c67c3e499b69f2c918a1879`.
+The inventory hash is `2877328dedfd7cf7d0b221a673303a070b9df2c9d6b6a4a8ccba70a017473cc0`: twelve disjoint changed identities, 342 unchanged identities, 304 files, and fifty explicit absences.
+Checkpoint/state inputs remain exact against `866981b9`, retaining native 8 / metadata 6 and 29 columns.
+Integration reconciled signatures, capture from the validated SQL owner, child-only environment removals, selected-peer pinning, option policy, and pre-data capture before phase intent without mismatch.
+Canonical `task lint test` on `6a92` passed formatting, then stopped at strict Clippy with outer exit 201 and nested exit 101.
+Two `clippy::err_expect` findings point to new `src/schema.rs` test assertions at lines 1132 and 1493.
+Failure proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/utility-final-successor/proof.json`, SHA-256 `43bb3e9979eff0510d4b8dc421e357511e9e9435d060b2cd581609f5580861a3`.
+The one-file `schema.rs` repair now uses explicit Err/Ok matching and fixed redacted panic text, avoiding Debug of a credential-bearing Command.
+Its manifest is `/Users/ydixken/.codex/tmp/rpgmigrate-m4-utility-lint-vozx450b/manifest.json`, SHA-256 `87a0b6a46dcab678d7eb2df83439fefd719a3138f770514d9d6195c07c638d9a`; focused proof SHA-256 is `3906113e330a17e9b22c9089d836400b43872c1e11d6fb63c0bf9136b7efaafc`.
+The +9/-7 assertion-only change preserves all 353 other predecessor entries and fifty absences; no production or test semantics change is claimed.
+Worker `cargo clippy --lib --tests -- -D warnings` passed, along with three utility tests, ten schema tests, discovery, and formatting.
+The original `6a92` invocation ran no downstream unit, CLI, portable, check, Linux-build, or live gates and had no live-lease effects.
+The repaired successor is frozen at `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/utility-lint-successor/manifest.json`, SHA-256 `87a0b6a46dcab678d7eb2df83439fefd719a3138f770514d9d6195c07c638d9a`, inventory `4bbb5fdb6afe74e851716d03ff76a210deb6473408e1399cc8a7953a4a163133`.
+Its canonical `task lint test` passed with exit zero in 62.605 seconds: formatting, strict Clippy, 499 Rust PASS with 22 ignored and 107 filtered, 27 CLI tests, and 308 portable tests without skips.
+Canonical `task check` then passed with exit zero in 2.929 seconds; the log canary scan was clean.
+Canonical host proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/utility-lint-successor/host-gate-proof.json`, SHA-256 `6ab8f932b9ef3ecd7296f53d782b7a6a08f1fd5a1e3e6bb0de9aaa14bb0563a1`.
+The earlier `6a92` failure remains scoped history; final Linux build and fresh Schema3 acceptance on both majors are next, without a live-pass claim.
+Strict lint has no staging-policy exception.
+TLS proof remains option-byte and selected-hostname/address mapping with TLS disabled; no TLS handshake, client-certificate, or encrypted-key qualification is claimed.
 Final assembled runtime, current engine gates, actual seven-case Go interoperability, and one whole-M4 review remain pending.
 The earlier `ef4` producer 27-case PASS and `134`/`d75` actual seven-case Go interoperability PASS below are ancestor evidence, pending fresh current-code matrices.
 Final actual seven-case acceptance on current engine/current Go and one whole-M4 xhigh review remain pending.
@@ -473,6 +492,7 @@ Exclusive slot administration is an accepted prerequisite; uncertain incarnation
 
 - [x] Retain the ancestor 27-case engine-producer PASS across all three pairs.
 - [x] Pass the exact seventeen-case FollowAuthority profile on PostgreSQL 16.15 and 18.6 for the focused repair successor.
+- [x] Pass canonical host `task lint test` and `task check` on the repaired utility successor.
 - [ ] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
@@ -510,7 +530,7 @@ These test-only closing checks do not activate production native paths; current-
 A confirmed engine utility-routing defect blocks native alpha: explicit or inherited `PGSERVICE` can redirect schema children from parent-validated alpha to beta.
 Snapshot-bound dump refused the wrong database, while exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
 Receipt: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m6-service-precedence-t7l0ql_r/receipt.json`, SHA-256 `10f7d53c6c687e768f7940218d64b9153b9e3d57f31dc5695f6ff3e79cc49320`.
-The existing-libpq effective-connection/selected-peer repair plan is approved and assigned to separate implementation and harness owners.
+The existing-libpq effective-connection/selected-peer repair exports are frozen and joined in the closing candidate; final acceptance remains pending.
 The current three-case Schema acceptance and final runtime interoperability remain pending; broad Go suites are not repeated for unchanged operator source.
 
 Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify Python 3 plus stock libpq for password-bearing URI Secrets without secret argv.
