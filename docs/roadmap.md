@@ -89,17 +89,17 @@ After M1, the engine track (M2-M4), packaging (M5) and the operator track (M6, k
 The first operator E2E (M7) runs the vertical slice with binary COPY, split and large objects switched off in the Migration; M8 turns them on.
 
 > [!IMPORTANT]
-> M0–M4 are closed; M4 engine source and six behavior documents are integrated on `feat/native-engine` at `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`.
+> M0–M5 are closed; M4 engine source and six behavior documents are integrated on `feat/native-engine` at `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`.
 > M4 passed host lint/check, 499 Rust tests, 27 CLI tests, 324 portable tests, forty fresh native sampling cases, and all 93 Follow21/Cutover10 runtime cases.
 > The prior nine-profile 266-case native subset retains its original provenance and is separate from the forty fresh samples.
 > The single whole-M4 review is resolved with no findings remaining; operator test-only evidence is committed separately as `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
-> M5–M10 remain open: final images/hosted CI, production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
+> M6–M10 remain open: production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
 > VM preservation/resize maintenance and the user-exception three-container cleanup passed; the failed M7 UP remains unqualified and needs corrected fresh source/RUN.
 > Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
-Remaining work follows the existing M5 packaging/CI, M6 production adapter, and M7 operator E2E dependencies.
+Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
 Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explicit; M4 engine qualification does not activate the operator.
 
 ### M0: Preserve and reset (rpgmigrate)
@@ -252,49 +252,33 @@ The qualified native 8 / metadata 6 runtime has 29 control columns and refuses o
 
 ### M5: Packaging and engine CI (starts with M2)
 
-The development-only M2 harness image builds, and the documentation lint gate passes all 17 discovered Markdown files.
-M5 workflow controls (seven tests), image smoke controls (12 tests), actionlint, yamllint, and dependency license/advisory checks pass.
-The native ARM64 image passed its read-only packaging smoke with UID 65532, libpq 18.6, and client tools 16.15/18.6; later clone/schema edits mean that receipt does not bind the final source.
-The isolated implicit stock-target-major utility-routing implementation passed nineteen child-process scenarios and ten Rust tests, with one existing database test ignored.
-Formatting and strict Clippy passed; the two-file utility-routing export is frozen at manifest `4ed44353c90377845c28ec16e739f04f6f35aa0436ad79e39e5f6a4fad8ddb40`.
-The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
-Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
-The production ARM64 image build disk peak remains unqualified despite cached base images.
-The maintenance proof records 41,988,149,248 free VM bytes; the unknown exact build peak still prevents an image-build capacity claim.
-The M5 four-file source/pure-test export is ready and failed-node cleanup is confirmed; runtime image build has not started, with its fresh resource-budget authorization still pending.
-Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
-The final-source image, AMD64 and hosted checks, and the M5 closing gate remain unqualified.
-These checks do not complete the released runner or hosted engine CI gates below.
+Local native ARM64 image `b4631063096125a84d3428571fe81d7057c91cf3356adf54cc738744709e52b0` passed its build/read-only runtime smoke on input digest `296279da95b924a59a903034a89f30853d037039368026859ce5d6ecc6eb9d9a`.
+The [ledger](../tasks/todo.md) binds that retained image evidence and the same-review portability correction; the test-only R2 change is outside the 65 image inputs.
+The first [hosted run](https://github.com/ydixken/rpgmigrate/actions/runs/42625499630) on pushed `34208b6` ended with five PASS and three FAIL jobs, including all three migration pairs passing.
+The docs MD038 failure is fixed in `55ea9c7`; the Dockerfile heredoc-parser failure and version-dependent test are corrected and integrated in `7c04dff673f41b3a27c5d0afbc6dbe5e6b551c03`.
+That exact feature SHA is pushed and remote-verified; its [push-triggered hosted run](https://github.com/ydixken/rpgmigrate/actions/runs/42630883414) passed all eight jobs, with all five artifact ZIP digests and both native image input bindings verified.
+Hosted AMD64/ARM64 images passed uid 65532/stock-libpq checks on the exact 65-file input digest.
+M5 is complete after the same reviewer’s final acceptance of hosted multi-architecture, read-only runtime, source/artifact, clone-inventory, and retained stock PostgreSQL 16/18 evidence bindings.
+The retained database evidence preserves its original 266-case subset and forty-case sampling/composite provenance; exact source/Cargo/build/Taskfile/test/harness bindings are unchanged from `67f7fcb` to `7c04dff`.
+This acceptance claims neither a fresh aggregate database run nor migration using the production image; broad operator Go checks are not applicable to engine-only packaging.
+The operator-publication P1 remains an open, separate blocked action; absent operator push does not invalidate engine M5 qualification.
+No tags, releases, or GHCR publication are authorized, and these checks do not close M10.
 
-- [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
-- [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, image build, ghcr push on tags only.
+- [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
+- [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, and both native image builds.
+- [ ] GHCR publication on tags only, pending separate publication authorization.
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
-Production native activation remains refused; the composed operator closing checks establish test-only compatibility, not Task 0 production admission.
-On the 546-file composition, full lint passed all sixteen stages with zero issues, and `task test` passed fifteen uncached unit/envtest packages.
-PG16 race checks passed 508 entries with exactly two expected skips; the PG18 subset passed 158 without skips.
-Each major passed fourteen helper functions and 158 entries with no required skip; PG16 combines seven completed results from an observer-interrupted invocation with seven fresh exit-zero results.
-The 128 Go shared-fixture cases (186 inventory cases) are already included, not additional runs.
-Owned cleanup, exact source/staged identity, and credential/canary checks passed.
-
-The retained utility-routing reproduction showed explicit or inherited `PGSERVICE` redirecting schema children from validated database alpha to beta.
-The snapshot-bound dump refused the wrong database, but exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
-The effective-connection/selected-peer repair passed exact Schema3 on PostgreSQL 16.15 and 18.6 and final M4 engine acceptance; production operator admission remains refused.
-TLS evidence covers option bytes and selected hostname/address mapping with TLS disabled, not handshakes, client certificates, or encrypted keys.
-Prior-source Schema3 and actual-seven receipts remain separate from final repaired-runtime `1fd03e42` actual-seven acceptance.
-The new-runtime invocation passed seven cases with final independent verification; this remains private PostgreSQL 18/mocked Kubernetes evidence with production admission disabled.
-These are test-only checks with mocked Kubernetes ownership and production admission disabled; broad Go suites were not repeated for unchanged source.
-
-The user approved both decisions on 2026-11-09: data-preserving VM maintenance and the [scoped runner dependency exception](superpowers/plans/2026-11-08-m6-native-adapter.md#user-approved-runner-dependency-exception-2026-11-09).
-Python 3/ctypes/stock-libpq dependencies may support direct private URI Secret authentication without credentials in argv; the separate mechanism plan retains all qualification gates.
-The mechanism adds no Secret-read calls or RBAC scope: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than attesting the latest Secret resource version.
-The host proof of concept passed nine URI cases and a PostgreSQL 18 connection/empty COMMIT, but the measured tool image lacks Python/ctypes and Perl DBI/DBD::Pg/FFI.
-No dependency was added and no mechanism was activated; this is not a production tool choice.
-Task 0 real Kubernetes/PVC/work permissions, production signatures, tool dependency, URI-secret handling, and checked transport remain unqualified.
-The private fresh-volume capability PASS remains distinct from real Kubernetes permission qualification; guards remain unchanged.
-Task 0 needs the approved root-reviewed addendum; one independent xhigh whole-M6 review belongs at milestone close.
-Users retain application write fencing and outstanding-transaction duties in both cutover modes.
+Production native admission still returns `UnsupportedEngine`; M4's engine and mocked-Kubernetes helper evidence does not qualify the operator lifecycle.
+Task 0's five-file pure-helper export is frozen with nineteen Python and eighteen focused Go tests passing, including exact PG16/18 SQL fixture equality.
+The admission-reader handoff separately passed thirteen top-level tests and 330 focused checks with zero failures or skips; all Task 0 source handoffs are frozen but not integrated.
+These focused checks do not qualify packaged Python/libpq, database, Kubernetes/PVC, or opaque-file runtime behavior.
+Checked WebSocket transport has focused passing checks, while default Kubernetes 1.36 split-log-gate behavior leaves current result delivery fail-closed pending its planned correction.
+Opaque file preconsumption/service handling and exact packaged-libc resolver qualification remain unresolved; these blockers do not permanently narrow the approved contracts.
+The approved Python/ctypes/libpq exception and no-added-Secret-read/RBAC boundary remain in force: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than latest-Secret-version attestation.
+Operator feature push remains held for the default-main GitLab mirror authorization question; no GitLab publication is inferred from origin feature-push approval.
+One independent whole-M6 review belongs at milestone close, and users retain write fencing/outstanding-transaction duties through cutover.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
 - [ ] Preflight: `version --json` handshake into `validateNativeConfig`; native pg_restore gate by target major; skip the origin-grant probe; PG16 target allowed for native.
@@ -332,7 +316,9 @@ The maintenance included an idle M0 PID1 forced stop, unexpected first VM stop, 
 The final proof records 41,988,149,248 free VM bytes and 237,409,554,432 free host bytes.
 The preparation receipt itself authorized no cleanup or resize; the later dated user decision authorizes only the stated maintenance and confirmed-unused pruning scope.
 The first M7 UP failed after tracked check/source/37-output and capacity admission passed.
-Diagnosis identified omitted `podman exec -i` and fake marker/label controls that were not stateful; the source-fix plan is frozen, and corrected fresh source plus a fresh RUN are required.
+The omitted `podman exec -i` source fix is ready with 81 focused checks and the separate 169-check full wrapper/self-check run; these overlapping counts are not additive.
+The diagnosed fake marker/label controls did not retain state; the [ledger](../tasks/todo.md) binds the frozen source and check receipts.
+Corrected fresh source, a source-bound manager, and a fresh RUN remain required; no repaired UP qualification is claimed.
 The one-off user-exception cleanup passed for exactly the three failed-node containers, with no volume flags or other deletions.
 The source and every old RUN file remain unchanged in creating/empty state; volumes, kind network, images, backups, and original services are retained.
 The quiet reservation is released; this is neither guarded DOWN nor UP qualification.
@@ -372,7 +358,7 @@ No manual proof JSON or lease renewal is allowed.
 The user authorized continuing the existing M5/M6/M7 plans and pruning unused Podman images, volumes, and build cache, plus growing `podman-machine-default`.
 The approved PostgreSQL 18 persistent-preservation maintenance plan must protect tmpfs data before any original-container stop or VM restart.
 The leader selected a 128-GiB disk, preserving 14 CPUs, 32 GiB memory, original service endpoints, and data; user-reported host free space is about 212 GiB.
-`vm_pg18_preservation_plan` completed maintenance; the exact failed-node cleanup is now verified and its quiet reservation released, with M5 build-budget authorization pending.
+`vm_pg18_preservation_plan` completed maintenance; the exact failed-node cleanup is now verified and its quiet reservation released, with subsequent M5 image results recorded above.
 Pruning is limited to confirmed-unused resources under that plan, with retained evidence and data preserved.
 The user also approved new runner dependencies, including Python 3 and ctypes/libpq, under the dated M6 exception so opaque URI Secret authentication stays out of argv.
 The separate mechanism plan and required validation remain open; this authorization proves no TLS, PVC, image, kind, or production-admission result.
@@ -384,8 +370,9 @@ This authorizes feature branches only: do not push or merge to main, create tags
 The user separately authorized one-off removal of exactly the three failed kind-node containers identified for the failed RUN.
 That exception covers no volumes, networks, images, backups, original services, RUN-marker edits, or generic guard bypass; final independent verification now accepts its exact three-container cleanup.
 The cleanup result is recorded separately from its approval; no push, hosted-CI, image-build, or kind workflow success is claimed.
-Engine push preflight found the intended checks/native-AMD64 path; operator push is held because its workflows would force-mirror all refs/tags to GitLab and skip tests.
-The leader assigned an exact two-workflow CI-guard/hosted-test repair slice; no push has occurred and no GitLab publication is authorized.
+Operator preflight exposed all-ref/tag GitLab mirroring and skipped tests; the assigned two-workflow guard/hosted-test slice remains separate from the unresolved default-main mirror authorization.
+Engine feature pushes of `34208b6` and `7c04dff` are recorded with their exact hosted-run scopes above; operator push stays held for the default-main GitLab mirror decision.
+No GitLab publication is authorized, and no feature CI result closes a milestone by itself.
 
 ## Execution model
 
@@ -397,7 +384,7 @@ Run the independent review (at the effort its risk calls for) and the Go test su
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
 The verified VM allocation is 14 CPUs, 32 GiB memory, and a 128-GiB disk; the final maintenance proof records preservation and released-lease checks.
 The original 21:35 UTC startup failure predates the CPU/memory resize.
-Maintenance and failed-node quiet reservations are released; M5 image build awaits the leader's fresh resource budget and proof, retaining host Cargo headroom.
+Maintenance and failed-node quiet reservations are released; preserve host Cargo headroom and the approved resource budgets for subsequent M6/M7 execution.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
 See the [capacity and preservation record](../tasks/todo.md#capacity-and-parallel-execution-user-update-2026-11-08) for budgets and the restart prerequisites.
 Commits remain small, conventional, and lint-clean; feature-branch CI pushes have the dated user authorization above, while main pushes/merges, tags, releases, and GHCR publication remain unauthorized.

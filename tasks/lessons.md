@@ -423,3 +423,5 @@ Dependency authorization supports private opaque URI Secret authentication witho
 Retain the approval to push rpgmigrate `feat/native-engine` and the operator native-work feature branch to origin for hosted CI, including native AMD64 checks; do not extend it to main push/merge, tags, releases, or GHCR publication.
 Treat the failed-kind cleanup exception as exactly three approved container identities, with no volumes, network, images, backups, originals, RUN-marker mutation, or generic guard bypass.
 Keep creating/empty failed-RUN markers unchanged, require confirmed cleanup and the leader's resource-budget release before the held M5 build, and use fresh source/RUN after the diagnosed fix.
+
+Origin feature-branch push approval does not authorize downstream default-main GitLab mirroring or all-ref/tag publication; inspect workflow side effects and keep unresolved publication scope separate from CI readiness.
