@@ -273,9 +273,14 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
 Production native admission still returns `UnsupportedEngine`; M4's engine and mocked-Kubernetes helper evidence does not qualify the operator lifecycle.
-The clean central operator checkpoint is `d28dd9c2b8d87344d337c3dad9c837306d8bb074`, integrating control `058d8c42` and retry Reader `d28dd9c` against the unchanged 105031-byte Python source.
+Engine FD implementation is integrated at `3c4d0a5a6212de642aa8f205989fadf80b64ee49`, with retained thirteen-case Linux prerequisite evidence and host library Clippy/formatting checks.
+The exact joined FD/capability Linux producer check passed protocol ten/CLI31 plus actual binary three-field Linux-seven discovery and executable CLI28; this source qualification preserves the non-Linux six and operational arrays.
+The CLI selector was ignored and the broader 28-case executable script ran once; no rerun or fabricated partial-run claim is recorded.
+Old six-name discovery still parses but cannot satisfy native M6 before credentials; actual authentication/TLS, real PostgreSQL dump, image, NSS/resolver, lifecycle, broad Go, and whole-M6 review gates remain open.
+The clean central operator capability checkpoint is `14b73f5980768841c68dcb0d699e5889e88d80ad`, following comparison `351aa3`; earlier control/retry evidence retains its original 105031-byte Python input.
 Control and retry Reader have focused source/lint evidence only; interfaces/dispatch, runtime target-retry producer/Reader, and owned-cleanup comparison remain open, without activation or new producer/image qualification.
-A private 111754-byte Python successor passed 54 mechanism tests, with canonical source/registry/golden atomic integration in progress; comparison parser/transport/helper work and the bounded isolated Rust sealed-child-FD change remain private and unqualified.
+The clean central operator comparison checkpoint is `351aa3` with focused comparison/transport coverage and canonical 111754-byte Python/54-mechanism-test binding; it grants no runtime qualification.
+The ten-capability operator consumer is now central and source-qualified for six-name pre-credential refusal, Linux-seven mocked admission, and known-extra read-only cases; runtime guards remain refused.
 Full canonical in-memory admission remains authoritative; correlation hashes and informational lag supply no target durability or completion authority, runtime acceptance, or new image qualification.
 Task 0's five-file pure-helper export is frozen with nineteen Python and eighteen focused Go tests passing, including exact PG16/18 SQL fixture equality.
 The earlier admission-reader handoff separately passed thirteen top-level tests and 330 focused checks with zero failures or skips; the final relay-aware Reader composition passed fourteen top-level tests and 344 focused checks with zero failures/skips against the exact new relay/transport inputs.
@@ -292,11 +297,11 @@ The approved [discovery/preflight plan](superpowers/plans/2026-11-09-m6-native-d
 The dormant preflight source checkpoint is fast-forwarded into the clean central operator branch at `727e45da94a5b2d099e97380e086a36206e68451`, with 575 source paths verified against the accepted prefix/source receipts; no broad rerun, push, CI, or activation follows.
 Canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides; runtime qualification and activation remain closed.
 The preflight field is not injected and resolver policy still always refuses; remaining consumers, runtime, whole-M6 review, and closing gates remain open.
-Engine checkpoint `96d37073716768c21993c3b2df724d6c3b425415` publishes the fixed ordered six-name discovery set and keeps metadata inside the fixture contract; see the [native protocol](native-protocol.md#discovery).
+The earlier `96d3707` six-name source checkpoint remains historical evidence; the [native protocol](native-protocol.md#discovery) now defines the post-cap Linux-seven/non-Linux-six contract with fixture-only metadata.
 The operator six-capability fixture mirror `b590` is now central; source discovery still does not qualify a newly built executable or image.
-The engine and central operator capability mirror retain identical fixtures, including the historical accepted empty array and the new qualified-profile producer golden; runtime qualification remains separate.
+The new engine candidate and central operator mirror contain 134 identical fixtures, preserving empty/six-name parser fixtures plus Linux-seven producer metadata; engine source integration and runtime qualification remain separate.
 The producer/help, portable fixture/consumer, and packaging-smoke packets have focused source evidence only.
-No newly built executable or image is qualified by those packets or by the historical M5 `b463`/hosted `7c04dff` receipts.
+No packaged image or authentication/migration runtime is qualified by those source packets or by the historical M5 `b463`/hosted `7c04dff` receipts.
 Fresh ARM packaging must precede the actual-image M6 three-pair native acceptance; AMD64 retains packaging-only scope until exact-image native database qualification in M10.
 Production `UnsupportedEngine` and resolver refusal remain unchanged.
 The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is a final route.
@@ -338,7 +343,7 @@ The approved disk resize from 128 to 160 GiB passed with the same fourteen CPUs/
 The fresh `8af` RUN passed PREPARE/CHECK/UP/LOAD with six archives/eighteen image pairs, then the legacy gate failed in 334.581 seconds (Task 201) before the Go suite.
 CloudNativePG hit CreateContainerError because CRI normalized the existing raw import alias to a missing `docker.io/library/import-2026-11-09@sha256:2e4051608564bbe757b099067e2df55f5c4a960b6191837ce448ec3d1760b297` key; retained content and source evidence establish no alias-deletion cause.
 One exact nonforced post-failure alias addition on the Pod host made the same original CloudNativePG Pod Ready with restart count zero; this mechanism experiment leaves the historical gate FAILED and supplies no Go/M7 pass.
-Source-aware load-alias/actual-CRI-imageID planning is in progress; the failed RUN and S2 retain the original hard deadline without renewal.
+M7 load-alias/actual-CRI-imageID Python, Go, and guide fixes are privately ready for composition; focused source checks close no fresh-build/runtime gate and the prior failure/experiment remain unchanged.
 A separate four-CPU/4-GiB focused Linux Rust window with a 6-GiB growth envelope is being planned; it is not a benchmark reservation or result.
 The earlier successor required a new manager/archive/RUN; old acceptance was not reused and no M7 stage completion follows.
 The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the failed handoff and experiment separately.

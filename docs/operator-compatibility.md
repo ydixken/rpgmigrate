@@ -129,11 +129,15 @@ M1 freezes native DTOs for version/capabilities, status and COPY metrics, distin
 Comparison keeps its existing transport outside the native Report DTO.
 Use `version --json` capabilities in preflight, `native-report: {json}` stdout for phase/progress/drain/cleanup, and work identity derived from the Migration UID and PVC.
 Keep the existing per-table comparison JSON array and `"compare progress: "` shapes outside `ParseReport`.
-Discovery is identity-free and advertises exactly `clone.single_db`, `cdc.pgoutput`, `progress.v1`, `cutover.v1`, `verify.v1`, and `cleanup.v1`, in that order.
-The current producer covers the narrowed text-COPY, no-large-object, durable pgoutput profile; its three discovery fields stay unchanged.
-The shared `version-qualified-profile` golden and fixture-only `qualified_capabilities` metadata describe that set.
-The historical accepted empty-array fixture remains parser evidence and cannot pass native clone capability admission.
-Pure consumer tests admit narrowed clone/follow and optional verification, reject every required omission, and continue refusing the binary/split/large-object defaults.
+Discovery stays identity-free with exactly `protocol_version`, `engine_version`, and `capabilities` under protocol v1.
+Linux advertises the ordered core six followed by `verify.sealed_files.v1`; non-Linux keeps the original six, as defined in the [native protocol](native-protocol.md#discovery).
+The shared 134-file fixture trees preserve the historical empty/six-name syntax and distinguish fixture-only `qualified_capabilities` from `qualified_linux_capabilities`; neither extends executable discovery.
+The mandatory native M6 base profile requires `verify.sealed_files.v1` even when optional verification is off, because helper workflows can reach sealed-file comparison.
+Old six-name discovery remains valid syntax but fails native admission before credential projection; the actual historical golden is compacted to a valid line for that refusal control, creating/deleting only one discovery Job and no DB helper.
+The Linux-seven golden passes the corresponding mocked checked preflight; this is consumer evidence, not runtime acceptance.
+Keep unknown/duplicate/null/field/framing refusals, require every selected capability, and retain the binary/split/large-object default refusals.
+Non-Linux core standalone verification retains its existing profile but cannot satisfy native M6 sealed-file admission.
+The [private sealed-file interface](native-protocol.md#private-sealed-file-inputs-for-comparison) preserves raw DSN and Report/compare-array contracts; runtime descriptor/kernel/file and database checks remain mandatory.
 Production `UnsupportedEngine` and resolver refusal remain closed; discovery does not qualify helpers, PVC/file delivery, SQL authority, or lifecycle behavior.
 New ARM executable/image bytes need fresh packaging and exact-image M6 checks on all three declared pairs.
 AMD64 packaging scope stays separate from native database runtime qualification, which remains an M10 gate.

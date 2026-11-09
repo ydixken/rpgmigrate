@@ -476,3 +476,10 @@ Never broaden the completed validator or fabricate persisted E to make an active
 Content presence or successful image inspection does not prove the runtime’s CreateContainer reference path.
 Bind normalized CRI references through the exact node-local OCI index, selected manifest, and config chain; an actual CloudNativePG normalized-index imageID must not be admitted by silently stripping reference strings.
 Keep a post-failure alias experiment separate from the failed historical gate, and require the reviewed source/import/runtime profile before claiming workflow acceptance.
+
+## Bind composed checks to the actual input inventory
+
+Derive the Python mechanism inventory from actual AST definitions and compare it with the explicit registry; a 54-case source cannot be qualified by stale 52-case registration.
+Prefix-level checks do not qualify a changed compiled package composition: run one scoped lint on the actual joined input and preserve the earlier RED result separately from the repaired successor.
+The `d28` constant-collision failure and reviewed `6d` actual scoped-lint PASS have distinct inputs; broad Go suites and independent milestone review still run once at close.
+Confirm that a CLI test driver actually supports a requested selector before reporting a partial run; if it ignores the filter, record the real broader inventory once instead of repeating the broad script.

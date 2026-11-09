@@ -12,7 +12,7 @@ import sys
 
 
 QUALIFIED_CAPABILITIES = [
-    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
+    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
 ]
 HEADER = re.compile(r"^===rpgmigrate-smoke:([a-z0-9_]+)===$", re.MULTILINE)
 EMIT = r'''
@@ -298,7 +298,7 @@ def decode_json(value):
 def qualified_version():
     root = Path(__file__).resolve().parents[2] / "tests/fixtures/native/v1"
     try:
-        version = decode_json((root / "payloads/version-qualified-profile.json").read_bytes())
+        version = decode_json((root / "payloads/version-qualified-linux-profile.json").read_bytes())
         contract = decode_json((root / "contract.json").read_bytes())
     except (OSError, ValueError) as error:
         raise RuntimeError("invalid local qualified discovery fixtures") from error
@@ -307,7 +307,7 @@ def qualified_version():
     require(type(version["protocol_version"]) is int and version["protocol_version"] == 1
             and type(version["engine_version"]) is str and re.fullmatch(r"\d+\.\d+\.\d+", version["engine_version"])
             and version["capabilities"] == QUALIFIED_CAPABILITIES
-            and type(contract) is dict and contract.get("qualified_capabilities") == QUALIFIED_CAPABILITIES,
+            and type(contract) is dict and contract.get("qualified_linux_capabilities") == QUALIFIED_CAPABILITIES,
             "invalid qualified version contract")
     return version
 

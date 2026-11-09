@@ -1,6 +1,7 @@
 """Check CLI behavior without database services or inherited migration settings."""
 
 import os
+import sys
 import json
 from pathlib import Path
 import subprocess
@@ -16,8 +17,9 @@ class CliContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.baseline = json.loads((ROOT / "tests/fixtures/cli/baseline.json").read_text())
+        profile = "version-qualified-linux-profile.json" if sys.platform == "linux" else "version-qualified-profile.json"
         cls.qualified_version = json.loads(
-            (ROOT / "tests/fixtures/native/v1/payloads/version-qualified-profile.json").read_text()
+            (ROOT / "tests/fixtures/native/v1/payloads" / profile).read_text()
         )
         storage = tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-offline-")
         cls.addClassCleanup(storage.cleanup)
@@ -66,6 +68,8 @@ class CliContract(unittest.TestCase):
             "RPGMIGRATE_CHECKPOINT_GENERATION": "invalid",
             "PGCOPYDB_APPLY_GROUP_TXNS": "invalid",
             "PGCOPYDB_LOG_JSON": "on",
+            "RPGMIGRATE_INTERNAL_COMPARE_SOURCE_FILES": "invalid",
+            "RPGMIGRATE_INTERNAL_COMPARE_TARGET_FILES": "invalid",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), self.qualified_version)

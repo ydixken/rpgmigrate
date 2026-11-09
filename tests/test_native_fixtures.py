@@ -16,6 +16,13 @@ QUALIFIED_CAPABILITIES = [
 ]
 
 
+LINUX_QUALIFIED_CAPABILITIES = QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"]
+RESERVED_CAPABILITIES = [
+    "clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput",
+    "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
+]
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -70,19 +77,24 @@ def verify_inventory(root):
     contract = read_json(root / "contract.json")
     if contract.get("protocol_version") != 1 or contract.get("m1_capabilities") != []:
         raise ValueError("invalid native contract")
-    if contract.get("qualified_capabilities") != QUALIFIED_CAPABILITIES:
-        raise ValueError("invalid qualified capabilities")
-    qualified = [case for case in cases["cases"] if case["id"] == "version-qualified-profile"]
-    if qualified != [{
-        "id": "version-qualified-profile", "kind": "version",
-        "payload": "payloads/version-qualified-profile.json", "accept": True,
-    }]:
-        raise ValueError("invalid qualified version case")
-    version = read_json(root / qualified[0]["payload"])
-    if version != {
-        "protocol_version": 1, "engine_version": "0.1.0", "capabilities": contract["qualified_capabilities"],
-    } or type(version["protocol_version"]) is not int:
-        raise ValueError("qualified version differs from contract")
+    if contract.get("capabilities") != RESERVED_CAPABILITIES:
+        raise ValueError("invalid reserved capabilities")
+    for case_id, metadata, capabilities in [
+        ("version-qualified-profile", "qualified_capabilities", QUALIFIED_CAPABILITIES),
+        ("version-qualified-linux-profile", "qualified_linux_capabilities", LINUX_QUALIFIED_CAPABILITIES),
+    ]:
+        if contract.get(metadata) != capabilities:
+            raise ValueError("invalid qualified capabilities")
+        qualified = [case for case in cases["cases"] if case["id"] == case_id]
+        if qualified != [{
+            "id": case_id, "kind": "version", "payload": "payloads/" + case_id + ".json", "accept": True,
+        }]:
+            raise ValueError("invalid qualified version case")
+        version = read_json(root / qualified[0]["payload"])
+        if version != {
+            "protocol_version": 1, "engine_version": "0.1.0", "capabilities": capabilities,
+        } or type(version["protocol_version"]) is not int:
+            raise ValueError("qualified version differs from contract")
     options = contract["options"]
     if len(options) != 43 or len({option["name"] for option in options}) != 43:
         raise ValueError("operator option inventory differs")
@@ -95,6 +107,19 @@ def verify_inventory(root):
 
 
 class NativeFixtureTests(unittest.TestCase):
+    def test_linux_metadata_preserves_portable_profile_and_extends_discovery(self):
+        contract = read_json(ROOT / "contract.json")
+        self.assertEqual(contract.get("qualified_capabilities"), QUALIFIED_CAPABILITIES)
+        self.assertEqual(contract.get("qualified_linux_capabilities"), QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"])
+        cases = verify_inventory(ROOT)
+        qualified = [case for case in cases if case["id"] == "version-qualified-linux-profile"]
+        self.assertEqual(len(qualified), 1)
+        self.assertTrue(qualified[0]["accept"])
+        self.assertEqual(read_json(ROOT / qualified[0]["payload"]), {
+            "protocol_version": 1, "engine_version": "0.1.0",
+            "capabilities": QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"],
+        })
+
     def test_local_inventory_is_complete(self):
         self.assertGreater(len(verify_inventory(ROOT)), 0)
 
@@ -166,6 +191,23 @@ class NativeFixtureTests(unittest.TestCase):
                 def mutate(root):
                     self.change_cases(root, lambda data: change(next(case for case in data["cases"] if case["id"] == "version-qualified-profile")))
                 self.mutate(mutate, refresh=True)
+
+    def test_linux_metadata_and_golden_drift_refused_with_updated_digests(self):
+        invalid = [None, [], QUALIFIED_CAPABILITIES, LINUX_QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"],
+                   LINUX_QUALIFIED_CAPABILITIES + ["unknown"], list(reversed(LINUX_QUALIFIED_CAPABILITIES))]
+        invalid += [LINUX_QUALIFIED_CAPABILITIES[:i] + LINUX_QUALIFIED_CAPABILITIES[i + 1:]
+                    for i in range(len(LINUX_QUALIFIED_CAPABILITIES))]
+        for capabilities in invalid:
+            with self.subTest(capabilities=capabilities):
+                self.mutate(lambda root: self.change_json(root, "contract.json", lambda data: data.update(qualified_linux_capabilities=capabilities)), refresh=True)
+                self.mutate(lambda root: self.change_json(root, "payloads/version-qualified-linux-profile.json", lambda data: data.update(capabilities=capabilities)), refresh=True)
+        self.mutate(lambda root: self.change_json(root, "contract.json", lambda data: data.pop("qualified_linux_capabilities")), refresh=True)
+        self.mutate(lambda root: self.change_json(root, "contract.json", lambda data: data.update(capabilities=RESERVED_CAPABILITIES[:-1])), refresh=True)
+        for change in [lambda case: case.update(accept=False), lambda case: case.update(kind="report"),
+                       lambda case: case.update(id="renamed-linux-version"),
+                       lambda case: case.update(payload="payloads/version-qualified-profile.json")]:
+            with self.subTest(change=change):
+                self.mutate(lambda root: self.change_cases(root, lambda data: change(next(case for case in data["cases"] if case["id"] == "version-qualified-linux-profile"))), refresh=True)
 
     def test_missing_payload_is_refused(self):
         self.mutate(lambda root: (root / "payloads/progress-copying.json").unlink())

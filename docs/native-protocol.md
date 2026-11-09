@@ -3,7 +3,7 @@
 We freeze the engine/operator boundary here and in the shared [contract fixtures](../tests/fixtures/native/v1/contract.json).
 The [M1 plan](superpowers/plans/2026-11-08-m1-native-contract.md) defines the implementation boundary.
 M1 defines discovery and pure contract validation; its empty capability fixture remains accepted parser evidence.
-The current producer advertises the narrowed engine profile qualified through M4.
+Discovery describes the narrowed core profile and the Linux-only compiled sealed-file comparison interface below; platform advertisement does not replace its runtime prerequisites.
 New executable and image bytes require their own packaging and M6 runtime evidence before operator activation.
 Shared fixture payloads remain synthetic contracts, separate from actual producer checks.
 Use the [Native cutover handoff](native-cutover-handoff.md) for M4 command behavior, native format 8, metadata version 6, and the M6 observation procedure.
@@ -22,7 +22,13 @@ Run discovery without PostgreSQL, a workdir, or operator identity:
 The command writes one JSON object and a newline to stdout.
 Its exact required fields are `protocol_version`, `engine_version`, and `capabilities`.
 `protocol_version` is integer `1`, and `engine_version` comes from Cargo package metadata.
-The current producer emits this fixed ordered capability array:
+Linux producers emit this fixed ordered capability array:
+
+```json
+["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1","verify.sealed_files.v1"]
+```
+
+Non-Linux producers retain the original ordered six:
 
 ```json
 ["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1"]
@@ -32,14 +38,18 @@ The profile covers single-database clone with unsplit text COPY, measured progre
 It admits PostgreSQL 16 to 16, 18 to 18, and 16 to 18, with explicit large-object skipping for follow and `durable` commits.
 Binary COPY, splitting, large objects, replay-safe cadence, and relaxed mode remain outside this advertisement.
 Operational reports retain their command-specific capability arrays.
-The accepted `version-empty-capabilities` fixture preserves historical discovery syntax; it cannot satisfy native clone capability admission.
-The fixture contract records this producer array as `qualified_capabilities`, historical M1 syntax as `m1_capabilities: []`, and all nine reserved names as `capabilities`.
+The accepted `version-empty-capabilities` and original six-name `version-qualified-profile` fixtures preserve historical discovery syntax.
+Both still parse, but the six-name profile lacks the mandatory native M6 sealed-file prerequisite and refuses before credential projection; the empty array also cannot satisfy native clone admission.
+The new accepted `version-qualified-linux-profile` fixture records Linux seven-name discovery.
+The shared 134-file fixture trees retain the portable historical six as fixture-only `qualified_capabilities`, add fixture-only `qualified_linux_capabilities` for Linux seven, preserve `m1_capabilities: []`, and reserve all ten names in `capabilities`.
 These metadata fields do not extend the three-field discovery document.
 Discovery MUST NOT contain operational identity or report fields.
 Plain `version` retains text identity and libpq version output.
 Operational identity and apply-group settings do not gate discovery.
 
-The reserved capability names are `clone.single_db`, `copy.large_objects`, `copy.binary_fallback`, `copy.split`, `cdc.pgoutput`, `progress.v1`, `cutover.v1`, `verify.v1`, and `cleanup.v1`.
+The reserved capability names are `clone.single_db`, `copy.large_objects`, `copy.binary_fallback`, `copy.split`, `cdc.pgoutput`, `progress.v1`, `cutover.v1`, `verify.v1`, `cleanup.v1`, and `verify.sealed_files.v1`.
+`verify.sealed_files.v1` identifies compiled support for the private comparison file interface, not universal kernel/NSS/TLS availability or independent database authority.
+Runtime descriptor, kernel, file, image, and connection checks remain mandatory.
 Unknown or duplicate capabilities MUST fail validation.
 A reserved name does not mean that the runtime implements that capability.
 Discovery supplies configuration-assessment input; production `UnsupportedEngine`, resolver refusal, helper/PVC/file/SQL qualification, and M6 lifecycle gates remain closed.
@@ -92,6 +102,27 @@ Compare progress retains the `"compare progress: "` message prefix and keys `pla
 Each in-flight entry contains `schema`, `name`, `bytes`, and `elapsedMs`.
 The operator's existing compare consumer owns these messages.
 `ParseReport` MUST reject compare arrays and compare command reports; a native `verification` payload does not replace this contract.
+
+## Private sealed-file inputs for comparison
+
+The native helper can bind already captured credential/TLS file bytes to comparison children without rewriting the raw DSN or exposing those bytes in argv.
+This private interface applies only to `compare schema` and `compare data`; both internal variables absent preserve the ordinary CLI and other commands keep their existing connection path.
+It introduces no public CLI option or new Report/compare-array shape.
+
+Set `RPGMIGRATE_INTERNAL_COMPARE_SOURCE_FILES` and `RPGMIGRATE_INTERNAL_COMPARE_TARGET_FILES` together for this mode.
+Each is a strict JSON object of at most 1024 bytes, with only `passfile`, `sslrootcert`, `sslcert`, `sslkey`, and `sslcrl` keys.
+An integer of at least 3 selects an inherited descriptor; null selects only `/usr/share/rpgmigrate/.native-file-absent`, an omitted key leaves libpq unchanged, and an empty object is valid.
+Repeated descriptor values are allowed across options and roles; duplicate keys, unknown keys, invalid values, or only one present map refuse before state access or connection.
+Keep map values out of argv and public diagnostics, retain canonical snapshot owners through child closure/postcheck, and inherit only the sorted unique selected descriptor set.
+
+Mapped inputs require Linux 5.11 or newer with working `close_range` / `CLOSE_RANGE_CLOEXEC`; unsupported kernels or failed admission refuse without fallback.
+Require an effective-user-owned regular descriptor, mode 0400, zero links, at most 1 MiB, all WRITE/GROW/SHRINK/SEAL seals, and matching retained procfd identity.
+Sealed RDWR memfds are valid despite mode 0400; owned per-role duplicates remain alive through libpq and utility completion without adopting or closing borrowed originals.
+A null selection requires positive missing-path proof, with exact-image immutability, read-only-rootfs, and mount-shadow qualification still required.
+
+Mapped SQL connections pass the unchanged raw DSN first to native libpq parameter expansion, then only the selected fixed file overrides.
+Schema `pg_dump` children inherit only their endpoint’s selected owned descriptors; both internal map variables are removed from utility descendants and tool-discovery children inherit none.
+Revalidate retained files before connection or utility spawn; credentials, TLS/database behavior, real `pg_dump`, packaged images, and resolver/PVC qualification remain separate runtime gates.
 
 ## Work identity and ownership
 

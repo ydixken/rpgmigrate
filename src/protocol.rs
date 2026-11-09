@@ -8,7 +8,7 @@ use crate::identity::RunId;
 pub(crate) struct Version {
     protocol_version: u32,
     engine_version: &'static str,
-    capabilities: [&'static str; 6],
+    capabilities: &'static [&'static str],
 }
 
 impl Version {
@@ -16,13 +16,15 @@ impl Version {
         Self {
             protocol_version: 1,
             engine_version: env!("CARGO_PKG_VERSION"),
-            capabilities: [
+            capabilities: &[
                 "clone.single_db",
                 "cdc.pgoutput",
                 "progress.v1",
                 "cutover.v1",
                 "verify.v1",
                 "cleanup.v1",
+                #[cfg(target_os = "linux")]
+                "verify.sealed_files.v1",
             ],
         }
     }
@@ -562,16 +564,14 @@ mod tests {
         assert_eq!(bound["capabilities"], serde_json::json!(["cutover.v1"]));
         assert_eq!(bound["work"], work(Some(&operator)).unwrap());
         assert_eq!(bound["replication"], standalone["replication"]);
+        let discovery = serde_json::to_value(Version::current()).unwrap();
         assert_eq!(
-            serde_json::to_value(Version::current()).unwrap()["capabilities"],
-            serde_json::json!([
-                "clone.single_db",
-                "cdc.pgoutput",
-                "progress.v1",
-                "cutover.v1",
-                "verify.v1",
-                "cleanup.v1"
-            ])
+            discovery["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "verify.sealed_files.v1"),
+            cfg!(target_os = "linux")
         );
     }
 
@@ -583,6 +583,11 @@ mod tests {
             serde_json::from_slice(&std::fs::read(root.join("cases.json")).unwrap()).unwrap();
         let mut argv_count = 0;
         let mut producer_count = 0;
+        let producer_id = if cfg!(target_os = "linux") {
+            "version-qualified-linux-profile"
+        } else {
+            "version-qualified-profile"
+        };
         for case in catalog["cases"].as_array().unwrap() {
             let id = case["id"].as_str().unwrap();
             if case["kind"] == "version" && case["accept"] == true {
@@ -590,7 +595,7 @@ mod tests {
                     &std::fs::read(root.join(case["payload"].as_str().unwrap())).unwrap(),
                 )
                 .unwrap();
-                if id == "version-qualified-profile" {
+                if id == producer_id {
                     assert_eq!(
                         serde_json::to_value(Version::current()).unwrap(),
                         fixture,

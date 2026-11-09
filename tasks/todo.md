@@ -703,6 +703,21 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ### Capability discovery source checkpoints, 2026-11-09
 
+The post-cap contract keeps protocol v1 and three public discovery fields; Linux emits the original ordered six plus `verify.sealed_files.v1`, while non-Linux retains six.
+The 134-file engine candidate and central operator mirror retain portable `qualified_capabilities`, add fixture-only `qualified_linux_capabilities`, and preserve historical empty/six-name parse acceptance; old six cannot satisfy native M6 before credential projection.
+The exact joined 321-file FD/cap Linux producer check passed protocol ten/CLI31 and actual binary three-field Linux-seven discovery, plus executable CLI28; no packaged image, ARM helper/runtime, AMD64 database runtime, or production admission is qualified.
+Joined source manifest SHA-256 `fbc3d7c2f4c59dd1ad68365d4770612b0505051243a25075d7d5be87f7d0de0e` and binary SHA-256 `275cab235cd9a27934b58766fc9865bf899cf03d694493a0b79e001fe0eef074` are bound by `/Users/ydixken/.codex/tmp/m6-joint-fd-cap-linux-20261110/joined-qualification-proof.json`, SHA-256 `ebdf851566cd2926e25d304be58ae35be6e2071a8a73a7bc8c62c61ebd6f19d2`.
+The requested CLI selector was ignored and the broader executable 28-case invocation ran once; it is recorded explicitly without a repeat run or false partial inventory.
+Engine FD source is integrated at `3c4d0a5a6212de642aa8f205989fadf80b64ee49`; thirteen focused Linux prerequisite cases passed on retained `8dd89a68` input, with host library Clippy/formatting evidence retained and the separate host transport libpq-minimum failure preserved.
+Actual authentication/TLS/real PostgreSQL dump/image/NSS/resolver/lifecycle, broad Go, and whole-M6 review remain open.
+The cap export retains macOS protocol ten, CLI 31, executable 28, fixture eighteen, and offline smoke 29 source checks.
+Older operator `d28` scoped lint failed on two existing wrong-image constant collisions; the reviewed `6d` composition preserves all ten capability paths and has two Linux-seven/old-six mocked-preflight cases plus one actual native/controller scoped-lint PASS, without relabeling the older RED receipt.
+Engine FD proof: `/tmp/rpgmigrate-m6-engine-fd-integration-20261110/fast-forward-proof.json`, SHA-256 `250408b47456fa4072d5dc8686cb3e8374278e126f1dd77dc78ac8feef45a91c`.
+Operator comparison proof: `/tmp/rpgmigrate-m6-native-comparison-integration-20261110/checkpoint-ff-proof.json`, SHA-256 `faf9246c5a5f93e8b1c17e2a223ff9c87e94f524de29f1dacf4d783dcbff215b`.
+The retained comparison checkpoint `351aa3` binds comparison10/36 plus transport eleven source cases/zero lint and canonical Python111754/54 mechanism cases.
+The ten-capability consumer is now fast-forwarded into clean central operator HEAD `14b73f5980768841c68dcb0d699e5889e88d80ad`, tree `1f21d90ebb364241054ada9ad14a8eb54a911d51`, parent `351aa3`; old-six early refusal/new-Linux-seven source-consumer qualification does not clear runtime guards.
+Fast-forward proof: `/tmp/rpgmigrate-m6-sealed-capability-composition-20261110/checkpoint-ff-proof.json`, SHA-256 `d5689817826b1b20b79d7582086bb328e4a5342813ce2477e2aeeb2ac7653c0a`.
+
 - [x] Compose the exact fixture, producer/help, and packaging-smoke packets on engine baseline `ef37214b55e7a082f6e2ee949768649e83163ea4`, with a separate fixture/consumer candidate on operator baseline `727e45da94a5b2d099e97380e086a36206e68451`.
 - [x] Verify packet manifests, every exported and baseline blob, intended modes, preserved peer files, and identical 133-file fixture trees.
 - [x] Update discovery/profile documentation without changing the three-field DTO, command-specific reports, historical empty parser fixture, or operator activation gates.
@@ -710,8 +725,8 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 - [ ] Bind the new ARM executable/image to the scheduled M6 helper/preflight/controller and three-pair native acceptance packet.
 - [ ] Qualify exact-image AMD64 native database runtime in M10 before claiming multi-architecture runtime support.
 
-Engine source checkpoint `96d37073716768c21993c3b2df724d6c3b425415` contains discovery; the operator six-capability fixture mirror `b590` is now central, without fresh runtime/image qualification.
-The [native protocol](../docs/native-protocol.md#discovery) records the six ordered names, restrictions, and fixture-only `qualified_capabilities` metadata.
+Historical engine `96d3707` and operator `b590` establish the earlier six-name checkpoint only; post-cap fixture/source facts above supersede its current-profile description without adding runtime qualification.
+The [native protocol](../docs/native-protocol.md#discovery) records the post-cap platform-specific arrays, restrictions, and separate fixture-only six/seven metadata.
 Retained source checks cover sixteen fixture tests, ten protocol tests, 31 CLI unit tests, 28 executable CLI tests, 28 smoke tests, focused Go capability/fixture tests, strict Clippy/formatting, and zero focused Go lint findings.
 Input hashes match the retained producer Cargo/CLI scope (217 files), fixture-tool scope (134 files), and focused operator package scope (286 files).
 The joined offline smoke reran once against the two changed producer sources and passed all 28 tests.
@@ -723,11 +738,11 @@ M0 through M5 stay closed; M6 through M10 remain open.
 
 ### Current composed Go closing profile and blockers
 
-The authoritative clean central operator HEAD is `d28dd9c2b8d87344d337c3dad9c837306d8bb074`, tree `1ad0ccc51dff948ac3e9d67ba051a1d3ab2333e3`, integrating control `058d8c428bfcff17bdba59cc65237227e6bd41cd` and retry Reader `d28dd9c`; the 105031-byte Python source is unchanged.
+The authoritative clean central operator capability HEAD is `14b73f5980768841c68dcb0d699e5889e88d80ad`, tree `1f21d90ebb364241054ada9ad14a8eb54a911d51`; comparison `351aa3` and earlier control/retry receipts retain their separate provenance.
 Control passed 78 named checks/zero lint and retry Reader passed six focused checks/zero lint; these retained source proofs grant no activation or new Python/image qualification.
 Fast-forward proof: `/tmp/rpgmigrate-m6-control-retry-integration-20261110/fast-forward-proof.json`, SHA-256 `2e1a86f86e7add5f47831584fa5acd1d7d6c379c71fab39df3e3e9b14e9e56b1`.
 The private two-file Python export `d1abd09` has 111754 source bytes/54 mechanism tests and is not central; canonical source/registry/golden atomic integration is in progress.
-Comparison parser/transport/helper work is private; the real-child sealed-FD gap has a bounded Rust change isolated under `/tmp/rpgmigrate-m6-compare-sealed-files`, without runtime/support qualification.
+Comparison parser/transport/helper source is integrated at the separate `351aa3` checkpoint above, while the FD implementation is integrated at engine `3c4d0a5a`; actual file/authentication/image/runtime qualification remains open.
 ACK transport passed nine focused tests with zero lint; recovery passed four top-level/43 subcases through actual Reader composition with zero lint, as component evidence only.
 Fast-forward proof: `/tmp/rpgmigrate-m6-ack-integration-20261109/fast-forward-proof.json`, SHA-256 `5c167ff85f802d716aa1655219a6d2d4c1717a06032f7f6f6ef49e0e2c432c5e`.
 Interfaces/dispatch, runtime target-retry producer/Reader, owned-cleanup comparison, and activation remain open; `UnsupportedEngine` is unchanged.
@@ -908,7 +923,8 @@ CloudNativePG CreateContainerError came from normalizing an existing raw import 
 Sealed failed handoff: `/private/var/tmp/rpgmigrate-m7-manifest-legacy-gate-0uu04_9w/sealed-handoff-manifest.json`, SHA-256 `0d1b1bd8fe8631ab99e1d19d4eed411df7a61018d0a1784ea5d7489ad4970a41`.
 The single authorized nonforced alias addition on the Pod host made the same original CloudNativePG Pod Ready/restart zero; the historical gate remains FAILED, with no Go/M7 pass.
 Sealed experiment: `/private/var/tmp/rpgmigrate-m7-CNPG-alias-experiment-r5ad002c/sealed-experiment-manifest.json`, SHA-256 `f59ae83815c0e1b80107e2abf71df7240f82bfe9334cd3311121d2e5f68163f9`.
-Source-aware load-alias/actual-CRI-imageID research is in progress; source/RUN/S2 retain original hard deadline `2026-11-10T01:02:25.725552Z`, without renewal or old acceptance repair.
+M7 private fixes are ready for composition: two Python files passed 28 focused/231 full checks, three Go files passed 139 named checks/zero lint, and one guide file is ready.
+No fresh build/runtime acceptance follows; the prior failed gate and experiment remain unchanged.
 The VM remains fourteen CPUs/32 GiB/160 GiB with originals protected; a separate four-CPU/4-GiB focused Linux Rust window with 6-GiB growth is planning only, without benchmark execution.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 

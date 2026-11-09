@@ -77,15 +77,18 @@ Retain build logs and the receipt because a later build can resolve different pa
 
 ## Discovery and artifact identity
 
-The smoke requires the exact three-field discovery document in `tests/fixtures/native/v1/payloads/version-qualified-profile.json`.
+The smoke requires the exact three-field Linux discovery document in `tests/fixtures/native/v1/payloads/version-qualified-linux-profile.json`, regardless of the smoke host operating system.
 It decodes the local golden and `contract.json` with duplicate-field refusal, checks both against the independent ordered producer expectation, and compares the observed document with that golden.
 The required capability array is:
 
 ```json
-["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1"]
+["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1","verify.sealed_files.v1"]
 ```
 
-The accepted `version-empty-capabilities` fixture preserves historical parser behavior; an image that advertises `[]` fails this producer check.
+The accepted `version-empty-capabilities` and original six-capability `version-qualified-profile` fixtures preserve historical parser behavior; either set fails this Linux producer check.
+The portable six-capability fixture and `qualified_capabilities` metadata stay unchanged.
+Linux builds add `verify.sealed_files.v1`, matched by fixture-only `qualified_linux_capabilities`; non-Linux builds retain six capabilities because the internal sealed-file comparison mode requires Linux.
+The new capability describes compiled sealed-file comparison support; kernel, descriptor, file, and runtime admission checks remain mandatory.
 The narrowed engine profile covers single-database text COPY, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
 The command paths include `clone`, `follow`, `list progress --json`, the supported `stream sentinel get` and `stream sentinel set endpos` forms, `stream cleanup`, and `compare schema` or `compare data`.
 The profile requires PostgreSQL 16 or 18 with source major no greater than target, explicit large-object skipping for follow, unsplit text COPY, and `durable` mode.

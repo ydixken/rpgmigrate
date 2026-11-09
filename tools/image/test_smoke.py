@@ -22,7 +22,7 @@ from unittest.mock import Mock, patch
 
 PATH = Path(__file__).with_name("smoke.py")
 QUALIFIED_CAPABILITIES = [
-    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
+    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
 ]
 
 
@@ -471,6 +471,12 @@ class SmokeTests(unittest.TestCase):
             self.smoke.probe(image, "podman")
         self.assertEqual(self.calls[0][0], ["podman", "image", "inspect", image])
 
+    def test_historical_six_capability_image_is_refused(self):
+        path = PATH.parents[2] / "tests/fixtures/native/v1/payloads/version-qualified-profile.json"
+        self.observed["version"] = path.read_text()
+        with self.assertRaises(RuntimeError):
+            self.probe()
+
     def test_version_contract_requires_exact_qualified_capabilities(self):
         self.assertEqual(self.probe()["version"], {
             "protocol_version": 1, "engine_version": "0.1.0", "capabilities": QUALIFIED_CAPABILITIES,
@@ -564,7 +570,7 @@ class SmokeTests(unittest.TestCase):
 
     def test_qualified_expectation_refuses_invalid_local_golden_or_metadata(self):
         fixtures = PATH.parents[2] / "tests/fixtures/native/v1"
-        golden_path = fixtures / "payloads/version-qualified-profile.json"
+        golden_path = fixtures / "payloads/version-qualified-linux-profile.json"
         contract_path = fixtures / "contract.json"
         golden = json.loads(golden_path.read_bytes())
         contract = json.loads(contract_path.read_bytes())
@@ -576,11 +582,11 @@ class SmokeTests(unittest.TestCase):
             {golden_path: json.dumps({**golden, "protocol_version": True}).encode()},
             {golden_path: json.dumps({**golden, "capabilities": []}).encode()},
             {golden_path: json.dumps({key: value for key, value in golden.items() if key != "capabilities"}).encode()},
-            {contract_path: json.dumps({**contract, "qualified_capabilities": []}).encode()},
+            {contract_path: json.dumps({**contract, "qualified_linux_capabilities": []}).encode()},
             {contract_path: contract_path.read_bytes().replace(b'"protocol_version": 1,',
                             b'"protocol_version": 1,"protocol_version": 1,')},
             {golden_path: json.dumps({**golden, "capabilities": wrong_set}).encode(),
-             contract_path: json.dumps({**contract, "qualified_capabilities": wrong_set}).encode()},
+             contract_path: json.dumps({**contract, "qualified_linux_capabilities": wrong_set}).encode()},
             {golden_path: golden_path.read_bytes().replace(b'"protocol_version": 1,',
                         b'"protocol_version": 1,"protocol_version": 1,')},
         ]

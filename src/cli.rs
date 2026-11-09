@@ -883,27 +883,25 @@ mod tests {
             ("RPGMIGRATE_CHECKPOINT_GENERATION", "invalid"),
             ("PGCOPYDB_APPLY_GROUP_TXNS", "invalid"),
             ("PGCOPYDB_LOG_JSON", "on"),
+            ("RPGMIGRATE_INTERNAL_COMPARE_SOURCE_FILES", "invalid"),
+            ("RPGMIGRATE_INTERNAL_COMPARE_TARGET_FILES", "invalid"),
         ];
         let invocation = invoke(&["version", "--json"], &env).unwrap();
         let output = crate::execute(invocation).unwrap();
         assert_eq!(output.lines().count(), 1);
         assert!(output.ends_with('\n'));
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "protocol_version": 1,
-                "engine_version": env!("CARGO_PKG_VERSION"),
-                "capabilities": [
-                    "clone.single_db",
-                    "cdc.pgoutput",
-                    "progress.v1",
-                    "cutover.v1",
-                    "verify.v1",
-                    "cleanup.v1"
-                ],
-            })
-        );
+        let profile = if cfg!(target_os = "linux") {
+            "version-qualified-linux-profile.json"
+        } else {
+            "version-qualified-profile.json"
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/native/v1/payloads")
+            .join(profile);
+        let expected: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value, expected);
     }
 
     #[test]
