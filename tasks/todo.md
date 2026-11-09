@@ -460,10 +460,13 @@ The isolated implicit stock-target-major utility-routing implementation passed n
 Formatting and strict Clippy passed; the exact `schema.rs`/`runner-image.md` export is `/tmp/rpgmigrate-m5-tools-export-d799/manifest.json`, SHA-256 `4ed44353c90377845c28ec16e739f04f6f35aa0436ad79e39e5f6a4fad8ddb40`.
 The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
 Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
+The production ARM64 image build disk peak remains unqualified despite cached base images.
+Measured headroom is 2.32 GiB above the 10-GiB floor; the unknown exact build peak prevents a capacity claim.
+Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
 The local ARM64 read-only packaging smoke binds an older source snapshot; final-source image, AMD64, and hosted qualification remain open.
 
 - [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
-- [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, engine E2E matrix on hosted runners, image build, ghcr push on tags only.
+- [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, image build, ghcr push on tags only.
 
 ## M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
@@ -491,8 +494,15 @@ The lost-ack attempt retained fifteen stages, relay COMMIT/Idle, refusal, and no
 A distinct fresh PID/ID retry passed nineteen stages, EOF, exit zero, and the same row/token; cleanup and source checks passed.
 This does not qualify other PostgreSQL 18 cases, full M6, or production activation.
 The approved test-only actual-native-8 producer interoperability plan is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-m6-actual-producer-plan-u3xog4xr/2026-11-09-actual-native8-producer-interop-plan.md`, SHA-256 `e89bb99b7c10876130d4b9fa26c61b5f45979239aa00d74d9d10b3b77b450c9c`.
-The two-file test-only actual-producer fixture passed pure checks; runtime remains unrun.
-Fresh-volume provisioning and Task 0 real/work-PVC ancestor permissions remain unqualified; existing-state/PVC guards remain unchanged, with no guard relaxation or root initialization approved.
+The actual-producer fixture is frozen at `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m6-actual-producer-ouiswzeh/manifest.json`, SHA-256 `09efb7a3eee140477013a16b9fbaae2be493243bf07047eba63cabffd9611e28`.
+The manifest contains 23 files, with all 21 predecessor files unchanged.
+Two named pure tests produced 146 PASS entries without skips; the probe, three embedded-syntax checks, and gofmt passed.
+The seven-case actual-producer live profile remains unrun.
+The independent private fresh-volume capability probe passed: `/Users/ydixken/.codex/tmp/m6-private-parent-independent-o92c12a9/runtime-receipt.json`, SHA-256 `b5573b26d44529bcc04a7c90d55eee5c9b16afccaa4f9113943d051652591803`.
+UID/GID 65532 changed a fresh owned empty directory from mode 0755 to 0700 without privilege, then completed actual fsync.
+A new container retained owner, mode, device/inode, and empty-state proof; exact owned cleanup passed.
+The earlier private-probe stops were stat/id-map list-context harness bugs, fixed through scalar/arity handling and five pure RED/GREEN controls, without engine or production changes.
+This does not qualify real Kubernetes fsGroup/PVC or work-PVC ancestor permissions; existing-state/PVC guards remain unchanged, with no guard relaxation or root initialization approved.
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both Manual and Automatic modes; no new fencing subsystem is authorized.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.

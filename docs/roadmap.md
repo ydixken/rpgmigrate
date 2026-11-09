@@ -251,11 +251,14 @@ The isolated implicit stock-target-major utility-routing implementation passed n
 Formatting and strict Clippy passed; the two-file utility-routing export is frozen at manifest `4ed44353c90377845c28ec16e739f04f6f35aa0436ad79e39e5f6a4fad8ddb40`.
 The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
 Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
+The production ARM64 image build disk peak remains unqualified despite cached base images.
+Measured headroom is 2.32 GiB above the 10-GiB floor; the unknown exact build peak prevents a capacity claim.
+Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
 The final-source image, AMD64 and hosted checks, and the M5 closing gate remain unqualified.
 These checks do not complete the released runner or hosted engine CI gates below.
 
 - [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
-- [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, engine E2E matrix on hosted runners, image build, ghcr push on tags only.
+- [ ] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, image build, ghcr push on tags only.
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
@@ -272,8 +275,12 @@ The composed 21-file test-only successor `031f9d4` passed 67 focused Go checks a
 The latest `5f` input passed one focused PostgreSQL 16 lost-COMMIT case.
 The first attempt retained fifteen stages and relay COMMIT/Idle proof with refusal and no observation; a distinct fresh PID/ID retry passed nineteen stages, EOF, exit zero, and the same row/token.
 Source checks and owned cleanup passed; no other PostgreSQL 18, full-M6, or production qualification follows.
-The approved two-file actual-native-8 producer fixture passed pure checks; its runtime remains unrun.
-Fresh-volume provisioning and Task 0 real/work-PVC ancestor permissions remain unqualified; existing-state/PVC guards remain unchanged, with no guard relaxation or root initialization approved.
+The two-file actual-native-8 fixture is frozen in a 23-file manifest `09efb7a3eee140477013a16b9fbaae2be493243bf07047eba63cabffd9611e28`, preserving all 21 predecessor files.
+Its two named pure tests produced 146 PASS entries without skips; probe, three embedded-syntax checks, and formatting passed.
+The seven-case actual-producer live profile remains unrun.
+An independent private fresh-volume capability probe passed with UID/GID 65532: same-owner empty mode 0755 changed to 0700, actual fsync passed, and a new container retained owner/mode/device/inode/empty-state proof.
+Exact owned cleanup passed; this is not Kubernetes fsGroup/PVC permission qualification.
+Real/work-PVC ancestor permissions remain open, with existing-state/PVC guards unchanged and no guard relaxation or root initialization approved.
 This prototype does not qualify Task 0 or authorize production activation.
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both cutover modes; no fencing subsystem is added.
 
