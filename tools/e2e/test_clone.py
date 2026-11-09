@@ -1,12 +1,16 @@
 """Portable controls for the disposable clone qualification harness."""
 
 import importlib.util
+from contextlib import closing
 import json
+import sqlite3
+import stat
 from pathlib import Path
 import tempfile
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +48,18 @@ class CloneHarnessTests(unittest.TestCase):
         for rows in ([b"abc\n", b"def\n"], [b"abc\n", b"deg\n", b"abc\n"], [b"null\n"], []):
             self.assertNotEqual(baseline, harness.row_fingerprint(rows, 9, 100))
         self.assertEqual(harness.row_fingerprint([], 9, 100)["rows"], 0)
+
+    def test_schema_oracle_preserves_not_null_and_other_constraint_semantics(self):
+        columns = b"value|text|t\n"
+        obligations = b"CHECK length(value)>0\nFOREIGN KEY reference\nPRIMARY KEY id\nINDEX value\nTRIGGER preserve_row\n"
+        baseline = harness.schema_fingerprint(columns, obligations, b"0")
+        self.assertNotEqual(baseline, harness.schema_fingerprint(columns.replace(b"|t", b"|f"), obligations, b"0"))
+        for original in (b"CHECK", b"FOREIGN KEY", b"PRIMARY KEY", b"INDEX", b"TRIGGER"):
+            with self.subTest(original=original):
+                self.assertNotEqual(baseline, harness.schema_fingerprint(columns, obligations.replace(original, b"changed"), b"0"))
+        for invalid in (b"1", b"", b"false", None):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                harness.schema_fingerprint(columns, obligations, invalid)
 
     def test_oracle_refuses_row_and_byte_overflow(self):
         for rows, count, size in (([b"a\n", b"b\n"], 1, 10), ([b"abcd\n"], 2, 2)):
@@ -101,6 +117,7 @@ class CloneHarnessTests(unittest.TestCase):
             engine.write_text("#!" + sys.executable + "\nimport glob,json,os,pathlib\n" +
                               "files=list(pathlib.Path(__file__).parent.glob('binding-*.json'))\n" +
                               "assert len(files)==1\n" +
+                              "assert __import__('sys').argv.count('--restart')==1\n" +
                               "binding=json.loads(files[0].read_text())\n" +
                               "assert binding['work']['migration_uid']==os.environ['RPGMIGRATE_MIGRATION_UID']\n" +
                               "assert binding['work']['run_id']==os.environ['RPGMIGRATE_RUN_ID']\n" +
@@ -113,6 +130,61 @@ class CloneHarnessTests(unittest.TestCase):
             binding = json.loads(process.binding.read_text())
             self.assertEqual(binding["command"], "clone")
             self.assertEqual(binding["work"]["run_id"], binding["work"]["migration_uid"].replace("-", ""))
+
+    def test_restart_observer_matches_only_owned_pretruncate_lock(self):
+        with closing(sqlite3.connect(":memory:")) as database:
+            database.create_function("current_database", 0, lambda: "owned-db")
+            database.execute("CREATE TABLE pg_stat_activity(pid INTEGER, datname TEXT, application_name TEXT, query TEXT, wait_event_type TEXT)")
+            expected = 'LOCK TABLE ONLY "M2 space"."wide" IN ACCESS EXCLUSIVE MODE'
+            rows = [
+                (42, "owned-db", "owned-app", expected, "Lock"),
+                (43, "owned-db", "owned-app", 'TRUNCATE ONLY "M2 space"."wide"', "Lock"),
+                (44, "foreign-db", "owned-app", expected, "Lock"),
+                (45, "owned-db", "foreign-app", expected, "Lock"),
+                (46, "owned-db", "owned-app", expected, "Client"),
+                (47, "owned-db", "owned-app", expected + "; SELECT 1", "Lock"),
+                (48, "owned-db", "owned-app", expected.replace('"wide"', '"other"'), "Lock"),
+            ]
+            database.executemany("INSERT INTO pg_stat_activity VALUES (?,?,?,?,?)", rows)
+            self.assertEqual(database.execute(harness.blocked_worker_sql("owned-app")).fetchall(), [(42,)])
+
+    def test_failed_child_retains_private_redacted_stderr_and_safe_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "failures"
+            script = "import sys; print('child-output-row'); sys.stderr.write(\"fixture-secret-password postgresql://fixture:uri-password@localhost/private password='keyword-secret' SELECT private_row_value\\n\"); sys.exit(7)"
+            with patch.object(harness, "DIAGNOSTIC_ROOT", root, create=True), \
+                    self.assertRaises(RuntimeError) as failure:
+                harness.run([sys.executable, "-c", script], environment={"PGPASSWORD": "fixture-secret-password"})
+            metadata = failure.exception.metadata
+            self.assertEqual(metadata["returncode"], 7)
+            self.assertTrue(metadata["retained"])
+            self.assertEqual(metadata["callsite"]["file"], Path(__file__).name)
+            self.assertEqual(metadata["callsite"]["function"], self._testMethodName)
+            self.assertGreater(metadata["callsite"]["line"], 0)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            self.assertEqual(len(list(root.iterdir())), 2)
+            for path in root.iterdir():
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                value = path.read_text()
+                for secret in ("fixture-secret-password", "uri-password", "keyword-secret", "child-output-row"):
+                    self.assertNotIn(secret, value)
+            private = next(root.glob("*.stderr")).read_text()
+            self.assertIn("SELECT private_row_value", private)
+            public = str(failure.exception) + json.dumps(metadata)
+            self.assertNotIn("private_row_value", public)
+            self.assertNotIn("SELECT", public)
+            self.assertNotIn("argv", public)
+            engine = root.parent / "engine"
+            engine.write_text("#!" + sys.executable + "\nimport sys\nsys.stderr.write('fixture-secret-password private-engine-detail')\nsys.exit(9)\n")
+            engine.chmod(0o700)
+            driver = harness.Driver(engine, {"PGPASSWORD": "fixture-secret-password"}, root.parent)
+            process = driver.start("source", "target", root.parent / "native")
+            with patch.object(harness, "DIAGNOSTIC_ROOT", root), self.assertRaises(RuntimeError) as clone_failure:
+                driver.finish(process)
+            self.assertEqual(clone_failure.exception.metadata["command_kind"], "engine-clone-diagnostics")
+            self.assertEqual(clone_failure.exception.metadata["returncode"], 9)
+            self.assertTrue(any("private-engine-detail" in path.read_text() for path in root.glob("*.stderr")))
+            self.assertTrue(all("fixture-secret-password" not in path.read_text() for path in root.iterdir()))
 
     def test_utility_gate_delegates_version_and_success_before_observation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -146,9 +218,13 @@ class CloneHarnessTests(unittest.TestCase):
     def test_source_and_target_oracles_must_match_nonempty_inventory(self):
         row = harness.row_fingerprint([b"a\n"], 5, 10)
         harness.require_equal({"table": row}, {"table": row})
-        for source, target in (({}, {}), ({"table": row}, {}), ({"table": row}, {"table": {**row, "rows": 2}})):
-            with self.subTest(source=source, target=target), self.assertRaises(RuntimeError):
-                harness.require_equal(source, target)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary) / "failures"):
+            for source, target in (({}, {}), ({"table": row}, {}), ({"table": row}, {"table": {**row, "rows": 2}})):
+                with self.subTest(source=source, target=target), self.assertRaises(RuntimeError) as failure:
+                    harness.require_equal(source, target)
+                self.assertEqual(failure.exception.metadata["command_kind"], "independent-oracle")
+                self.assertEqual(failure.exception.metadata["callsite"]["function"], self._testMethodName)
+                self.assertTrue(failure.exception.metadata["retained"])
 
 
 if __name__ == "__main__":

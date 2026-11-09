@@ -1,8 +1,10 @@
 use super::{Checkpoint, CommitOutcome, ControlRow, Frontier, TargetCommit, metadata};
 use crate::catalog::{command, configure_durability, confirm_durability};
 use crate::cdc::contracts::Event;
-use crate::contracts::{CopyReport, Error, ErrorKind, IoControl, Result};
-use crate::identity::StreamId;
+use crate::contracts::{
+    CopyReport, Error, ErrorKind, FollowBinding, IoControl, OwnedCopyTable, Result, SnapshotAnchor,
+};
+use crate::identity::{SourceEndLsn, StreamId};
 use crate::pg::{CommitObservation, PgConnection, PgParam, PgResult, TransactionStatus};
 use crate::state::{
     ConfirmedProvenance, NativeState, TARGET_METADATA_VERSION, TargetBinding, TargetProvenance,
@@ -14,13 +16,14 @@ const FENCE_CLASS: i32 = 0x5250_474d;
 fn fence_slot(run: crate::identity::RunId) -> i32 {
     i32::from_ne_bytes(crc32fast::hash(&run.0).to_ne_bytes())
 }
-// Bound backend statement memory until the serial consumer owns eviction.
+// Bound backend statement memory independently of the consumer cache.
 const MAX_PREPARED_DML: usize = 1024;
 const CHECKPOINT_TABLE: &str = "checkpoint";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
     Idle,
+    BeginPending,
     InTransaction,
     CommitPending,
     Poisoned,
@@ -63,6 +66,83 @@ struct ProofEvidence {
     barrier_epoch: u64,
     barrier_counter: u64,
     target: ConfirmedProvenance,
+    certified_lsn: Option<SourceEndLsn>,
+    follow: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SafeFeedback {
+    stream: StreamId,
+    end: SourceEndLsn,
+}
+
+impl SafeFeedback {
+    pub(crate) fn stream(&self) -> StreamId {
+        self.stream
+    }
+    pub(crate) fn end(&self) -> SourceEndLsn {
+        self.end
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn feedback_for_test(stream: StreamId, end: SourceEndLsn) -> SafeFeedback {
+    assert_ne!(end.0, 0);
+    SafeFeedback { stream, end }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveryStart {
+    stream: StreamId,
+    applied: Option<Frontier>,
+    certified_lsn: Option<SourceEndLsn>,
+    anchor: Option<SnapshotAnchor>,
+    start_lsn: SourceEndLsn,
+    confirmed_flush_lsn: SourceEndLsn,
+}
+
+#[cfg(test)]
+pub(crate) fn recovery_start_for_test(
+    binding: &FollowBinding,
+    start_lsn: SourceEndLsn,
+    confirmed_flush_lsn: SourceEndLsn,
+) -> RecoveryStart {
+    assert!(start_lsn >= confirmed_flush_lsn);
+    assert!(start_lsn >= binding.slot.consistent_point);
+    RecoveryStart {
+        stream: binding.stream(),
+        applied: None,
+        certified_lsn: (start_lsn > binding.slot.consistent_point).then_some(start_lsn),
+        anchor: Some(SnapshotAnchor {
+            stream: binding.stream(),
+            snapshot_token: binding.slot.snapshot_token.clone(),
+            consistent_point: binding.slot.consistent_point,
+            plan_nonce: binding.slot.intent.nonce,
+        }),
+        start_lsn,
+        confirmed_flush_lsn,
+    }
+}
+
+impl RecoveryStart {
+    pub(crate) fn stream(&self) -> StreamId {
+        self.stream
+    }
+    pub(crate) fn applied(&self) -> Option<Frontier> {
+        self.applied
+    }
+    pub(crate) fn certified_lsn(&self) -> Option<SourceEndLsn> {
+        self.certified_lsn
+    }
+    pub(crate) fn anchor(&self) -> Option<&SnapshotAnchor> {
+        self.anchor.as_ref()
+    }
+    pub(crate) fn start_lsn(&self) -> SourceEndLsn {
+        self.start_lsn
+    }
+    pub(crate) fn confirmed_flush_lsn(&self) -> SourceEndLsn {
+        self.confirmed_flush_lsn
+    }
 }
 
 enum CommitReceipt {
@@ -71,6 +151,22 @@ enum CommitReceipt {
 }
 
 impl DurableProof {
+    pub(crate) fn feedback(&self) -> Option<SafeFeedback> {
+        if !self.evidence.follow {
+            return None;
+        }
+        self.evidence
+            .through
+            .map(|f| f.end)
+            .into_iter()
+            .chain(self.evidence.certified_lsn)
+            .max()
+            .map(|end| SafeFeedback {
+                stream: self.evidence.stream,
+                end,
+            })
+    }
+
     #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn stream(&self) -> StreamId {
         self.evidence.stream
@@ -206,6 +302,20 @@ impl TargetAuthority {
 
     #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn begin(&mut self, next: Frontier, io: &IoControl) -> Result<TargetTxn<'_>> {
+        if self.row.follow_binding.is_some() {
+            validate_follow_next(
+                self.provenance.intent.binding.stream,
+                self.row.applied,
+                next,
+            )?;
+            if self.row.anchor.is_none()
+                || durable_start(&self.row).is_some_and(|floor| next.end <= floor)
+            {
+                return Err(refusal(
+                    "target-follow: source transaction does not advance anchored authority",
+                ));
+            }
+        }
         validate_next(
             self.provenance.intent.binding.stream,
             self.row.applied,
@@ -231,6 +341,213 @@ impl TargetAuthority {
         Ok(TargetTxn {
             authority: self,
             next: Some(next),
+            failed: false,
+            finished: false,
+        })
+    }
+
+    pub(crate) fn acquire_follow(
+        connection: PgConnection,
+        native: &mut NativeState,
+        binding: &FollowBinding,
+        io: &IoControl,
+    ) -> Result<Self> {
+        let expected = native
+            .follow_control()?
+            .ok_or_else(|| refusal("target-follow: native follow binding is absent"))?;
+        if expected.binding != *binding {
+            return Err(refusal(
+                "target-follow: requested follow binding differs from native state",
+            ));
+        }
+        let authority = Self::acquire_inner(
+            connection,
+            binding.stream(),
+            native,
+            io,
+            fence_slot(binding.stream().run),
+        )?;
+        if authority.row.follow_binding.as_ref() != Some(&expected) {
+            return Err(refusal(
+                "target-follow: logged follow binding differs from native state",
+            ));
+        }
+        Ok(authority)
+    }
+
+    pub(crate) fn has_follow_anchor(&self) -> bool {
+        self.row.follow_binding.is_some() && self.row.anchor.is_some()
+    }
+
+    pub(crate) fn recover_follow(
+        &mut self,
+        binding: &FollowBinding,
+        confirmed_flush_lsn: SourceEndLsn,
+        io: &IoControl,
+    ) -> Result<RecoveryStart> {
+        let outcome = (|| {
+            if self
+                .row
+                .follow_binding
+                .as_ref()
+                .is_none_or(|f| f.binding != *binding)
+            {
+                return Err(refusal(
+                    "target-follow: recovery binding differs from logged authority",
+                ));
+            }
+            let through = self.row.applied;
+            self.barrier(through.as_ref(), self.row.barrier_epoch, io)?;
+            let proven = self.row.clone();
+            self.session.begin(io)?;
+            let observed = self.read_row(io)?;
+            self.session.rollback(io)?;
+            if observed != proven {
+                return Err(refusal(
+                    "target-follow: recovery row changed after positive writing barrier",
+                ));
+            }
+            recovery_start(binding.stream(), &proven, confirmed_flush_lsn)
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn certify(
+        &mut self,
+        candidate: SourceEndLsn,
+        io: &IoControl,
+    ) -> Result<DurableProof> {
+        let outcome = (|| {
+            if self.row.follow_binding.is_none()
+                || self.row.anchor.is_none()
+                || candidate.0 == 0
+                || candidate < durable_start(&self.row).unwrap_or(SourceEndLsn(0))
+            {
+                return Err(refusal(
+                    "target-follow: idle certification is below durable authority or lacks its binding",
+                ));
+            }
+            self.session.begin(io)?;
+            if self.read_row(io)? != self.row {
+                return Err(refusal("target-follow: certification predecessor changed"));
+            }
+            let mut next = self.row.clone();
+            next.certified_lsn = Some(candidate);
+            let epoch = next.barrier_epoch;
+            next = increment_barrier(next, epoch)?;
+            self.write_row(&next, io)?;
+            match self.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(proof)) => Ok(proof),
+                _ => Err(refusal(
+                    "target-follow: certification COMMIT outcome unknown",
+                )),
+            }
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn install_follow_anchor(
+        &mut self,
+        native: &NativeState,
+        receipt: &crate::state::SourceSlotReceipt,
+        io: &IoControl,
+    ) -> Result<DurableProof> {
+        let outcome = (|| {
+            let expected = native
+                .follow_control()?
+                .ok_or_else(|| refusal("target-follow: native follow binding is absent"))?;
+            let saved = native
+                .checked_clone()?
+                .ok_or_else(|| refusal("target-follow: native copy stages are absent"))?;
+            if expected.binding.slot != *receipt
+                || self.row.follow_binding.as_ref() != Some(&expected)
+                || saved.phase != ClonePhase::Analyzing
+                || self.row.clone.as_ref() != Some(&CloneControl::from_state(&saved))
+                || self.row.applied.is_some()
+                || self.row.certified_lsn.is_some()
+            {
+                return Err(refusal(
+                    "target-follow: copy anchor requires exact completed copy and post-data stages",
+                ));
+            }
+            let anchor = SnapshotAnchor {
+                stream: expected.binding.stream(),
+                snapshot_token: receipt.snapshot_token.clone(),
+                consistent_point: receipt.consistent_point,
+                plan_nonce: receipt.intent.nonce,
+            };
+            if self
+                .row
+                .anchor
+                .as_ref()
+                .is_some_and(|existing| existing != &anchor)
+            {
+                return Err(refusal("target-follow: existing copy anchor differs"));
+            }
+            self.session.begin(io)?;
+            if self.read_row(io)? != self.row {
+                return Err(refusal("target-follow: anchor predecessor changed"));
+            }
+            let markers = metadata::read_markers(self.session.connection()?, &self.provenance, io)?;
+            validate_markers(&markers, &saved)?;
+            aggregate_markers(&markers, saved.owned_tables.len())?;
+            let mut next = self.row.clone();
+            next.anchor = Some(anchor);
+            let epoch = next.barrier_epoch;
+            next = increment_barrier(next, epoch)?;
+            self.write_row(&next, io)?;
+            match self.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(proof)) => Ok(proof),
+                _ => Err(refusal("target-follow: anchor COMMIT outcome unknown")),
+            }
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn applied(&self) -> Option<Frontier> {
+        self.row.applied
+    }
+
+    pub(crate) fn check_replay(&self, next: Frontier) -> Result<bool> {
+        let duplicate = classify_replay(
+            self.provenance.intent.binding.stream,
+            self.row.applied,
+            next,
+        )?;
+        if !duplicate && durable_start(&self.row).is_some_and(|start| next.end <= start) {
+            return Err(refusal(
+                "target-follow: source transaction does not advance recovery authority",
+            ));
+        }
+        Ok(duplicate)
+    }
+
+    pub(crate) fn begin_group(&mut self, _io: &IoControl) -> Result<TargetTxn<'_>> {
+        if self.session.phase != Phase::Idle
+            || self.session.connection()?.transaction_status()? != TransactionStatus::Idle
+        {
+            return Err(refusal(
+                "target-authority: group requires an idle owned backend",
+            ));
+        }
+        if self.row.follow_binding.is_none() || self.row.anchor.is_none() {
+            return Err(refusal(
+                "target-authority: follow group requires its checked binding and copy anchor",
+            ));
+        }
+        self.session.phase = Phase::BeginPending;
+        Ok(TargetTxn {
+            authority: self,
+            next: None,
             failed: false,
             finished: false,
         })
@@ -337,6 +654,16 @@ impl TargetAuthority {
         mode: TargetCommit,
         io: &IoControl,
     ) -> Result<CommitReceipt> {
+        self.finish_inner(next, mode, false, io)
+    }
+
+    fn finish_inner(
+        &mut self,
+        next: ControlRow,
+        mode: TargetCommit,
+        warm: bool,
+        io: &IoControl,
+    ) -> Result<CommitReceipt> {
         self.session.require_transaction()?;
         command(
             self.session.connection()?,
@@ -344,7 +671,12 @@ impl TargetAuthority {
             "SET CONSTRAINTS",
             io,
         )?;
-        if self.read_row(io)? != next {
+        let observed = if warm {
+            metadata::read_prepared(self.session.connection()?, &self.provenance, io)?
+        } else {
+            self.read_row(io)?
+        };
+        if observed != next {
             return Err(refusal(
                 "target-authority: deferred effects changed the checkpoint",
             ));
@@ -375,6 +707,8 @@ impl TargetAuthority {
                         barrier_epoch: self.row.barrier_epoch,
                         barrier_counter: self.row.barrier_counter,
                         target: self.provenance.clone(),
+                        certified_lsn: self.row.certified_lsn,
+                        follow: self.row.follow_binding.is_some(),
                     }),
                 });
                 Ok(CommitReceipt::Acknowledged(proof))
@@ -392,6 +726,177 @@ impl TargetAuthority {
 }
 
 impl TargetTxn<'_> {
+    fn ensure_transaction(&mut self, io: &IoControl) -> Result<()> {
+        if self.authority.session.phase == Phase::BeginPending {
+            self.authority.session.phase = Phase::Idle;
+            self.authority.session.begin(io)?;
+        }
+        self.authority.session.require_transaction()
+    }
+
+    pub(crate) fn advance(&mut self, next: Frontier) -> Result<()> {
+        self.require_healthy()?;
+        self.failed = true;
+        let previous = self.next.or(self.authority.row.applied);
+        if self.next.is_none()
+            && durable_start(&self.authority.row).is_some_and(|start| next.end <= start)
+        {
+            return Err(refusal(
+                "target-follow: source transaction does not advance recovery authority",
+            ));
+        }
+        validate_follow_next(
+            self.authority.provenance.intent.binding.stream,
+            previous,
+            next,
+        )?;
+        self.next = Some(next);
+        self.failed = false;
+        Ok(())
+    }
+
+    pub(crate) fn pipeline(
+        &mut self,
+        io: &IoControl,
+        send: impl FnOnce(&mut crate::pg::Pipeline<'_>) -> Result<()>,
+        validate: impl FnMut(usize, PgResult) -> Result<()>,
+    ) -> Result<()> {
+        self.pipeline_window(io, send, validate, None)
+    }
+
+    fn pipeline_window(
+        &mut self,
+        io: &IoControl,
+        send: impl FnOnce(&mut crate::pg::Pipeline<'_>) -> Result<()>,
+        mut validate: impl FnMut(usize, PgResult) -> Result<()>,
+        next: Option<&ControlRow>,
+    ) -> Result<()> {
+        self.require_healthy()?;
+        self.failed = true;
+        let begin = self.authority.session.phase == Phase::BeginPending;
+        if !begin {
+            self.authority.session.require_transaction()?;
+        }
+        let connection = self.authority.session.connection()?;
+        let mut pipeline = if begin {
+            connection.pipeline_begin(io)?
+        } else {
+            connection.pipeline(io)?
+        };
+        send(&mut pipeline)?;
+        let checkpoint_index = next.map(|_| pipeline.commands());
+        if let Some(next) = next {
+            metadata::pipeline_update(
+                &mut pipeline,
+                &self.authority.provenance,
+                &self.authority.row,
+                next,
+                io,
+            )?;
+        }
+        pipeline.sync(io, |index, result| {
+            if begin && index == 0 {
+                if result.command_tag()? != "BEGIN" {
+                    return Err(refusal(
+                        "target-authority: pipeline did not begin its transaction",
+                    ));
+                }
+                Ok(())
+            } else if checkpoint_index == Some(index) {
+                metadata::validate_update(&result)
+            } else {
+                validate(index - usize::from(begin), result)
+            }
+        })?;
+        self.authority.session.phase = Phase::InTransaction;
+        self.authority.session.require_transaction()?;
+        self.failed = false;
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_input_bytes(&self) -> Result<usize> {
+        self.require_healthy()?;
+        let frontier = self.next.ok_or_else(|| {
+            refusal("target-authority: checkpoint budget requires a sealed transaction")
+        })?;
+        let mut next = self.authority.row.clone();
+        next.applied = Some(frontier);
+        let epoch = next.barrier_epoch;
+        next = increment_barrier(next, epoch)?;
+        metadata::checkpoint_input_bytes(&self.authority.provenance, &self.authority.row, &next)?
+            .checked_add(if self.authority.session.phase == Phase::BeginPending {
+                6
+            } else {
+                0
+            })
+            .ok_or_else(|| refusal("target-authority: checkpoint input size overflow"))
+    }
+
+    pub(crate) fn commit_pipeline(
+        mut self,
+        io: &IoControl,
+        send: impl FnOnce(&mut crate::pg::Pipeline<'_>) -> Result<()>,
+        validate: impl FnMut(usize, PgResult) -> Result<()>,
+    ) -> Result<CommitOutcome> {
+        self.require_healthy()?;
+        let frontier = self
+            .next
+            .ok_or_else(|| refusal("target-authority: group has no sealed source transaction"))?;
+        let mut next = self.authority.row.clone();
+        next.applied = Some(frontier);
+        let epoch = next.barrier_epoch;
+        next = increment_barrier(next, epoch)?;
+        self.pipeline_window(io, send, validate, Some(&next))?;
+        self.failed = true;
+        let result = self
+            .authority
+            .finish_inner(next, TargetCommit::Synchronous, true, io)?;
+        self.finished = true;
+        match result {
+            CommitReceipt::Acknowledged(durable) => Ok(CommitOutcome::Acknowledged {
+                checkpoint: self.authority.current_checkpoint().ok_or_else(|| {
+                    refusal("target-authority: committed group frontier is absent")
+                })?,
+                durable,
+            }),
+            CommitReceipt::Unknown => Ok(CommitOutcome::Unknown),
+        }
+    }
+
+    pub(crate) fn preflight_follow_relation(
+        &mut self,
+        expected: &Event,
+        binding: &FollowBinding,
+        owned: &OwnedCopyTable,
+        io: &IoControl,
+    ) -> Result<crate::catalog::FollowRelation> {
+        self.require_healthy()?;
+        self.failed = true;
+        if self
+            .authority
+            .row
+            .follow_binding
+            .as_ref()
+            .is_none_or(|follow| follow.binding != *binding)
+        {
+            return Err(refusal(
+                "target-follow: relation preflight binding differs from logged authority",
+            ));
+        }
+        self.ensure_transaction(io)?;
+        self.authority.session.verify(io)?;
+        let relation = crate::catalog::preflight_follow_relation(
+            self.authority.session.connection()?,
+            expected,
+            binding,
+            owned,
+            io,
+        )?;
+        self.authority.session.require_transaction()?;
+        self.failed = false;
+        Ok(relation)
+    }
+
     /// Run on the first touch of each relation in every owned transaction.
     #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn preflight_relation(&mut self, expected: &Event, io: &IoControl) -> Result<()> {
@@ -399,7 +904,7 @@ impl TargetTxn<'_> {
         // Keep a caught helper panic from leaving this transaction committable.
         self.failed = true;
         let outcome = (|| {
-            self.authority.session.require_transaction()?;
+            self.ensure_transaction(io)?;
             self.authority.session.verify(io)?;
             crate::catalog::preflight_cdc_target(
                 self.authority.session.connection()?,
@@ -413,7 +918,6 @@ impl TargetTxn<'_> {
     }
 
     /// Only the internal serial SQL generator supplies statements; transaction control is forbidden.
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn prepare(
         &mut self,
         name: &str,
@@ -429,13 +933,14 @@ impl TargetTxn<'_> {
                 || self.authority.prepared.len() >= MAX_PREPARED_DML
                 || !matches!(
                     sql.split_ascii_whitespace().next(),
-                    Some("INSERT" | "UPDATE" | "DELETE" | "TRUNCATE")
+                    Some("INSERT" | "UPDATE" | "DELETE" | "TRUNCATE" | "WITH")
                 )
             {
                 return Err(refusal(
                     "target-authority: invalid or excessive internal DML statement",
                 ));
             }
+            self.ensure_transaction(io)?;
             self.authority.session.verify(io)?;
             self.authority
                 .session
@@ -448,7 +953,6 @@ impl TargetTxn<'_> {
         outcome
     }
     /// The 63-byte limit prevents SQL identifier truncation of protocol statement names.
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn deallocate(&mut self, name: &str, io: &IoControl) -> Result<()> {
         let outcome = (|| {
             self.require_healthy()?;
@@ -462,7 +966,7 @@ impl TargetTxn<'_> {
                     "target-authority: invalid or unowned DML statement",
                 ));
             }
-            self.authority.session.require_transaction()?;
+            self.ensure_transaction(io)?;
             self.authority.session.verify(io)?;
             let quoted = self
                 .authority
@@ -481,7 +985,6 @@ impl TargetTxn<'_> {
         self.failed |= outcome.is_err();
         outcome
     }
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn execute_prepared(
         &mut self,
         name: &str,
@@ -495,7 +998,7 @@ impl TargetTxn<'_> {
                     "target-authority: DML statement is not prepared on this backend",
                 ));
             }
-            self.authority.session.require_transaction()?;
+            self.ensure_transaction(io)?;
             let result = self
                 .authority
                 .session
@@ -581,11 +1084,12 @@ impl Session {
         let result = connection.query("SELECT pg_catalog.pg_backend_pid(), d.oid, r.oid,
             NOT pg_catalog.pg_is_in_recovery() AND pg_catalog.current_setting('transaction_read_only') = 'off'
             AND pg_catalog.current_setting('fsync') = 'on'
+            AND pg_catalog.current_setting('full_page_writes') = 'on'
             FROM pg_catalog.pg_database d, pg_catalog.pg_roles r
             WHERE d.datname = pg_catalog.current_database() AND r.rolname = CURRENT_USER", io)?;
         if result.rows() != 1 || result.cell(0, 3)? != Some(b"t") {
             return Err(refusal(
-                "target-authority: writable primary with fsync on is required",
+                "target-authority: writable primary with fsync and full_page_writes on is required",
             ));
         }
         let pid = number(&result, 0)?;
@@ -614,6 +1118,7 @@ impl Session {
             AND NOT pg_catalog.pg_is_in_recovery()
             AND pg_catalog.current_setting('transaction_read_only') = 'off'
             AND pg_catalog.current_setting('fsync') = 'on'
+            AND pg_catalog.current_setting('full_page_writes') = 'on'
             AND pg_catalog.current_setting('search_path') = 'pg_catalog'
             AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory'
                 AND database = $2::oid AND pid = $1::integer AND classid = {FENCE_CLASS}::oid
@@ -671,7 +1176,7 @@ impl Session {
                 .execute_prepared("rpgmigrate_authority_guard", &params, io)?;
         if result.rows() != 1 || result.cell(0, 0)? != Some(b"t") {
             return Err(refusal(
-                "target-authority: physical backend, primary, or writer fence changed",
+                "target-authority: backend, primary, durability settings, or writer fence changed",
             ));
         }
         Ok(())
@@ -839,11 +1344,89 @@ fn validate_next(stream: StreamId, previous: Option<Frontier>, next: Frontier) -
     Ok(())
 }
 
-fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::Target,
-        message: message.to_owned(),
+fn durable_start(row: &ControlRow) -> Option<SourceEndLsn> {
+    row.applied
+        .map(|f| f.end)
+        .into_iter()
+        .chain(row.certified_lsn)
+        .chain(row.anchor.as_ref().map(|a| a.consistent_point))
+        .max()
+}
+
+fn recovery_start(
+    stream: StreamId,
+    row: &ControlRow,
+    confirmed_flush_lsn: SourceEndLsn,
+) -> Result<RecoveryStart> {
+    if row
+        .follow_binding
+        .as_ref()
+        .is_none_or(|f| f.binding.stream() != stream)
+        || row.anchor.is_none()
+    {
+        return Err(refusal(
+            "target-follow: recovery requires its exact follow binding and copy anchor",
+        ));
     }
+    let start_lsn = durable_start(row)
+        .ok_or_else(|| refusal("target-follow: durable recovery position is absent"))?;
+    if confirmed_flush_lsn > start_lsn {
+        return Err(Error::new(
+            ErrorKind::BadState,
+            "follow-recovery-gap: source confirmed flush is ahead of durable target authority",
+        ));
+    }
+    Ok(RecoveryStart {
+        stream,
+        applied: row.applied,
+        certified_lsn: row.certified_lsn,
+        anchor: row.anchor.clone(),
+        start_lsn,
+        confirmed_flush_lsn,
+    })
+}
+
+fn classify_replay(stream: StreamId, previous: Option<Frontier>, next: Frontier) -> Result<bool> {
+    if let Some(previous) = previous {
+        if next.end == previous.end {
+            if next == previous {
+                return Ok(true);
+            }
+            return Err(refusal(
+                "target-follow: equal end LSN has conflicting transaction identity",
+            ));
+        }
+        if next.end < previous.end {
+            return Err(refusal(
+                "target-follow: source end precedes durable applied frontier",
+            ));
+        }
+    }
+    validate_follow_next(stream, previous, next)?;
+    Ok(false)
+}
+
+fn validate_follow_next(
+    stream: StreamId,
+    previous: Option<Frontier>,
+    next: Frontier,
+) -> Result<()> {
+    validate_next(stream, previous, next)?;
+    if next
+        .commit
+        .is_none_or(|commit| commit.0 == 0 || next.tx.begin_ordinal != commit.0)
+        || previous.is_some_and(|previous| next.end <= previous.end)
+    {
+        return Err(refusal(
+            "target-authority: follow frontier lacks strict source commit identity",
+        ));
+    }
+    Ok(())
+}
+
+#[track_caller]
+fn refusal(message: &str) -> Error {
+    Error::new(ErrorKind::Target, message.to_owned())
 }
 
 #[cfg(test)]
@@ -876,7 +1459,7 @@ mod tests {
         }
     }
 
-    fn disconnected_authority() -> (TargetAuthority, IoControl) {
+    pub(super) fn disconnected_authority() -> (TargetAuthority, IoControl) {
         let authority = TargetAuthority {
             session: Session {
                 connection: None,
@@ -913,6 +1496,7 @@ mod tests {
                 anchor: None,
                 clone: None,
                 certified_lsn: None,
+                follow_binding: None,
             },
             prepared: BTreeSet::from(["keep".into()]),
         };
@@ -1002,6 +1586,36 @@ mod tests {
         assert!(error.message.contains("poisoned by an earlier DML error"));
         assert!(tx.failed);
         assert!(tx.commit(&io).is_err());
+    }
+
+    #[test]
+    fn prepare_with_reaches_backend_checks_but_utility_tokens_do_not() {
+        for (sql, expected) in [
+            (
+                "WITH old AS (DELETE FROM x RETURNING id) INSERT INTO x SELECT id FROM old",
+                "connection poisoned",
+            ),
+            ("WITHIN x", "invalid or excessive internal DML statement"),
+            (
+                "with x AS (SELECT 1) SELECT * FROM x",
+                "invalid or excessive internal DML statement",
+            ),
+            ("COMMIT", "invalid or excessive internal DML statement"),
+        ] {
+            let (mut authority, io) = disconnected_authority();
+            let mut tx = TargetTxn {
+                authority: &mut authority,
+                next: Some(frontier(1, 100, 120)),
+                failed: false,
+                finished: false,
+            };
+            let error = tx.prepare("candidate", sql, &[], &io).unwrap_err();
+            assert!(error.message.contains(expected), "{error:?}");
+            assert!(tx.failed);
+            assert!(!tx.authority.prepared.contains("candidate"));
+            assert!(tx.commit(&io).is_err());
+            assert!(authority.current_checkpoint().is_none());
+        }
     }
 
     #[test]
@@ -1138,6 +1752,7 @@ mod tests {
             anchor: None,
             clone: None,
             certified_lsn: None,
+            follow_binding: None,
         };
         assert!(increment_barrier(row.clone(), 7).is_err());
         assert!(
@@ -1166,6 +1781,7 @@ mod tests {
                 anchor: None,
                 clone: None,
                 certified_lsn: None,
+                follow_binding: None,
             }
         );
     }
@@ -1230,7 +1846,7 @@ mod tests {
     }
 }
 
-use crate::contracts::{ClonePlan, CopyGeneration, OwnedCopyTable, OwnedObject};
+use crate::contracts::{ClonePlan, CopyGeneration, OwnedObject};
 use crate::state::{CloneInspection, ClonePhase, CloneState};
 use serde::{Deserialize, Serialize};
 
@@ -1292,12 +1908,14 @@ pub(crate) struct CloneProgress {
     pub(crate) phase: ClonePhase,
     pub(crate) markers: Vec<CopyDone>,
     pub(crate) durable_complete: bool,
+    pub(crate) streaming: bool,
 }
 
 pub(crate) struct CloneAuthority {
     authority: TargetAuthority,
     state: CloneState,
     issued: BTreeSet<u32>,
+    follow: Option<crate::state::FollowControl>,
 }
 
 pub(crate) struct CopyPermit {
@@ -1340,8 +1958,29 @@ impl CloneAuthority {
             source: plan.source.identity,
             generation: 1,
         };
+        let follow = state.follow_control()?;
         let authority =
             TargetAuthority::acquire_inner(connection, stream, state, io, fence_slot(stream.run))?;
+        let restart = state.checked_follow_restart()?;
+        let pending_binding = restart.as_ref().is_some_and(|r| {
+            r.new_bound
+                && authority
+                    .row
+                    .follow_binding
+                    .as_ref()
+                    .is_some_and(|f| f.binding == r.previous)
+                && follow
+                    .as_ref()
+                    .is_some_and(|f| f.binding.copy_generation == r.next_generation)
+        });
+        if authority.row.follow_binding.is_some()
+            && authority.row.follow_binding != follow
+            && !pending_binding
+        {
+            return Err(refusal(
+                "target-clone: follow binding differs from native copy state",
+            ));
+        }
         if authority.provenance.intent.binding.target_system_identifier
             != Some(plan.target.identity.system_identifier)
             || authority.provenance.intent.binding.target_database_oid
@@ -1363,6 +2002,7 @@ impl CloneAuthority {
             authority,
             state: saved,
             issued: BTreeSet::new(),
+            follow,
         };
         if let Some(control) = owner.authority.row.clone.as_ref() {
             let expected = CloneControl::from_state(&owner.state);
@@ -1386,7 +2026,99 @@ impl CloneAuthority {
             }
             owner.publish(CloneControl::from_state(&owner.state), false, io)?;
         }
+        if owner.authority.row.follow_binding != owner.follow && !pending_binding {
+            owner.publish(CloneControl::from_state(&owner.state), false, io)?;
+        }
         Ok(owner)
+    }
+
+    pub(crate) fn begin_follow_restart(
+        &mut self,
+        native: &mut NativeState,
+        checked_plan: &ClonePlan,
+        io: &IoControl,
+    ) -> Result<crate::state::FollowRestart> {
+        let outcome = (|| {
+            let follow = self
+                .follow
+                .as_ref()
+                .ok_or_else(|| {
+                    refusal("target-follow: restart requires its native follow binding")
+                })?
+                .clone();
+            if self.state.phase != ClonePhase::Copying
+                || self.state.plan.source != checked_plan.source
+                || self.state.plan.target != checked_plan.target
+                || self.state.plan.tables != checked_plan.tables
+                || self.state.plan.sequences != checked_plan.sequences
+                || self.state.plan.policy != checked_plan.policy
+            {
+                return Err(refusal(
+                    "target-follow: restart source plan or owned phase differs",
+                ));
+            }
+            self.authority.session.begin(io)?;
+            self.authority.row = self.authority.read_row(io)?;
+            let previous = native
+                .checked_follow_restart()?
+                .map_or(follow.binding.clone(), |r| r.previous);
+            if self
+                .authority
+                .row
+                .follow_binding
+                .as_ref()
+                .is_none_or(|f| f.binding != previous)
+                || self.authority.row.anchor.is_some()
+                || self.authority.row.applied.is_some()
+                || self.authority.row.certified_lsn.is_some()
+                || self
+                    .authority
+                    .row
+                    .clone
+                    .as_ref()
+                    .is_none_or(|c| c.phase != ClonePhase::Copying)
+            {
+                return Err(refusal(
+                    "target-follow: durable anchored or post-data work cannot restart COPY",
+                ));
+            }
+            let rebound = crate::catalog::reconcile_clone_tables(
+                self.authority.session.connection()?,
+                &self.state.plan,
+                &self.state.owned_objects,
+                io,
+            )?;
+            if rebound != self.state.owned_tables {
+                return Err(refusal(
+                    "target-follow: exact target ownership changed before source replacement",
+                ));
+            }
+            let epoch = self.authority.row.barrier_epoch;
+            let next = increment_barrier(self.authority.row.clone(), epoch)?;
+            self.authority.write_row(&next, io)?;
+            match self.authority.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(_)) => {}
+                _ => {
+                    return Err(refusal(
+                        "target-follow: restart writing barrier COMMIT outcome unknown",
+                    ));
+                }
+            }
+            native.begin_follow_restart(&previous, checked_plan)
+        })();
+        if outcome.is_err() {
+            self.authority.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn install_follow_anchor(
+        &mut self,
+        native: &NativeState,
+        receipt: &crate::state::SourceSlotReceipt,
+        io: &IoControl,
+    ) -> Result<DurableProof> {
+        self.authority.install_follow_anchor(native, receipt, io)
     }
 
     pub(crate) fn permit(&mut self, table: &OwnedCopyTable) -> Result<CopyPermit> {
@@ -1435,12 +2167,26 @@ impl CloneAuthority {
         let next = state
             .checked_clone()?
             .ok_or_else(|| refusal("target-clone: native clone state is absent"))?;
+        let follow = state.follow_control()?;
+        let restart = state.checked_follow_restart()?;
+        let expected = CloneControl::from_state(&next);
         let old = self
             .authority
             .row
             .clone
             .as_ref()
             .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
+        if restart.as_ref().is_some_and(|r| r.new_bound)
+            && old == &expected
+            && self.authority.row.follow_binding == follow
+        {
+            self.authority
+                .barrier(None, self.authority.row.barrier_epoch, io)?;
+            self.state = next;
+            self.follow = follow;
+            self.issued.clear();
+            return Ok(());
+        }
         if next.phase != ClonePhase::Copying
             || old.phase != ClonePhase::Copying
             || old.generation.0.checked_add(1) != Some(next.plan.generation.0)
@@ -1449,15 +2195,155 @@ impl CloneAuthority {
             || next.plan.tables != self.state.plan.tables
             || next.plan.sequences != self.state.plan.sequences
             || next.plan.policy != self.state.plan.policy
+            || self.authority.row.anchor.is_some()
+            || self.authority.row.applied.is_some()
+            || self.authority.row.certified_lsn.is_some()
+            || follow.is_some()
+                && restart.as_ref().is_none_or(|r| {
+                    !r.new_bound
+                        || self
+                            .authority
+                            .row
+                            .follow_binding
+                            .as_ref()
+                            .is_none_or(|f| f.binding != r.previous)
+                        || follow
+                            .as_ref()
+                            .is_none_or(|f| f.binding.copy_generation != r.next_generation)
+                })
         {
             return Err(refusal(
                 "target-clone: recopy requires the next exact owned generation",
             ));
         }
-        self.publish(CloneControl::from_state(&next), true, io)?;
+        let rebound = crate::catalog::reconcile_clone_tables(
+            self.authority.session.connection()?,
+            &next.plan,
+            &next.owned_objects,
+            io,
+        )?;
+        if rebound != next.owned_tables {
+            return Err(refusal(
+                "target-follow: exact target ownership changed before generation advance",
+            ));
+        }
+        self.follow = follow;
+        self.publish(expected, true, io)?;
         self.state = next;
         self.issued.clear();
         Ok(())
+    }
+
+    pub(crate) fn truncate_follow_workset(
+        &mut self,
+        native: &NativeState,
+        io: &IoControl,
+    ) -> Result<()> {
+        let outcome = (|| {
+            let saved = native
+                .checked_clone()?
+                .ok_or_else(|| refusal("target-follow: restart copy ownership is absent"))?;
+            let follow = native
+                .follow_control()?
+                .ok_or_else(|| refusal("target-follow: restart binding is absent"))?;
+            if native.checked_follow_restart()?.is_some()
+                || saved != self.state
+                || Some(&follow) != self.follow.as_ref()
+                || saved.phase != ClonePhase::Copying
+                || saved.plan.generation.0 <= 1
+                || !self.issued.is_empty()
+            {
+                return Err(refusal(
+                    "target-follow: complete workset reset requires finished restart before workers",
+                ));
+            }
+            self.authority.session.begin(io)?;
+            let row = self.authority.read_row(io)?;
+            if row != self.authority.row
+                || row.follow_binding.as_ref() != Some(&follow)
+                || row.clone.as_ref() != Some(&CloneControl::from_state(&saved))
+                || row.anchor.is_some()
+                || row.applied.is_some()
+                || row.certified_lsn.is_some()
+            {
+                return Err(refusal(
+                    "target-follow: restart reset authority changed or became anchored",
+                ));
+            }
+            if !metadata::read_markers(
+                self.authority.session.connection()?,
+                &self.authority.provenance,
+                io,
+            )?
+            .is_empty()
+            {
+                return Err(refusal(
+                    "target-follow: restart reset requires invalidated copy markers",
+                ));
+            }
+            let mut tables = saved.owned_tables.clone();
+            tables.sort_by(|a, b| {
+                (&a.table.name.schema, &a.table.name.table)
+                    .cmp(&(&b.table.name.schema, &b.table.name.table))
+            });
+            let mut names = Vec::with_capacity(tables.len());
+            for table in &tables {
+                names.push(format!(
+                    "ONLY {}",
+                    crate::catalog::qualified(
+                        self.authority.session.connection()?,
+                        &table.table.name.schema,
+                        &table.table.name.table,
+                    )?
+                ));
+            }
+            if !names.is_empty() {
+                command(
+                    self.authority.session.connection()?,
+                    &format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", names.join(", ")),
+                    "LOCK TABLE",
+                    io,
+                )?;
+            }
+            let rebound = crate::catalog::reconcile_clone_tables(
+                self.authority.session.connection()?,
+                &saved.plan,
+                &saved.owned_objects,
+                io,
+            )?;
+            if rebound != saved.owned_tables {
+                return Err(refusal(
+                    "target-follow: exact owned workset changed before complete reset",
+                ));
+            }
+            for table in &tables {
+                validate_owned_copy_table(self.authority.session.connection()?, table, io)?;
+            }
+            if !names.is_empty() {
+                command(
+                    self.authority.session.connection()?,
+                    &format!(
+                        "TRUNCATE TABLE {} CONTINUE IDENTITY RESTRICT",
+                        names.join(", ")
+                    ),
+                    "TRUNCATE TABLE",
+                    io,
+                )?;
+            }
+            let epoch = row.barrier_epoch;
+            let next = increment_barrier(row, epoch)?;
+            self.authority.write_row(&next, io)?;
+            match self.authority.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(_)) => Ok(()),
+                _ => Err(refusal(
+                    "target-follow: complete workset reset COMMIT outcome unknown",
+                )),
+            }
+        })();
+        if outcome.is_err() {
+            self.authority.session.close();
+        }
+        outcome
     }
 
     pub(crate) fn bind_tables(&mut self, state: &NativeState, io: &IoControl) -> Result<()> {
@@ -1477,6 +2363,7 @@ impl CloneAuthority {
             self.authority.row = self.authority.read_row(io)?;
             let mut next = self.authority.row.clone();
             next.clone = Some(control);
+            next.follow_binding = self.follow.clone();
             let epoch = next.barrier_epoch;
             next = increment_barrier(next, epoch)?;
             if clear {
@@ -1664,7 +2551,7 @@ impl CopyTxn {
         let p = &self.permit;
         let binding = &p.provenance.intent.binding;
         let sql = format!(
-            "SELECT pg_catalog.pg_backend_pid()={} AND (SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())={}::oid AND NOT pg_catalog.pg_is_in_recovery() AND pg_catalog.current_setting('transaction_read_only')='off' AND pg_catalog.current_setting('fsync')='on' AND pg_catalog.current_setting('search_path')='pg_catalog' AND EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='advisory' AND database={}::oid AND pid={} AND classid={FENCE_CLASS}::oid AND objid={}::oid AND objsubid=2 AND mode='ExclusiveLock' AND granted)",
+            "SELECT pg_catalog.pg_backend_pid()={} AND (SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())={}::oid AND NOT pg_catalog.pg_is_in_recovery() AND pg_catalog.current_setting('transaction_read_only')='off' AND pg_catalog.current_setting('fsync')='on' AND pg_catalog.current_setting('full_page_writes')='on' AND pg_catalog.current_setting('search_path')='pg_catalog' AND EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE locktype='advisory' AND database={}::oid AND pid={} AND classid={FENCE_CLASS}::oid AND objid={}::oid AND objsubid=2 AND mode='ExclusiveLock' AND granted)",
             self.pid,
             binding.target_database_oid,
             binding.target_database_oid,
@@ -1680,22 +2567,8 @@ impl CopyTxn {
         Ok(())
     }
     fn validate_table(&mut self, io: &IoControl) -> Result<()> {
-        let t = self.permit.table.clone();
-        let qualified = self.qualified()?;
-        let qualified = self.connection_mut()?.quote_literal(&qualified)?;
-        let schema = self.connection_mut()?.quote_literal(&t.table.name.schema)?;
-        let name = self.connection_mut()?.quote_literal(&t.table.name.table)?;
-        let sql = format!(
-            "SELECT c.oid={}::oid AND c.relnamespace={}::oid AND c.relowner={}::oid AND n.nspname={schema}::pg_catalog.text AND c.relname={name}::pg_catalog.text AND c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger tr WHERE tr.tgrelid=c.oid AND NOT tr.tgisinternal) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=pg_catalog.to_regclass({qualified})::oid",
-            t.target_oid, t.target_namespace_oid, t.target_owner_oid
-        );
-        let result = self.connection_mut()?.query(&sql, io)?;
-        if result.rows() != 1 || result.cell(0, 0)? != Some(b"t") {
-            return Err(refusal(
-                "target-copy: exact owned table identity or COPY profile changed",
-            ));
-        }
-        Ok(())
+        let table = self.permit.table.clone();
+        validate_owned_copy_table(self.connection_mut()?, &table, io)
     }
     pub(crate) fn mark_and_commit(
         mut self,
@@ -1754,6 +2627,32 @@ impl Drop for CopyTxn {
     }
 }
 
+fn validate_owned_copy_table(
+    connection: &mut PgConnection,
+    table: &OwnedCopyTable,
+    io: &IoControl,
+) -> Result<()> {
+    let qualified = crate::catalog::qualified(
+        connection,
+        &table.table.name.schema,
+        &table.table.name.table,
+    )?;
+    let qualified = connection.quote_literal(&qualified)?;
+    let schema = connection.quote_literal(&table.table.name.schema)?;
+    let name = connection.quote_literal(&table.table.name.table)?;
+    let sql = format!(
+        "SELECT c.oid={}::oid AND c.relnamespace={}::oid AND c.relowner={}::oid AND n.nspname={schema}::pg_catalog.text AND c.relname={name}::pg_catalog.text AND c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger tr WHERE tr.tgrelid=c.oid AND NOT tr.tgisinternal) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=pg_catalog.to_regclass({qualified})::oid",
+        table.target_oid, table.target_namespace_oid, table.target_owner_oid
+    );
+    let result = connection.query(&sql, io)?;
+    if result.rows() != 1 || result.cell(0, 0)? != Some(b"t") {
+        return Err(refusal(
+            "target-copy: exact owned table identity or COPY profile changed",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_markers(markers: &[CopyDone], state: &CloneState) -> Result<()> {
     let mut seen = BTreeSet::new();
     for marker in markers {
@@ -1796,6 +2695,12 @@ pub(crate) fn read_clone_progress(
     io: &IoControl,
 ) -> Result<CloneProgress> {
     let row = metadata::read_only(connection, &inspection.provenance, io)?;
+    if row.follow_binding != inspection.follow {
+        return Err(refusal(
+            "target-follow: inspected follow binding differs from native authority",
+        ));
+    }
+    let streaming = row.anchor.is_some() && inspection.follow.is_some();
     let control = row
         .clone
         .ok_or_else(|| refusal("target-clone: target clone control is absent"))?;
@@ -1811,7 +2716,8 @@ pub(crate) fn read_clone_progress(
     }
     let markers = metadata::read_markers(connection, &inspection.provenance, io)?;
     validate_markers(&markers, &inspection.clone_state)?;
-    let complete = control.phase == ClonePhase::Complete
+    let complete = inspection.follow.is_none()
+        && control.phase == ClonePhase::Complete
         && inspection.clone_state.phase == ClonePhase::Complete
         && inspection
             .clone_state
@@ -1826,6 +2732,7 @@ pub(crate) fn read_clone_progress(
         phase: control.phase,
         markers,
         durable_complete: complete,
+        streaming,
     })
 }
 
@@ -1889,6 +2796,8 @@ mod clone_marker_tests {
                 },
                 writable_columns: vec!["id".into()],
                 all_columns: vec!["id".into()],
+                identity_modes: vec![0],
+                partition_identity_modes: None,
             },
             target_oid: 4,
             target_namespace_oid: 2200,
@@ -2667,5 +3576,221 @@ with ProtocolFault(context,'commit_unknown') as relay:
             )
             .unwrap();
         assert!(metadata_inventory(&mut target, &authority.authority.provenance, &io).is_err());
+    }
+}
+
+#[cfg(test)]
+mod follow_authority_tests {
+    use super::*;
+    use crate::contracts::{CopyGeneration, PublicationReceipt};
+    use crate::identity::{CommitLsn, RunId, SourceId, TxId, TxSeq};
+    use crate::state::{FollowControl, SourceSlotBinding, SourceSlotIntent, SourceSlotReceipt};
+
+    fn frontier(order: u64, end: u64) -> Frontier {
+        Frontier {
+            tx: TxId {
+                stream: StreamId {
+                    run: RunId([1; 16]),
+                    source: SourceId {
+                        system_identifier: 2,
+                        database_oid: 3,
+                    },
+                    generation: 1,
+                },
+                xid: order as u32,
+                begin_ordinal: end - 1,
+            },
+            order: TxSeq(order),
+            commit: Some(CommitLsn(end - 1)),
+            end: SourceEndLsn(end),
+        }
+    }
+
+    fn row() -> ControlRow {
+        let stream = frontier(1, 100).tx.stream;
+        let receipt = SourceSlotReceipt {
+            intent: SourceSlotIntent {
+                binding: SourceSlotBinding::new(
+                    stream,
+                    "rpgmigrate_test".into(),
+                    crate::cdc::contracts::Plugin::Pgoutput,
+                    1,
+                )
+                .unwrap(),
+                nonce: [2; 16],
+            },
+            consistent_point: SourceEndLsn(10),
+            snapshot_token: "snapshot".into(),
+        };
+        ControlRow {
+            applied: None,
+            barrier_epoch: 0,
+            barrier_counter: 1,
+            anchor: Some(SnapshotAnchor {
+                stream,
+                snapshot_token: receipt.snapshot_token.clone(),
+                consistent_point: receipt.consistent_point,
+                plan_nonce: receipt.intent.nonce,
+            }),
+            clone: None,
+            certified_lsn: None,
+            follow_binding: Some(FollowControl {
+                binding: FollowBinding {
+                    slot: receipt,
+                    publication: PublicationReceipt {
+                        name: "rpgmigrate_test".into(),
+                        oid: 4,
+                        owner_oid: 5,
+                    },
+                    source_timeline: 1,
+                    copy_generation: CopyGeneration(1),
+                    source_types: Vec::new(),
+                },
+                operator: None,
+                origin_name: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn reconnect_uses_barrier_proven_maximum_and_refuses_gaps() {
+        let mut row = row();
+        let stream = row.anchor.as_ref().unwrap().stream;
+        assert_eq!(
+            recovery_start(stream, &row, SourceEndLsn(10))
+                .unwrap()
+                .start_lsn(),
+            SourceEndLsn(10)
+        );
+        row.applied = Some(frontier(1, 100));
+        row.certified_lsn = Some(SourceEndLsn(200));
+        let start = recovery_start(stream, &row, SourceEndLsn(150)).unwrap();
+        assert_eq!(start.start_lsn(), SourceEndLsn(200));
+        assert_eq!(start.confirmed_flush_lsn(), SourceEndLsn(150));
+        let error = recovery_start(stream, &row, SourceEndLsn(201)).unwrap_err();
+        assert_eq!(error.exit_code(), 3);
+        assert!(!error.message.contains("snapshot"));
+    }
+
+    #[test]
+    fn duplicate_is_only_the_exact_committed_source_identity() {
+        let first = frontier(1, 100);
+        assert!(classify_replay(first.tx.stream, Some(first), first).unwrap());
+        let mut conflict = first;
+        conflict.tx.xid += 1;
+        assert!(classify_replay(first.tx.stream, Some(first), conflict).is_err());
+        conflict = first;
+        conflict.order.0 += 1;
+        assert!(classify_replay(first.tx.stream, Some(first), conflict).is_err());
+        assert!(classify_replay(first.tx.stream, Some(first), frontier(2, 99)).is_err());
+        assert!(!classify_replay(first.tx.stream, Some(first), frontier(2, 101)).unwrap());
+    }
+
+    #[test]
+    fn follow_commit_requires_source_begin_identity_and_strict_end() {
+        let first = frontier(1, 100);
+        let mut missing = frontier(2, 101);
+        missing.commit = None;
+        let mut zero = frontier(2, 101);
+        zero.commit = Some(CommitLsn(0));
+        zero.tx.begin_ordinal = 0;
+        for invalid in [missing, zero, frontier(2, 100)] {
+            assert!(validate_follow_next(first.tx.stream, Some(first), invalid).is_err());
+        }
+        let mut invalid = frontier(2, 101);
+        invalid.tx.begin_ordinal += 1;
+        assert!(validate_follow_next(first.tx.stream, Some(first), invalid).is_err());
+    }
+
+    #[test]
+    fn known_frontier_follow_cannot_bypass_source_identity_or_copy_floor() {
+        let (mut authority, io) = super::tests::disconnected_authority();
+        authority.row = row();
+        let stream = authority.row.anchor.as_ref().unwrap().stream;
+        authority.provenance.intent.binding.stream = stream;
+        let mut invalid = frontier(1, 100);
+        invalid.tx.begin_ordinal += 1;
+        assert!(authority.begin(invalid, &io).is_err());
+        assert!(authority.begin(frontier(1, 10), &io).is_err());
+        assert!(authority.row.applied.is_none());
+    }
+
+    #[test]
+    fn follow_relation_binding_mismatch_poison_is_local_and_precedes_sql() {
+        let (mut authority, io) = super::tests::disconnected_authority();
+        authority.row = row();
+        let mut binding = authority
+            .row
+            .follow_binding
+            .as_ref()
+            .unwrap()
+            .binding
+            .clone();
+        binding.publication.oid += 1;
+        let owned = OwnedCopyTable {
+            table: crate::contracts::CloneTable {
+                source_oid: 10,
+                name: crate::contracts::QualifiedTable {
+                    schema: "public".into(),
+                    table: "items".into(),
+                },
+                writable_columns: vec!["id".into()],
+                all_columns: vec!["id".into()],
+                identity_modes: vec![0],
+                partition_identity_modes: None,
+            },
+            target_oid: 20,
+            target_namespace_oid: 21,
+            target_owner_oid: 22,
+            generation: CopyGeneration(1),
+        };
+        let relation = Event::Relation {
+            key: crate::cdc::contracts::RelationKey {
+                oid: 10,
+                generation: 1,
+            },
+            schema: "public".into(),
+            name: "items".into(),
+            columns: Vec::new(),
+            replica_identity: b'd',
+        };
+        let mut tx = TargetTxn {
+            authority: &mut authority,
+            next: None,
+            failed: false,
+            finished: false,
+        };
+        let error = tx
+            .preflight_follow_relation(&relation, &binding, &owned, &io)
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "target-follow: relation preflight binding differs from logged authority"
+        );
+        assert!(tx.failed);
+        assert!(tx.commit(&io).is_err());
+    }
+
+    #[test]
+    fn copy_anchor_alone_never_constructs_feedback() {
+        let (authority, _) = super::tests::disconnected_authority();
+        let mut proof = DurableProof {
+            evidence: Box::new(ProofEvidence {
+                stream: frontier(1, 100).tx.stream,
+                through: None,
+                certified_lsn: None,
+                barrier_epoch: 0,
+                barrier_counter: 1,
+                target: authority.provenance.clone(),
+                follow: true,
+            }),
+        };
+        assert!(proof.feedback().is_none());
+        proof.evidence.through = Some(frontier(1, 100));
+        assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(100));
+        proof.evidence.certified_lsn = Some(SourceEndLsn(200));
+        assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(200));
+        proof.evidence.follow = false;
+        assert!(proof.feedback().is_none());
     }
 }

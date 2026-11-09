@@ -15,8 +15,9 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from unittest.mock import patch
 
-from db_harness import (clean_environment, conninfo, expected_version, load_manifest, module_cases, run_command, validate_libtest_output,
+from db_harness import (OwnedCluster, clean_environment, conninfo, expected_version, load_manifest, module_cases, run_command, validate_libtest_output,
                         validate_report, validate_success_output)
 from protocol_fault import error_sqlstate
 from e1_cases import Cases
@@ -427,6 +428,16 @@ assert all(thread is threading.current_thread() or not thread.is_alive() for thr
 
 
 class HarnessTests(unittest.TestCase):
+    def test_logical_slot_capacity_is_bounded_and_default_is_unchanged(self):
+        with patch("db_harness.find_bindir", return_value=Path("/owned/pg/bin")):
+            self.assertEqual(OwnedCluster(load_manifest()).logical_slots, 4)
+            for value in (1, 16, 64):
+                self.assertEqual(OwnedCluster(load_manifest(), logical=True, logical_slots=value).logical_slots, value)
+            for value in (0, 65, -1, True, False, 4.0, "16", None):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    OwnedCluster(load_manifest(), logical=True, logical_slots=value)
+
+
     def test_copy_controller_rejects_duplicate_json_operations(self):
         from authority_fault import copy_request
         reader, writer = os.pipe()
@@ -847,10 +858,10 @@ copy_request(relay)
         self.assertNotIn("passfile=", result)
 
     def test_success_output_cannot_disagree_with_native_receipt_or_expose_path(self):
-        state = {"format_version": 2, "run": list(range(16)), "target_provenance": [],
+        state = {"format_version": 7, "run": list(range(16)), "target_provenance": [],
                  "copy_complete": {"tables": 2, "rows": 10003, "bytes": 12345678}}
         valid = {"command": "copy table-data", "status": "complete", "run": list(range(16)),
-                 "state_format_version": 2, "tables": 2, "rows": 10003, "bytes": 12345678}
+                 "state_format_version": 7, "tables": 2, "rows": 10003, "bytes": 12345678}
         validate_success_output(json.dumps(valid), state)
         for changes in ({"run": [0] * 16}, {"state_format_version": 1}, {"state_format_version": 3}, {"tables": 0},
                         {"rows": 0}, {"bytes": 0}, {"canonical_path": "/private/fixture"},
@@ -858,35 +869,94 @@ copy_request(relay)
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
                 validate_success_output(json.dumps({**valid, **changes}), state)
 
-    def test_copy_receipts_require_v4_and_empty_provenance_and_copy_intent(self):
+    def test_copy_receipts_require_bound_native7_and_explicit_unused_state(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             case = SimpleNamespace(state=state)
+            identity = state.stat()
             for complete in (None, {"tables": 1, "rows": 1, "bytes": 8}):
-                value = {"magic": "RPGMIGRATE", "format_version": 4, "target_provenance": [], "source_slot": None,
-                         "copy_snapshot": None,
-                         "run": list(range(16)), "canonical_path": str(state.resolve()), "copy_complete": complete}
-                output = json.dumps({"command": "copy table-data", "status": "complete", "run": list(range(16)),
-                                     "state_format_version": 4, "tables": 1, "rows": 1, "bytes": 8})
+                value = {"magic": "RPGMIGRATE", "format_version": 7, "target_provenance": [], "source_slot": None,
+                         "clone_state": None, "follow_state": None, "operator": None,
+                         "run": list(range(16)), "canonical_path": str(state.resolve()),
+                         "directory_device": identity.st_dev, "directory_inode": identity.st_ino,
+                         "copy_complete": complete}
+                output = json.dumps({"command": "copy table-data", "status": "complete", "run": value["run"],
+                                     "state_format_version": 7, "tables": 1, "rows": 1, "bytes": 8})
                 check = (lambda: Cases.no_completion(case)) if complete is None else (
                     lambda: Cases.completed(case, 1, 1, output))
-                (state / "manifest.json").write_text(json.dumps(value))
+                path = state / "manifest.json"
+                path.write_text(json.dumps(value))
                 check()
-                for changes in ({"format_version": 1}, {"format_version": 2}, {"format_version": 3}, {"format_version": 5},
-                                {"target_provenance": None}, {"source_slot": {}},
-                                {"copy_snapshot": {}},
-                                {"source_slot": {"phase": "provisioning", "record": {}}},
-                                {"source_slot": {"phase": "confirmed", "record": {}}},
-                                {"target_provenance": [{"phase": "confirmed", "record": {}}]}):
+                invalid = [{"format_version": version} for version in (1, 2, 3, 4, 5, 6, 8, 999, 7.0, True)]
+                invalid += [{"magic": "foreign"}, {"target_provenance": None}, {"source_slot": {}},
+                            {"copy_snapshot": None}, {"clone_state": {}}, {"follow_state": {}}, {"operator": {}},
+                            {"source_slot": {"phase": "provisioning", "record": {}}},
+                            {"source_slot": {"phase": "confirmed", "record": {}}},
+                            {"target_provenance": [{"phase": "confirmed", "record": {}}]},
+                            {"run": [0] * 16}, {"run": list(range(15))}, {"run": [True] * 16},
+                            {"run": [256] * 16}, {"run": [1.0] * 16},
+                            {"canonical_path": str(state / "foreign")}, {"canonical_path": None},
+                            {"directory_device": identity.st_dev + 1}, {"directory_inode": identity.st_ino + 1},
+                            {"directory_device": float(identity.st_dev)}, {"directory_inode": 0}]
+                for changes in invalid:
                     with self.subTest(complete=complete, changes=changes), self.assertRaises(AssertionError):
-                        (state / "manifest.json").write_text(json.dumps({**value, **changes}))
+                        path.write_text(json.dumps({**value, **changes}))
                         check()
-                for field in ("target_provenance", "source_slot", "copy_snapshot"):
+                for field in value:
                     missing = dict(value)
                     del missing[field]
-                    (state / "manifest.json").write_text(json.dumps(missing))
-                    with self.assertRaises((AssertionError, KeyError)):
+                    path.write_text(json.dumps(missing))
+                    with self.subTest(complete=complete, missing=field), self.assertRaises((AssertionError, KeyError)):
                         check()
+                for raw in ("null", "[]", json.dumps(value)[:-1] + ', "format_version": 7}'):
+                    path.write_text(raw)
+                    with self.subTest(complete=complete, raw=raw[:8]), self.assertRaises(AssertionError):
+                        check()
+                path.unlink()
+                path.symlink_to(state / "missing")
+                with self.assertRaises(AssertionError):
+                    check()
+                path.unlink()
+            Cases.no_completion(case)
+            with self.assertRaises(AssertionError):
+                Cases.completed(case, 1, 1, output)
+
+    def test_copy_completion_requires_exact_unsigned_counts_and_matching_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            case = SimpleNamespace(state=state)
+            identity = state.stat()
+            value = {"magic": "RPGMIGRATE", "format_version": 7, "run": list(range(16)),
+                     "canonical_path": str(state.resolve()), "directory_device": identity.st_dev,
+                     "directory_inode": identity.st_ino, "target_provenance": [], "source_slot": None,
+                     "clone_state": None, "follow_state": None, "operator": None}
+            path = state / "manifest.json"
+            for tables, rows, size in ((1, 1, 8), (2, 0, 0), (0, 0, 0)):
+                complete = {"tables": tables, "rows": rows, "bytes": size}
+                output = {"command": "copy table-data", "status": "complete", "run": value["run"],
+                          "state_format_version": 7, **complete}
+                path.write_text(json.dumps({**value, "copy_complete": complete}))
+                Cases.completed(case, tables, rows, json.dumps(output))
+                with self.assertRaises(AssertionError):
+                    Cases.no_completion(case)
+                invalid = [None, {}, {**complete, "extra": 0}]
+                for field in complete:
+                    invalid += [{key: count for key, count in complete.items() if key != field}]
+                    invalid += [{**complete, field: bad} for bad in (None, True, -1, 2**64, float(complete[field]), "0")]
+                invalid += [{**complete, "tables": tables + 1}, {**complete, "rows": rows + 1},
+                            {**complete, "bytes": 0 if rows else 1}]
+                for receipt in invalid:
+                    path.write_text(json.dumps({**value, "copy_complete": receipt}))
+                    with self.subTest(tables=tables, rows=rows, receipt=receipt), self.assertRaises((AssertionError, KeyError)):
+                        Cases.completed(case, tables, rows, json.dumps(output))
+                path.write_text(json.dumps({**value, "copy_complete": complete}))
+                for changes in ({"run": [1] * 16}, {"run": [float(byte) for byte in value["run"]]},
+                                {"state_format_version": 6}, {"state_format_version": 7.0},
+                                {"tables": tables + 1}, {"rows": rows + 1}, {"bytes": size + 1},
+                                {"tables": float(tables)}, {"rows": bool(rows)},
+                                {"status": "running"}, {"command": "ping"}, {"canonical_path": str(state)}):
+                    with self.subTest(output=changes), self.assertRaises(AssertionError):
+                        Cases.completed(case, tables, rows, json.dumps({**output, **changes}))
 
     def test_timed_out_command_terminates_its_descendant(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -926,6 +996,10 @@ copy_request(relay)
             "pg::pipeline_live_tests::pipeline_validates_ordered_rows_and_every_terminal_result",
             "pg::pipeline_live_tests::pipeline_sql_and_callback_errors_drain_through_sync",
             "pg::pipeline_live_tests::pipeline_drop_deadline_and_limits_fail_closed",
+            "pg::prepared_live_tests::prepared_with_identity_rewrite_is_atomic",
+            "pg::prepared_live_tests::prepared_with_transaction_escapes_never_commit",
+            "pg::pipeline_live_tests::pipeline_with_identity_rewrite_is_atomic",
+            "pg::pipeline_live_tests::pipeline_with_transaction_escapes_never_commit",
         }
         for profile in ("Prepared", "Engine"):
             inventory = module_cases(manifest, profile)
@@ -1080,13 +1154,13 @@ copy_request(relay)
         authority = module_cases(manifest, "Authority")
         boundaries = ["apply::checkpoint::live_tests::metadata_boundary_locks",
                       "apply::checkpoint::live_tests::transaction_boundary_faults"]
-        self.assertEqual(len(authority), 18)
+        self.assertEqual(len(authority), 19)
         self.assertEqual(authority[-2:], boundaries)
         old = manifest["transport_cases"] + manifest["copy_cases"]
         old += module_cases(manifest, "Prepared") + authority
         self.assertEqual(len(replication), 9)
-        self.assertEqual(len(old), 35)
-        self.assertEqual(len(module_cases(manifest, "Engine")), 45)
+        self.assertEqual(len(old), 40)
+        self.assertEqual(len(module_cases(manifest, "Engine")), 50)
         self.assertEqual(module_cases(manifest, "Engine"), old + replication + [
             "compare::tests::live_canonical_rows_preserve_only_generated_identity_null_and_duplicates"])
         self.assertEqual(module_cases(manifest, "Replication"), replication)
@@ -1096,7 +1170,7 @@ copy_request(relay)
             for bad in ("", good.replace(" ... ok", " ... ignored", 1), "\n".join(good.splitlines()[1:]),
                         good + good, good.replace(expected[0], "unlisted_case"),
                         good + "test unexpected_case ... ok\n", good.replace(" ... ok", " ... FAILED", 1),
-                        *(good.replace(f"test {case} ... ok\n", "") for case in boundaries if case in expected)):
+                        *(good.replace(f"test {case} ... ok\n", "") for case in expected)):
                 with self.subTest(expected=len(expected), output=bad), self.assertRaises(AssertionError):
                     validate_libtest_output(expected, bad)
             for inventory in ([], expected + [expected[0]]):

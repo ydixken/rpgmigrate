@@ -1,554 +1,414 @@
-use super::checkpoint::{TargetAuthority, TargetTxn};
-use super::plan::DmlPlan;
-use super::{CommitOutcome, Frontier};
-use crate::catalog::VerifiedCdcSource;
-use crate::cdc::codec::{self, CompletedTx, Frame, Record, TxValidator};
-use crate::cdc::contracts::{Column, Event, RelationKey};
-use crate::cdc::event_codec::{DecodeBudget, with_decoded_event};
-use crate::contracts::{Error, ErrorKind, IoControl, Result};
-use crate::pg::PgParam;
+use super::CommitOutcome;
+use super::checkpoint::TargetTxn;
+use super::plan::{DmlPlan, quote_identifier};
+use crate::catalog::FollowRelation;
+use crate::cdc::contracts::{Column, Event, RelationKey, Value};
+use crate::contracts::{Error, ErrorKind, FollowBinding, IoControl, OwnedCopyTable, Result};
+use crate::pg::{PgParam, PgResult, Pipeline};
 
-#[derive(Clone, Copy)]
-pub(crate) struct SerialBudgets {
-    pub(crate) frame_heap_bytes: usize,
-    pub(crate) reassembly_heap_bytes: usize,
-    pub(crate) decoded_heap_bytes: usize,
-    pub(crate) relation_slots: usize,
-    pub(crate) relation_bytes: usize,
-    pub(crate) plan_slots: usize,
-    pub(crate) plan_bytes: usize,
-    pub(crate) bind_bytes: usize,
-}
-
-impl SerialBudgets {
-    fn validate(self) -> Result<()> {
-        if [
-            self.frame_heap_bytes,
-            self.reassembly_heap_bytes,
-            self.decoded_heap_bytes,
-            self.relation_slots,
-            self.relation_bytes,
-            self.plan_slots,
-            self.plan_bytes,
-            self.bind_bytes,
-        ]
-        .contains(&0)
-            || self.plan_slots > 1024
-        {
-            return Err(refusal("serial apply: invalid resource budgets"));
-        }
-        Ok(())
-    }
-}
-
-pub(crate) struct SerialApplier {
-    authority: TargetAuthority,
-    wire: codec::Limits,
-    budgets: SerialBudgets,
-    caches: Caches,
-}
-
-impl SerialApplier {
-    /// The authority is freshly acquired; reconnect requires rebuilding this owner and its caches.
-    pub(crate) fn new(
-        authority: TargetAuthority,
-        wire: codec::Limits,
-        budgets: SerialBudgets,
-    ) -> Result<Self> {
-        wire.validate().map_err(input_error)?;
-        Ok(Self {
-            authority,
-            wire,
-            budgets,
-            caches: Caches::new(budgets)?,
-        })
-    }
-
-    /// The fresh online producer supplies one complete transaction and returns only at its input boundary.
-    /// Input errors, including errors after the descriptor, must propagate from the producer.
-    pub(crate) fn apply_one(
-        &mut self,
-        expected: &CompletedTx,
-        source: &mut VerifiedCdcSource<'_>,
-        input: impl FnOnce(&mut dyn FnMut(&Record) -> Result<()>) -> Result<()>,
-        io: &IoControl,
-    ) -> Result<CommitOutcome> {
-        if source.stream() != expected.tx.stream {
-            return Err(refusal(
-                "serial apply: source capability stream does not match",
-            ));
-        }
-        let mut target = self.authority.begin(
-            Frontier {
-                tx: expected.tx,
-                order: expected.order,
-                commit: expected.commit,
-                end: expected.end,
-            },
-            io,
-        )?;
-        self.caches.begin();
-        let mut replay = Replay::new(*expected, self.wire, self.budgets)?;
-        input(&mut |record| {
-            replay.visit(record, &mut |event, charged| {
-                self.caches
-                    .apply(event, charged, source, &mut target, self.budgets, io)
-            })
-        })?;
-        replay.finish()?;
-        target.commit(io)
-    }
-}
-
-struct Replay {
-    expected: CompletedTx,
-    validator: Option<TxValidator>,
-    wire: codec::Limits,
-    budgets: SerialBudgets,
-    decoded: DecodeBudget,
-    parts: Vec<u8>,
-    complete: bool,
-    failed: bool,
-}
-
-impl Replay {
-    fn new(expected: CompletedTx, wire: codec::Limits, budgets: SerialBudgets) -> Result<Self> {
-        budgets.validate()?;
-        Ok(Self {
-            expected,
-            validator: Some(TxValidator::new(expected.tx, wire).map_err(input_error)?),
-            wire,
-            budgets,
-            decoded: DecodeBudget::new(budgets.decoded_heap_bytes),
-            parts: Vec::new(),
-            complete: false,
-            failed: false,
-        })
-    }
-
-    fn visit(
-        &mut self,
-        record: &Record,
-        event: &mut impl FnMut(&Event, usize) -> Result<()>,
-    ) -> Result<()> {
-        if self.failed {
-            return Err(refusal("serial apply: input is poisoned"));
-        }
-        // A producer can catch a callback error or unwind and still return Ok.
-        self.failed = true;
-        if self.complete {
-            return Err(refusal(
-                "serial apply: records follow the terminal descriptor",
-            ));
-        }
-        let outcome = match record {
-            Record::Frame(frame) => self.frame(frame, event),
-            Record::Completed(completed) => {
-                if *completed != self.expected {
-                    return Err(refusal(
-                        "serial apply: terminal descriptor differs from expectation",
-                    ));
-                }
-                self.validator
-                    .take()
-                    .ok_or_else(|| refusal("serial apply: missing input validator"))?
-                    .finish(completed)
-                    .map_err(input_error)?;
-                self.complete = true;
-                Ok(())
-            }
-        };
-        if outcome.is_ok() {
-            self.failed = false;
-        }
-        outcome
-    }
-
-    fn frame(
-        &mut self,
-        frame: &Frame,
-        event: &mut impl FnMut(&Event, usize) -> Result<()>,
-    ) -> Result<()> {
-        self.validator
-            .as_mut()
-            .ok_or_else(|| refusal("serial apply: missing input validator"))?
-            .push(frame)
-            .map_err(input_error)?;
-        if frame.payload.capacity() > self.budgets.frame_heap_bytes {
-            return Err(refusal("serial apply: frame heap capacity budget exceeded"));
-        }
-        if frame.part == 0 && frame.last_part {
-            return with_decoded_event(&frame.payload, self.wire, &mut self.decoded, event)
-                .map_err(input_error)?;
-        }
-        let length = add(self.parts.len(), frame.payload.len())?;
-        if length > self.budgets.reassembly_heap_bytes {
-            return Err(refusal(
-                "serial apply: multipart reassembly budget exceeded",
-            ));
-        }
-        self.parts
-            .try_reserve_exact(frame.payload.len())
-            .map_err(|_| refusal("serial apply: reassembly allocation failed"))?;
-        if self.parts.capacity() > self.budgets.reassembly_heap_bytes {
-            return Err(refusal(
-                "serial apply: multipart reassembly capacity budget exceeded",
-            ));
-        }
-        self.parts.extend_from_slice(&frame.payload);
-        if frame.last_part {
-            with_decoded_event(&self.parts, self.wire, &mut self.decoded, event)
-                .map_err(input_error)??;
-            self.parts.clear();
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> Result<()> {
-        if self.failed || !self.complete {
-            return Err(refusal(
-                "serial apply: poisoned or incomplete transaction input",
-            ));
-        }
-        Ok(())
-    }
-}
-
-struct CachedRelation {
-    event: Event,
-    checked: bool,
-}
+const PLAN_SLOTS: usize = 128;
+const RELATION_SLOTS: usize = 4096;
+const CACHE_BYTES: usize = 8 * 1024 * 1024;
+const WINDOW_COMMANDS: usize = 62;
+const PIPELINE_BYTES: usize = 1024 * 1024;
+const CHECKPOINT_RESERVE: usize = 256 * 1024 + 6;
+const WINDOW_BYTES: usize = PIPELINE_BYTES - CHECKPOINT_RESERVE;
 
 struct CachedPlan {
-    relation: RelationKey,
+    key: RelationKey,
     plan: DmlPlan,
     name: String,
-    ordinal: u64,
+}
+enum Pending {
+    Row { plan: usize, event: Event },
+    Truncate(String),
 }
 
-struct Caches {
-    relations: Vec<CachedRelation>,
+pub(super) struct Caches {
+    relations: Vec<FollowRelation>,
     plans: Vec<CachedPlan>,
-    relation_heap: usize,
-    plan_heap: usize,
-    hot: Option<usize>,
+    pending: Vec<Pending>,
+    pending_bytes: usize,
+    pending_heap: usize,
     next_statement: u64,
+    hot: Option<usize>,
+    #[cfg(test)]
+    pub(super) serial: bool,
 }
-
 impl Caches {
-    fn new(budgets: SerialBudgets) -> Result<Self> {
-        budgets.validate()?;
-        Ok(Self {
-            relations: reserve_slots(budgets.relation_slots, budgets.relation_bytes)?,
-            plans: reserve_slots(budgets.plan_slots, budgets.plan_bytes)?,
-            relation_heap: 0,
-            plan_heap: 0,
-            hot: None,
+    pub(super) fn new() -> Self {
+        Self {
+            relations: Vec::with_capacity(RELATION_SLOTS),
+            plans: Vec::with_capacity(PLAN_SLOTS),
+            pending: Vec::new(),
+            pending_bytes: 0,
+            pending_heap: 0,
             next_statement: 0,
-        })
-    }
-
-    fn begin(&mut self) {
-        for relation in &mut self.relations {
-            relation.checked = false;
+            hot: None,
+            #[cfg(test)]
+            serial: false,
         }
     }
-
-    fn apply(
+    pub(super) fn event(
         &mut self,
-        event: &Event,
-        charged: usize,
-        source: &mut VerifiedCdcSource<'_>,
+        event: Event,
         target: &mut TargetTxn<'_>,
-        budgets: SerialBudgets,
+        binding: &FollowBinding,
+        owned: &[OwnedCopyTable],
         io: &IoControl,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        let charged = event_bytes(&event)?;
         if matches!(event, Event::Relation { .. }) {
-            return self.relation(event, charged, source, target, budgets, io);
+            self.relation(event, target, binding, owned, io)?;
+            return Ok(charged);
         }
-        let key = row_relation(event)?;
+        if let Event::Truncate {
+            relations,
+            restart_identity,
+            ..
+        } = &event
+        {
+            let mut names = Vec::with_capacity(relations.len());
+            if relations.is_empty() {
+                return Err(refusal("follow apply: empty TRUNCATE"));
+            }
+            for (index, key) in relations.iter().enumerate() {
+                if relations[..index].contains(key) {
+                    return Err(refusal("follow apply: duplicate TRUNCATE relation"));
+                }
+                let checked = self
+                    .relations
+                    .iter()
+                    .find(|r| relation_key(&r.relation) == *key)
+                    .ok_or_else(|| refusal("follow apply: TRUNCATE relation is unchecked"))?;
+                let Event::Relation { schema, name, .. } = &checked.relation else {
+                    unreachable!()
+                };
+                names.push(format!(
+                    "ONLY {}.{}",
+                    quote_identifier(schema)?,
+                    quote_identifier(name)?
+                ));
+            }
+            // No CASCADE: PostgreSQL refuses an incomplete dependency closure atomically.
+            let sql = format!(
+                "TRUNCATE TABLE {} {}",
+                names.join(", "),
+                if *restart_identity {
+                    "RESTART IDENTITY"
+                } else {
+                    "CONTINUE IDENTITY"
+                }
+            );
+            let bytes = add(sql.len(), 1)?;
+            if bytes > WINDOW_BYTES {
+                return Err(refusal("follow apply: TRUNCATE exceeds pipeline budget"));
+            }
+            self.make_room(bytes, charged, target, io)?;
+            self.pending.push(Pending::Truncate(sql));
+            self.pending_bytes = add(self.pending_bytes, bytes)?;
+            self.pending_heap = add(self.pending_heap, charged)?;
+            return Ok(charged);
+        }
+        let key = row_relation(&event)?;
         let relation = self
             .relations
             .iter()
-            .position(|entry| relation_key(&entry.event) == key && entry.checked)
-            .ok_or_else(|| {
-                refusal("serial apply: row precedes verified relation context in this transaction")
-            })?;
-        let index = match self.find_plan(key, event)? {
+            .position(|r| relation_key(&r.relation) == key)
+            .ok_or_else(|| refusal("follow apply: row precedes checked relation"))?;
+        let mut found = match self.hot {
+            Some(index)
+                if self.plans[index].key == key && self.plans[index].plan.matches(&event)? =>
+            {
+                Some(index)
+            }
+            _ => None,
+        };
+        for (index, entry) in self.plans.iter().enumerate() {
+            if found.is_some() {
+                break;
+            }
+            if entry.key == key && entry.plan.matches(&event)? {
+                found = Some(index);
+                break;
+            }
+        }
+        let index = match found {
             Some(index) => index,
             None => {
-                let plan = DmlPlan::new(&self.relations[relation].event, event)?;
-                self.prepare_plan(key, plan, target, budgets, io)?
+                // Preparing/evicting waits only on a cold shape and cannot overtake queued DML.
+                self.flush(target, io)?;
+                let plan = DmlPlan::new(&self.relations[relation], &event)?;
+                if plan.owned_capacity_bytes()? > CACHE_BYTES {
+                    return Err(refusal("follow apply: plan exceeds cache budget"));
+                }
+                while self.plans.len() >= PLAN_SLOTS
+                    || add(add(self.plan_bytes()?, plan.owned_capacity_bytes()?)?, 20)?
+                        > CACHE_BYTES
+                {
+                    if self.plans.is_empty() {
+                        return Err(refusal("follow apply: plan cache byte budget exhausted"));
+                    }
+                    target.deallocate(&self.plans[0].name, io)?;
+                    self.plans.remove(0);
+                }
+                let ordinal = self.next_statement;
+                self.next_statement = ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| refusal("follow apply: prepared identity exhausted"))?;
+                let name = format!("fa_{ordinal:016x}");
+                target.prepare(&name, plan.sql(), plan.param_types(), io)?;
+                self.plans.push(CachedPlan { key, plan, name });
+                self.plans.len() - 1
             }
         };
-        let entry = &self.plans[index];
-        if multiply(entry.plan.param_types().len(), size_of::<PgParam<'_>>())? > budgets.bind_bytes
-        {
-            return Err(refusal("serial apply: parameter binding budget exceeded"));
+        self.hot = Some(index);
+        let params = self.plans[index].plan.bind(&event)?;
+        let bytes = prepared_bytes(&self.plans[index].name, &params)?;
+        if bytes > WINDOW_BYTES || charged > CACHE_BYTES || self.serial_mode() {
+            self.flush(target, io)?;
+            let entry = &self.plans[index];
+            let params = entry.plan.bind(&event)?;
+            require_result(
+                &entry.plan,
+                target.execute_prepared(&entry.name, &params, io)?,
+            )?;
+        } else {
+            self.make_room(bytes, charged, target, io)?;
+            self.pending.push(Pending::Row { plan: index, event });
+            self.pending_bytes = add(self.pending_bytes, bytes)?;
+            self.pending_heap = add(self.pending_heap, charged)?;
         }
-        let params = entry.plan.bind(event)?;
-        if multiply(params.capacity(), size_of::<PgParam<'_>>())? > budgets.bind_bytes {
-            return Err(refusal(
-                "serial apply: parameter binding capacity budget exceeded",
-            ));
-        }
-        let result = target.execute_prepared(&entry.name, &params, io)?;
-        require_one_row(event, result.command_tag()?)
+        Ok(charged)
     }
-
+    fn serial_mode(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.serial
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
     fn relation(
         &mut self,
-        event: &Event,
-        charged: usize,
-        source: &mut VerifiedCdcSource<'_>,
+        event: Event,
         target: &mut TargetTxn<'_>,
-        budgets: SerialBudgets,
+        binding: &FollowBinding,
+        owned: &[OwnedCopyTable],
         io: &IoControl,
     ) -> Result<()> {
-        let key = relation_key(event);
-        if let Some(entry) = self
+        let key = relation_key(&event);
+        if let Some(old) = self
             .relations
-            .iter_mut()
-            .find(|entry| relation_key(&entry.event) == key)
+            .iter()
+            .find(|r| relation_key(&r.relation).oid == key.oid)
         {
-            if entry.event != *event {
-                return Err(refusal("serial apply: conflicting relation metadata"));
-            }
-            if !entry.checked {
-                source.check_relation(event, io)?;
-                target.preflight_relation(event, io)?;
-                entry.checked = true;
+            if old.relation != event {
+                return Err(refusal("follow apply: frozen relation changed"));
             }
             return Ok(());
         }
-        if self
-            .relations
+        let table = owned
             .iter()
-            .any(|entry| relation_key(&entry.event).oid == key.oid)
+            .find(|t| t.table.source_oid == key.oid)
+            .ok_or_else(|| refusal("follow apply: relation outside owned source plan"))?;
+        let bytes = self.relations.iter().try_fold(
+            self.relations.capacity() * size_of::<FollowRelation>(),
+            |total, r| {
+                add(
+                    add(
+                        add(total, event_bytes(&r.relation)?)?,
+                        r.target_type_oids.capacity() * size_of::<u32>(),
+                    )?,
+                    r.identity_modes.capacity() * size_of::<u8>(),
+                )
+            },
+        )?;
+        if self.relations.len() >= RELATION_SLOTS
+            || add(
+                add(bytes, event_bytes(&event)?)?,
+                1600 * (size_of::<u32>() + size_of::<u8>()),
+            )? > CACHE_BYTES
         {
-            return Err(refusal("serial apply: conflicting relation generation"));
+            return Err(refusal("follow apply: checked relation cache exhausted"));
         }
-        let base = multiply(self.relations.capacity(), size_of::<CachedRelation>())?;
-        if add(base, charged)? > budgets.relation_bytes {
-            return Err(refusal(
-                "serial apply: single relation exceeds cache byte budget",
-            ));
-        }
-        while self.relations.len() >= budgets.relation_slots
-            || add(add(base, self.relation_heap)?, charged)? > budgets.relation_bytes
-        {
-            let index = self
-                .relations
-                .iter()
-                .position(|entry| !entry.checked)
-                .ok_or_else(|| {
-                    refusal("serial apply: transaction relation count or byte budget exhausted")
-                })?;
-            let old = relation_key(&self.relations[index].event);
-            self.retire_relation(old, target, io)?;
-            let removed = self.relations.remove(index);
-            self.relation_heap -= relation_heap_bytes(&removed.event)?;
-        }
-        let owned = event.clone();
-        let bytes = relation_heap_bytes(&owned)?;
-        if add(add(base, self.relation_heap)?, bytes)? > budgets.relation_bytes {
-            return Err(refusal(
-                "serial apply: relation clone capacity exceeds cache byte budget",
-            ));
-        }
-        source.check_relation(event, io)?;
-        target.preflight_relation(event, io)?;
-        self.relation_heap = add(self.relation_heap, bytes)?;
-        self.relations.push(CachedRelation {
-            event: owned,
-            checked: true,
-        });
+        self.flush(target, io)?;
+        self.relations
+            .push(target.preflight_follow_relation(&event, binding, table, io)?);
         Ok(())
     }
-
-    fn find_plan(&mut self, key: RelationKey, row: &Event) -> Result<Option<usize>> {
-        if let Some(index) = self.hot {
-            let entry = &self.plans[index];
-            if entry.relation == key && entry.plan.matches(row)? {
-                return Ok(Some(index));
-            }
-        }
-        // The hot path avoids a scan; misses remain bounded by plan_slots and row width.
-        for (index, entry) in self.plans.iter().enumerate() {
-            if Some(index) != self.hot && entry.relation == key && entry.plan.matches(row)? {
-                self.hot = Some(index);
-                return Ok(Some(index));
-            }
-        }
-        Ok(None)
+    fn plan_bytes(&self) -> Result<usize> {
+        self.plans.iter().try_fold(
+            self.plans.capacity() * size_of::<CachedPlan>(),
+            |bytes, p| {
+                add(
+                    add(bytes, p.name.capacity())?,
+                    p.plan.owned_capacity_bytes()?,
+                )
+            },
+        )
     }
-
-    fn prepare_plan(
+    fn make_room(
         &mut self,
-        key: RelationKey,
-        plan: DmlPlan,
+        bytes: usize,
+        heap: usize,
         target: &mut TargetTxn<'_>,
-        budgets: SerialBudgets,
         io: &IoControl,
-    ) -> Result<usize> {
-        let ordinal = self.next_statement;
-        self.next_statement = ordinal
-            .checked_add(1)
-            .ok_or_else(|| refusal("serial apply: statement identity exhausted"))?;
-        let name = format!("sa_{ordinal:016x}");
-        let bytes = add(plan.owned_capacity_bytes()?, name.capacity())?;
-        let base = multiply(self.plans.capacity(), size_of::<CachedPlan>())?;
-        if add(base, bytes)? > budgets.plan_bytes {
-            return Err(refusal(
-                "serial apply: single plan exceeds cache byte budget",
-            ));
-        }
-        while self.plans.len() >= budgets.plan_slots
-            || add(add(base, self.plan_heap)?, bytes)? > budgets.plan_bytes
+    ) -> Result<()> {
+        if self.pending.len() >= WINDOW_COMMANDS
+            || add(self.pending_bytes, bytes)? > WINDOW_BYTES
+            || add(self.pending_heap, heap)? > CACHE_BYTES
         {
-            let index = self
-                .plans
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.ordinal)
-                .map(|(index, _)| index)
-                .ok_or_else(|| refusal("serial apply: prepared plan budget exhausted"))?;
-            self.retire_plan(index, target, io)?;
+            self.flush(target, io)?;
         }
-        target.prepare(&name, plan.sql(), plan.param_types(), io)?;
-        self.plan_heap = add(self.plan_heap, bytes)?;
-        let index = self.plans.len();
-        self.plans.push(CachedPlan {
-            relation: key,
-            plan,
+        Ok(())
+    }
+    pub(super) fn flush(&mut self, target: &mut TargetTxn<'_>, io: &IoControl) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        target.pipeline(
+            io,
+            |pipeline| self.send(pipeline, io),
+            |index, result| self.validate(index, result),
+        )?;
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.pending_heap = 0;
+        Ok(())
+    }
+    pub(super) fn commit(
+        &mut self,
+        mut target: TargetTxn<'_>,
+        io: &IoControl,
+    ) -> Result<CommitOutcome> {
+        if add(self.pending_bytes, target.checkpoint_input_bytes()?)? > PIPELINE_BYTES {
+            self.flush(&mut target, io)?;
+        }
+        let outcome = target.commit_pipeline(
+            io,
+            |pipeline| self.send(pipeline, io),
+            |index, result| self.validate(index, result),
+        )?;
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.pending_heap = 0;
+        Ok(outcome)
+    }
+    fn send(&self, pipeline: &mut Pipeline<'_>, io: &IoControl) -> Result<()> {
+        for pending in &self.pending {
+            match pending {
+                Pending::Row { plan, event } => {
+                    let entry = &self.plans[*plan];
+                    pipeline.execute_prepared(&entry.name, &entry.plan.bind(event)?, io)?;
+                }
+                Pending::Truncate(sql) => pipeline.query(sql, io)?,
+            }
+        }
+        Ok(())
+    }
+    fn validate(&self, index: usize, result: PgResult) -> Result<()> {
+        match self
+            .pending
+            .get(index)
+            .ok_or_else(|| refusal("follow apply: unexpected pipeline result"))?
+        {
+            Pending::Row { plan, .. } => require_result(&self.plans[*plan].plan, result),
+            Pending::Truncate(_)
+                if result.rows() == 0 && result.command_tag()? == "TRUNCATE TABLE" =>
+            {
+                Ok(())
+            }
+            _ => Err(refusal("follow apply: unexpected TRUNCATE result")),
+        }
+    }
+}
+pub(super) fn require_result(plan: &DmlPlan, result: PgResult) -> Result<()> {
+    if result.rows() != 0 {
+        return Err(refusal("follow apply: unexpected returned rows"));
+    }
+    require_one_row(plan, result.command_tag()?)
+}
+fn require_one_row(plan: &DmlPlan, tag: &str) -> Result<()> {
+    if tag != plan.expected_tag() {
+        return Err(refusal("follow apply: DML did not affect exactly one row"));
+    }
+    Ok(())
+}
+fn prepared_bytes(name: &str, params: &[PgParam<'_>]) -> Result<usize> {
+    params.iter().try_fold(add(name.len(), 1)?, |bytes, p| {
+        add(
+            bytes,
+            match p {
+                PgParam::Null => 4,
+                PgParam::Text(value) => add(value.len(), 5)?,
+                #[cfg(test)]
+                PgParam::Binary(value) => add(value.len(), 4)?,
+            },
+        )
+    })
+}
+pub(super) fn event_bytes(event: &Event) -> Result<usize> {
+    let values = |values: &Vec<Value>| {
+        values
+            .iter()
+            .try_fold(values.capacity() * size_of::<Value>(), |bytes, value| {
+                add(
+                    bytes,
+                    match value {
+                        Value::Text(b) => b.capacity(),
+                        _ => 0,
+                    },
+                )
+            })
+    };
+    let bytes = match event {
+        Event::Relation {
+            schema,
             name,
-            ordinal,
-        });
-        self.hot = Some(index);
-        Ok(index)
-    }
-
-    fn retire_relation(
-        &mut self,
-        key: RelationKey,
-        target: &mut TargetTxn<'_>,
-        io: &IoControl,
-    ) -> Result<()> {
-        while let Some(index) = self.plans.iter().position(|entry| entry.relation == key) {
-            self.retire_plan(index, target, io)?;
-        }
-        Ok(())
-    }
-
-    fn retire_plan(
-        &mut self,
-        index: usize,
-        target: &mut TargetTxn<'_>,
-        io: &IoControl,
-    ) -> Result<()> {
-        target.deallocate(&self.plans[index].name, io)?;
-        let old = self.plans.swap_remove(index);
-        self.plan_heap -= add(old.plan.owned_capacity_bytes()?, old.name.capacity())?;
-        self.hot = None;
-        Ok(())
-    }
+            columns,
+            ..
+        } => columns.iter().try_fold(
+            add(
+                add(schema.capacity(), name.capacity())?,
+                columns.capacity() * size_of::<Column>(),
+            )?,
+            |bytes, c| add(bytes, c.name.capacity()),
+        )?,
+        Event::Insert { values: row, .. } => values(row)?,
+        Event::Update { old, new, .. } => add(
+            values(new)?,
+            old.as_ref().map_or(Ok(0), |old| values(&old.values))?,
+        )?,
+        Event::Delete { old, .. } => values(&old.values)?,
+        Event::Truncate { relations, .. } => relations.capacity() * size_of::<RelationKey>(),
+    };
+    add(size_of::<Event>(), bytes)
 }
-
-fn reserve_slots<T>(count: usize, budget: usize) -> Result<Vec<T>> {
-    if multiply(count, size_of::<T>())? > budget {
-        return Err(refusal(
-            "serial apply: cache inline storage exceeds byte budget",
-        ));
-    }
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(count)
-        .map_err(|_| refusal("serial apply: cache allocation failed"))?;
-    if multiply(entries.capacity(), size_of::<T>())? > budget {
-        return Err(refusal(
-            "serial apply: cache container capacity exceeds byte budget",
-        ));
-    }
-    Ok(entries)
-}
-
 fn relation_key(event: &Event) -> RelationKey {
     match event {
         Event::Relation { key, .. } => *key,
-        _ => unreachable!("cache retains only relation events"),
+        _ => unreachable!(),
     }
 }
-
 fn row_relation(event: &Event) -> Result<RelationKey> {
     match event {
         Event::Insert { relation, .. }
         | Event::Update { relation, .. }
         | Event::Delete { relation, .. } => Ok(*relation),
-        Event::Truncate { .. } => Err(refusal(
-            "serial apply: TRUNCATE requires verified target scope closure",
-        )),
-        Event::Relation { .. } => Err(refusal("serial apply: a row event is required")),
+        _ => Err(refusal("follow apply: row required")),
     }
 }
-
-fn relation_heap_bytes(event: &Event) -> Result<usize> {
-    let Event::Relation {
-        schema,
-        name,
-        columns,
-        ..
-    } = event
-    else {
-        return Err(refusal("serial apply: relation metadata is required"));
-    };
-    let mut bytes = add(
-        add(schema.capacity(), name.capacity())?,
-        multiply(columns.capacity(), size_of::<Column>())?,
-    )?;
-    for column in columns {
-        bytes = add(bytes, column.name.capacity())?;
-    }
-    Ok(bytes)
+fn add(a: usize, b: usize) -> Result<usize> {
+    a.checked_add(b)
+        .ok_or_else(|| refusal("follow apply: byte accounting overflow"))
 }
-
-fn require_one_row(event: &Event, tag: &str) -> Result<()> {
-    let expected = match event {
-        Event::Insert { .. } => "INSERT 0 1",
-        Event::Update { .. } => "UPDATE 1",
-        Event::Delete { .. } => "DELETE 1",
-        _ => {
-            return Err(refusal(
-                "serial apply: exact row count requires a DML event",
-            ));
-        }
-    };
-    if tag != expected {
-        return Err(refusal("serial apply: DML did not affect exactly one row"));
-    }
-    Ok(())
+#[track_caller]
+pub(super) fn refusal(message: &'static str) -> Error {
+    Error::new(ErrorKind::Target, message)
 }
-
-fn add(left: usize, right: usize) -> Result<usize> {
-    left.checked_add(right)
-        .ok_or_else(|| refusal("serial apply: byte accounting overflow"))
-}
-fn multiply(left: usize, right: usize) -> Result<usize> {
-    left.checked_mul(right)
-        .ok_or_else(|| refusal("serial apply: byte accounting overflow"))
-}
-fn input_error(error: codec::Error) -> Error {
-    Error {
-        kind: ErrorKind::BadState,
-        message: format!("serial apply: invalid required CDC input: {error}"),
-    }
-}
-fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::Target,
-        message: message.to_owned(),
-    }
-}
-
 #[cfg(test)]
 #[path = "serial/tests.rs"]
 mod tests;

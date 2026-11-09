@@ -13,9 +13,24 @@ from db_harness import (FIXTURES, assert_equal, assert_identity, clean_environme
                         conninfo, databases, fingerprint, inventory, load_manifest, psql,
                         reference_copy, validate_report, validate_success_output)
 from protocol_fault import ProtocolFault
+from follow_snapshot_fixture import NATIVE_FIELDS, identifier, read_json
 
 TABLE = '"E1 space"."row ""payload"'
 EMPTY = '"E1 space"."empty table"'
+
+
+def validate_copy_native(value, state):
+    assert isinstance(value, dict) and set(value) == NATIVE_FIELDS, "native COPY fields differ"
+    assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] == 7, "wrong native COPY format"
+    assert identifier(value["run"]), "invalid native COPY run identity"
+    assert state.is_dir() and not state.is_symlink(), "invalid native COPY directory"
+    assert value["canonical_path"] == str(state.resolve(strict=True)), "native COPY path binding differs"
+    directory = state.stat()
+    for field, expected in (("directory_device", directory.st_dev), ("directory_inode", directory.st_ino)):
+        assert type(value[field]) is int and 0 < value[field] <= 2**64 - 1 and value[field] == expected, "native COPY directory identity differs"
+    assert value["target_provenance"] == [], "COPY receipt contains target authority provenance"
+    for field in ("source_slot", "clone_state", "follow_state", "operator"):
+        assert value[field] is None, "COPY receipt contains unrelated operation state"
 
 
 class Cases:
@@ -49,27 +64,24 @@ class Cases:
 
     def no_completion(self):
         path = self.state / "manifest.json"
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             return
-        value = json.loads(path.read_text())
-        assert value["magic"] == "RPGMIGRATE" and value["format_version"] == 4
-        assert value["target_provenance"] == [], "COPY receipt contains target authority provenance"
-        assert value["source_slot"] is None, "COPY receipt contains source slot provenance"
-        assert value["copy_snapshot"] is None, "COPY receipt contains a snapshot anchor intent"
+        value = read_json(path)
+        validate_copy_native(value, self.state)
         assert value["copy_complete"] is None, "completion published after failure"
 
     def completed(self, tables, rows, output, min_bytes=1):
-        value = json.loads((self.state / "manifest.json").read_text())
-        assert value["magic"] == "RPGMIGRATE" and value["format_version"] == 4
-        assert value["target_provenance"] == [], "COPY receipt contains target authority provenance"
-        assert value["source_slot"] is None, "COPY receipt contains source slot provenance"
-        assert value["copy_snapshot"] is None, "COPY receipt contains a snapshot anchor intent"
-        assert len(value["run"]) == 16
-        assert Path(value["canonical_path"]) == self.state.resolve()
+        value = read_json(self.state / "manifest.json")
+        validate_copy_native(value, self.state)
         receipt = value["copy_complete"]
+        assert isinstance(receipt, dict) and set(receipt) == {"tables", "rows", "bytes"}, "native COPY completion fields differ"
+        assert all(type(count) is int and 0 <= count <= 2**64 - 1 for count in receipt.values()), "invalid native COPY completion counts"
         assert receipt["tables"] == tables and receipt["rows"] == rows, "incorrect completion totals"
         assert receipt["bytes"] >= min_bytes if rows else receipt["bytes"] == 0
         validate_success_output(output, value)
+        record = json.loads(output)
+        assert identifier(record["run"]), "invalid COPY output run identity"
+        assert all(type(record[field]) is int for field in ("state_format_version", "tables", "rows", "bytes")), "invalid COPY output counts or version"
 
     def fail(self, result):
         assert result.returncode != 0, "required failure returned zero"

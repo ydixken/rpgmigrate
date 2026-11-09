@@ -313,11 +313,9 @@ fn validate_workset(
     Ok(())
 }
 
+#[track_caller]
 fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadState,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadState, message)
 }
 
 #[cfg(test)]
@@ -346,6 +344,8 @@ mod tests {
             },
             writable_columns: vec!["key".into(), "value".into()],
             all_columns: vec!["key".into(), "value".into(), "generated".into()],
+            identity_modes: vec![0, 0, 0],
+            partition_identity_modes: None,
         };
         let owned = OwnedCopyTable {
             table: table.clone(),

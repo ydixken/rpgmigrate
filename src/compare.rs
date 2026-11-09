@@ -437,11 +437,9 @@ fn compare_streams<B>(
     Ok((matched && source.rows == target.rows, source, target))
 }
 
+#[track_caller]
 fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadState,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadState, message)
 }
 
 #[cfg(test)]

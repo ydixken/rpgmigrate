@@ -15,6 +15,7 @@ use std::time::Instant;
 
 #[path = "pipeline.rs"]
 mod pipeline;
+pub(crate) use pipeline::Pipeline;
 
 pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
     let mut diagnostic = ptr::null_mut();
@@ -111,6 +112,7 @@ impl Drop for Connection {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
     Idle,
+    SnapshotExport,
     Query,
     CopyIn,
     CopyOut,
@@ -121,10 +123,12 @@ enum Phase {
 #[derive(Debug, Default)]
 struct NoticeState {
     uncertain: Cell<bool>,
+    seen: Cell<bool>,
 }
 
 impl NoticeState {
     fn observe(&self, severity: Option<&[u8]>) {
+        self.seen.set(true);
         if !matches!(severity, Some(b"NOTICE" | b"INFO" | b"DEBUG" | b"LOG")) {
             self.uncertain.set(true);
         }
@@ -132,6 +136,7 @@ impl NoticeState {
 
     fn reset(&self) {
         self.uncertain.set(false);
+        self.seen.set(false);
     }
 }
 
@@ -164,13 +169,7 @@ pub(crate) struct CopyBuffer {
 pub(crate) enum PgParam<'a> {
     Null,
     Text(&'a [u8]),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Binary parameters await serial-applier integration"
-        )
-    )]
+    #[cfg(test)]
     Binary(&'a [u8]),
 }
 
@@ -196,6 +195,13 @@ fn commit_observation(tag: &str, status: TransactionStatus, warning: bool) -> Co
         ("ROLLBACK", TransactionStatus::Idle, _) => CommitObservation::RolledBack,
         _ => CommitObservation::Unknown,
     }
+}
+
+fn is_data_command(sql: &str) -> bool {
+    matches!(
+        sql.split_ascii_whitespace().next(),
+        Some("SELECT" | "INSERT" | "UPDATE" | "DELETE" | "TRUNCATE" | "WITH")
+    )
 }
 
 impl PgConnection {
@@ -275,6 +281,18 @@ impl PgConnection {
         self.require_mode(Mode::Sql)?;
         self.operation(io, |connection, io| {
             connection.send(sql, io)?;
+            connection.drain(None, io)
+        })
+    }
+
+    /// Logical database sessions require simple Query; exported snapshots forbid later commands.
+    pub(crate) fn logical_query(&mut self, sql: &str, io: &IoControl) -> Result<PgResult> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::Idle)?;
+        let command =
+            CString::new(sql).map_err(|_| error("PostgreSQL command contains a NUL byte"))?;
+        self.operation(io, |connection, io| {
+            connection.send_replication(&command, io)?;
             connection.drain(None, io)
         })
     }
@@ -369,7 +387,14 @@ impl PgConnection {
             let raw = connection.require(Phase::Idle)?;
             let count = parameter_count(param_types.len())?;
             let name = prepared_cstring(name.as_bytes())?;
+            let admitted =
+                is_data_command(sql) || sql.split_ascii_whitespace().next() == Some("COPY");
             let sql = prepared_cstring(sql.as_bytes())?;
+            if !admitted {
+                return Err(error(
+                    "PostgreSQL prepared statements require an internal data command",
+                ));
+            }
             io::check(io)?;
             connection.phase = Phase::Query;
             // SAFETY: libpq copies the terminated strings and the checked count of OIDs.
@@ -423,6 +448,7 @@ impl PgConnection {
                         text.push(value);
                         (pointer, 0, 0)
                     }
+                    #[cfg(test)]
                     PgParam::Binary(bytes) => {
                         (bytes.as_ptr().cast(), parameter_length(bytes.len())?, 1)
                     }
@@ -535,6 +561,7 @@ impl PgConnection {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn flush_copy(&mut self, io: &IoControl) -> Result<()> {
         self.require_mode(Mode::Sql)?;
         self.operation(io, |connection, io| {
@@ -639,18 +666,10 @@ impl PgConnection {
     }
 
     /// Opens a dedicated logical session with replication=database overriding conninfo.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn connect_replication(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
         Self::connect_mode(conninfo, Mode::Logical, io)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn identify_system(&mut self, io: &IoControl) -> Result<IdentifySystem> {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::Idle)?;
@@ -687,6 +706,7 @@ impl PgConnection {
         plugin: &str,
         io: &IoControl,
     ) -> Result<SlotCreateOutcome> {
+        let io = &io::operation_control(io);
         self.require_mode(Mode::Logical)?;
         let raw = self.require(Phase::Idle)?;
         let command = create_slot_command(slot, plugin)?;
@@ -730,7 +750,10 @@ impl PgConnection {
             )
         })();
         Ok(match outcome {
-            Ok(created) => SlotCreateOutcome::Created(created),
+            Ok(created) => {
+                self.phase = Phase::SnapshotExport;
+                SlotCreateOutcome::Created(created)
+            }
             Err(failure) => {
                 self.raw.take();
                 self.phase = Phase::Idle;
@@ -739,10 +762,6 @@ impl PgConnection {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn start_replication(
         &mut self,
         slot: &str,
@@ -761,6 +780,7 @@ impl PgConnection {
             if result.status() == pq::ExecStatusType::PGRES_COPY_BOTH {
                 connection.phase = Phase::CopyBoth;
                 connection.replication = ReplicationState::default();
+                connection.check_replication_notices()?;
                 return Ok(());
             }
             connection.drain(Some(result), io)?;
@@ -772,10 +792,6 @@ impl PgConnection {
 
     /// False means NOT accepted: the existing pending status remains unchanged.
     /// Positions belong to the caller's durability policy, never to received frames.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn queue_feedback(&mut self, status: StandbyStatus) -> Result<bool> {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::CopyBoth)?;
@@ -788,7 +804,10 @@ impl PgConnection {
     /// Begins graceful shutdown; continue polling until End or an error.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
+        expect(
+            dead_code,
+            reason = "Graceful logical termination belongs to the requested-end boundary"
+        )
     )]
     pub(crate) fn request_replication_end(&mut self) -> Result<()> {
         self.require_mode(Mode::Logical)?;
@@ -800,10 +819,6 @@ impl PgConnection {
     /// FeedbackDrained leaves all delivery and feedback-position policy with the caller.
     /// End requires every terminal result; caller wakes preserve the absolute session deadline.
     /// Streaming errors close the connection.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn poll_replication(
         &mut self,
         wake_at: Instant,
@@ -812,8 +827,34 @@ impl PgConnection {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::CopyBoth)?;
         self.operation(io, |connection, io| {
-            connection.pump_replication(wake_at, io)
+            connection.pump_replication(wake_at, true, io)
         })
+    }
+
+    /// Paused reads bound libpq buffering while feedback output and the absolute deadline progress.
+    pub(crate) fn poll_replication_paused(
+        &mut self,
+        wake_at: Instant,
+        io: &IoControl,
+    ) -> Result<ReplicationPoll> {
+        self.require_mode(Mode::Logical)?;
+        self.require(Phase::CopyBoth)?;
+        self.operation(io, |connection, io| {
+            connection.pump_replication(wake_at, false, io)
+        })
+    }
+
+    fn check_replication_notices(&self) -> Result<()> {
+        if self
+            .raw
+            .as_ref()
+            .is_some_and(|connection| connection.notices.seen.get())
+        {
+            return Err(error(
+                "PostgreSQL replication notice refused; details redacted",
+            ));
+        }
+        Ok(())
     }
 
     fn send_replication(&mut self, command: &CStr, io: &IoControl) -> Result<()> {
@@ -904,7 +945,12 @@ impl PgConnection {
                 && self.replication.pending.is_none()))
     }
 
-    fn pump_replication(&mut self, wake_at: Instant, io: &IoControl) -> Result<ReplicationPoll> {
+    fn pump_replication(
+        &mut self,
+        wake_at: Instant,
+        read_enabled: bool,
+        io: &IoControl,
+    ) -> Result<ReplicationPoll> {
         let raw = self.raw()?;
         if Instant::now() >= wake_at {
             return Ok(ReplicationPoll::Wake);
@@ -915,6 +961,7 @@ impl PgConnection {
         let mut consumed = false;
         loop {
             io::check(io)?;
+            self.check_replication_notices()?;
             if Instant::now() >= wake_at {
                 return Ok(ReplicationPoll::Wake);
             }
@@ -958,10 +1005,18 @@ impl PgConnection {
                 self.phase = Phase::Idle;
                 return Ok(ReplicationPoll::End);
             }
-            if !self.replication.received_end {
+            if read_enabled && !self.replication.received_end {
                 let mut buffer = ptr::null_mut();
                 // SAFETY: asynchronous COPY returns either one owned allocation or a status code.
-                match unsafe { pq::PQgetCopyData(raw, &mut buffer, 1) } {
+                let received = unsafe { pq::PQgetCopyData(raw, &mut buffer, 1) };
+                if let Err(failure) = self.check_replication_notices() {
+                    if received > 0 && !buffer.is_null() {
+                        // SAFETY: libpq transferred this buffer even when a preceding notice is refused.
+                        unsafe { pq::PQfreemem(buffer.cast()) };
+                    }
+                    return Err(failure);
+                }
+                match received {
                     size @ 1.. => {
                         let raw = NonNull::new(buffer.cast()).ok_or_else(|| {
                             error("PostgreSQL returned a missing replication buffer")
@@ -994,10 +1049,16 @@ impl PgConnection {
             }
             // SAFETY: raw remains owned; poll still observes both directions while output is blocked.
             let socket = unsafe { pq::PQsocket(raw) };
-            let events = libc::POLLIN | if writing { libc::POLLOUT } else { 0 };
+            let events = if read_enabled { libc::POLLIN } else { 0 }
+                | if writing { libc::POLLOUT } else { 0 };
             match io::wait_until(socket, events, wake_at, io)? {
                 Some(ready) => {
-                    if ready & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                    if !read_enabled && ready & (libc::POLLHUP | libc::POLLERR) != 0 {
+                        return Err(error(
+                            "PostgreSQL replication connection failed while reads were paused",
+                        ));
+                    }
+                    if read_enabled && ready & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
                         self.consume()?;
                         consumed = true;
                     }
@@ -1222,6 +1283,7 @@ impl PgResult {
         unsafe { pq::PQresultStatus(self.raw.as_ptr()) }
     }
 
+    #[track_caller]
     fn failure(&self) -> Error {
         // SAFETY: the optional SQLSTATE C string belongs to this live result and is copied below.
         let state =
@@ -1463,6 +1525,25 @@ mod tests {
     }
 
     #[test]
+    fn result_failure_origin_records_the_failure_caller() {
+        let connection = unconnected();
+        // SAFETY: the standalone result is owned here and freed by PgResult.
+        let raw = unsafe {
+            pq::PQmakeEmptyPGresult(ptr::null_mut(), pq::ExecStatusType::PGRES_FATAL_ERROR)
+        };
+        let result = connection.own_result(NonNull::new(raw).unwrap()).unwrap();
+        let expected_line = line!() + 1;
+        let error = result.failure();
+        assert_eq!(error.origin.file(), file!());
+        assert_eq!(error.origin.line(), expected_line);
+        assert_eq!(error.kind, crate::contracts::ErrorKind::Pgsql);
+        assert_eq!(
+            error.message,
+            "PostgreSQL command failed; server details redacted"
+        );
+    }
+
+    #[test]
     fn commit_observation_refuses_warning_even_with_commit_and_idle() {
         assert_eq!(
             commit_observation("COMMIT", TransactionStatus::Idle, false),
@@ -1513,10 +1594,7 @@ mod tests {
         }
         notices.reset();
         assert!(!notices.uncertain.get());
-        assert_eq!(
-            std::mem::size_of::<NoticeState>(),
-            std::mem::size_of::<bool>()
-        );
+        assert!(std::mem::size_of::<NoticeState>() <= 2 * std::mem::size_of::<bool>());
     }
 
     #[test]
@@ -1538,7 +1616,7 @@ mod tests {
         assert!(weak.upgrade().is_none());
     }
 
-    fn unconnected() -> PgConnection {
+    pub(super) fn unconnected() -> PgConnection {
         // SAFETY: the terminated invalid option is rejected before auth or socket setup.
         let raw = unsafe { pq::PQconnectStart(c"rpgmigrate_invalid_option=1".as_ptr()) };
         PgConnection {
@@ -1551,6 +1629,61 @@ mod tests {
             mode: Mode::Logical,
             replication: ReplicationState::default(),
             copy_pending: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn data_commands_require_an_exact_uppercase_first_token() {
+        for sql in [
+            "SELECT 1",
+            "INSERT INTO x VALUES (1)",
+            "UPDATE x SET id = 1",
+            "DELETE FROM x",
+            "TRUNCATE x",
+            "  WITH x AS (SELECT 1) SELECT * FROM x",
+        ] {
+            assert!(is_data_command(sql), "{sql}");
+        }
+        for sql in [
+            "WITHIN x",
+            "WITH/* hidden */ x AS (SELECT 1) SELECT * FROM x",
+            "with x AS (SELECT 1) SELECT * FROM x",
+            "/* hidden */ WITH x AS (SELECT 1) SELECT * FROM x",
+            "-- hidden\nWITH x AS (SELECT 1) SELECT * FROM x",
+            "COMMIT",
+            "DO $$ BEGIN END $$",
+            "",
+        ] {
+            assert!(!is_data_command(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn prepared_transaction_commands_are_refused_before_dispatch() {
+        for sql in [
+            "COMMIT",
+            "END",
+            "ROLLBACK",
+            "ABORT",
+            "BEGIN",
+            "START TRANSACTION",
+            "SAVEPOINT x",
+            "EXECUTE x",
+            "/* hidden */ SELECT 1",
+            "-- hidden\nSELECT 1",
+        ] {
+            let mut connection = unconnected();
+            connection.mode = Mode::Sql;
+            let failure = connection
+                .prepare("escape", sql, &[], &control())
+                .unwrap_err();
+            assert!(
+                failure.message.contains("internal data"),
+                "{sql}: {}",
+                failure.message
+            );
+            assert!(connection.raw.is_some());
+            assert!(connection.phase == Phase::Idle);
         }
     }
 
@@ -1589,6 +1722,29 @@ mod tests {
             assert!(!failure.message.contains("private-secret"));
             assert!(!failure.message.contains("replication"));
         }
+    }
+
+    #[test]
+    fn logical_query_rejects_wrong_mode_export_and_copyboth_before_dispatch() {
+        let mut connection = unconnected();
+        for phase in [Phase::SnapshotExport, Phase::CopyBoth, Phase::Query] {
+            connection.phase = phase;
+            let failure = connection
+                .logical_query("SHOW statement_timeout", &control())
+                .err()
+                .unwrap();
+            assert!(failure.message.contains("protocol state"));
+            assert!(connection.raw.is_some());
+            assert!(connection.phase == phase);
+        }
+        connection.phase = Phase::Idle;
+        connection.mode = Mode::Sql;
+        let failure = connection
+            .logical_query("SHOW statement_timeout", &control())
+            .err()
+            .unwrap();
+        assert!(failure.message.contains("connection mode"));
+        assert!(connection.raw.is_some());
     }
 
     #[test]

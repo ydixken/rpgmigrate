@@ -18,23 +18,21 @@ from db_harness import (FIXTURES, SETTINGS, OwnedCluster, assert_equal, conninfo
 from protocol_fault import ProtocolFault
 from authority_fixture import authority_fixture, validate_authority_faults
 from replication_fixture import replication_fixture, validate_replication_faults
-from source_snapshot_fixture import source_snapshot_fixture, validate_source_snapshot_faults
+from money_locale_fixture import money_locales
+from follow_snapshot_fixture import (follow_snapshot_application_name,
+                                     validate_follow_snapshot_faults)
 
 
 def validate_module_receipt(profile, expected, output, context):
     validate_libtest_output(expected, output)
-    if profile == "SourceSnapshot":
-        assert expected == module_cases({}, profile), "wrong source snapshot inventory"
-        summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
-        assert len(summaries) == 1 and re.fullmatch(
-            r"ok\. 12 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
-            summaries[0]), "missing or inconsistent source snapshot test summary"
-        validate_source_snapshot_faults(context["snapshot"])
-    if profile in ("Catalog", "SourceCatalog", "Clone", "Schema"):
+    if profile in ("Catalog", "SourceCatalog", "Clone", "Schema", "FollowSource", "FollowSnapshot", "FollowAuthority", "FollowReceive", "FollowApply"):
         summaries = re.findall(r"^test result: (.*)$", output, flags=re.MULTILINE)
         assert len(summaries) == 1 and re.fullmatch(
             rf"ok\. {len(expected)} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in \S+",
             summaries[0]), "missing or inconsistent catalog test summary"
+    if profile == "FollowSnapshot":
+        assert expected == module_cases({}, profile), "wrong current source snapshot inventory"
+        validate_follow_snapshot_faults(context)
     if profile in ("Authority", "Engine"):
         validate_authority_faults(context)
     if profile in ("Replication", "Engine"):
@@ -133,6 +131,11 @@ def protocol_self_check(cluster, manifest):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--follow-authority", action="store_true", help="require eleven exact native pgoutput target authority cases")
+    modes.add_argument("--follow-receive", action="store_true", help="require four exact native pgoutput receiver cases")
+    modes.add_argument("--follow-apply", action="store_true", help="require eleven exact native pgoutput row semantics and catalog identity cases")
+    modes.add_argument("--follow-snapshot", action="store_true", help="require nine exact pgoutput snapshot cases and five independent fault receipts")
+    modes.add_argument("--follow-source", action="store_true", help="require seven exact native pgoutput source snapshot cases")
     modes.add_argument("--schema", action="store_true", help="require the exact native pre-data drift guard case")
     modes.add_argument("--clone", action="store_true", help="require all seven exact native clone component cases")
     modes.add_argument("--self-check", action="store_true")
@@ -140,9 +143,8 @@ def main():
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
     modes.add_argument("--authority", action="store_true", help="require the exact target authority live-test inventory")
     modes.add_argument("--replication", action="store_true", help="require the exact raw CopyBoth live-test inventory")
-    modes.add_argument("--catalog", action="store_true", help="require the exact twelve CDC and native clone catalog live tests")
+    modes.add_argument("--catalog", action="store_true", help="require thirteen exact CDC, clone, and money catalog live tests")
     modes.add_argument("--source-catalog", action="store_true", help="require the exact three source identity live tests")
-    modes.add_argument("--source-snapshot", action="store_true", help="require twelve source snapshot cases and five observed fault receipts")
     modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, replication, and catalog/COPY live tests")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -150,16 +152,16 @@ def main():
     if not args.self_check and not command:
         parser.error("provide --self-check or -- followed by the integration test command")
     manifest = load_manifest()
-    module_suite = args.transport or args.engine or args.prepared or args.authority or args.replication or args.catalog or args.source_catalog or args.source_snapshot or args.clone or args.schema
+    module_suite = args.follow_snapshot or args.follow_authority or args.follow_receive or args.follow_apply or args.follow_source or args.transport or args.engine or args.prepared or args.authority or args.replication or args.catalog or args.source_catalog or args.clone or args.schema
     if module_suite:
-        profile = "Schema" if args.schema else "Clone" if args.clone else "SourceSnapshot" if args.source_snapshot else "SourceCatalog" if args.source_catalog else "Catalog" if args.catalog else "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
+        profile = "FollowSnapshot" if args.follow_snapshot else "FollowAuthority" if args.follow_authority else "FollowReceive" if args.follow_receive else "FollowApply" if args.follow_apply else "FollowSource" if args.follow_source else "Schema" if args.schema else "Clone" if args.clone else "SourceCatalog" if args.source_catalog else "Catalog" if args.catalog else "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
         expected = module_cases(manifest, profile)
-    with OwnedCluster(manifest) as cluster, ExitStack() as fixtures:
+    with money_locales(args.catalog), (OwnedCluster(manifest, logical=True, logical_slots=32) if args.follow_source or args.follow_snapshot or args.follow_receive else OwnedCluster(manifest)) as cluster, ExitStack() as fixtures:
         if args.self_check:
             self_check(cluster, manifest)
             return 0
         source, target = databases(cluster.context, "source_catalog" if args.source_catalog else "catalog" if args.catalog else "transport",
-                                   empty=args.catalog or args.source_catalog or args.clone or args.schema)
+                                   empty=args.follow_snapshot or args.follow_source or args.follow_authority or args.follow_receive or args.follow_apply or args.catalog or args.source_catalog or args.clone or args.schema)
         receipt = cluster.root / "results.json"
         environment = dict(cluster.environment)
         environment.update({
@@ -174,6 +176,20 @@ def main():
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION": manifest["server_version"],
             "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM": str(manifest["server_version_num"]),
         })
+        if args.follow_receive:
+            environment.update(RPGMIGRATE_TEST_FOLLOW_RECEIVE_CONTEXT=str(cluster.context_path),
+                               RPGMIGRATE_TEST_FOLLOW_RECEIVE_SOURCE=conninfo(cluster.context, "postgres", "e1_admin"))
+        if args.follow_apply:
+            environment["RPGMIGRATE_TEST_SOURCE"] = conninfo(cluster.context, source, "e1_admin")
+        if args.follow_snapshot:
+            helper = ROOT / "tests/support/follow_snapshot_fault.py"
+            if not helper.is_file():
+                raise RuntimeError("required current follow snapshot fault helper is missing")
+            environment.update(RPGMIGRATE_TEST_FOLLOW_SNAPSHOT_CONTEXT=str(cluster.context_path),
+                               RPGMIGRATE_TEST_FOLLOW_SNAPSHOT_HELPER=str(helper),
+                               PGAPPNAME=follow_snapshot_application_name(cluster.context))
+        if args.follow_source or args.follow_snapshot:
+            environment["RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN"] = conninfo(cluster.context, "postgres", "e1_admin")
         if args.schema:
             environment.update({
                 "RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN": conninfo(cluster.context, source, "e1_admin"),
@@ -185,7 +201,11 @@ def main():
                 "RPGMIGRATE_TEST_CLONE_TARGET_ADMIN": conninfo(cluster.context, target, "e1_admin"),
             })
         if args.catalog:
+            # CDC cases commit fixtures; clone admission requires an untouched database pair.
+            clone_source, clone_target = databases(cluster.context, "catalog_clone", empty=True)
             environment.update({
+                "RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN": conninfo(cluster.context, clone_source, "e1_admin"),
+                "RPGMIGRATE_TEST_CLONE_TARGET_ADMIN": conninfo(cluster.context, clone_target, "e1_admin"),
                 "RPGMIGRATE_TEST_CATALOG_SOURCE": conninfo(cluster.context, source, "e1_source"),
                 "RPGMIGRATE_TEST_CATALOG_ADMIN": conninfo(cluster.context, source, "e1_admin"),
                 "RPGMIGRATE_TEST_CATALOG_TARGET": conninfo(cluster.context, target, "e1_target"),
@@ -199,15 +219,11 @@ def main():
                 "RPGMIGRATE_TEST_SOURCE_CATALOG_SOURCE": conninfo(cluster.context, source, "e1_source"),
                 "RPGMIGRATE_TEST_SOURCE_CATALOG_ADMIN": conninfo(cluster.context, source, "e1_admin"),
             })
-        if args.authority or args.engine:
+        if args.authority or args.engine or args.follow_authority:
             environment.update(fixtures.enter_context(authority_fixture(cluster)))
         if args.replication or args.engine:
             context, source_environment = fixtures.enter_context(replication_fixture(manifest))
             cluster.context["replication"] = context
-            environment.update(source_environment)
-        if args.source_snapshot:
-            context, source_environment = fixtures.enter_context(source_snapshot_fixture(manifest))
-            cluster.context["snapshot"] = context
             environment.update(source_environment)
         # Cargo keeps its cache/toolchain paths while test clients get a private HOME.
         for key, fallback in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
@@ -226,8 +242,8 @@ def main():
                 print("Authority faults verified 2 held COMMIT replies and observed fence releases")
             if args.replication or args.engine:
                 print("Replication faults verified 4 wire cases and observed PQflush backpressure")
-            if args.source_snapshot:
-                print("SourceSnapshot faults verified 5 observed cases and closed backends")
+            if args.follow_snapshot:
+                print("FollowSnapshot faults verified 5 cases, 3 CREATE tail phases, and closed/reaped owned processes")
             print(f"{profile} verified {len(expected)} exact cases; full E1 suite not selected")
             return 0
         if not receipt.is_file():

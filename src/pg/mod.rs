@@ -3,8 +3,7 @@ mod io;
 mod replication;
 
 #[cfg(test)]
-pub(crate) use ffi::replication_testing::owned_frame;
-
+pub(crate) mod follow_receive_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]
@@ -24,6 +23,7 @@ pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
 
 pub(crate) use ffi::CommitObservation;
 pub(crate) use ffi::PgParam;
+pub(crate) use ffi::Pipeline;
 pub(crate) use ffi::utility_environment;
 pub(crate) use io::operation_control;
 
@@ -49,9 +49,21 @@ pub(crate) fn libpq_version() -> i32 {
     unsafe { pq_sys::PQlibVersion() }
 }
 
+#[track_caller]
 fn error(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::Pgsql,
-        message: message.to_owned(),
+    Error::new(ErrorKind::Pgsql, message.to_owned())
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn transport_error_records_its_caller() {
+        let expected_line = line!() + 1;
+        let error = error("PostgreSQL command failed; server details redacted");
+        assert_eq!(error.origin.file(), file!());
+        assert_eq!(error.origin.line(), expected_line);
+        assert!(error.origin.column() > 0);
     }
 }

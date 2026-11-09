@@ -29,8 +29,8 @@ fn clone_identity(connection: &mut PgConnection, io: &IoControl) -> Result<(Sour
     if !matches!(major, 16 | 18) {
         return Err(refusal("clone requires PostgreSQL 16 or 18"));
     }
-    let result = connection.query("SELECT c.system_identifier::pg_catalog.text, d.oid, k.timeline_id, pg_catalog.pg_is_in_recovery() FROM pg_catalog.pg_control_system() c CROSS JOIN pg_catalog.pg_control_checkpoint() k CROSS JOIN pg_catalog.pg_database d WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()",io)?;
-    if result.rows() != 1 || result.columns()? != 4 || text(&result, 0, 3)? != "f" {
+    let result = connection.query("SELECT c.system_identifier::pg_catalog.text, d.oid, k.timeline_id, pg_catalog.pg_is_in_recovery(), pg_catalog.pg_backend_pid() FROM pg_catalog.pg_control_system() c CROSS JOIN pg_catalog.pg_control_checkpoint() k CROSS JOIN pg_catalog.pg_database d WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()",io)?;
+    if result.rows() != 1 || result.columns()? != 5 || text(&result, 0, 3)? != "f" {
         return Err(refusal(
             "clone requires a primary database with a positive control identity",
         ));
@@ -40,6 +40,11 @@ fn clone_identity(connection: &mut PgConnection, io: &IoControl) -> Result<(Sour
         .map_err(|_| refusal("clone returned an invalid system identity"))?;
     if system == 0 || system.to_string() != text(&result, 0, 0)? {
         return Err(refusal("clone returned an invalid system identity"));
+    }
+    if cdc_object_id(text(&result, 0, 4)?)? != connection.backend_pid()? {
+        return Err(refusal(
+            "clone backend identity differs from the physical connection",
+        ));
     }
     Ok((
         SourceId {
@@ -224,6 +229,117 @@ GROUP BY r.attnum,r.attname,r.attgenerated ORDER BY r.attnum LIMIT 1601"#),io)?;
     Ok((writable, all))
 }
 
+pub(super) fn clone_identity_modes(
+    connection: &mut PgConnection,
+    oid: u32,
+    columns: &[String],
+    io: &IoControl,
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    let result = connection.query(&format!(r#"SELECT c.relispartition,a.attname,a.attidentity,r.attname,r.attidentity
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+LEFT JOIN pg_catalog.pg_attribute r ON c.relispartition AND r.attrelid=pg_catalog.pg_partition_root(c.oid) AND r.attname=a.attname AND r.attnum>0 AND NOT r.attisdropped
+WHERE c.oid={oid} AND c.relkind='r' ORDER BY a.attnum LIMIT 1601"#),io)?;
+    if columns.is_empty()
+        || columns.len() > 1600
+        || result.rows() != columns.len()
+        || result.columns()? != 5
+    {
+        return Err(refusal(
+            "clone identity metadata has an incomplete or unbounded column layout",
+        ));
+    }
+    let partition = match text(&result, 0, 0)? {
+        "t" => true,
+        "f" => false,
+        _ => {
+            return Err(refusal(
+                "clone identity metadata lacks declarative partition evidence",
+            ));
+        }
+    };
+    let mut local = Vec::with_capacity(columns.len());
+    let mut root = partition.then(|| Vec::with_capacity(columns.len()));
+    let mut names = BTreeSet::new();
+    for (row, name) in columns.iter().enumerate() {
+        if text(&result, row, 0)? != if partition { "t" } else { "f" }
+            || text(&result, row, 1)? != name
+            || !names.insert(name)
+        {
+            return Err(refusal(
+                "clone identity metadata column names differ from the plan",
+            ));
+        }
+        local.push(identity_mode(text(&result, row, 2)?)?);
+        if let Some(root) = &mut root {
+            if text(&result, row, 3)? != name {
+                return Err(refusal(
+                    "clone partition identity metadata lacks an exact root column",
+                ));
+            }
+            root.push(identity_mode(text(&result, row, 4)?)?);
+        } else if result.cell(row, 3)?.is_some() || result.cell(row, 4)?.is_some() {
+            return Err(refusal(
+                "clone ordinary table unexpectedly has partition identity metadata",
+            ));
+        }
+    }
+    Ok((local, root))
+}
+
+fn identity_mode(value: &str) -> Result<u8> {
+    match value {
+        "" => Ok(0),
+        "a" => Ok(b'a'),
+        "d" => Ok(b'd'),
+        _ => Err(refusal(
+            "clone identity metadata has an invalid generation mode",
+        )),
+    }
+}
+
+pub(super) fn require_identity_compatibility(
+    source_major: u32,
+    target_major: u32,
+    tables: &[CloneTable],
+) -> Result<()> {
+    if source_major == 16
+        && target_major == 18
+        && tables.iter().any(|table| {
+            table.partition_identity_modes.is_some()
+                && table.identity_modes.iter().any(|mode| *mode != 0)
+        })
+    {
+        return Err(refusal(
+            "clone identity: independent PostgreSQL 16 leaf identity cannot be represented on PostgreSQL 18",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn require_target_identity_modes(
+    table: &CloneTable,
+    target_major: u32,
+    local: &[u8],
+    root: Option<&[u8]>,
+) -> Result<()> {
+    let expected_local = if target_major == 18 && table.identity_modes.iter().all(|mode| *mode == 0)
+    {
+        table
+            .partition_identity_modes
+            .as_deref()
+            .unwrap_or(&table.identity_modes)
+    } else {
+        &table.identity_modes
+    };
+    if local != expected_local || root != table.partition_identity_modes.as_deref() {
+        return Err(refusal(
+            "clone target identity generation modes differ from the source plan",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn inspect_clone_tables(
     connection: &mut PgConnection,
     exact_exclusions: &[OwnedObject],
@@ -236,7 +352,7 @@ pub(crate) fn inspect_clone_tables(
     let mut after = 0;
     let mut budget = CATALOG_BYTES;
     loop {
-        let result=connection.query(&format!("SELECT c.oid,n.nspname,c.relname,c.relkind,c.relpersistence,COALESCE(am.amname,''), EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass AND d.objid=c.oid AND d.deptype='e'), EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal AND t.tgenabled IN ('A','R')) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p','v','m','f','S') AND c.oid>{after} ORDER BY c.oid LIMIT {CATALOG_PAGE}"),io)?;
+        let result=connection.query(&format!("SELECT c.oid,n.nspname,c.relname,c.relkind,c.relpersistence,COALESCE(am.amname,''), EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass AND d.objid=c.oid AND d.deptype='e'), EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND t.tgenabled IN ('A','R')) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p','v','m','f','S') AND c.oid>{after} ORDER BY c.oid LIMIT {CATALOG_PAGE}"),io)?;
         for row in 0..result.rows() {
             let oid = cdc_object_id(text(&result, row, 0)?)?;
             if oid <= after {
@@ -280,6 +396,8 @@ pub(crate) fn inspect_clone_tables(
                 io,
             )?;
             let (writable_columns, all_columns) = clone_columns(connection, oid, io)?;
+            let (identity_modes, partition_identity_modes) =
+                clone_identity_modes(connection, oid, &all_columns, io)?;
             let selected = writable_columns
                 .iter()
                 .map(|name| connection.quote_identifier(name))
@@ -292,13 +410,17 @@ pub(crate) fn inspect_clone_tables(
                     + name.schema.len()
                     + name.table.len()
                     + all_columns.iter().map(String::len).sum::<usize>()
-                    + writable_columns.iter().map(String::len).sum::<usize>(),
+                    + writable_columns.iter().map(String::len).sum::<usize>()
+                    + identity_modes.capacity()
+                    + partition_identity_modes.as_ref().map_or(0, Vec::capacity),
             )?;
             tables.push(CloneTable {
                 source_oid: oid,
                 name,
                 writable_columns,
                 all_columns,
+                identity_modes,
+                partition_identity_modes,
             });
         }
         if result.rows() < CATALOG_PAGE {
@@ -332,6 +454,7 @@ pub(crate) fn plan_clone(
         ));
     }
     let tables = inspect_clone_tables(source, &[], io)?;
+    require_identity_compatibility(source_id.major, target_id.major, &tables)?;
     source_obligations(target, io)?;
     let objects = clone_object_inventory(target, io)?;
     verify_exact_exclusions(&objects, exact_metadata)?;
@@ -418,6 +541,8 @@ pub(crate) fn reconcile_clone_tables(
                 "pre-data target column layout differs from the source plan",
             ));
         }
+        let (local, root) = clone_identity_modes(target, object.object_oid, &all, io)?;
+        require_target_identity_modes(table, plan.target.major, &local, root.as_deref())?;
         tables.push(OwnedCopyTable {
             table: table.clone(),
             target_oid: object.object_oid,
@@ -531,6 +656,128 @@ pub(crate) fn analyze_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_modes_normalize_only_zero_local_declarative_leaves_on_pg18() {
+        let mut table = CloneTable {
+            source_oid: 42,
+            name: QualifiedTable {
+                schema: "public".into(),
+                table: "leaf".into(),
+            },
+            all_columns: vec!["id".into(), "body".into()],
+            writable_columns: vec!["id".into(), "body".into()],
+            identity_modes: vec![0, 0],
+            partition_identity_modes: Some(vec![b'a', 0]),
+        };
+        require_target_identity_modes(&table, 16, &[0, 0], Some(&[b'a', 0])).unwrap();
+        require_target_identity_modes(&table, 18, &[b'a', 0], Some(&[b'a', 0])).unwrap();
+        assert!(require_target_identity_modes(&table, 18, &[0, 0], Some(&[b'a', 0])).is_err());
+        assert!(require_target_identity_modes(&table, 18, &[b'd', 0], Some(&[b'a', 0])).is_err());
+        assert!(require_target_identity_modes(&table, 18, &[b'a', 0], Some(&[b'd', 0])).is_err());
+        assert!(require_target_identity_modes(&table, 16, &[b'a', 0], Some(&[b'a', 0])).is_err());
+        table.identity_modes[0] = b'd';
+        require_target_identity_modes(&table, 16, &[b'd', 0], Some(&[b'a', 0])).unwrap();
+        require_identity_compatibility(16, 16, std::slice::from_ref(&table)).unwrap();
+        assert!(
+            require_identity_compatibility(16, 18, std::slice::from_ref(&table))
+                .unwrap_err()
+                .message
+                .contains("independent")
+        );
+        table.partition_identity_modes = None;
+        require_identity_compatibility(16, 18, std::slice::from_ref(&table)).unwrap();
+        require_target_identity_modes(&table, 18, &[b'd', 0], None).unwrap();
+        assert!(require_target_identity_modes(&table, 18, &[b'a', 0], None).is_err());
+    }
+
+    #[test]
+    fn identity_mode_bytes_require_exact_catalog_values() {
+        for (value, expected) in [("", 0), ("a", b'a'), ("d", b'd')] {
+            assert_eq!(identity_mode(value).unwrap(), expected);
+        }
+        for invalid in ["0", "A", "ad", " "] {
+            assert!(identity_mode(invalid).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires owned PostgreSQL harness"]
+    fn live_identity_catalog_tracks_physical_and_partition_root_modes() {
+        let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
+        let context: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                std::path::Path::new(context["root"].as_str().unwrap()).join(".e1-owner")
+            )
+            .unwrap(),
+            context["token"].as_str().unwrap()
+        );
+        let io = IoControl {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let info =
+            crate::contracts::Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_SOURCE").unwrap())
+                .unwrap();
+        let mut connection = PgConnection::connect(&info, &io).unwrap();
+        configure_session(&mut connection, &io).unwrap();
+        command(&mut connection, "BEGIN", "BEGIN", &io).unwrap();
+        let schema = format!("identity_catalog_{}", std::process::id());
+        for sql in [
+            format!("CREATE SCHEMA {schema}"),
+            format!(
+                "CREATE TABLE {schema}.plain(id integer GENERATED ALWAYS AS IDENTITY, second integer GENERATED BY DEFAULT AS IDENTITY)"
+            ),
+            format!(
+                "CREATE TABLE {schema}.parent(id integer GENERATED ALWAYS AS IDENTITY, body integer)"
+            ),
+            format!("CREATE TABLE {schema}.child() INHERITS ({schema}.parent)"),
+            format!(
+                "ALTER TABLE {schema}.child ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY"
+            ),
+            format!(
+                "CREATE TABLE {schema}.root(discarded integer,id integer GENERATED ALWAYS AS IDENTITY,body integer) PARTITION BY RANGE (body)"
+            ),
+            format!("ALTER TABLE {schema}.root DROP COLUMN discarded"),
+            format!(
+                "CREATE TABLE {schema}.leaf PARTITION OF {schema}.root FOR VALUES FROM (0) TO (100)"
+            ),
+        ] {
+            connection.query(&sql, &io).unwrap();
+        }
+        let tables = inspect_clone_tables(&mut connection, &[], &io).unwrap();
+        let get = |name: &str| {
+            tables
+                .iter()
+                .find(|t| t.name.schema == schema && t.name.table == name)
+                .unwrap()
+        };
+        assert_eq!(get("plain").identity_modes, [b'a', b'd']);
+        assert_eq!(get("plain").partition_identity_modes, None);
+        assert_eq!(get("parent").identity_modes, [b'a', 0]);
+        assert_eq!(get("child").identity_modes, [b'd', 0]);
+        assert_eq!(get("child").partition_identity_modes, None);
+        assert_eq!(get("leaf").all_columns, ["id", "body"]);
+        assert_eq!(
+            get("leaf").identity_modes,
+            if connection.server_version().unwrap() / 10_000 == 18 {
+                vec![b'a', 0]
+            } else {
+                vec![0, 0]
+            }
+        );
+        assert_eq!(get("leaf").partition_identity_modes, Some(vec![b'a', 0]));
+        let oid = get("leaf").source_oid;
+        assert!(
+            clone_identity_modes(&mut connection, oid, &["body".into(), "id".into()], &io).is_err()
+        );
+        assert!(clone_identity_modes(&mut connection, oid, &["id".into()], &io).is_err());
+        assert!(clone_identity_modes(&mut connection, oid, &[], &io).is_err());
+        assert!(clone_identity_modes(&mut connection, 0, &["id".into()], &io).is_err());
+        command(&mut connection, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    }
 
     #[test]
     fn logged_heaps_and_partition_roots_admit_without_an_inheritance_whitelist() {

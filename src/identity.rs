@@ -24,6 +24,7 @@ pub struct StreamId {
 pub struct TxId {
     pub stream: StreamId,
     pub xid: u32,
+    // Follow format 6 uses source BEGIN.final_lsn so replay identity survives reconnect.
     pub begin_ordinal: u64,
 }
 

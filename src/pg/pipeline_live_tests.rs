@@ -1,4 +1,9 @@
-use super::{CommitObservation, Conninfo, IoControl, PgConnection, PgParam, error};
+use super::prepared_live_tests::{
+    IDENTITY_REWRITE_SQL, assert_identity_rewrite_state, identity_rewrite_fixture,
+};
+use super::{
+    CommitObservation, Conninfo, IoControl, PgConnection, PgParam, TransactionStatus, error,
+};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -25,14 +30,187 @@ fn connect(io: &IoControl) -> PgConnection {
 
 #[test]
 #[ignore = "requires isolated harness connection"]
+fn pipeline_with_identity_rewrite_is_atomic() {
+    let io = control();
+    let mut connection = connect(&io);
+    identity_rewrite_fixture(&mut connection, &io);
+    let mut pipeline = connection.pipeline_begin(&io).unwrap();
+    pipeline
+        .query("UPDATE identity_sentinel SET value=1", &io)
+        .unwrap();
+    pipeline
+        .query(
+            &IDENTITY_REWRITE_SQL
+                .replace("$1", "11")
+                .replace("$2", "'changed'")
+                .replace("$3", "1")
+                .replace("$4", "'first'"),
+            &io,
+        )
+        .unwrap();
+    let mut tags = Vec::new();
+    pipeline
+        .sync(&io, |index, result| {
+            assert_eq!(result.rows(), 0);
+            tags.push((index, result.command_tag()?.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        tags,
+        [
+            (0, "BEGIN".to_owned()),
+            (1, "UPDATE 1".to_owned()),
+            (2, "INSERT 0 1".to_owned()),
+        ]
+    );
+    connection
+        .prepare("rewrite", IDENTITY_REWRITE_SQL, &[23, 25, 23, 25], &io)
+        .unwrap();
+    let mut pipeline = connection.pipeline(&io).unwrap();
+    pipeline
+        .execute_prepared(
+            "rewrite",
+            &[
+                PgParam::Text(b"12"),
+                PgParam::Text(b"changed"),
+                PgParam::Text(b"11"),
+                PgParam::Text(b"changed"),
+            ],
+            &io,
+        )
+        .unwrap();
+    let mut tags = Vec::new();
+    pipeline
+        .sync(&io, |index, result| {
+            assert_eq!(result.rows(), 0);
+            tags.push((index, result.command_tag()?.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(tags, [(0, "INSERT 0 1".to_owned())]);
+    assert_eq!(
+        connection.transaction_status().unwrap(),
+        TransactionStatus::InTransaction
+    );
+    assert_identity_rewrite_state(&mut connection, 12, 1, &io);
+    assert_eq!(
+        connection.commit_observed(&io).unwrap(),
+        CommitObservation::Committed
+    );
+    for (id, other, sqlstate) in [
+        (&b"2"[..], PgParam::Text(b"changed"), "23505"),
+        (&b"13"[..], PgParam::Null, "23502"),
+    ] {
+        let mut pipeline = connection.pipeline_begin(&io).unwrap();
+        pipeline
+            .query("UPDATE identity_sentinel SET value=2", &io)
+            .unwrap();
+        pipeline
+            .execute_prepared(
+                "rewrite",
+                &[
+                    PgParam::Text(id),
+                    other,
+                    PgParam::Text(b"12"),
+                    PgParam::Text(b"changed"),
+                ],
+                &io,
+            )
+            .unwrap();
+        let failure = pipeline.sync(&io, |_, _| Ok(())).unwrap_err();
+        assert!(failure.message.contains(sqlstate));
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::InError
+        );
+        assert_eq!(
+            connection.commit_observed(&io).unwrap(),
+            CommitObservation::RolledBack
+        );
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::Idle
+        );
+        assert_identity_rewrite_state(&mut connection, 12, 1, &io);
+    }
+}
+
+#[test]
+#[ignore = "requires isolated harness connection"]
+fn pipeline_with_transaction_escapes_never_commit() {
+    let io = control();
+    let mut observer = connect(&io);
+    observer
+        .query("CREATE TABLE pipeline_escape_sentinel(value integer)", &io)
+        .unwrap();
+    observer
+        .query("INSERT INTO pipeline_escape_sentinel VALUES (0)", &io)
+        .unwrap();
+    for sql in [
+        "COMMIT",
+        "SELECT 1; COMMIT",
+        "WITH x AS (COMMIT) SELECT 1",
+        "WITH x AS (SELECT 1) COMMIT",
+        "WITH x AS (SELECT 1) SELECT 1; COMMIT",
+    ] {
+        let mut connection = connect(&io);
+        connection.query("BEGIN", &io).unwrap();
+        connection
+            .query("UPDATE pipeline_escape_sentinel SET value=1", &io)
+            .unwrap();
+        let mut pipeline = connection.pipeline(&io).unwrap();
+        if sql == "COMMIT" {
+            let failure = pipeline.query(sql, &io).unwrap_err();
+            assert!(failure.message.contains("internal data"));
+            assert_eq!(pipeline.commands(), 0);
+            drop(pipeline);
+            assert!(connection.query("SELECT 1", &io).is_err());
+        } else {
+            pipeline.query(sql, &io).unwrap();
+            assert_eq!(pipeline.commands(), 1);
+            let failure = pipeline.sync(&io, |_, _| Ok(())).unwrap_err();
+            assert!(
+                failure.message.contains("42601"),
+                "{sql}: {}",
+                failure.message
+            );
+            assert_eq!(
+                connection.transaction_status().unwrap(),
+                TransactionStatus::InError
+            );
+            assert_eq!(
+                connection.commit_observed(&io).unwrap(),
+                CommitObservation::RolledBack
+            );
+            assert_eq!(
+                connection.transaction_status().unwrap(),
+                TransactionStatus::Idle
+            );
+        }
+        assert_eq!(
+            observer
+                .query("SELECT value FROM pipeline_escape_sentinel", &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(&b"0"[..])
+        );
+    }
+    observer
+        .query("DROP TABLE pipeline_escape_sentinel", &io)
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires isolated harness connection"]
 fn pipeline_validates_ordered_rows_and_every_terminal_result() {
     let io = control();
     let mut connection = connect(&io);
     connection
         .prepare("value", "SELECT $1::text", &[25], &io)
         .unwrap();
-    let mut pipeline = connection.pipeline(&io).unwrap();
-    pipeline.query("BEGIN", &io).unwrap();
+    let mut pipeline = connection.pipeline_begin(&io).unwrap();
     pipeline.query("SELECT generate_series(1, 3)", &io).unwrap();
     pipeline
         .execute_prepared("value", &[PgParam::Text(b"tail")], &io)
@@ -72,23 +250,18 @@ fn pipeline_validates_ordered_rows_and_every_terminal_result() {
 fn pipeline_sql_and_callback_errors_drain_through_sync() {
     let io = control();
     let mut connection = connect(&io);
-    let mut pipeline = connection.pipeline(&io).unwrap();
-    for sql in [
-        "BEGIN",
-        "SELECT 1 / 0",
-        "CREATE TEMP TABLE skipped_pipeline(value integer)",
-        "COMMIT",
-    ] {
+    connection
+        .query("CREATE TEMP TABLE skipped_pipeline(value integer)", &io)
+        .unwrap();
+    let mut pipeline = connection.pipeline_begin(&io).unwrap();
+    for sql in ["SELECT 1 / 0", "INSERT INTO skipped_pipeline VALUES (1)"] {
         pipeline.query(sql, &io).unwrap();
     }
     let failure = pipeline.sync(&io, |_, _| Ok(())).unwrap_err();
     assert!(failure.message.contains("22012"));
     connection.query("ROLLBACK", &io).unwrap();
     let result = connection
-        .query(
-            "SELECT to_regclass('pg_temp.skipped_pipeline') IS NULL",
-            &io,
-        )
+        .query("SELECT count(*)=0 FROM skipped_pipeline", &io)
         .unwrap();
     assert_eq!(result.cell(0, 0).unwrap(), Some(&b"t"[..]));
     let mut pipeline = connection.pipeline(&io).unwrap();
@@ -113,24 +286,16 @@ fn pipeline_sql_and_callback_errors_drain_through_sync() {
     assert!(connection.query("SELECT 42", &io).is_ok());
 
     let mut refused = connect(&io);
-    let mut pipeline = refused.pipeline(&io).unwrap();
-    for sql in [
-        "BEGIN",
-        "DO $$ BEGIN RAISE WARNING 'private-warning-row-secret'; END $$",
-        "COMMIT",
-    ] {
-        pipeline.query(sql, &io).unwrap();
-    }
-    let mut committed = false;
+    let mut pipeline = refused.pipeline_begin(&io).unwrap();
     let failure = pipeline
-        .sync(&io, |_, result| {
-            committed |= result.command_tag()? == "COMMIT";
-            Ok(())
-        })
-        .expect_err("warning-bearing pipeline COMMIT was accepted");
-    assert!(failure.message.contains("checked commit"));
+        .query(
+            "DO $$ BEGIN RAISE WARNING 'private-warning-row-secret'; END $$",
+            &io,
+        )
+        .expect_err("pipeline utility command was accepted");
+    assert!(failure.message.contains("internal data"));
     assert!(!failure.message.contains("private-warning-row-secret"));
-    assert!(!committed);
+    drop(pipeline);
     assert!(refused.query("SELECT 1", &io).is_err());
     connection
         .query(
@@ -187,16 +352,15 @@ fn pipeline_drop_deadline_and_limits_fail_closed() {
     committed
         .query("SET client_min_messages = error", &io)
         .unwrap();
-    let mut pipeline = committed.pipeline(&io).unwrap();
-    pipeline.query("BEGIN", &io).unwrap();
-    pipeline.query("COMMIT", &io).unwrap();
+    let mut pipeline = committed.pipeline_begin(&io).unwrap();
     assert!(
         pipeline
-            .sync(&io, |_, _| Ok(()))
+            .query("COMMIT", &io)
             .unwrap_err()
             .message
-            .contains("checked commit")
+            .contains("internal data")
     );
+    drop(pipeline);
     assert!(committed.query("SELECT 1", &io).is_err());
     let mut dropped = connect(&io);
     let mut pipeline = dropped.pipeline(&io).unwrap();

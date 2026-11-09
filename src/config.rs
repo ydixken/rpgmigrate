@@ -7,8 +7,8 @@ use clap::parser::ValueSource;
 
 use crate::cli::{CommandPath, Environment, Parser};
 use crate::contracts::{
-    CloneOptions, Conninfo, Error, ErrorKind, Invocation, RestorePolicy, Result, StateAction,
-    StateRequest,
+    CloneOptions, Conninfo, Error, ErrorKind, FollowLimits, FollowOptions, Invocation,
+    RestorePolicy, Result, StateAction, StateRequest,
 };
 
 const COMMON_ENV: &[(&str, &str, bool)] = &[
@@ -70,17 +70,15 @@ struct Setting {
 }
 
 impl Setting {
+    #[track_caller]
     fn error(&self, name: &str, reason: &str) -> Error {
         if let Some(environment) = &self.environment {
-            Error {
-                kind: ErrorKind::BadConfig,
-                message: format!("invalid {environment}: {reason}"),
-            }
+            Error::new(
+                ErrorKind::BadConfig,
+                format!("invalid {environment}: {reason}"),
+            )
         } else {
-            Error {
-                kind: ErrorKind::BadArgs,
-                message: format!("invalid --{name}: {reason}"),
-            }
+            Error::new(ErrorKind::BadArgs, format!("invalid --{name}: {reason}"))
         }
     }
 
@@ -217,6 +215,7 @@ impl Settings {
         self.count(name) > 0
     }
 
+    #[track_caller]
     fn invalid_combination(&self, names: &[&str], reason: &str) -> Error {
         if let Some((name, setting)) = names.iter().find_map(|name| {
             self.options
@@ -226,10 +225,7 @@ impl Settings {
         }) {
             setting.error(name, reason)
         } else {
-            Error {
-                kind: ErrorKind::BadArgs,
-                message: reason.into(),
-            }
+            Error::new(ErrorKind::BadArgs, reason)
         }
     }
 
@@ -347,26 +343,31 @@ impl Settings {
         env: &Environment,
     ) -> Result<Invocation> {
         let operator = crate::protocol::operator_identity(env)?;
-        let clone_route = path.0 == ["clone"];
+        let follow = path.0 == ["follow"] || (path.0 == ["clone"] && self.enabled("follow"));
+        let clone_route = path.0 == ["clone"] && !follow;
         let progress = path.0 == ["list", "progress"];
         let compare_schema = path.0 == ["compare", "schema"];
         let compare_data = path.0 == ["compare", "data"];
-        let native_route = clone_route || progress || compare_schema || compare_data;
+        let native_route = follow || clone_route || progress || compare_schema || compare_data;
         if operator.is_some() && !native_route {
-            return Err(Error {
-                kind: ErrorKind::BadConfig,
-                message: "unimplemented operator identity state binding; no database or state action was started".into(),
-            });
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "unimplemented operator identity state binding; no database or state action was started",
+            ));
         }
-        if validate_apply_group(env)? {
-            return Err(Error {
-                kind: ErrorKind::BadConfig,
-                message: "unimplemented PGCOPYDB_APPLY_GROUP_TXNS; no database or state action was started".into(),
-            });
+        let apply_group = validate_apply_group(env)?;
+        if apply_group.is_some() && !follow {
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "unimplemented PGCOPYDB_APPLY_GROUP_TXNS; no database or state action was started",
+            ));
         }
         self.validate_connections(parser)?;
         if native_route {
-            let options = self.clone_options(env, operator, !clone_route)?;
+            let options = self.clone_options(env, operator, !clone_route && !follow, follow)?;
+            if follow {
+                return self.follow_options(options, apply_group.unwrap_or(100));
+            }
             return Ok(if clone_route {
                 Invocation::Clone(options)
             } else if progress {
@@ -391,6 +392,7 @@ impl Settings {
         env: &Environment,
         operator: Option<crate::contracts::OperatorIdentity>,
         read_only: bool,
+        follow: bool,
     ) -> Result<CloneOptions> {
         if !self.operands.is_empty() {
             return Err(
@@ -417,6 +419,11 @@ impl Settings {
                             | "no-comments"
                             | "no-tablespaces"
                             | "skip-large-objects"
+                    ))
+                || (follow
+                    && matches!(
+                        name.as_str(),
+                        "follow" | "plugin" | "slot-name" | "publication" | "origin" | "durability"
                     ));
             if !allowed {
                 return Err(unsupported_option(name));
@@ -478,6 +485,54 @@ impl Settings {
         })
     }
 
+    fn follow_options(&self, clone: CloneOptions, apply_group_txns: u64) -> Result<Invocation> {
+        if !self.enabled("skip-large-objects") {
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "follow requires explicit --skip-large-objects; no database or state action was started",
+            ));
+        }
+        for (name, admitted) in [("plugin", "pgoutput"), ("durability", "durable")] {
+            if self.text(name).is_some_and(|value| value != admitted) {
+                return Err(unsupported_option(name));
+            }
+        }
+        let name = |option: &str| -> Result<Option<String>> {
+            self.text(option)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .filter(|value| {
+                            !value.is_empty()
+                                && value.len() <= 63
+                                && !value.contains('\0')
+                                && (option != "slot-name"
+                                    || value.bytes().all(|byte| {
+                                        byte.is_ascii_lowercase()
+                                            || byte.is_ascii_digit()
+                                            || byte == b'_'
+                                    }))
+                        })
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            self.invalid_combination(
+                                &[option],
+                                "invalid native follow resource name",
+                            )
+                        })
+                })
+                .transpose()
+        };
+        Ok(Invocation::Follow(FollowOptions {
+            clone,
+            slot_name: name("slot-name")?.unwrap_or_default(),
+            publication_name: name("publication")?.unwrap_or_default(),
+            origin_name: name("origin")?,
+            apply_group_txns,
+            limits: FollowLimits::default(),
+        }))
+    }
+
     fn validate_connections(&self, parser: Parser) -> Result<()> {
         for name in ["source", "target"] {
             if let Some(setting) = self.options.get(name) {
@@ -520,7 +575,7 @@ impl Settings {
         env: &Environment,
     ) -> Result<serde_json::Value> {
         crate::protocol::operator_run(env)?;
-        validate_apply_group(env)?;
+        let _ = validate_apply_group(env)?;
         self.validate_connections(parser)?;
         Ok(serde_json::json!({
             "effective_source": self.text("source").and_then(OsStr::to_str),
@@ -537,7 +592,10 @@ impl Settings {
             return Ok(Invocation::Unsupported(path));
         }
         if !self.operands.is_empty() {
-            return Err(Error { kind: ErrorKind::BadConfig, message: "unimplemented operands: this command does not select a table by positional argument".into() });
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "unimplemented operands: this command does not select a table by positional argument",
+            ));
         }
         for (name, setting) in &self.options {
             if matches!(name.as_str(), "source" | "target") || !setting.active() {
@@ -602,9 +660,11 @@ impl Settings {
         #[cfg(target_os = "macos")]
         let base =
             if base == std::path::Path::new("/tmp") || base == std::path::Path::new("/var/tmp") {
-                std::fs::canonicalize(&base).map_err(|_| Error {
-                    kind: ErrorKind::BadConfig,
-                    message: "default temporary directory is unavailable".into(),
+                std::fs::canonicalize(&base).map_err(|_| {
+                    Error::new(
+                        ErrorKind::BadConfig,
+                        "default temporary directory is unavailable",
+                    )
                 })?
             } else {
                 base
@@ -613,27 +673,29 @@ impl Settings {
     }
 }
 
-fn validate_apply_group(env: &Environment) -> Result<bool> {
+fn validate_apply_group(env: &Environment) -> Result<Option<u64>> {
     let Some(value) = env.0.get(OsStr::new("PGCOPYDB_APPLY_GROUP_TXNS")) else {
-        return Ok(false);
+        return Ok(None);
     };
-    if !value
+    let parsed = value
         .to_str()
-        .is_some_and(|value| bounded_integer(value, 1, u64::MAX))
-    {
-        return Err(Error {
-            kind: ErrorKind::BadConfig,
-            message: "invalid PGCOPYDB_APPLY_GROUP_TXNS: expected a positive integer".into(),
-        });
+        .and_then(parse_integer)
+        .filter(|value| *value > 0);
+    if parsed.is_none() {
+        return Err(Error::new(
+            ErrorKind::BadConfig,
+            "invalid PGCOPYDB_APPLY_GROUP_TXNS: expected a positive integer",
+        ));
     }
-    Ok(true)
+    Ok(parsed)
 }
 
+#[track_caller]
 fn unsupported_option(name: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadConfig,
-        message: format!("unimplemented option --{name}; no database or state action was started"),
-    }
+    Error::new(
+        ErrorKind::BadConfig,
+        format!("unimplemented option --{name}; no database or state action was started"),
+    )
 }
 
 fn validate_value(name: &str, setting: &Setting, parser: Parser) -> Result<()> {

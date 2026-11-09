@@ -340,9 +340,9 @@ class CliContract(unittest.TestCase):
                         json_version = parser == "cli_print_version_getopts" and name == "json"
                         admitted_clone = parser == "cli_copy_db_getopts" and name in {
                             "source", "target", "dir", "jobs", "table-jobs", "index-jobs", "restore-jobs",
-                            "no-owner", "no-acl", "no-comments", "no-tablespaces", "skip-blobs", "skip-large-objects",
+                            "no-owner", "no-acl", "no-comments", "no-tablespaces", "skip-blobs", "skip-large-objects", "restart",
                         }
-                        missing_clone = parser == "cli_copy_db_getopts" and name in {"resume", "restart"}
+                        missing_clone = parser == "cli_copy_db_getopts" and name == "resume"
                         missing_compare = parser == "cli_compare_getopts" and name in {"source", "target", "dir", "json"}
                         inconsistent = parser == "cli_copy_db_getopts" and name == "not-consistent"
                         if name in {"help", "version"} or json_version:
@@ -368,7 +368,14 @@ class CliContract(unittest.TestCase):
                             self.assertIn("--not-consistent requires --resume", result.stderr)
                             self.assertFalse(state.exists())
                         elif expected == 2:
-                            self.assertIn("unimplemented", result.stderr.lower())
+                            if parser == "cli_copy_db_getopts" and name == "follow":
+                                error = json.loads(result.stderr)
+                                self.assertEqual(error["category"], "BadConfig")
+                                self.assertEqual(error["exit_code"], 2)
+                                self.assertIn("follow requires explicit --skip-large-objects; no database or state action was started", error["message"])
+                                self.assertEqual(result.stdout, "")
+                            else:
+                                self.assertIn("unimplemented", result.stderr.lower())
                             self.assertFalse(state.exists())
                         if json_version:
                             report = json.loads(result.stdout)

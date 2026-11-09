@@ -19,9 +19,11 @@ enum Entry {
 }
 
 fn entry(phase: Option<ClonePhase>, action: StateAction, not_consistent: bool) -> Result<Entry> {
+    // open_clone admits None only for a new or positively proven pristine INIT state.
     match (phase, action, not_consistent) {
-        (None, StateAction::Create, false) => Ok(Entry::Fresh),
-        (Some(ClonePhase::Complete), StateAction::Resume, false) => Ok(Entry::Complete),
+        (None, StateAction::Create | StateAction::Restart, false)
+        | (None, StateAction::Resume, _) => Ok(Entry::Fresh),
+        (Some(ClonePhase::Complete), StateAction::Resume, _) => Ok(Entry::Complete),
         (Some(ClonePhase::Copying), StateAction::Restart, false)
         | (Some(ClonePhase::Copying), StateAction::Resume, true) => Ok(Entry::Recopy),
         (Some(ClonePhase::PostDataComplete), StateAction::Resume, false) => {
@@ -247,7 +249,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
     completion(&options, &native, &plan, &report, io)
 }
 
-fn require_pre_data_match(result: Result<bool>) -> Result<()> {
+pub(crate) fn require_pre_data_match(result: Result<bool>) -> Result<()> {
     match result {
         Ok(true) => Ok(()),
         Ok(false) => Err(refusal(
@@ -259,7 +261,7 @@ fn require_pre_data_match(result: Result<bool>) -> Result<()> {
     }
 }
 
-fn require_same_plan(previous: &ClonePlan, candidate: &ClonePlan) -> Result<()> {
+pub(crate) fn require_same_plan(previous: &ClonePlan, candidate: &ClonePlan) -> Result<()> {
     if previous.source != candidate.source
         || previous.target != candidate.target
         || previous.tables != candidate.tables
@@ -273,7 +275,7 @@ fn require_same_plan(previous: &ClonePlan, candidate: &ClonePlan) -> Result<()> 
     Ok(())
 }
 
-fn metadata(
+pub(crate) fn metadata(
     native: &NativeState,
     plan: &ClonePlan,
     target: &mut PgConnection,
@@ -292,7 +294,7 @@ fn metadata(
     crate::apply::metadata_inventory(target, provenance, io)
 }
 
-fn pending(
+pub(crate) fn pending(
     native: &mut NativeState,
     authority: &mut CloneAuthority,
     phase: ClonePhase,
@@ -302,7 +304,7 @@ fn pending(
     authority.mark_stage(phase, io)
 }
 
-fn positive(
+pub(crate) fn positive(
     native: &mut NativeState,
     authority: &mut CloneAuthority,
     phase: ClonePhase,
@@ -349,16 +351,29 @@ fn completion(
     Ok(format!("{value}\n"))
 }
 
+#[track_caller]
 fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadState,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadState, message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_init_state_starts_without_recovery_artifacts() {
+        for (action, not_consistent) in [
+            (StateAction::Create, false),
+            (StateAction::Restart, false),
+            (StateAction::Resume, false),
+            (StateAction::Resume, true),
+        ] {
+            assert_eq!(entry(None, action, not_consistent).unwrap(), Entry::Fresh);
+        }
+        for action in [StateAction::Create, StateAction::Restart] {
+            assert!(entry(None, action, true).is_err());
+        }
+    }
 
     #[test]
     fn lost_snapshot_requires_explicit_fresh_generation() {
@@ -391,7 +406,10 @@ mod tests {
             Entry::Complete
         );
         assert!(entry(Some(ClonePhase::Complete), StateAction::Restart, false).is_err());
-        assert!(entry(Some(ClonePhase::Complete), StateAction::Resume, true).is_err());
+        assert_eq!(
+            entry(Some(ClonePhase::Complete), StateAction::Resume, true).unwrap(),
+            Entry::Complete
+        );
     }
 
     #[test]

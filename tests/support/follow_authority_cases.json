@@ -1,0 +1,13 @@
+[
+  "apply::checkpoint::live_tests::follow_streamed_group_is_atomic_and_checkpointed_once",
+  "apply::checkpoint::live_tests::follow_cas_failure_rolls_back_dml_and_feedback",
+  "apply::checkpoint::live_tests::follow_certification_and_recovery_refuse_a_source_gap",
+  "apply::checkpoint::live_tests::follow_cancelled_sync_wait_never_proves_group_or_certification",
+  "apply::checkpoint::live_tests::follow_restart_resets_the_complete_workset_and_allows_safe_preworker_retry",
+  "apply::checkpoint::live_tests::follow_restart_refuses_foreign_replacement_and_fk_without_mutating_rows",
+  "apply::checkpoint::live_tests::follow_identity_rewrite_commits_data_and_checkpoint",
+  "apply::checkpoint::live_tests::follow_identity_rewrite_constraint_failure_rolls_back",
+  "apply::checkpoint::live_tests::follow_identity_rewrite_missing_row_and_wrong_tag_roll_back",
+  "apply::checkpoint::live_tests::follow_identity_rewrite_cas_failure_rolls_back",
+  "apply::checkpoint::live_tests::follow_identity_rewrite_transaction_escape_rolls_back"
+]

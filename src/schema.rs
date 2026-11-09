@@ -225,7 +225,9 @@ fn utility(program: &Path, conninfo: &Conninfo) -> Result<Command> {
         .map(|(_, value)| value.clone())
         .or_else(|| std::env::var_os("PGOPTIONS"))
         .unwrap_or_default();
-    options.push(" -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8");
+    options.push(
+        " -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C",
+    );
     let mut command = Command::new(program);
     command
         .envs(environment)
@@ -683,11 +685,9 @@ fn compare_schemas(
     }
 }
 
+#[track_caller]
 fn failure(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadConfig,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadConfig, message)
 }
 
 #[cfg(test)]

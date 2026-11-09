@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "PROVENANCE.md",
+      "sha256": "534cca9bc230eeccb0ba044de2f0e403e72aecbcd94e3f9910aa9e252527ad19"
+    },
+    {
+      "path": "capture.py",
+      "sha256": "36fff8eb72376e18d60ebe005796263307a34e4f0cafcb1b4e0be7cf6ab864e1"
+    },
+    {
+      "path": "capture.sql",
+      "sha256": "9d49f07eab0ab97ec0418662c40bfc22d3a89fb63b8c9b2b027ed80389f16eec"
+    },
+    {
+      "path": "pg16.json",
+      "sha256": "0362f05ed2bd664f7c2f448796291860540ef4e779fd36e7ccd70567fedf6038"
+    },
+    {
+      "path": "pg18.json",
+      "sha256": "7b77013511147abf46e5525010fefc0244c6c12dfef207717cfc576392101f11"
+    }
+  ]
+}

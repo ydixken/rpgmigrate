@@ -5,5 +5,9 @@
   "pg::prepared_live_tests::prepared_execution_deadline_closes_connection",
   "pg::prepared_live_tests::prepared_execution_cancellation_closes_connection",
   "pg::prepared_live_tests::prepared_changes_roll_back_with_transaction",
-  "pg::prepared_live_tests::prepared_execution_rejects_copy_results"
+  "pg::prepared_live_tests::prepared_execution_rejects_copy_results",
+  "pg::prepared_live_tests::prepared_with_identity_rewrite_is_atomic",
+  "pg::prepared_live_tests::prepared_with_transaction_escapes_never_commit",
+  "pg::pipeline_live_tests::pipeline_with_identity_rewrite_is_atomic",
+  "pg::pipeline_live_tests::pipeline_with_transaction_escapes_never_commit"
 ]

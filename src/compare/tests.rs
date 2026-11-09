@@ -9,6 +9,8 @@ fn table(name: &str, oid: u32) -> CloneTable {
         },
         writable_columns: vec!["value".into()],
         all_columns: vec!["value".into()],
+        identity_modes: vec![0],
+        partition_identity_modes: None,
     }
 }
 
@@ -244,13 +246,30 @@ fn live_table(
     io: &IoControl,
 ) -> CloneTable {
     let name_literal = connection.quote_literal(name).unwrap();
-    let result = connection.query(&format!("SELECT n.nspname,c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.oid=pg_catalog.pg_my_temp_schema() AND c.relname={name_literal}"),io).unwrap();
+    let result = connection.query(&format!("SELECT n.nspname,c.oid,c.relispartition FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.oid=pg_catalog.pg_my_temp_schema() AND c.relname={name_literal}"),io).unwrap();
     assert_eq!(result.rows(), 1);
+    assert_eq!(result.cell(0, 2).unwrap(), Some(b"f".as_slice()));
+    let source_oid = std::str::from_utf8(result.cell(0, 1).unwrap().unwrap())
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let attributes = connection.query(&format!("SELECT attname,attidentity FROM pg_catalog.pg_attribute WHERE attrelid={source_oid} AND attnum>0 AND NOT attisdropped ORDER BY attnum LIMIT 1601"),io).unwrap();
+    assert_eq!(attributes.rows(), columns.len());
+    let identity_modes = columns
+        .iter()
+        .enumerate()
+        .map(|(row, name)| {
+            assert_eq!(attributes.cell(row, 0).unwrap(), Some(name.as_bytes()));
+            match attributes.cell(row, 1).unwrap() {
+                Some(b"") => 0,
+                Some(b"a") => b'a',
+                Some(b"d") => b'd',
+                _ => panic!("comparison fixture has an invalid identity mode"),
+            }
+        })
+        .collect();
     CloneTable {
-        source_oid: std::str::from_utf8(result.cell(0, 1).unwrap().unwrap())
-            .unwrap()
-            .parse()
-            .unwrap(),
+        source_oid,
         name: crate::contracts::QualifiedTable {
             schema: std::str::from_utf8(result.cell(0, 0).unwrap().unwrap())
                 .unwrap()
@@ -259,6 +278,8 @@ fn live_table(
         },
         writable_columns: columns.iter().map(|value| (*value).into()).collect(),
         all_columns: columns.iter().map(|value| (*value).into()).collect(),
+        identity_modes,
+        partition_identity_modes: None,
     }
 }
 

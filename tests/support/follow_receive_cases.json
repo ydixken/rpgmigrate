@@ -1,0 +1,6 @@
+[
+  "cdc::receive::tests::live_configuration_and_logical_query_preserve_export_lifetime",
+  "pg::follow_receive_tests::live_pipeline_commands_counts_dispatched_commands",
+  "cdc::receive::tests::live_startup_refuses_slot_advanced_beyond_recovery_before_readiness",
+  "cdc::receive::tests::full_fifo_status_survives_walsender_timeout"
+]

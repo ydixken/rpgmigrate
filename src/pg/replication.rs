@@ -120,22 +120,10 @@ pub(crate) struct ReplicationFrame {
 }
 
 pub(crate) enum ReplicationPoll {
-    Frame(
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "Logical source integration is pending")
-        )]
-        ReplicationFrame,
-    ),
+    Frame(ReplicationFrame),
     /// Libpq's output buffer is no longer pending; the supplied status is returned unchanged.
     /// This says nothing about sending, peer receipt, source acknowledgment, or durability.
-    FeedbackDrained(
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "Logical source integration is pending")
-        )]
-        StandbyStatus,
-    ),
+    FeedbackDrained(StandbyStatus),
     Wake,
     End,
 }
@@ -232,17 +220,9 @@ impl ReplicationFrame {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         self.buffer.as_bytes()
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn envelope(&self) -> ReplicationEnvelope {
         self.envelope
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Logical source integration is pending")
-    )]
     pub(crate) fn payload(&self) -> Option<&[u8]> {
         match self.envelope {
             ReplicationEnvelope::XLogData { .. } => Some(&self.as_bytes()[25..]),

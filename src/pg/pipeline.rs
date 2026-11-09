@@ -12,6 +12,19 @@ pub(crate) struct Pipeline<'a> {
 }
 
 impl PgConnection {
+    /// Only the connection owner can queue BEGIN before lending the data-only window.
+    pub(crate) fn pipeline_begin(&mut self, io: &IoControl) -> Result<Pipeline<'_>> {
+        self.require_mode(Mode::Sql)?;
+        if self.transaction_status()? != TransactionStatus::Idle {
+            return Err(error(
+                "PostgreSQL pipeline BEGIN requires an idle transaction",
+            ));
+        }
+        let mut pipeline = self.pipeline(io)?;
+        pipeline.query_internal("BEGIN", io)?;
+        Ok(pipeline)
+    }
+
     /// Pipeline completion validates a query window; use commit_observed for transaction completion.
     pub(crate) fn pipeline(&mut self, io: &IoControl) -> Result<Pipeline<'_>> {
         self.require_mode(Mode::Sql)?;
@@ -37,7 +50,20 @@ impl PgConnection {
 }
 
 impl Pipeline<'_> {
+    pub(crate) fn commands(&self) -> usize {
+        self.commands
+    }
+
     pub(crate) fn query(&mut self, sql: &str, io: &IoControl) -> Result<()> {
+        if !is_data_command(sql) {
+            return self.fail(error(
+                "PostgreSQL pipeline requires an internal data command",
+            ));
+        }
+        self.query_internal(sql, io)
+    }
+
+    fn query_internal(&mut self, sql: &str, io: &IoControl) -> Result<()> {
         self.check_capacity(sql.len().saturating_add(1))?;
         let sql = match prepared_cstring(sql.as_bytes()) {
             Ok(sql) => sql,
@@ -72,6 +98,7 @@ impl Pipeline<'_> {
                 bytes.saturating_add(match param {
                     PgParam::Null => 4,
                     PgParam::Text(value) => value.len().saturating_add(5),
+                    #[cfg(test)]
                     PgParam::Binary(value) => value.len().saturating_add(4),
                 })
             });
@@ -93,6 +120,7 @@ impl Pipeline<'_> {
                         text.push(string);
                         (pointer, 0, 0, value.len().saturating_add(5))
                     }
+                    #[cfg(test)]
                     PgParam::Binary(value) => (
                         value.as_ptr().cast(),
                         parameter_length(value.len())?,
@@ -300,6 +328,59 @@ impl Drop for Pipeline<'_> {
         if !self.finished {
             self.connection.raw.take();
             self.connection.phase = Phase::Idle;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_control_and_utilities_fail_before_pipeline_dispatch() {
+        let io = crate::contracts::IoControl {
+            deadline: Instant::now() + std::time::Duration::from_secs(1),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        for sql in [
+            "COMMIT",
+            "END",
+            "ROLLBACK",
+            "ABORT",
+            "BEGIN",
+            "START TRANSACTION",
+            "SAVEPOINT x",
+            "RELEASE SAVEPOINT x",
+            "PREPARE TRANSACTION 'x'",
+            "COMMIT PREPARED 'x'",
+            "EXECUTE x",
+            "DO $$ BEGIN END $$",
+            "SET client_min_messages=error",
+            "CREATE TABLE x(id int)",
+            "/* hidden */ SELECT 1",
+            "-- hidden\nSELECT 1",
+            "WITHIN x",
+            "with x AS (SELECT 1) SELECT * FROM x",
+            "",
+        ] {
+            let mut connection = super::super::tests::unconnected();
+            connection.mode = Mode::Sql;
+            connection.phase = Phase::Pipeline;
+            let mut pipeline = Pipeline {
+                connection: &mut connection,
+                commands: 0,
+                input_bytes: 0,
+                finished: false,
+            };
+            let failure = pipeline.query(sql, &io).unwrap_err();
+            assert!(
+                failure.message.contains("internal data"),
+                "{sql}: {}",
+                failure.message
+            );
+            assert_eq!(pipeline.commands(), 0);
+            drop(pipeline);
+            assert!(connection.raw.is_none());
         }
     }
 }

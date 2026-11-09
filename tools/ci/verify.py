@@ -6,10 +6,10 @@ from pathlib import Path
 
 HARNESS_SUITES = (
     "tests/support/test_harness.py", "tests/support/test_catalog_harness.py",
-    "tests/support/test_source_catalog_harness.py", "tests/support/test_source_snapshot_harness.py",
-    "tests/support/test_copy_snapshot_harness.py",
+    "tests/support/test_source_catalog_harness.py",
+    "tests/support/test_copy_snapshot_harness.py", "tests/support/test_follow_snapshot_harness.py",
 )
-CI_SUITES = ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/image/test_smoke.py", *HARNESS_SUITES)
+CI_SUITES = ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/image/test_smoke.py", *HARNESS_SUITES)
 
 
 class VerificationError(RuntimeError):

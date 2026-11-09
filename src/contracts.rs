@@ -19,6 +19,8 @@ pub(crate) const MAX_SNAPSHOT_TOKEN_BYTES: usize = 1024;
 pub(crate) struct Error {
     pub(crate) kind: ErrorKind,
     pub(crate) message: String,
+    pub(crate) origin: &'static std::panic::Location<'static>,
+    cancelled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +45,28 @@ pub(crate) enum ErrorKind {
 }
 
 impl Error {
+    #[track_caller]
+    pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            origin: std::panic::Location::caller(),
+            cancelled: false,
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn cancelled(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            cancelled: true,
+            ..Self::new(kind, message)
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
     pub(crate) fn exit_code(&self) -> u8 {
         match self.kind {
             ErrorKind::BadArgs => 1,
@@ -65,16 +89,18 @@ pub(crate) struct Conninfo(CString);
 impl Conninfo {
     pub(crate) fn new(value: OsString) -> Result<Self> {
         if value.is_empty() {
-            return Err(Error {
-                kind: ErrorKind::BadConfig,
-                message: "connection information is empty".into(),
-            });
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "connection information is empty",
+            ));
         }
         CString::new(value.into_encoded_bytes())
             .map(Self)
-            .map_err(|_| Error {
-                kind: ErrorKind::BadConfig,
-                message: "connection information contains a NUL byte".into(),
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::BadConfig,
+                    "connection information contains a NUL byte",
+                )
             })
     }
 
@@ -204,6 +230,9 @@ pub(crate) struct CloneTable {
     pub(crate) name: QualifiedTable,
     pub(crate) writable_columns: Vec<String>,
     pub(crate) all_columns: Vec<String>,
+    pub(crate) identity_modes: Vec<u8>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) partition_identity_modes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,9 +290,95 @@ pub(crate) struct CloneOptions {
     pub(crate) not_consistent: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FollowLimits {
+    pub(crate) channel_bytes: usize,
+    pub(crate) channel_messages: usize,
+    pub(crate) max_message_bytes: usize,
+    pub(crate) group_rows: usize,
+    pub(crate) group_bytes: usize,
+}
+
+impl Default for FollowLimits {
+    fn default() -> Self {
+        Self {
+            channel_bytes: 8 * 1024 * 1024,
+            channel_messages: 1024,
+            max_message_bytes: 16 * 1024 * 1024,
+            group_rows: 10_000,
+            group_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+impl FollowLimits {
+    pub(crate) fn validate(self) -> Result<()> {
+        if [
+            (self.channel_bytes, 8 * 1024 * 1024),
+            (self.channel_messages, 1024),
+            (self.max_message_bytes, 16 * 1024 * 1024),
+            (self.group_rows, 10_000),
+            (self.group_bytes, 8 * 1024 * 1024),
+        ]
+        .iter()
+        .any(|(value, maximum)| *value == 0 || value > maximum)
+        {
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "follow limits must be positive and within the compiled profile budgets",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FollowOptions {
+    pub(crate) clone: CloneOptions,
+    pub(crate) slot_name: String,
+    pub(crate) publication_name: String,
+    pub(crate) origin_name: Option<String>,
+    pub(crate) apply_group_txns: u64,
+    pub(crate) limits: FollowLimits,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublicationReceipt {
+    pub(crate) name: String,
+    pub(crate) oid: u32,
+    pub(crate) owner_oid: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceType {
+    pub(crate) oid: u32,
+    pub(crate) schema: String,
+    pub(crate) name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FollowBinding {
+    pub(crate) slot: crate::state::SourceSlotReceipt,
+    pub(crate) publication: PublicationReceipt,
+    pub(crate) source_timeline: u32,
+    pub(crate) copy_generation: CopyGeneration,
+    pub(crate) source_types: Vec<SourceType>,
+}
+
+impl FollowBinding {
+    pub(crate) fn stream(&self) -> StreamId {
+        self.slot.intent.binding.stream()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Invocation {
     Clone(CloneOptions),
+    Follow(FollowOptions),
     Progress {
         options: CloneOptions,
         json: bool,
@@ -294,6 +409,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn follow_limits_admit_one_bounded_oversize_message() {
+        let limits = FollowLimits::default();
+        assert_eq!(limits.channel_bytes, 8 * 1024 * 1024);
+        assert_eq!(limits.channel_messages, 1024);
+        assert_eq!(limits.max_message_bytes, 16 * 1024 * 1024);
+        assert_eq!(limits.group_rows, 10_000);
+        assert_eq!(limits.group_bytes, 8 * 1024 * 1024);
+        limits.validate().unwrap();
+        for field in 0..5 {
+            let mut invalid = limits;
+            match field {
+                0 => invalid.channel_bytes = 0,
+                1 => invalid.channel_messages = 0,
+                2 => invalid.max_message_bytes = 0,
+                3 => invalid.group_rows = 0,
+                _ => invalid.group_bytes = 0,
+            }
+            assert!(invalid.validate().is_err(), "field {field}");
+        }
+        let oversized = FollowLimits {
+            max_message_bytes: 16 * 1024 * 1024 + 1,
+            ..limits
+        };
+        assert!(oversized.validate().is_err());
+        for field in 0..4 {
+            let mut invalid = limits;
+            match field {
+                0 => invalid.channel_bytes += 1,
+                1 => invalid.channel_messages += 1,
+                2 => invalid.group_rows += 1,
+                _ => invalid.group_bytes += 1,
+            }
+            assert!(invalid.validate().is_err(), "field {field}");
+        }
+    }
+
+    #[test]
     fn snapshot_anchor_json_preserves_identity_and_requires_exact_fields() {
         let value = serde_json::json!({
             "stream": {
@@ -321,6 +473,42 @@ mod tests {
     }
 
     #[test]
+    fn error_origin_records_constructor_and_forwarded_callers() {
+        #[track_caller]
+        fn forwarded() -> Error {
+            Error::new(ErrorKind::BadState, "bounded failure")
+        }
+
+        let direct_line = line!() + 1;
+        let direct = Error::new(ErrorKind::BadState, "bounded failure");
+        assert_eq!(direct.origin.file(), file!());
+        assert_eq!(direct.origin.line(), direct_line);
+        assert!(direct.origin.column() > 0);
+
+        let forwarded_line = line!() + 1;
+        let forwarded = forwarded();
+        assert_eq!(forwarded.origin.file(), file!());
+        assert_eq!(forwarded.origin.line(), forwarded_line);
+        assert!(forwarded.origin.column() > 0);
+    }
+
+    #[test]
+    fn cancellation_marker_survives_endpoint_context_with_its_origin() {
+        let expected_line = line!() + 1;
+        let error = Error::cancelled(ErrorKind::Pgsql, "PostgreSQL operation cancelled");
+        assert_eq!(error.origin.file(), file!());
+        assert_eq!(error.origin.line(), expected_line);
+        let origin = error.origin;
+        let error = crate::endpoint_error(error, ErrorKind::Source);
+        assert!(error.is_cancelled());
+        assert_eq!(error.kind, ErrorKind::Source);
+        assert_eq!(error.exit_code(), 6);
+        assert_eq!(error.message, "PostgreSQL operation cancelled");
+        assert!(std::ptr::eq(error.origin, origin));
+        assert!(!Error::new(ErrorKind::Pgsql, "PostgreSQL operation cancelled").is_cancelled());
+    }
+
+    #[test]
     fn failures_preserve_nonzero_exit_categories() {
         for (kind, expected) in [
             (ErrorKind::BadArgs, 1),
@@ -334,10 +522,7 @@ mod tests {
             (ErrorKind::Internal, 12),
             (ErrorKind::Fatal, 122),
         ] {
-            let error = Error {
-                kind,
-                message: "redacted failure".into(),
-            };
+            let error = Error::new(kind, "redacted failure");
             assert_eq!(error.exit_code(), expected, "{kind:?}");
         }
     }

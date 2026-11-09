@@ -21,11 +21,20 @@ FLAGS = ["--silent", "--output=interleaved", "--color=false"]
 FILTERS = ["--skip", "pg::live_tests::", "--skip", "pg::prepared_live_tests::",
            "--skip", "pg::replication_live_tests::", "--skip", "apply::checkpoint::live_tests::",
            "--skip", "catalog::tests::live_", "--skip", "copy::tests::live_",
-           "--skip", "snapshot::live_tests::"]
+           "--skip", "catalog::clone::tests::live_identity_", "--skip", "catalog::follow::tests::live_identity_",
+           "--skip", "snapshot::follow_tests::live_", "--skip", "snapshot::follow_fault_tests::live_",
+           "--skip", "cdc::receive::tests::live_", "--skip", "pg::follow_receive_tests::live_",
+           "--skip", "apply::plan::tests::live_"]
+FOLLOW_FILTERS = ["--skip", "snapshot::follow_tests::live_", "--skip", "snapshot::follow_fault_tests::live_", "--skip", "cdc::receive::tests::live_",
+                  "--skip", "pg::follow_receive_tests::live_", "--skip", "apply::plan::tests::live_",
+                  "--skip", "apply::checkpoint::live_tests::follow_",
+                  "--skip", "cdc::receive::tests::full_fifo_status_survives_walsender_timeout"]
 TARGETS = {"check", "fmt-check", "lint", "build", "test", "test-unit", "test-cli", "test-harness",
            "test-db", "test-engine", "test-transport", "test-prepared", "test-replication", "test-authority",
-           "test-db-self-check", "default", "help", "test-catalog", "test-source-catalog", "test-source-snapshot", "test-clone", "test-schema", "image:build", "image:smoke", "test-e2e-clone-unit", "test-e2e-clone",
-           "test-e2e-clone-16-16", "test-e2e-clone-18-18", "test-e2e-clone-16-18"}
+           "test-db-self-check", "default", "help", "test-catalog", "test-source-catalog", "test-clone", "test-schema", "image:build", "image:smoke", "test-e2e-clone-unit", "test-e2e-clone",
+           "test-e2e-clone-16-16", "test-e2e-clone-18-18", "test-e2e-clone-16-18",
+           "test-e2e-follow-smoke-16-16", "test-e2e-follow-smoke-18-18", "test-e2e-follow-smoke-16-18",
+           "test-follow-source", "test-follow-snapshot", "test-follow-authority", "test-follow-receive", "test-follow-apply", "test-e2e-follow-unit", "test-e2e-follow", "test-e2e-follow-16-16", "test-e2e-follow-18-18", "test-e2e-follow-16-18"}
 FORWARDED = ("RPGMIGRATE_E2E_REPORT_PROBE", "CONTAINER_RUNTIME", "CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG_PATH", "PG_BINDIR", "PG_CONFIG",
              "CARGO_TARGET_DIR", "RPGMIGRATE_BIN", "RPGMIGRATE_TEST_EXPECTED_PG_VERSION",
              "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM")
@@ -160,7 +169,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             path = self.bin / name
             path.write_text(script)
             path.chmod(0o755)
-        for path in ("tools/test-db.py", "tests/cli_contract.py", "tools/ci/unit.py", "tools/e2e/clone.py", "tools/e2e/test_clone.py", "tools/image/smoke.py"):
+        for path in ("tools/test-db.py", "tests/cli_contract.py", "tools/ci/unit.py", "tools/e2e/clone.py", "tools/e2e/test_clone.py", "tools/e2e/follow.py", "tools/e2e/test_follow.py", "tools/image/smoke.py"):
             fixture = self.root / path
             fixture.parent.mkdir(parents=True, exist_ok=True)
             fixture.touch()
@@ -190,7 +199,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
     def test_retired_targets_fail_without_executing_children(self):
         for target in ("native", "native-check", "test-native", "test-storage-format",
                        "test-storage-recovery", "test-storage-publication", "storage-pilot",
-                       "test-journal-serial", "ci:linux"):
+                       "test-journal-serial", "ci:linux", "test-source-snapshot"):
             with self.subTest(target=target):
                 self.assertNotEqual(self.run_task(target).returncode, 0)
         self.assertEqual(self.calls(), [])
@@ -252,7 +261,10 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                           "--", "--ignored", "--test-threads=1", "--skip", "catalog::tests::live_cdc_",
                           "--skip", "catalog::tests::live_clone_admission_",
                           "--skip", "catalog::tests::live_source_identity_",
-                          "--skip", "snapshot::live_tests::", "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"])
+                          "--skip", "catalog::clone::tests::live_identity_", "--skip", "catalog::follow::tests::live_identity_",
+                          "--skip", "catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales",
+                          *FOLLOW_FILTERS,
+                                  "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"])
         self.assertEqual(self.calls()[-1]["env"]["PG_BINDIR"], "/cli pg")
 
     def test_defined_empty_never_uses_default(self):
@@ -313,14 +325,23 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                  "replication": "pg::replication_live_tests::", "authority": "apply::checkpoint::live_tests::",
                  "catalog": "catalog::tests::live_",
                  "source-catalog": "catalog::tests::live_source_identity_",
-                 "source-snapshot": "snapshot::live_tests::"}
+                 "follow-source": "snapshot::follow_tests::live_follow_",
+                 "follow-snapshot": "snapshot::follow_fault_tests::live_follow_",
+                 "follow-authority": "apply::checkpoint::live_tests::follow_",
+                 "follow-apply": "apply::plan::tests::live_"}
         for profile, namespace in cases.items():
             with self.subTest(profile=profile):
                 self.passed(self.run_task("test-" + profile))
                 expected = ["tools/test-db.py", "--" + profile, "--", "cargo", "test", "--locked",
                             "--lib", namespace, "--", "--ignored", "--test-threads=1"]
+                if profile == "follow-apply":
+                    expected = ["tools/test-db.py", "--follow-apply", "--", "cargo", "test", "--locked",
+                                "--lib", "--", "--ignored", "--test-threads=1", namespace,
+                                "catalog::clone::tests::live_identity_", "catalog::follow::tests::live_identity_"]
                 if profile == "prepared":
-                    expected += ["--skip", "pg::live_tests::", "--skip", "pg::replication_live_tests::"]
+                    expected += ["--skip", "pg::live_tests::", "--skip", "pg::replication_live_tests::", "--skip", "pg::follow_receive_tests::live_"]
+                if profile == "authority":
+                    expected += ["--skip", "apply::checkpoint::live_tests::follow_"]
                 if profile == "catalog":
                     expected += ["--skip", "catalog::tests::live_source_identity_", "--skip", "catalog::tests::live_preflight_"]
                 self.assertEqual(self.calls()[-1]["argv"], expected)
@@ -350,7 +371,15 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.assertNotEqual(self.run_task("test-e2e-clone", env={"FAIL_MATCH": "18-18"}).returncode, 0)
         self.assertEqual([row["argv"][-1] for row in self.calls()], ["16-16", "18-18"])
 
-    def test_database_build_engine_copy_order(self):
+    def test_follow_matrix_enumerates_exact_pairs_and_stops_on_failure(self):
+        self.passed(self.run_task("test-e2e-follow"))
+        self.assertEqual([row["argv"] for row in self.calls()],
+                         [["tools/e2e/follow.py", "--pair", pair] for pair in ("16-16", "18-18", "16-18")])
+        self.log.unlink()
+        self.assertNotEqual(self.run_task("test-e2e-follow", env={"FAIL_MATCH": "18-18"}).returncode, 0)
+        self.assertEqual([row["argv"][-1] for row in self.calls()], ["16-16", "18-18"])
+
+    def test_database_gate_runs_retained_and_follow_profiles_once_in_order(self):
         self.passed(self.run_task("test-db"))
         calls = [row["argv"] for row in self.calls()]
         self.assertEqual(calls, [["build", "--locked"],
@@ -358,19 +387,31 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                                   "--", "--ignored", "--test-threads=1", "--skip", "catalog::tests::live_cdc_",
                                   "--skip", "catalog::tests::live_clone_admission_",
                                   "--skip", "catalog::tests::live_source_identity_",
-                                  "--skip", "snapshot::live_tests::", "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"],
+                                  "--skip", "catalog::clone::tests::live_identity_", "--skip", "catalog::follow::tests::live_identity_",
+                                  "--skip", "catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales", *FOLLOW_FILTERS,
+                                  "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"],
                                  ["tools/test-db.py", "--catalog", "--", "cargo", "test", "--locked", "--lib",
                                   "catalog::tests::live_", "--", "--ignored", "--test-threads=1",
                               "--skip", "catalog::tests::live_source_identity_", "--skip", "catalog::tests::live_preflight_"],
                                  ["tools/test-db.py", "--source-catalog", "--", "cargo", "test", "--locked", "--lib",
                                   "catalog::tests::live_source_identity_", "--", "--ignored", "--test-threads=1"],
-                                 ["tools/test-db.py", "--source-snapshot", "--", "cargo", "test", "--locked", "--lib",
-                                  "snapshot::live_tests::", "--", "--ignored", "--test-threads=1"],
                                  ["tools/test-db.py", "--clone", "--", "cargo", "test", "--locked", "--lib",
                               "--", "--ignored", "--test-threads=1", "snapshot::clone_tests::", "copy::live_tests::", "apply::checkpoint::clone_marker_tests::"],
                              ["tools/test-db.py", "--schema", "--", "cargo", "test", "--locked", "--lib",
                               "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation",
                               "--", "--ignored", "--test-threads=1"],
+                             ["tools/test-db.py", "--follow-source", "--", "cargo", "test", "--locked", "--lib",
+                              "snapshot::follow_tests::live_follow_", "--", "--ignored", "--test-threads=1"],
+                             ["tools/test-db.py", "--follow-snapshot", "--", "cargo", "test", "--locked", "--lib",
+                              "snapshot::follow_fault_tests::live_follow_", "--", "--ignored", "--test-threads=1"],
+                             ["tools/test-db.py", "--follow-authority", "--", "cargo", "test", "--locked", "--lib",
+                              "apply::checkpoint::live_tests::follow_", "--", "--ignored", "--test-threads=1"],
+                             ["tools/test-db.py", "--follow-receive", "--", "cargo", "test", "--locked", "--lib",
+                              "--", "--ignored", "--test-threads=1", "cdc::receive::tests::live_", "pg::follow_receive_tests::live_",
+                              "cdc::receive::tests::full_fifo_status_survives_walsender_timeout"],
+                             ["tools/test-db.py", "--follow-apply", "--", "cargo", "test", "--locked", "--lib",
+                              "--", "--ignored", "--test-threads=1", "apply::plan::tests::live_",
+                              "catalog::clone::tests::live_identity_", "catalog::follow::tests::live_identity_"],
                              ["tools/test-db.py", "--", "cargo", "test", "--locked", "--test", "copy_integration",
                                   "--", "--test-threads=1"]])
 
@@ -388,19 +429,35 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             from db_harness import load_manifest, module_cases
             manifest = load_manifest()
             engine = module_cases(manifest, "Engine")
-            self.assertEqual(len(engine), 45)
+            self.assertEqual(len(engine), 50)
             retained = [name for name in engine if not any(skip in name for skip in skips)]
             self.assertEqual(retained, engine)
-            for profile in ("Catalog", "SourceCatalog", "SourceSnapshot"):
+            for profile in ("Catalog", "SourceCatalog"):
                 cases = module_cases(manifest, profile)
                 self.assertTrue(cases)
                 self.assertEqual([name for name in cases if not any(skip in name for skip in skips)], [])
+            with self.assertRaisesRegex(ValueError, "unknown module test profile"):
+                module_cases(manifest, "SourceSnapshot")
 
 
-    def test_source_snapshot_failure_stops_database_pipeline(self):
-        self.assertNotEqual(self.run_task("test-db", env={"FAIL_MATCH": "--source-snapshot"}).returncode, 0)
-        self.assertIn("--source-snapshot", self.calls()[-1]["argv"])
-        self.assertFalse(any("copy_integration" in row["argv"] for row in self.calls()))
+    def test_default_database_gate_refuses_missing_or_failed_follow_profiles(self):
+        path = self.root / "Taskfile.yml"
+        original = path.read_text()
+        for profile in ("source", "snapshot", "authority", "receive", "apply"):
+            with self.subTest(profile=profile, failure="command"):
+                self.log.unlink(missing_ok=True)
+                self.assertNotEqual(self.run_task("test-db", env={"FAIL_MATCH": "--follow-" + profile}).returncode, 0)
+                self.assertIn("--follow-" + profile, self.calls()[-1]["argv"])
+                self.assertFalse(any("copy_integration" in row["argv"] for row in self.calls()))
+            with self.subTest(profile=profile, failure="missing task"):
+                start = original.index("  test-follow-" + profile + ":\n")
+                end = original.index("\n  test-", start)
+                path.write_text(original[:start] + original[end:])
+                self.log.unlink(missing_ok=True)
+                self.assertNotEqual(self.run_task("test-db").returncode, 0)
+                self.assertFalse(any("copy_integration" in row["argv"] for row in self.calls()))
+                path.write_text(original)
+
 
 
 

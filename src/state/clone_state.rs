@@ -49,9 +49,10 @@ pub(crate) struct CloneState {
 pub(crate) struct CloneInspection {
     pub(crate) clone_state: CloneState,
     pub(crate) provenance: ConfirmedProvenance,
+    pub(crate) follow: Option<FollowControl>,
 }
 
-fn check_io(io: &IoControl) -> Result<()> {
+pub(super) fn check_io(io: &IoControl) -> Result<()> {
     if io.cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(bad_state("state-cancelled: operation cancelled"));
     }
@@ -61,7 +62,7 @@ fn check_io(io: &IoControl) -> Result<()> {
     Ok(())
 }
 
-fn validate_operator(operator: &OperatorIdentity) -> Result<()> {
+pub(super) fn validate_operator(operator: &OperatorIdentity) -> Result<()> {
     let run: String = operator
         .run
         .0
@@ -103,7 +104,12 @@ pub(crate) fn open_clone(
     if let Some(operator) = operator {
         validate_operator(operator)?;
     }
-    let mut state = open_native(request, true)?;
+    let mut state = open_native(request, true, true)?;
+    if state.manifest.follow_state.is_some() {
+        return Err(bad_state(
+            "state-clone: follow state cannot become a plain clone",
+        ));
+    }
     if state.fresh_created {
         let mut next = state.checked_manifest()?;
         if let Some(operator) = operator {
@@ -117,7 +123,10 @@ pub(crate) fn open_clone(
             "state-operator: requested identity differs from native binding",
         ));
     }
-    if request.action != StateAction::Create && state.manifest.clone_state.is_none() {
+    if request.action != StateAction::Create
+        && state.manifest.clone_state.is_none()
+        && !state.manifest.is_init_only()
+    {
         return Err(bad_state(
             "state-clone: native state has no plain clone binding",
         ));
@@ -169,6 +178,13 @@ pub(crate) fn inspect_clone(
             "state-operator: requested identity differs from native binding",
         ));
     }
+    let follow = manifest.follow_state.as_ref().and_then(|follow| {
+        follow.binding.as_ref().map(|binding| FollowControl {
+            binding: binding.clone(),
+            operator: manifest.operator.clone(),
+            origin_name: follow.origin_name.clone(),
+        })
+    });
     let clone_state = manifest
         .clone_state
         .ok_or_else(|| bad_state("state-clone: native clone binding is absent"))?;
@@ -188,12 +204,18 @@ pub(crate) fn inspect_clone(
     Ok(CloneInspection {
         clone_state,
         provenance,
+        follow,
     })
 }
 
 impl NativeState {
     pub(crate) fn bind_clone(&mut self, plan: &ClonePlan, ticket: &SnapshotTicket) -> Result<()> {
         let mut next = self.checked_manifest()?;
+        if next.follow_state.is_some() {
+            return Err(bad_state(
+                "state-clone: follow state requires its own snapshot binding",
+            ));
+        }
         let clone = CloneState {
             plan: plan.clone(),
             ticket: ticket.clone(),
@@ -323,53 +345,71 @@ impl NativeState {
     }
 }
 
+pub(super) fn validate_plan(plan: &ClonePlan) -> Result<()> {
+    let valid_name = |s: &str| !s.is_empty() && s.len() <= 63 && !s.contains('\0');
+    if plan.generation.0 == 0
+        || plan.source.identity.system_identifier == 0
+        || plan.source.identity.database_oid == 0
+        || plan.source.timeline == 0
+        || plan.target.identity.system_identifier == 0
+        || plan.target.identity.database_oid == 0
+        || ![16, 18].contains(&plan.source.major)
+        || ![16, 18].contains(&plan.target.major)
+        || plan.source.major > plan.target.major
+        || plan.tables.len() > MAX_CLONE_TABLES
+    {
+        return Err(bad_state(
+            "state-clone: invalid clone identity, snapshot, generation, or profile",
+        ));
+    }
+    let mut sources = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for table in &plan.tables {
+        let valid_modes = |modes: &[u8]| {
+            modes.len() == table.all_columns.len()
+                && modes.iter().all(|mode| matches!(mode, 0 | b'a' | b'd'))
+        };
+        if table.source_oid == 0
+            || !sources.insert(table.source_oid)
+            || !names.insert((&table.name.schema, &table.name.table))
+            || !valid_name(&table.name.schema)
+            || !valid_name(&table.name.table)
+            || table.all_columns.len() > 1600
+            || !valid_modes(&table.identity_modes)
+            || table
+                .partition_identity_modes
+                .as_ref()
+                .is_some_and(|modes| !valid_modes(modes))
+            || table
+                .writable_columns
+                .iter()
+                .any(|c| !table.all_columns.contains(c))
+            || table.all_columns.iter().any(|c| !valid_name(c))
+            || table.all_columns.iter().collect::<BTreeSet<_>>().len() != table.all_columns.len()
+            || table.writable_columns.iter().collect::<BTreeSet<_>>().len()
+                != table.writable_columns.len()
+        {
+            return Err(bad_state(
+                "state-clone: invalid or duplicate source table identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl CloneState {
     pub(crate) fn validate(&self) -> Result<()> {
         let plan = &self.plan;
-        let valid_name = |s: &str| !s.is_empty() && s.len() <= 63 && !s.contains('\0');
-        if plan.generation.0 == 0
-            || self.ticket.generation != plan.generation
+        validate_plan(plan)?;
+        if self.ticket.generation != plan.generation
             || self.ticket.source != plan.source
             || self.ticket.token.is_empty()
             || self.ticket.token.len() > MAX_SNAPSHOT_TOKEN_BYTES
             || self.ticket.token.contains('\0')
-            || plan.source.identity.system_identifier == 0
-            || plan.source.identity.database_oid == 0
-            || plan.source.timeline == 0
-            || plan.target.identity.system_identifier == 0
-            || plan.target.identity.database_oid == 0
-            || ![16, 18].contains(&plan.source.major)
-            || ![16, 18].contains(&plan.target.major)
-            || plan.source.major > plan.target.major
-            || plan.tables.len() > MAX_CLONE_TABLES
         {
             return Err(bad_state(
                 "state-clone: invalid clone identity, snapshot, generation, or profile",
             ));
-        }
-        let mut sources = BTreeSet::new();
-        let mut names = BTreeSet::new();
-        for table in &plan.tables {
-            if table.source_oid == 0
-                || !sources.insert(table.source_oid)
-                || !names.insert((&table.name.schema, &table.name.table))
-                || !valid_name(&table.name.schema)
-                || !valid_name(&table.name.table)
-                || table.all_columns.len() > 1600
-                || table
-                    .writable_columns
-                    .iter()
-                    .any(|c| !table.all_columns.contains(c))
-                || table.all_columns.iter().any(|c| !valid_name(c))
-                || table.all_columns.iter().collect::<BTreeSet<_>>().len()
-                    != table.all_columns.len()
-                || table.writable_columns.iter().collect::<BTreeSet<_>>().len()
-                    != table.writable_columns.len()
-            {
-                return Err(bad_state(
-                    "state-clone: invalid or duplicate source table identity",
-                ));
-            }
         }
         let owned_phase = !matches!(self.phase, ClonePhase::Fresh | ClonePhase::PreDataPending);
         if owned_phase && self.owned_tables.len() != plan.tables.len() {

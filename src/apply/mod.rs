@@ -1,9 +1,10 @@
 //! Serial authority requires a dedicated backend, including through session pooling.
 //! Transaction/statement pooling and concurrent namespace DDL are unsupported.
-//! Durable commits are the only production path until E4 supplies release policy.
+//! Follow feedback requires a logged synchronous target commit.
 //! An interrupted initial .manifest.tmp remains fail-closed in native state.
 
 pub(crate) mod checkpoint;
+pub(crate) mod follow;
 mod metadata;
 mod plan;
 pub(crate) mod serial;
@@ -39,20 +40,13 @@ pub(super) struct ControlRow {
     pub(super) anchor: Option<SnapshotAnchor>,
     pub(super) clone: Option<checkpoint::CloneControl>,
     pub(super) certified_lsn: Option<SourceEndLsn>,
+    pub(super) follow_binding: Option<crate::state::FollowControl>,
 }
 
 #[derive(Debug)]
 pub(crate) enum CommitOutcome {
     Acknowledged {
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "E3 serial consumer reads commit receipts")
-        )]
         checkpoint: Checkpoint,
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "E3 serial consumer reads commit receipts")
-        )]
         durable: Option<DurableProof>,
     },
     Unknown,

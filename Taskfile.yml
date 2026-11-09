@@ -54,7 +54,9 @@ vars:
   UNIT_FILTERS: >-
     --skip pg::live_tests:: --skip pg::prepared_live_tests:: --skip pg::replication_live_tests::
     --skip apply::checkpoint::live_tests:: --skip catalog::tests::live_ --skip copy::tests::live_
-    --skip snapshot::live_tests::
+    --skip catalog::clone::tests::live_identity_ --skip catalog::follow::tests::live_identity_
+    --skip snapshot::follow_tests::live_ --skip snapshot::follow_fault_tests::live_ --skip cdc::receive::tests::live_
+    --skip pg::follow_receive_tests::live_ --skip apply::plan::tests::live_
 
 tasks:
   default:
@@ -115,15 +117,19 @@ tasks:
       - '{{.RUN}} {{.PYTHON_COMMAND}} tools/ci/unit.py --harness'
 
   test-db:
-    desc: Run engine, catalog, snapshot, and COPY database profiles
+    desc: Run retained database and exact pgoutput follow profiles
     cmds:
       - task: build
       - task: test-engine
       - task: test-catalog
       - task: test-source-catalog
-      - task: test-source-snapshot
       - task: test-clone
       - task: test-schema
+      - task: test-follow-source
+      - task: test-follow-snapshot
+      - task: test-follow-authority
+      - task: test-follow-receive
+      - task: test-follow-apply
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py -- {{.CARGO_COMMAND}}
         test --locked --test copy_integration -- --test-threads=1
@@ -136,7 +142,11 @@ tasks:
         test --locked --lib -- --ignored --test-threads=1
         --skip catalog::tests::live_cdc_ --skip catalog::tests::live_clone_admission_
         --skip catalog::tests::live_source_identity_
-        --skip snapshot::live_tests:: --skip snapshot::clone_tests:: --skip copy::live_tests:: --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation
+        --skip catalog::clone::tests::live_identity_ --skip catalog::follow::tests::live_identity_
+        --skip catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales
+        --skip snapshot::follow_tests::live_ --skip snapshot::follow_fault_tests::live_ --skip cdc::receive::tests::live_ --skip pg::follow_receive_tests::live_ --skip apply::plan::tests::live_ --skip apply::checkpoint::live_tests::follow_
+        --skip cdc::receive::tests::full_fifo_status_survives_walsender_timeout
+        --skip snapshot::clone_tests:: --skip copy::live_tests:: --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation
 
   test-catalog:
     desc: Run the live CDC catalog profile
@@ -154,6 +164,44 @@ tasks:
         test --locked --lib -- --ignored --test-threads=1
         snapshot::clone_tests:: copy::live_tests:: apply::checkpoint::clone_marker_tests::
 
+  test-follow-authority:
+    desc: Run the exact pgoutput authority and owned restart profile
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-authority -- {{.CARGO_COMMAND}}
+        test --locked --lib apply::checkpoint::live_tests::follow_ -- --ignored --test-threads=1
+
+  test-follow-receive:
+    desc: Run the exact pgoutput receiver configuration and startup profile
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-receive -- {{.CARGO_COMMAND}}
+        test --locked --lib -- --ignored --test-threads=1
+        cdc::receive::tests::live_ pg::follow_receive_tests::live_
+        cdc::receive::tests::full_fifo_status_survives_walsender_timeout
+
+  test-follow-apply:
+    desc: Run the exact pgoutput row semantics and differential profile
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-apply -- {{.CARGO_COMMAND}}
+        test --locked --lib -- --ignored --test-threads=1
+        apply::plan::tests::live_ catalog::clone::tests::live_identity_ catalog::follow::tests::live_identity_
+
+  test-follow-snapshot:
+    desc: Run nine exact pgoutput snapshot cases and five observed fault receipts
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-snapshot -- {{.CARGO_COMMAND}}
+        test --locked --lib snapshot::follow_fault_tests::live_follow_ -- --ignored --test-threads=1
+
+  test-follow-source:
+    desc: Run the exact pgoutput source snapshot admission profile
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-source -- {{.CARGO_COMMAND}}
+        test --locked --lib snapshot::follow_tests::live_follow_ -- --ignored --test-threads=1
+
   test-schema:
     desc: Run the exact isolated schema restart guard case
     cmds:
@@ -169,13 +217,6 @@ tasks:
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --source-catalog -- {{.CARGO_COMMAND}}
         test --locked --lib catalog::tests::live_source_identity_ -- --ignored --test-threads=1
 
-  test-source-snapshot:
-    desc: Run the live source snapshot and fault profile
-    cmds:
-      - >-
-        {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --source-snapshot -- {{.CARGO_COMMAND}}
-        test --locked --lib snapshot::live_tests:: -- --ignored --test-threads=1
-
   test-transport:
     desc: Run the live transport profile
     cmds:
@@ -189,7 +230,7 @@ tasks:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --prepared -- {{.CARGO_COMMAND}}
         test --locked --lib pg:: -- --ignored --test-threads=1
-        --skip pg::live_tests:: --skip pg::replication_live_tests::
+        --skip pg::live_tests:: --skip pg::replication_live_tests:: --skip pg::follow_receive_tests::live_
 
   test-replication:
     desc: Run the replication profile
@@ -204,6 +245,7 @@ tasks:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --authority -- {{.CARGO_COMMAND}}
         test --locked --lib apply::checkpoint::live_tests:: -- --ignored --test-threads=1
+        --skip apply::checkpoint::live_tests::follow_
 
   test-db-self-check:
     desc: Run database harness negative controls
@@ -236,6 +278,49 @@ tasks:
       - task: test-e2e-clone-16-16
       - task: test-e2e-clone-18-18
       - task: test-e2e-clone-16-18
+
+  test-e2e-follow-smoke-16-16:
+    desc: Check initial copy and ongoing DML on PostgreSQL 16 to 16
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --smoke --pair 16-16'
+
+  test-e2e-follow-smoke-18-18:
+    desc: Check initial copy and ongoing DML on PostgreSQL 18 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --smoke --pair 18-18'
+
+  test-e2e-follow-smoke-16-18:
+    desc: Check initial copy and ongoing DML on PostgreSQL 16 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --smoke --pair 16-18'
+
+  test-e2e-follow-unit:
+    desc: Check disposable follow harness controls without containers
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_follow.py'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_follow_wire_protocol.py'
+
+  test-e2e-follow-16-16:
+    desc: Qualify ongoing follow and recovery boundaries on PostgreSQL 16 to 16
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --pair 16-16'
+
+  test-e2e-follow-18-18:
+    desc: Qualify ongoing follow and recovery boundaries on PostgreSQL 18 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --pair 18-18'
+
+  test-e2e-follow-16-18:
+    desc: Qualify ongoing follow and recovery boundaries on PostgreSQL 16 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --pair 16-18'
+
+  test-e2e-follow:
+    desc: Qualify all three declared ongoing follow version pairs
+    cmds:
+      - task: test-e2e-follow-16-16
+      - task: test-e2e-follow-18-18
+      - task: test-e2e-follow-16-18
 
   image:build:
     desc: Build the local native runner image

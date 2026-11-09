@@ -175,10 +175,12 @@ fn add(current: u64, amount: u64) -> Result<u64> {
     current.checked_add(amount).ok_or_else(overflow)
 }
 
+#[track_caller]
 fn overflow() -> Error {
     failure(ErrorKind::Internal, "COPY report counter overflow")
 }
 
+#[track_caller]
 fn unknown_commit() -> Error {
     failure(
         ErrorKind::BadState,
@@ -186,11 +188,9 @@ fn unknown_commit() -> Error {
     )
 }
 
+#[track_caller]
 fn failure(kind: ErrorKind, message: &str) -> Error {
-    Error {
-        kind,
-        message: message.into(),
-    }
+    Error::new(kind, message)
 }
 
 #[cfg(test)]

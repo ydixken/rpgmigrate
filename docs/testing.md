@@ -73,6 +73,10 @@ Use `task help` for retained focused profiles, including prepared execution, rep
 
 ## Container clone checks
 
+The qualified alpha evidence consists of staged PostgreSQL 16 to 16, 18 to 18, and 16 to 18 pair runs, each passing eleven cases and six actual Go report validations.
+The final staged test receipts passed 417 Rust tests, 24 CLI tests, and 183 portable tests; the aggregate Task commands were not rerun to exit zero after earlier failures.
+Strict lint remains held on staged unused code, and no operator-controller, CDC, power-loss, or failover qualification follows from this alpha.
+
 The M2 harness uses podman by default.
 Set `CONTAINER_RUNTIME` to a Podman-compatible executable when it is not named `podman`.
 The verified harness and image smoke use Podman-specific options; Docker is not qualified by these commands.
@@ -81,6 +85,8 @@ The fixture pins immutable PostgreSQL server image digests, and the receipt reco
 Image setup and the first locked Cargo build require network access.
 Database execution uses a disposable internal network with no published ports, two owned server containers, and fixture credentials held outside command arguments and receipts.
 The harness removes its own containers and private network, and retains build caches and successful receipts under `target/e2e/`.
+Failures retain redacted child stderr and safe stage/return-code/callsite metadata under `target/e2e/failures/`, using private 0700 directories and 0600 files.
+Public failure output contains no child argv, SQL, row values, or credentials.
 
 1. Check the harness controls without containers.
 
@@ -111,11 +117,13 @@ Receipts distinguish `local_m2_contract` from `operator_go_parse_report` and rec
 The M2 closing matrix selects the authoritative probe; operator controller qualification remains an M7 gate.
 Each pair exercises schema restoration, parallel text COPY, constraints/indexes/triggers, sequence state, completed resume, source writes after snapshot export, owned-data restart under a fresh generation, and explicit unsafe-boundary refusals.
 Independent SQL checks inspect both peers and hash canonical full rows with duplicate multiplicity, NULLs, generated/identity output, and physical `ONLY` table semantics.
+The schema oracle compares table NOT NULL through `attnotnull`, omitting only PostgreSQL 18's duplicate validated `pg_constraint` not-null records from the other-constraint stream.
+Unvalidated not-null constraints refuse qualification; FK, CHECK, primary-key, index, and trigger evidence remains exact.
 The fixture includes eight physical heaps, an empty table, wide rows, inheritance, and partition leaves, with bounds of 100,000 rows and 64 MiB of oracle output per table.
 After creation, independent `ONLY` row counts must match the reviewed baseline, including 2048 wide rows, two duplicate parent rows, and one separately counted child row.
 A target-byte mutation must fail the independent oracle and runtime comparison.
 Snapshot tests compare the target with the source fingerprint captured before concurrent writes, then require a current-source comparison difference.
-Utility wrappers delegate actual matching-major tools and record observed synchronization points before a controlled kill; the data-phase restart waits on an exact worker blocked at TRUNCATE by a harness-owned target SHARE lock after other tables committed.
+Utility wrappers delegate actual matching-major tools and record observed synchronization points before a controlled kill; the data-phase restart waits on the exact owned `LOCK TABLE ONLY` statement in ACCESS EXCLUSIVE mode, blocked by a harness-owned target SHARE lock after seven other tables committed.
 This kills a partially completed COPY phase; it does not claim a pause inside the blocked table's COPY stream.
 
 ### Plain clone admission and recovery
@@ -126,6 +134,8 @@ The source role needs visibility of every copied row, sequence read access, and 
 The target role needs schema creation and ownership of the restored objects, native metadata, and copied tables, plus the required session-parameter privileges.
 The disposable checks use fixture database owners; they do not qualify an operator least-privilege deployment.
 Fresh targets must be collision-free apart from the empty-database baseline and exact owned native bookkeeping.
+The first operator `--restart` may initialize an absent native path or an accepted private empty directory through the checked creation path.
+Resume on an absent or empty path refuses; a resource-free native INIT state may retry only with its exact existing caller binding, without adopting foreign, legacy, or old-format state.
 
 The admitted profile uses logged heap tables, inheritance children, and partition leaves exactly once, preserves explicit identity values, and computes generated columns on the target.
 Generated output must match canonical source bytes under the imported snapshot before the table marker and COMMIT; a mismatch refuses and rolls back.
@@ -138,7 +148,7 @@ No-owner, no-ACL, no-comments, and no-tablespaces policies are passed through to
 Before post-data begins, restart or resume with `--not-consistent` obtains a new snapshot and COPY generation, invalidates old completion markers, and truncates only positively recorded owned data without CASCADE.
 A lost positive pre-data ownership handoff refuses recovery and preserves the uncertain objects for manual review or a fresh migration.
 Before advancing a restart generation, pre-data schema comparison under the new exported source snapshot refuses same-OID schema drift without target mutation.
-An uncertain post-data boundary refuses recopy; a completed clone resumes only after positive durable target proof and refuses unsafe restart.
+An uncertain post-data boundary refuses recopy; a completed clone accepts `--resume --not-consistent` only after positive durable target proof, preserving its generation and committed marker rows, and refuses unsafe restart.
 No path adopts or repairs pgcopydb state or foreign target objects.
 
 Data comparison pins UTF8, ISO/YMD dates, PostgreSQL intervals, UTC, explicit float digits, and hex bytea output.
@@ -174,8 +184,10 @@ These commands build and inspect local images; publishing has separate release g
 ## Qualification boundaries
 
 The revised native profile targets 16→16, 18→18, and 16→18 only.
-The retained `test-db`, `test-engine`, and logical `test-source-snapshot` profiles keep their historical admission requirements and do not replace the native clone gate.
-The logical snapshot profile retains its earlier PostgreSQL 14/17 slot tests for M3; it is not a PostgreSQL 16/18 plain-clone prerequisite.
+The retained `test-db` and `test-engine` profiles keep their historical admission requirements and do not replace the native clone gate.
+`task test-follow-snapshot` registers nine native pgoutput snapshot cases with five independent fault receipts for PostgreSQL 16 and 18.
+The obsolete `test-source-snapshot` task, `--source-snapshot` selector, and PostgreSQL 14/17 legacy stage are retired.
+Shared lower COPY helpers retain portable test coverage; those checks do not qualify PostgreSQL 14/17 runtime behavior.
 Containers supplement the local harness as the engine/operator E2E layer, rather than replacing cargo live tests.
 Run independent review and applicable Go suites once per milestone at close; engine-only changes have no operator Go suite.
 Historical storage benchmarks remain evidence about their measured candidates, not qualification of the revised source-WAL design.

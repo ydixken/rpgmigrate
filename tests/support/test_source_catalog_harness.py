@@ -29,7 +29,7 @@ class SourceCatalogHarnessTests(unittest.TestCase):
     def test_source_catalog_inventory_is_exact_and_separate(self):
         manifest = load_manifest()
         self.assertEqual(module_cases(manifest, "SourceCatalog"), CASES)
-        for profile, count in (("Catalog", 12), ("Authority", 18), ("Engine", 45), ("Replication", 9)):
+        for profile, count in (("Catalog", 13), ("Authority", 19), ("Engine", 50), ("Replication", 9)):
             with self.subTest(profile=profile):
                 names = module_cases(manifest, profile)
                 self.assertEqual(len(names), count)

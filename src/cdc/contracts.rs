@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{CommitLsn, SourceEndLsn};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum Plugin {
     #[serde(rename = "pgoutput")]
@@ -41,7 +43,6 @@ pub(crate) enum Value {
     Null,
     UnchangedToast,
     Text(Vec<u8>),
-    Binary(Vec<u8>),
 }
 
 impl fmt::Debug for Value {
@@ -50,12 +51,46 @@ impl fmt::Debug for Value {
             Self::Null => f.write_str("Null"),
             Self::UnchangedToast => f.write_str("UnchangedToast"),
             Self::Text(bytes) => f.debug_struct("Text").field("bytes", &bytes.len()).finish(),
-            Self::Binary(bytes) => f
-                .debug_struct("Binary")
-                .field("bytes", &bytes.len())
-                .finish(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OldTupleKind {
+    Key,
+    Full,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OldTuple {
+    pub(crate) kind: OldTupleKind,
+    pub(crate) values: Vec<Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Begin {
+    pub(crate) xid: u32,
+    pub(crate) final_lsn: CommitLsn,
+    pub(crate) commit_time_micros: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Commit {
+    pub(crate) xid: u32,
+    pub(crate) commit: CommitLsn,
+    pub(crate) end: SourceEndLsn,
+    pub(crate) commit_time_micros: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FollowMessage {
+    Begin(Begin),
+    Event(Event),
+    Commit(Commit),
+    Keepalive {
+        wal_end: SourceEndLsn,
+        decoder_idle: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,16 +108,44 @@ pub(crate) enum Event {
     },
     Update {
         relation: RelationKey,
-        old: Option<Vec<Value>>,
+        old: Option<OldTuple>,
         new: Vec<Value>,
     },
     Delete {
         relation: RelationKey,
-        old: Vec<Value>,
+        old: OldTuple,
     },
     Truncate {
         relations: Vec<RelationKey>,
         cascade: bool,
         restart_identity: bool,
     },
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn old_tuple_preserves_full_width_and_redacts_values() {
+        let old = OldTuple {
+            kind: OldTupleKind::Key,
+            values: vec![Value::Null, Value::Text(b"private-row-value".to_vec())],
+        };
+        assert_eq!(old.values.len(), 2);
+        assert_eq!(old.kind, OldTupleKind::Key);
+        assert!(!format!("{old:?}").contains("private-row-value"));
+    }
+
+    #[test]
+    fn commit_message_keeps_source_commit_and_end_distinct() {
+        let message = FollowMessage::Commit(Commit {
+            xid: 9,
+            commit: crate::identity::CommitLsn(32),
+            end: crate::identity::SourceEndLsn(48),
+            commit_time_micros: 1,
+        });
+        assert!(matches!(message, FollowMessage::Commit(commit)
+            if commit.xid == 9 && commit.commit.0 == 32 && commit.end.0 == 48));
+    }
 }

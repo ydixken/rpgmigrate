@@ -54,12 +54,11 @@ pub(crate) fn read(options: &CloneOptions, io: &IoControl) -> Result<ProgressSna
             .filter(|value| *value <= i64::MAX as u64)
             .ok_or_else(|| refusal("progress byte counter overflow"))
     })?;
-    let current_phase = match progress.phase {
-        ClonePhase::Fresh | ClonePhase::PreDataPending => "planning",
-        ClonePhase::Copying => "copying",
-        ClonePhase::Complete => phase(true, progress.durable_complete),
-        _ => "finalizing",
-    };
+    let current_phase = phase(
+        progress.phase,
+        progress.durable_complete,
+        progress.streaming,
+    );
     let result = ProgressSnapshot {
         work: options.operator.clone(),
         phase: current_phase,
@@ -70,7 +69,7 @@ pub(crate) fn read(options: &CloneOptions, io: &IoControl) -> Result<ProgressSna
             )?,
             indexes: Counter::new(Some(indexes_total), indexes_done)?,
             bytes: Counter::new(
-                if progress.durable_complete {
+                if progress.durable_complete || progress.streaming {
                     Some(copied_bytes)
                 } else {
                     None
@@ -124,21 +123,21 @@ impl Counter {
     }
 }
 
-fn phase(local_complete: bool, durable_complete: bool) -> &'static str {
-    if durable_complete {
-        "completed"
-    } else if local_complete {
-        "finalizing"
-    } else {
-        "copying"
+fn phase(stage: ClonePhase, durable_complete: bool, streaming: bool) -> &'static str {
+    if streaming {
+        return "streaming";
+    }
+    match stage {
+        ClonePhase::Fresh | ClonePhase::PreDataPending => "planning",
+        ClonePhase::Copying => "copying",
+        ClonePhase::Complete if durable_complete => "completed",
+        _ => "finalizing",
     }
 }
 
+#[track_caller]
 fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadState,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadState, message)
 }
 
 #[cfg(test)]
@@ -221,7 +220,14 @@ mod tests {
 
     #[test]
     fn local_completion_never_proves_durable_target_completion() {
-        assert_ne!(phase(true, false), "completed");
-        assert_eq!(phase(true, true), "completed");
+        assert_ne!(phase(ClonePhase::Complete, false, false), "completed");
+        assert_eq!(phase(ClonePhase::Complete, true, false), "completed");
+    }
+
+    #[test]
+    fn anchored_follow_reports_streaming_without_follow_completion() {
+        assert_eq!(phase(ClonePhase::Analyzing, false, true), "streaming");
+        assert_eq!(phase(ClonePhase::Complete, true, true), "streaming");
+        assert_eq!(phase(ClonePhase::Analyzing, false, false), "finalizing");
     }
 }

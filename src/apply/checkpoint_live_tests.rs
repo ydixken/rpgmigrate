@@ -443,11 +443,11 @@ fn transaction_boundary_faults() {
                     .unwrap()
                     .query("SELECT pg_catalog.pg_advisory_unlock_all()", &io)
                     .unwrap();
-                "target-authority: physical backend, primary, or writer fence changed"
+                "target-authority: backend, primary, durability settings, or writer fence changed"
             }
             "pid_mismatch" => {
                 tx.authority.session.pid += 1;
-                "target-authority: physical backend, primary, or writer fence changed"
+                "target-authority: backend, primary, durability settings, or writer fence changed"
             }
             "metadata_row_changed" => {
                 command(
@@ -792,7 +792,10 @@ fn async_barrier() {
     let failure = TargetAuthority::acquire(unsafe_target, stream, &mut native, &io)
         .err()
         .unwrap();
-    assert!(failure.message.contains("fsync on"));
+    assert_eq!(
+        failure.message,
+        "target-authority: writable primary with fsync and full_page_writes on is required"
+    );
     assert!(native.target_provenance(&stream).is_none());
 }
 
@@ -1054,20 +1057,21 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
             &format!(
                 "SELECT attname, atttypid, atttypmod, attnotnull, attcollation,
             'pg_catalog.\"C\"'::pg_catalog.regcollation::pg_catalog.oid
-            FROM pg_catalog.pg_attribute WHERE attrelid = {} AND attnum BETWEEN 20 AND 24
+            FROM pg_catalog.pg_attribute WHERE attrelid = {} AND attnum BETWEEN 20 AND 25
             ORDER BY attnum",
                 provenance.table_oid
             ),
             io,
         )
         .unwrap();
-    assert_eq!(columns.rows(), 5);
+    assert_eq!(columns.rows(), 6);
     for (row, (name, oid)) in [
         ("copy_snapshot_token", "25"),
         ("copy_consistent_point", "3220"),
         ("copy_plan_nonce", "17"),
         ("clone_state", "25"),
         ("certified_lsn", "3220"),
+        ("follow_binding", "25"),
     ]
     .iter()
     .enumerate()
@@ -1082,6 +1086,7 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
     assert_eq!(columns.cell(2, 4).unwrap(), Some(b"0".as_slice()));
     assert_eq!(columns.cell(3, 4).unwrap(), columns.cell(3, 5).unwrap());
     assert_eq!(columns.cell(4, 4).unwrap(), Some(b"0".as_slice()));
+    assert_eq!(columns.cell(5, 4).unwrap(), columns.cell(5, 5).unwrap());
     authority.session.begin(io).unwrap();
     let types = authority
         .session
@@ -1091,16 +1096,17 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
             "SELECT pg_catalog.cardinality(parameter_types),
             parameter_types[20]::pg_catalog.oid, parameter_types[21]::pg_catalog.oid,
             parameter_types[22]::pg_catalog.oid, parameter_types[23]::pg_catalog.oid,
-            parameter_types[24]::pg_catalog.oid, parameter_types[32]::pg_catalog.oid,
+            parameter_types[24]::pg_catalog.oid, parameter_types[25]::pg_catalog.oid,
             parameter_types[33]::pg_catalog.oid, parameter_types[34]::pg_catalog.oid,
-            parameter_types[35]::pg_catalog.oid, parameter_types[36]::pg_catalog.oid
+            parameter_types[35]::pg_catalog.oid, parameter_types[36]::pg_catalog.oid,
+            parameter_types[37]::pg_catalog.oid, parameter_types[38]::pg_catalog.oid
             FROM pg_catalog.pg_prepared_statements WHERE name = 'rpgmigrate_metadata_update'",
             io,
         )
         .unwrap();
     assert_eq!(types.rows(), 1);
     for (column, expected) in [
-        "36", "25", "3220", "17", "25", "3220", "25", "3220", "17", "25", "3220",
+        "38", "25", "3220", "17", "25", "3220", "25", "25", "3220", "17", "25", "3220", "25",
     ]
     .iter()
     .enumerate()
@@ -1852,7 +1858,7 @@ fn commit_rollback_tag() {
             "server_lock" => assert!(error.message.contains("SQLSTATE 42501"), "{error:?}"),
             "fence_lost" => assert_eq!(
                 error.message,
-                "target-authority: physical backend, primary, or writer fence changed"
+                "target-authority: backend, primary, durability settings, or writer fence changed"
             ),
             _ => unreachable!(),
         }
@@ -2196,4 +2202,1198 @@ fn provisioning_recovery() {
     assert_eq!(owned_provenance(&strong, strong_stream).intent, intent);
     drop(owner);
     assert!(TargetAuthority::acquire(connection(&io), strong_stream, &mut strong, &io).is_err());
+}
+
+fn install_test_follow(authority: &mut TargetAuthority, io: &IoControl) -> FollowBinding {
+    let stream = authority.provenance.intent.binding.stream;
+    let slot = crate::state::SourceSlotReceipt {
+        intent: crate::state::SourceSlotIntent {
+            binding: crate::state::SourceSlotBinding::new(
+                stream,
+                "rpgmigrate_follow_authority".into(),
+                crate::cdc::contracts::Plugin::Pgoutput,
+                1,
+            )
+            .unwrap(),
+            nonce: [2; 16],
+        },
+        consistent_point: SourceEndLsn(10),
+        snapshot_token: "test-snapshot".into(),
+    };
+    let binding = FollowBinding {
+        slot,
+        publication: crate::contracts::PublicationReceipt {
+            name: "rpgmigrate_follow_authority".into(),
+            oid: 42,
+            owner_oid: 43,
+        },
+        source_timeline: 1,
+        copy_generation: crate::contracts::CopyGeneration(1),
+        source_types: Vec::new(),
+    };
+    authority.session.begin(io).unwrap();
+    let mut next = authority.row.clone();
+    next.follow_binding = Some(crate::state::FollowControl {
+        binding: binding.clone(),
+        operator: None,
+        origin_name: None,
+    });
+    next.anchor = Some(SnapshotAnchor {
+        stream,
+        snapshot_token: binding.slot.snapshot_token.clone(),
+        consistent_point: binding.slot.consistent_point,
+        plan_nonce: binding.slot.intent.nonce,
+    });
+    let epoch = next.barrier_epoch;
+    next = increment_barrier(next, epoch).unwrap();
+    authority.write_row(&next, io).unwrap();
+    let CommitReceipt::Acknowledged(Some(proof)) = authority
+        .finish(next, TargetCommit::Synchronous, io)
+        .unwrap()
+    else {
+        panic!("follow test anchor has no positive commit")
+    };
+    assert!(proof.feedback().is_none());
+    binding
+}
+
+fn follow_frontier(stream: StreamId, order: u64, end: u64) -> Frontier {
+    Frontier {
+        tx: TxId {
+            stream,
+            xid: order as u32,
+            begin_ordinal: end - 1,
+        },
+        order: TxSeq(order),
+        commit: Some(CommitLsn(end - 1)),
+        end: SourceEndLsn(end),
+    }
+}
+
+struct IdentityRewriteFixture {
+    _native: NativeState,
+    authority: TargetAuthority,
+    observer: PgConnection,
+    table: String,
+    committed: ControlRow,
+    stream: StreamId,
+}
+
+fn identity_rewrite_fixture(case: &str, replica: bool, io: &IoControl) -> IdentityRewriteFixture {
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io);
+    let table = format!("public.authority_identity_{case}");
+    command(
+        &mut observer,
+        &format!(
+            "CREATE TABLE {table} (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, \
+             immediate_key integer UNIQUE, deferred_key integer UNIQUE DEFERRABLE INITIALLY DEFERRED, \
+             body text NOT NULL)"
+        ),
+        "CREATE TABLE",
+        io,
+    )
+    .unwrap();
+    command(
+        &mut observer,
+        &format!(
+            "INSERT INTO {table} OVERRIDING SYSTEM VALUE VALUES \
+             (1,10,100,'original'),(2,20,200,'other')"
+        ),
+        "INSERT 0 2",
+        io,
+    )
+    .unwrap();
+    let mut target = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io);
+    if replica {
+        command(
+            &mut target,
+            "SET session_replication_role=replica",
+            "SET",
+            io,
+        )
+        .unwrap();
+    }
+    let mut authority = TargetAuthority::acquire(target, stream, &mut native, io).unwrap();
+    install_test_follow(&mut authority, io);
+    let mut tx = authority.begin_group(io).unwrap();
+    tx.prepare(
+        "identity_sentinel",
+        &format!("UPDATE ONLY {table} SET body='uncommitted' WHERE id=2"),
+        &[],
+        io,
+    )
+    .unwrap();
+    tx.prepare(
+        "identity_rewrite",
+        &format!(
+            "WITH rpgmigrate_old AS (DELETE FROM ONLY {table} \
+             WHERE ctid=(SELECT ctid FROM ONLY {table} \
+             WHERE id IS NOT DISTINCT FROM $5 LIMIT 1 FOR UPDATE) \
+             RETURNING id,immediate_key,deferred_key,body) \
+             INSERT INTO {table} (id,immediate_key,deferred_key,body) \
+             OVERRIDING SYSTEM VALUE SELECT $1,$2,$3,$4 FROM rpgmigrate_old"
+        ),
+        &[20, 23, 23, 25, 20],
+        io,
+    )
+    .unwrap();
+    tx.advance(follow_frontier(stream, 1, 100)).unwrap();
+    let CommitOutcome::Acknowledged {
+        durable: Some(proof),
+        ..
+    } = tx.commit(io).unwrap()
+    else {
+        panic!("identity fixture has no positive durable COMMIT")
+    };
+    assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(100));
+    let committed = authority.row.clone();
+    IdentityRewriteFixture {
+        _native: native,
+        authority,
+        observer,
+        table,
+        committed,
+        stream,
+    }
+}
+
+fn require_identity_rewrite_result(result: PgResult) -> Result<()> {
+    if result.rows() != 0 || result.command_tag()? != "INSERT 0 1" {
+        return Err(refusal("identity rewrite did not replace exactly one row"));
+    }
+    Ok(())
+}
+
+fn assert_identity_rewrite_rolled_back(fixture: &mut IdentityRewriteFixture, io: &IoControl) {
+    assert!(matches!(fixture.authority.session.phase, Phase::Poisoned));
+    assert_eq!(fixture.authority.row, fixture.committed);
+    let checkpoint = fixture
+        .authority
+        .reacquire(named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io), io)
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.applied, follow_frontier(fixture.stream, 1, 100));
+    assert_eq!(fixture.authority.row, fixture.committed);
+    let rows = fixture
+        .observer
+        .query(
+            &format!(
+                "SELECT id,immediate_key,deferred_key,body FROM ONLY {} ORDER BY id",
+                fixture.table
+            ),
+            io,
+        )
+        .unwrap();
+    assert_eq!(rows.rows(), 2);
+    for (index, expected) in [["1", "10", "100", "original"], ["2", "20", "200", "other"]]
+        .iter()
+        .enumerate()
+    {
+        for (column, value) in expected.iter().enumerate() {
+            assert_eq!(rows.cell(index, column).unwrap(), Some(value.as_bytes()));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_identity_rewrite_commits_data_and_checkpoint() {
+    let io = control();
+    let mut fixture = identity_rewrite_fixture("commit", true, &io);
+    let checkpoint_table = qualified(&mut fixture.observer, &fixture.authority.provenance);
+    let next = follow_frontier(fixture.stream, 2, 200);
+    let mut tx = fixture.authority.begin_group(&io).unwrap();
+    tx.execute_prepared("identity_sentinel", &[], &io).unwrap();
+    let result = tx
+        .execute_prepared(
+            "identity_rewrite",
+            &[
+                PgParam::Text(b"3"),
+                PgParam::Text(b"30"),
+                PgParam::Text(b"300"),
+                PgParam::Text(b"replacement"),
+                PgParam::Text(b"1"),
+            ],
+            &io,
+        )
+        .unwrap();
+    require_identity_rewrite_result(result).unwrap();
+    tx.advance(next).unwrap();
+    let before = fixture
+        .observer
+        .query(
+            &format!(
+                "SELECT applied_order,(SELECT body FROM ONLY {} WHERE id=1) \
+                 FROM ONLY {checkpoint_table}",
+                fixture.table
+            ),
+            &io,
+        )
+        .unwrap();
+    assert_eq!(before.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+    assert_eq!(before.cell(0, 1).unwrap(), Some(b"original".as_slice()));
+    let CommitOutcome::Acknowledged {
+        checkpoint,
+        durable: Some(proof),
+    } = tx.commit(&io).unwrap()
+    else {
+        panic!("identity rewrite has no positive durable COMMIT")
+    };
+    assert_eq!(checkpoint.applied, next);
+    assert_eq!(
+        checkpoint.barrier_counter,
+        fixture.committed.barrier_counter + 1
+    );
+    assert_eq!(proof.frontier(), Some(&next));
+    assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(200));
+    let rows = fixture
+        .observer
+        .query(
+            &format!(
+                "SELECT applied_order,source_end_lsn, \
+                 (SELECT count(*)=2 AND bool_and( \
+                  (id=3 AND immediate_key=30 AND deferred_key=300 AND body='replacement') \
+                  OR (id=2 AND immediate_key=20 AND deferred_key=200 AND body='uncommitted')) \
+                  FROM ONLY {}) \
+                 FROM ONLY {checkpoint_table}",
+                fixture.table
+            ),
+            &io,
+        )
+        .unwrap();
+    assert_eq!(rows.rows(), 1);
+    assert_eq!(rows.cell(0, 0).unwrap(), Some(b"2".as_slice()));
+    assert_eq!(rows.cell(0, 1).unwrap(), Some(b"0/C8".as_slice()));
+    assert_eq!(rows.cell(0, 2).unwrap(), Some(b"t".as_slice()));
+    assert_eq!(fixture.authority.checkpoint(&io).unwrap(), Some(checkpoint));
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_identity_rewrite_constraint_failure_rolls_back() {
+    let io = control();
+    for (case, immediate, body, expected) in [
+        (
+            "unique",
+            b"20".as_slice(),
+            PgParam::Text(b"replacement"),
+            "23505",
+        ),
+        ("not_null", b"30".as_slice(), PgParam::Null, "23502"),
+    ] {
+        let mut fixture = identity_rewrite_fixture(case, true, &io);
+        let mut tx = fixture.authority.begin_group(&io).unwrap();
+        tx.execute_prepared("identity_sentinel", &[], &io).unwrap();
+        tx.advance(follow_frontier(fixture.stream, 2, 200)).unwrap();
+        let result = tx.execute_prepared(
+            "identity_rewrite",
+            &[
+                PgParam::Text(b"3"),
+                PgParam::Text(immediate),
+                PgParam::Text(b"300"),
+                body,
+                PgParam::Text(b"1"),
+            ],
+            &io,
+        );
+        let Err(error) = result else {
+            panic!("identity rewrite accepted {case}")
+        };
+        assert!(error.message.contains(expected), "{error:?}");
+        assert!(tx.commit(&io).is_err());
+        assert_identity_rewrite_rolled_back(&mut fixture, &io);
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn identity_rewrite_origin_deferred_constraint_failure_rolls_back() {
+    let io = control();
+    let mut fixture = identity_rewrite_fixture("deferred_origin", false, &io);
+    let mut tx = fixture.authority.begin_group(&io).unwrap();
+    tx.execute_prepared("identity_sentinel", &[], &io).unwrap();
+    tx.advance(follow_frontier(fixture.stream, 2, 200)).unwrap();
+    require_identity_rewrite_result(
+        tx.execute_prepared(
+            "identity_rewrite",
+            &[
+                PgParam::Text(b"3"),
+                PgParam::Text(b"30"),
+                PgParam::Text(b"200"),
+                PgParam::Text(b"replacement"),
+                PgParam::Text(b"1"),
+            ],
+            &io,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let error = tx.commit(&io).unwrap_err();
+    assert!(error.message.contains("23505"), "{error:?}");
+    assert_identity_rewrite_rolled_back(&mut fixture, &io);
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_identity_rewrite_missing_row_and_wrong_tag_roll_back() {
+    let io = control();
+    for (case, old, expected_tag) in [
+        ("missing", b"99".as_slice(), "INSERT 0 0"),
+        ("wrong_tag", b"1".as_slice(), "UPDATE 1"),
+    ] {
+        let mut fixture = identity_rewrite_fixture(case, true, &io);
+        let mut tx = fixture.authority.begin_group(&io).unwrap();
+        tx.execute_prepared("identity_sentinel", &[], &io).unwrap();
+        tx.advance(follow_frontier(fixture.stream, 2, 200)).unwrap();
+        let result = tx.pipeline(
+            &io,
+            |pipeline| {
+                if case == "wrong_tag" {
+                    pipeline.execute_prepared("identity_sentinel", &[], &io)
+                } else {
+                    pipeline.execute_prepared(
+                        "identity_rewrite",
+                        &[
+                            PgParam::Text(b"3"),
+                            PgParam::Text(b"30"),
+                            PgParam::Text(b"300"),
+                            PgParam::Text(b"replacement"),
+                            PgParam::Text(old),
+                        ],
+                        &io,
+                    )
+                }
+            },
+            |index, result| {
+                assert_eq!(index, 0);
+                assert_eq!(result.command_tag()?, expected_tag);
+                require_identity_rewrite_result(result)
+            },
+        );
+        assert!(result.is_err());
+        assert!(tx.commit(&io).is_err());
+        assert_identity_rewrite_rolled_back(&mut fixture, &io);
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_identity_rewrite_cas_failure_rolls_back() {
+    let io = control();
+    let mut fixture = identity_rewrite_fixture("cas", true, &io);
+    let checkpoint_table = qualified(&mut fixture.observer, &fixture.authority.provenance);
+    let mut tx = fixture.authority.begin_group(&io).unwrap();
+    tx.execute_prepared("identity_sentinel", &[], &io).unwrap();
+    require_identity_rewrite_result(
+        tx.execute_prepared(
+            "identity_rewrite",
+            &[
+                PgParam::Text(b"3"),
+                PgParam::Text(b"30"),
+                PgParam::Text(b"300"),
+                PgParam::Text(b"replacement"),
+                PgParam::Text(b"1"),
+            ],
+            &io,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    tx.advance(follow_frontier(fixture.stream, 2, 200)).unwrap();
+    let result = tx.commit_pipeline(
+        &io,
+        |pipeline| {
+            pipeline.query(
+                &format!("UPDATE ONLY {checkpoint_table} SET barrier_counter=barrier_counter+1"),
+                &io,
+            )
+        },
+        |_, _| Ok(()),
+    );
+    assert!(result.is_err());
+    assert_identity_rewrite_rolled_back(&mut fixture, &io);
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_identity_rewrite_transaction_escape_rolls_back() {
+    let io = control();
+    for (case, sql) in [
+        ("cte_commit", "WITH x AS (COMMIT) SELECT 1"),
+        ("parent_commit", "WITH x AS (SELECT 1) COMMIT"),
+        ("second_commit", "WITH x AS (SELECT 1) SELECT 1; COMMIT"),
+    ] {
+        let mut fixture = identity_rewrite_fixture(case, true, &io);
+        let mut tx = fixture.authority.begin_group(&io).unwrap();
+        tx.execute_prepared("identity_sentinel", &[], &io).unwrap();
+        tx.advance(follow_frontier(fixture.stream, 2, 200)).unwrap();
+        let error = tx.prepare("identity_escape", sql, &[], &io).unwrap_err();
+        assert!(error.message.contains("42601"), "{error:?}");
+        assert!(tx.failed);
+        assert!(!tx.authority.prepared.contains("identity_escape"));
+        assert_eq!(
+            tx.authority
+                .session
+                .connection()
+                .unwrap()
+                .transaction_status()
+                .unwrap(),
+            TransactionStatus::InError
+        );
+        assert!(tx.execute_prepared("identity_sentinel", &[], &io).is_err());
+        assert!(tx.commit(&io).is_err());
+        assert_identity_rewrite_rolled_back(&mut fixture, &io);
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_streamed_group_is_atomic_and_checkpointed_once() {
+    let io = control();
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut observer = connection(&io);
+    command(
+        &mut observer,
+        "CREATE TABLE public.authority_follow_group(value integer)",
+        "CREATE TABLE",
+        &io,
+    )
+    .unwrap();
+    let mut authority =
+        TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+    install_test_follow(&mut authority, &io);
+    let previous_counter = authority.row.barrier_counter;
+    let mut setup = authority.begin_group(&io).unwrap();
+    setup
+        .prepare(
+            "follow_group_insert",
+            "INSERT INTO public.authority_follow_group VALUES ($1)",
+            &[23],
+            &io,
+        )
+        .unwrap();
+    setup.rollback(&io).unwrap();
+    let mut tx = authority.begin_group(&io).unwrap();
+    assert!(matches!(tx.authority.session.phase, Phase::BeginPending));
+    tx.pipeline(
+        &io,
+        |pipeline| pipeline.execute_prepared("follow_group_insert", &[PgParam::Text(b"1")], &io),
+        |index, result| {
+            assert_eq!(index, 0);
+            assert_eq!(result.command_tag()?, "INSERT 0 1");
+            Ok(())
+        },
+    )
+    .unwrap();
+    tx.advance(follow_frontier(stream, 1, 100)).unwrap();
+    assert_eq!(
+        observer
+            .query("SELECT count(*) FROM public.authority_follow_group", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap(),
+        Some(b"0".as_slice())
+    );
+    tx.advance(follow_frontier(stream, 2, 200)).unwrap();
+    let CommitOutcome::Acknowledged {
+        checkpoint,
+        durable: Some(proof),
+    } = tx
+        .commit_pipeline(
+            &io,
+            |pipeline| {
+                pipeline.execute_prepared("follow_group_insert", &[PgParam::Text(b"2")], &io)
+            },
+            |index, result| {
+                assert_eq!(index, 0);
+                assert_eq!(result.command_tag()?, "INSERT 0 1");
+                Ok(())
+            },
+        )
+        .unwrap()
+    else {
+        panic!("follow group has no positive durable COMMIT")
+    };
+    assert_eq!(checkpoint.applied, follow_frontier(stream, 2, 200));
+    assert_eq!(checkpoint.barrier_counter, previous_counter + 1);
+    assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(200));
+    assert_eq!(
+        observer
+            .query("SELECT count(*) FROM public.authority_follow_group", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap(),
+        Some(b"2".as_slice())
+    );
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_cas_failure_rolls_back_dml_and_feedback() {
+    let io = control();
+    let mut observer = connection(&io);
+    command(
+        &mut observer,
+        "CREATE TABLE public.authority_follow_cas(value integer)",
+        "CREATE TABLE",
+        &io,
+    )
+    .unwrap();
+    for commit_escape in [false, true] {
+        let mut native = state();
+        let stream = stream_for(&native);
+        let mut authority =
+            TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+        install_test_follow(&mut authority, &io);
+        let table = qualified(&mut observer, &authority.provenance);
+        let cached = authority.row.clone();
+        let mut tx = authority.begin_group(&io).unwrap();
+        tx.advance(follow_frontier(stream, 1, 100)).unwrap();
+        let sabotage = if commit_escape {
+            "COMMIT".into()
+        } else {
+            format!("UPDATE ONLY {table} SET barrier_counter = barrier_counter + 1")
+        };
+        let result = tx.commit_pipeline(
+            &io,
+            |pipeline| {
+                pipeline.query("INSERT INTO public.authority_follow_cas VALUES (1)", &io)?;
+                pipeline.query(&sabotage, &io)
+            },
+            |_, _| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(matches!(authority.session.phase, Phase::Poisoned));
+        assert_eq!(authority.row, cached);
+        assert_eq!(
+            observer
+                .query("SELECT count(*) FROM public.authority_follow_cas", &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"0".as_slice())
+        );
+        let row = observer
+            .query(
+                &format!("SELECT applied_order,barrier_counter FROM {table}"),
+                &io,
+            )
+            .unwrap();
+        assert_eq!(row.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+        assert_eq!(
+            row.cell(0, 1).unwrap(),
+            Some(cached.barrier_counter.to_string().as_bytes())
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_certification_and_recovery_refuse_a_source_gap() {
+    let io = control();
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut authority =
+        TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+    let binding = install_test_follow(&mut authority, &io);
+    let proof = authority.certify(SourceEndLsn(200), &io).unwrap();
+    assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(200));
+    assert!(authority.row.applied.is_none());
+    let start = authority
+        .recover_follow(&binding, SourceEndLsn(200), &io)
+        .unwrap();
+    assert_eq!(start.start_lsn(), SourceEndLsn(200));
+    let error = authority
+        .recover_follow(&binding, SourceEndLsn(201), &io)
+        .unwrap_err();
+    assert_eq!(error.exit_code(), 3);
+    assert!(matches!(authority.session.phase, Phase::Poisoned));
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness with exclusive SyncRep settings"]
+fn follow_cancelled_sync_wait_never_proves_group_or_certification() {
+    let io = control();
+    let context_path = PathBuf::from(std::env::var_os("RPGMIGRATE_TEST_CONTEXT").unwrap());
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(context_path).unwrap()).unwrap();
+    let token = context["token"].as_str().unwrap();
+    let root = PathBuf::from(context["root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+        token
+    );
+    let admin_info = Conninfo::new(
+        std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").expect("owned admin required"),
+    )
+    .unwrap();
+    let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+    let identity = admin
+        .query("SELECT pg_catalog.current_setting('cluster_name')", &io)
+        .unwrap();
+    assert_eq!(identity.cell(0, 0).unwrap(), Some(token.as_bytes()));
+    command(&mut admin, "SET synchronous_commit=off", "SET", &io).unwrap();
+    let mut setup = connection(&io);
+    command(
+        &mut setup,
+        "CREATE TABLE public.authority_follow_cancel(value integer)",
+        "CREATE TABLE",
+        &io,
+    )
+    .unwrap();
+    let mut protected_native = state();
+    let protected_stream = stream_for(&protected_native);
+    let mut protected = TargetAuthority::acquire(
+        connection(&io),
+        protected_stream,
+        &mut protected_native,
+        &io,
+    )
+    .unwrap();
+    command(
+        &mut admin,
+        "ALTER SYSTEM SET full_page_writes=off",
+        "ALTER SYSTEM",
+        &io,
+    )
+    .unwrap();
+    admin
+        .query("SELECT pg_catalog.pg_reload_conf()", &io)
+        .unwrap();
+    let drift_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if admin
+            .query("SHOW full_page_writes", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            == Some(b"off".as_slice())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < drift_deadline,
+            "owned full_page_writes drift was not observed"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut rejected = state();
+    let rejected_stream = stream_for(&rejected);
+    assert!(
+        TargetAuthority::acquire(connection(&io), rejected_stream, &mut rejected, &io).is_err()
+    );
+    assert!(rejected.target_provenance(&rejected_stream).is_none());
+    assert!(protected.checkpoint(&io).is_err());
+    assert!(matches!(protected.session.phase, Phase::Poisoned));
+    assert!(protected.barrier(None, 0, &io).is_err());
+    command(
+        &mut admin,
+        "ALTER SYSTEM RESET full_page_writes",
+        "ALTER SYSTEM",
+        &io,
+    )
+    .unwrap();
+    admin
+        .query("SELECT pg_catalog.pg_reload_conf()", &io)
+        .unwrap();
+    let restore_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if admin
+            .query("SHOW full_page_writes", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            == Some(b"on".as_slice())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < restore_deadline,
+            "owned full_page_writes was not restored"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for certification in [false, true] {
+        let mut native = state();
+        let stream = stream_for(&native);
+        let mut authority =
+            TargetAuthority::acquire(connection(&io), stream, &mut native, &io).unwrap();
+        let binding = install_test_follow(&mut authority, &io);
+        let pid = authority.session.pid;
+        let cancellation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            command(
+                &mut admin,
+                "ALTER SYSTEM SET synchronous_standby_names='FIRST 1 (rpgmigrate_missing_standby)'",
+                "ALTER SYSTEM",
+                &io,
+            )
+            .unwrap();
+            assert_eq!(
+                admin
+                    .query("SELECT pg_catalog.pg_reload_conf()", &io)
+                    .unwrap()
+                    .cell(0, 0)
+                    .unwrap(),
+                Some(b"t".as_slice())
+            );
+            let mut reload_io = io.clone();
+            reload_io.deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if admin
+                    .query("SHOW synchronous_standby_names", &reload_io)
+                    .unwrap()
+                    .cell(0, 0)
+                    .unwrap()
+                    == Some(b"FIRST 1 (rpgmigrate_missing_standby)".as_slice())
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < reload_io.deadline,
+                    "owned synchronous standby policy was not reloaded"
+                );
+            }
+            // The checkpointer publishes shared SyncRep policy before processing checkpoints.
+            command(&mut admin, "CHECKPOINT", "CHECKPOINT", &io).unwrap();
+            let cancel_info = admin_info.clone();
+            let cancel_io = io.clone();
+            let cancel = std::thread::spawn(move || {
+                let mut observer = PgConnection::connect(&cancel_info, &cancel_io).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "sync-cancel diagnostic pid={pid} wait=unobserved query=unobserved cancel=false"
+                    );
+                    let result = observer
+                        .query(
+                            &format!("SELECT pid,wait_event='SyncRep',query='COMMIT' FROM pg_catalog.pg_stat_activity WHERE pid={pid}"),
+                            &cancel_io,
+                        )
+                        .unwrap();
+                    assert_eq!(result.rows(), 1);
+                    assert_eq!(number(&result, 0).unwrap(), pid);
+                    if result.cell(0, 1).unwrap() == Some(b"t".as_slice())
+                        && result.cell(0, 2).unwrap() == Some(b"t".as_slice())
+                    {
+                        let result = observer
+                            .query(
+                                &format!("SELECT pg_catalog.pg_cancel_backend({pid})"),
+                                &cancel_io,
+                            )
+                            .unwrap();
+                        let submitted = result.cell(0, 0).unwrap() == Some(b"t".as_slice());
+                        eprintln!(
+                            "sync-cancel diagnostic pid={pid} wait=SyncRep query=COMMIT cancel={submitted}"
+                        );
+                        assert!(submitted);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+            if certification {
+                let outcome = authority.certify(SourceEndLsn(200), &io);
+                let variant = if outcome.is_ok() {
+                    "Acknowledged"
+                } else {
+                    "Refused"
+                };
+                eprintln!("sync-cancel diagnostic phase=certification pid={pid} outcome={variant}");
+                cancel
+                    .join()
+                    .expect("SyncRep cancellation was not observed");
+                assert!(outcome.is_err());
+                assert!(authority.row.certified_lsn.is_none());
+            } else {
+                let mut tx = authority.begin_group(&io).unwrap();
+                tx.advance(follow_frontier(stream, 1, 100)).unwrap();
+                let outcome = tx
+                    .commit_pipeline(
+                        &io,
+                        |pipeline| {
+                            pipeline
+                                .query("INSERT INTO public.authority_follow_cancel VALUES (1)", &io)
+                        },
+                        |_, result| {
+                            assert_eq!(result.command_tag()?, "INSERT 0 1");
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                let variant = match &outcome {
+                    CommitOutcome::Acknowledged { .. } => "Acknowledged",
+                    CommitOutcome::Unknown => "Unknown",
+                };
+                eprintln!("sync-cancel diagnostic phase=group pid={pid} outcome={variant}");
+                cancel
+                    .join()
+                    .expect("SyncRep cancellation was not observed");
+                assert!(
+                    matches!(outcome, CommitOutcome::Unknown),
+                    "outcome={variant}"
+                );
+                assert!(authority.row.applied.is_none());
+            }
+            assert!(matches!(authority.session.phase, Phase::Poisoned));
+        }));
+        command(
+            &mut admin,
+            "ALTER SYSTEM RESET synchronous_standby_names",
+            "ALTER SYSTEM",
+            &io,
+        )
+        .unwrap();
+        admin
+            .query("SELECT pg_catalog.pg_reload_conf()", &io)
+            .unwrap();
+        let reset_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reset = admin.query("SHOW synchronous_standby_names", &io).unwrap();
+            if reset.cell(0, 0).unwrap() == Some(b"".as_slice()) {
+                break;
+            }
+            assert!(
+                Instant::now() < reset_deadline,
+                "owned SyncRep setting did not reset"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Err(panic) = cancellation {
+            std::panic::resume_unwind(panic);
+        }
+        authority.reacquire(connection(&io), &io).unwrap();
+        let recovered = authority
+            .recover_follow(&binding, SourceEndLsn(10), &io)
+            .unwrap();
+        assert_eq!(
+            recovered.start_lsn(),
+            SourceEndLsn(if certification { 200 } else { 100 })
+        );
+    }
+}
+
+fn follow_reset_resources(
+    native: &mut NativeState,
+    plan: &crate::contracts::ClonePlan,
+    point: u64,
+) -> FollowBinding {
+    native.prepare_follow_source(plan).unwrap();
+    let name = format!("rpgmigrate_reset_{}", plan.generation.0);
+    let intent = native.begin_publication(&name).unwrap();
+    let publication = crate::contracts::PublicationReceipt {
+        name: name.clone(),
+        oid: point as u32,
+        owner_oid: 43,
+    };
+    native
+        .record_publication_created(&intent, &publication)
+        .unwrap();
+    native.confirm_publication(&intent, &publication).unwrap();
+    let stream = StreamId {
+        run: native.identity().run,
+        source: plan.source.identity,
+        generation: 1,
+    };
+    let slot = native
+        .begin_source_slot(
+            &crate::state::SourceSlotBinding::new(
+                stream,
+                name,
+                crate::cdc::contracts::Plugin::Pgoutput,
+                plan.generation.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let receipt = native
+        .confirm_source_slot(
+            &slot,
+            crate::state::CreatedSlotData {
+                consistent_point: SourceEndLsn(point),
+                snapshot_name: format!("reset-{point}"),
+            },
+        )
+        .unwrap();
+    FollowBinding {
+        slot: receipt,
+        publication,
+        source_timeline: 1,
+        copy_generation: plan.generation,
+        source_types: Vec::new(),
+    }
+}
+
+// Source receipts are synthetic here; every target ownership receipt comes from actual fixture DDL.
+fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAuthority, String) {
+    let initial = state();
+    let path = initial.identity().canonical_path.clone();
+    drop(initial);
+    let mut native = crate::state::open_follow(
+        &StateRequest {
+            path,
+            action: StateAction::Resume,
+        },
+        None,
+        None,
+        io,
+    )
+    .unwrap();
+    let schema = format!(
+        "m3_reset_{}",
+        native
+            .identity()
+            .run
+            .0
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io);
+    let target = crate::catalog::read_clone_target(&mut observer, io).unwrap();
+    let source = crate::contracts::CloneSource {
+        identity: SourceId {
+            system_identifier: 777,
+            database_oid: 42,
+        },
+        timeline: 1,
+        major: 16,
+    };
+    let mut plan = crate::contracts::ClonePlan {
+        source: source.clone(),
+        target,
+        generation: crate::contracts::CopyGeneration(1),
+        tables: if empty {
+            Vec::new()
+        } else {
+            ["a", "b"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| crate::contracts::CloneTable {
+                    source_oid: 1001 + index as u32,
+                    name: crate::contracts::QualifiedTable {
+                        schema: schema.clone(),
+                        table: name.into(),
+                    },
+                    writable_columns: vec!["id".into()],
+                    all_columns: vec!["id".into()],
+                    identity_modes: vec![0],
+                    partition_identity_modes: None,
+                })
+                .collect()
+        },
+        sequences: Vec::new(),
+        policy: crate::contracts::RestorePolicy::default(),
+    };
+    let binding = follow_reset_resources(&mut native, &plan, 10);
+    native
+        .bind_follow(
+            &plan,
+            &crate::contracts::SnapshotTicket {
+                token: binding.slot.snapshot_token.clone(),
+                source: source.clone(),
+                generation: plan.generation,
+            },
+            &binding,
+        )
+        .unwrap();
+    let mut authority = CloneAuthority::acquire(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io),
+        &mut native,
+        &plan,
+        io,
+    )
+    .unwrap();
+    native.begin_pre_data().unwrap();
+    authority
+        .mark_stage(crate::state::ClonePhase::PreDataPending, io)
+        .unwrap();
+    let before = crate::catalog::clone_object_inventory(&mut observer, io).unwrap();
+    if !empty {
+        observer
+            .query(&format!("CREATE SCHEMA {schema}"), io)
+            .unwrap();
+        observer
+            .query(
+                &format!("CREATE TABLE {schema}.a(id integer PRIMARY KEY)"),
+                io,
+            )
+            .unwrap();
+        observer
+            .query(&format!("CREATE TABLE {schema}.b(id integer)"), io)
+            .unwrap();
+    }
+    let objects = crate::catalog::clone_object_inventory(&mut observer, io)
+        .unwrap()
+        .into_iter()
+        .filter(|object| !before.contains(object))
+        .collect::<Vec<_>>();
+    let tables =
+        crate::catalog::reconcile_clone_tables(&mut observer, &plan, &objects, io).unwrap();
+    native.confirm_pre_data(objects, tables.clone()).unwrap();
+    authority.bind_tables(&native, io).unwrap();
+    for table in &tables {
+        let mut tx = CopyTxn::begin(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io),
+            authority.permit(table).unwrap(),
+            io,
+        )
+        .unwrap();
+        tx.connection_mut()
+            .unwrap()
+            .start_copy_in(
+                &format!(
+                    "COPY {schema}.{} FROM STDIN WITH(FORMAT text,FREEZE true)",
+                    table.table.name.table
+                ),
+                io,
+            )
+            .unwrap();
+        tx.connection_mut().unwrap().write_copy(b"1\n", io).unwrap();
+        assert_eq!(tx.connection_mut().unwrap().finish_copy_in(io).unwrap(), 1);
+        assert!(matches!(
+            tx.mark_and_commit(1, 2, io).unwrap(),
+            CopyCommitOutcome::Durable
+        ));
+    }
+    assert_eq!(
+        authority.copy_report(io).unwrap().tables,
+        tables.len() as u64
+    );
+    let restart = authority
+        .begin_follow_restart(&mut native, &plan, io)
+        .unwrap();
+    native.confirm_follow_slot_absent(&restart).unwrap();
+    native.confirm_follow_publication_absent(&restart).unwrap();
+    plan.generation = crate::contracts::CopyGeneration(2);
+    let binding = follow_reset_resources(&mut native, &plan, 20);
+    native
+        .bind_follow(
+            &plan,
+            &crate::contracts::SnapshotTicket {
+                token: binding.slot.snapshot_token.clone(),
+                source,
+                generation: plan.generation,
+            },
+            &binding,
+        )
+        .unwrap();
+    authority.advance_generation(&native, io).unwrap();
+    native.finish_follow_restart().unwrap();
+    assert!(
+        metadata::read_markers(
+            authority.authority.session.connection().unwrap(),
+            &authority.authority.provenance,
+            io
+        )
+        .unwrap()
+        .is_empty()
+    );
+    (native, authority, schema)
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_restart_resets_the_complete_workset_and_allows_safe_preworker_retry() {
+    let io = control();
+    let (native, mut authority, schema) = follow_reset_fixture(&io, false);
+    let before = authority.authority.row.barrier_counter;
+    let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    for step in 1..=2 {
+        authority.truncate_follow_workset(&native, &io).unwrap();
+        assert_eq!(authority.authority.row.barrier_counter, before + step);
+        let result = observer
+            .query(
+                &format!(
+                    "SELECT (SELECT count(*) FROM {schema}.a), (SELECT count(*) FROM {schema}.b)"
+                ),
+                &io,
+            )
+            .unwrap();
+        assert_eq!(result.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+        assert_eq!(result.cell(0, 1).unwrap(), Some(b"0".as_slice()));
+    }
+    let (native, mut empty, _) = follow_reset_fixture(&io, true);
+    let counter = empty.authority.row.barrier_counter;
+    empty.truncate_follow_workset(&native, &io).unwrap();
+    assert_eq!(empty.authority.row.barrier_counter, counter + 1);
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_restart_refuses_foreign_replacement_and_fk_without_mutating_rows() {
+    let io = control();
+    for replacement in [true, false] {
+        let (native, mut authority, schema) = follow_reset_fixture(&io, false);
+        let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+        if replacement {
+            observer
+                .query(&format!("ALTER TABLE {schema}.a RENAME TO original_a"), &io)
+                .unwrap();
+            observer
+                .query(
+                    &format!("CREATE TABLE {schema}.a(id integer PRIMARY KEY)"),
+                    &io,
+                )
+                .unwrap();
+            observer
+                .query(&format!("INSERT INTO {schema}.a VALUES (91)"), &io)
+                .unwrap();
+        } else {
+            observer
+                .query(
+                    &format!(
+                        "CREATE TABLE {schema}.foreign_refs(id integer REFERENCES {schema}.a(id))"
+                    ),
+                    &io,
+                )
+                .unwrap();
+            observer
+                .query(
+                    &format!("INSERT INTO {schema}.foreign_refs VALUES (1)"),
+                    &io,
+                )
+                .unwrap();
+        }
+        let cached = authority.authority.row.clone();
+        assert!(authority.truncate_follow_workset(&native, &io).is_err());
+        assert_eq!(authority.authority.row, cached);
+        assert!(matches!(authority.authority.session.phase, Phase::Poisoned));
+        let result = observer.query(&format!("SELECT (SELECT count(*) FROM {schema}.a), (SELECT count(*) FROM {schema}.b), (SELECT min(id) FROM {schema}.a)"), &io).unwrap();
+        assert_eq!(result.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+        assert_eq!(result.cell(0, 1).unwrap(), Some(b"1".as_slice()));
+        assert_eq!(
+            result.cell(0, 2).unwrap(),
+            Some(if replacement {
+                b"91".as_slice()
+            } else {
+                b"1".as_slice()
+            })
+        );
+        let foreign = if replacement {
+            "original_a"
+        } else {
+            "foreign_refs"
+        };
+        assert_eq!(
+            observer
+                .query(&format!("SELECT id FROM {schema}.{foreign}"), &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(b"1".as_slice())
+        );
+        let metadata_name = qualified(&mut observer, &authority.authority.provenance);
+        assert_eq!(
+            observer
+                .query(&format!("SELECT barrier_counter FROM {metadata_name}"), &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(cached.barrier_counter.to_string().as_bytes())
+        );
+    }
 }

@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::cli::Environment;
-use crate::contracts::{Error, ErrorKind, OperatorIdentity, Result};
+use crate::contracts::{Error, ErrorKind, FollowLimits, FollowOptions, OperatorIdentity, Result};
 use crate::identity::RunId;
 
 #[derive(Serialize)]
@@ -32,10 +32,11 @@ pub(crate) fn operator_run(env: &Environment) -> Result<Option<RunId>> {
     if values.iter().all(Option::is_none) {
         return Ok(None);
     }
-    let invalid = || Error {
-        kind: ErrorKind::BadConfig,
-        message: "invalid operator identity environment; supply all four canonical identity values"
-            .into(),
+    let invalid = || {
+        Error::new(
+            ErrorKind::BadConfig,
+            "invalid operator identity environment; supply all four canonical identity values",
+        )
     };
     let [uid, run, workdir, generation] =
         values.map(|value| value.and_then(|value| value.to_str()));
@@ -135,10 +136,10 @@ impl Phase {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "suspended" => Ok(Self::Suspended),
-            _ => Err(Error {
-                kind: ErrorKind::BadState,
-                message: "native report phase is unsupported".into(),
-            }),
+            _ => Err(Error::new(
+                ErrorKind::BadState,
+                "native report phase is unsupported",
+            )),
         }
     }
 }
@@ -190,10 +191,75 @@ pub(crate) fn copy_report(
         })
         .map(|document| format!("{document}\n")),
     };
-    encoded.map_err(|_| Error {
-        kind: ErrorKind::Internal,
-        message: "cannot encode native copy report".into(),
-    })
+    encoded.map_err(|_| Error::new(ErrorKind::Internal, "cannot encode native copy report"))
+}
+
+enum FollowLog {
+    Startup {
+        limits: FollowLimits,
+        apply_group_txns: u64,
+    },
+    Backpressure {
+        limits: FollowLimits,
+        queued_messages: usize,
+        queued_bytes: usize,
+    },
+}
+
+impl FollowLog {
+    fn startup(options: &FollowOptions) -> Self {
+        Self::Startup {
+            limits: options.limits,
+            apply_group_txns: options.apply_group_txns,
+        }
+    }
+
+    fn document(&self) -> serde_json::Value {
+        match self {
+            Self::Startup {
+                limits,
+                apply_group_txns,
+            } => serde_json::json!({
+                "level":"info", "error_severity":"INFO", "event":"follow.startup",
+                "message":"native follow startup", "limits":limits,
+                "apply_group_txns":apply_group_txns, "wal_storage_free_bytes":"unknown",
+            }),
+            Self::Backpressure {
+                limits,
+                queued_messages,
+                queued_bytes,
+            } => serde_json::json!({
+                "level":"info", "error_severity":"INFO", "event":"follow.backpressure",
+                "message":"native follow backpressure", "queue":{
+                    "messages":queued_messages, "owned_bytes":queued_bytes,
+                    "limit_messages":limits.channel_messages, "limit_bytes":limits.channel_bytes,
+                },
+            }),
+        }
+    }
+
+    fn write(self) -> Result<()> {
+        use std::io::Write;
+        writeln!(std::io::stderr().lock(), "{}", self.document())
+            .map_err(|_| Error::new(ErrorKind::Internal, "cannot write native follow log"))
+    }
+}
+
+pub(crate) fn follow_startup(options: &FollowOptions) -> Result<()> {
+    FollowLog::startup(options).write()
+}
+
+pub(crate) fn follow_backpressure(
+    limits: FollowLimits,
+    queued_messages: usize,
+    queued_bytes: usize,
+) -> Result<()> {
+    FollowLog::Backpressure {
+        limits,
+        queued_messages,
+        queued_bytes,
+    }
+    .write()
 }
 
 #[cfg(test)]
@@ -368,6 +434,85 @@ mod tests {
             serde_json::json!({"command":"list progress","phase":"copying","copy":{"tables":{"total":2}}})
         );
         assert!(copy_report(CopyCommand::Clone, None, "complete", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn streaming_report_never_claims_follow_completion_or_drain() {
+        let operator = operator_identity(&environment()).unwrap().unwrap();
+        let output = copy_report(
+            CopyCommand::Clone,
+            Some(&operator),
+            "streaming",
+            &serde_json::json!({
+                "tables":{"total":1,"done":1},
+                "indexes":{"total":0,"done":0},
+                "bytes":{"total":4,"done":4},
+            }),
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(output.strip_prefix("native-report: ").unwrap()).unwrap();
+        assert_eq!(value["phase"], "streaming");
+        assert_eq!(value["command"], "clone");
+        assert_eq!(value["work"], work(Some(&operator)).unwrap());
+        assert!(value.get("complete").is_none());
+        assert!(value.get("drain_proof").is_none());
+        assert_eq!(
+            value["capabilities"],
+            serde_json::json!(["clone.single_db"])
+        );
+    }
+
+    #[test]
+    fn follow_info_events_expose_only_fixed_shapes_and_safe_counts() {
+        let args = [
+            "rpgmigrate",
+            "follow",
+            "--skip-large-objects",
+            "--source",
+            "host=source.invalid password=private-canary",
+            "--target",
+            "host=target.invalid",
+            "--origin",
+            "private-origin",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        let crate::contracts::Invocation::Follow(options) =
+            crate::cli::parse(&args, &crate::cli::Environment(Default::default())).unwrap()
+        else {
+            panic!("expected follow")
+        };
+        let startup = FollowLog::startup(&options).document();
+        assert_eq!(startup["event"], "follow.startup");
+        assert_eq!(startup["error_severity"], "INFO");
+        assert_eq!(startup["apply_group_txns"], 100);
+        let encoded = startup.to_string();
+        for private in [
+            "source.invalid",
+            "target.invalid",
+            "private-canary",
+            "private-origin",
+            "password",
+        ] {
+            assert!(!encoded.contains(private));
+        }
+        let full = FollowLog::Backpressure {
+            limits: FollowLimits::default(),
+            queued_messages: 2,
+            queued_bytes: 300,
+        }
+        .document();
+        assert_eq!(
+            full,
+            serde_json::json!({
+                "level":"info", "error_severity":"INFO", "event":"follow.backpressure",
+                "message":"native follow backpressure", "queue":{
+                    "messages":2, "owned_bytes":300, "limit_messages":1024, "limit_bytes":8*1024*1024,
+                },
+            })
+        );
     }
 
     #[test]

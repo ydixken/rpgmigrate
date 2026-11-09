@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use crate::cdc::contracts::{Event, RelationKey, Value};
+use crate::catalog::FollowRelation;
+use crate::cdc::contracts::{Event, OldTuple, OldTupleKind, RelationKey, Value};
 use crate::contracts::{Error, ErrorKind, Result};
 use crate::pg::PgParam;
 
@@ -14,114 +15,147 @@ enum Operation {
 struct RowValues<'a> {
     operation: Operation,
     new: &'a [Value],
-    old: Option<&'a [Value]>,
+    old: Option<&'a OldTuple>,
 }
 
 pub(super) struct DmlPlan {
     relation: RelationKey,
     operation: Operation,
     column_count: usize,
+    full_identity: bool,
     key_columns: Vec<usize>,
+    always_columns: Vec<usize>,
+    rewrite_identity: bool,
     write_columns: Vec<usize>,
     sql: String,
     param_types: Vec<u32>,
 }
 
 impl DmlPlan {
-    /// The caller verifies both endpoint profiles, ordered columns, and generation under DDL quiescence.
-    /// Catalog preflight must reject generated/identity columns and establish DEFAULT PK/builtin semantics.
-    /// This pure planner cannot verify either database or establish historical relation identity.
-    pub(super) fn new(relation: &Event, row: &Event) -> Result<Self> {
+    pub(super) fn new(checked: &FollowRelation, row: &Event) -> Result<Self> {
         let Event::Relation {
             key,
             schema,
             name,
             columns,
             replica_identity,
-        } = relation
+        } = &checked.relation
         else {
-            return Err(refusal("serial DML: relation context is required"));
+            return Err(refusal("apply DML: checked relation context is required"));
         };
-        if key.oid == 0 || *replica_identity != b'd' || columns.is_empty() || columns.len() > 1600 {
-            return Err(refusal("serial DML: relation profile is unsupported"));
+        if key.oid == 0
+            || !matches!(replica_identity, b'd' | b'i' | b'f')
+            || columns.is_empty()
+            || columns.len() > 1600
+            || checked.target_type_oids.len() != columns.len()
+            || checked.target_type_oids.contains(&0)
+            || checked.identity_modes.len() != columns.len()
+            || checked
+                .identity_modes
+                .iter()
+                .any(|mode| !matches!(mode, 0 | b'a' | b'd'))
+        {
+            return Err(refusal("apply DML: relation profile is unsupported"));
         }
         let table = format!("{}.{}", quote_identifier(schema)?, quote_identifier(name)?);
         let mut names = BTreeSet::new();
         let mut quoted = Vec::with_capacity(columns.len());
         for column in columns {
-            if column.type_oid == 0
-                || column.type_oid >= 16_384
-                || !names.insert(column.name.as_str())
-            {
-                return Err(refusal("serial DML: column metadata is invalid"));
+            if column.type_oid == 0 || !names.insert(column.name.as_str()) {
+                return Err(refusal("apply DML: column metadata is invalid"));
             }
             quoted.push(quote_identifier(&column.name)?);
         }
+        let full_identity = *replica_identity == b'f';
         let key_columns: Vec<_> = columns
             .iter()
             .enumerate()
-            .filter_map(|(index, column)| column.key.then_some(index))
+            .filter_map(|(index, column)| (full_identity || column.key).then_some(index))
             .collect();
         if key_columns.is_empty() {
-            return Err(refusal("serial DML: a verified primary key is required"));
+            return Err(refusal("apply DML: usable identity is required"));
         }
-        let operation = match row {
-            Event::Insert { .. } => Operation::Insert,
-            Event::Update { .. } => Operation::Update,
-            Event::Delete { .. } => Operation::Delete,
-            Event::Truncate { .. } => return Err(truncate_refusal()),
-            Event::Relation { .. } => {
-                return Err(refusal("serial DML: a row event is required"));
-            }
-        };
+        let operation = operation(row)?;
         let mut plan = Self {
             relation: *key,
             operation,
             column_count: columns.len(),
+            full_identity,
             key_columns,
+            always_columns: checked
+                .identity_modes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mode)| (*mode == b'a').then_some(index))
+                .collect(),
+            rewrite_identity: false,
             write_columns: Vec::new(),
             sql: String::new(),
             param_types: Vec::new(),
         };
-        let RowValues { new, .. } = plan.values(row)?;
-        plan.write_columns = new
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| (!matches!(value, Value::UnchangedToast)).then_some(index))
+        let values = plan.values(row)?;
+        plan.rewrite_identity = plan.needs_identity_rewrite(&values)?;
+        let new = values.new;
+        plan.write_columns = plan
+            .writable_columns(operation, new, plan.rewrite_identity)
             .collect();
-        let predicate_columns = if operation == Operation::Insert {
+        let predicates = if operation == Operation::Insert {
             &[][..]
         } else {
-            plan.key_columns.as_slice()
+            &plan.key_columns
         };
-        let count = parameter_count(plan.write_columns.len(), predicate_columns.len())?;
+        let count = parameter_count(plan.write_columns.len(), predicates.len())?;
         plan.param_types = plan
             .write_columns
             .iter()
-            .chain(predicate_columns)
-            .map(|index| columns[*index].type_oid)
+            .chain(predicates)
+            .map(|index| checked.target_type_oids[*index])
             .collect();
-        let predicate = predicate_columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                format!(
-                    "{} = ${}",
-                    quoted[*column],
-                    plan.write_columns.len() + index + 1
-                )
+        let predicate = predicates.iter().enumerate().map(|(index, column)|
+            if full_identity {
+                format!("({}::pg_catalog.text COLLATE pg_catalog.\"C\") IS NOT DISTINCT FROM (${}::pg_catalog.text COLLATE pg_catalog.\"C\")", quoted[*column], plan.write_columns.len() + index + 1)
+            } else {
+                format!("{} IS NOT DISTINCT FROM ${}", quoted[*column], plan.write_columns.len() + index + 1)
             })
-            .collect::<Vec<_>>()
-            .join(" AND ");
+            .collect::<Vec<_>>().join(" AND ");
+        // FULL has no uniqueness guarantee; one source row changes exactly one physical target row.
+        let ordinary_predicate = full_identity
+            .then(|| format!("ctid = (SELECT ctid FROM ONLY {table} WHERE {predicate} LIMIT 1)"));
+        let ordinary_predicate = ordinary_predicate.as_deref().unwrap_or(&predicate);
         plan.sql = match operation {
             Operation::Insert => {
                 let placeholders = (1..=count)
                     .map(|index| format!("${index}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let overriding = if !plan.always_columns.is_empty() {
+                    " OVERRIDING SYSTEM VALUE"
+                } else {
+                    ""
+                };
                 format!(
-                    "INSERT INTO {table} ({}) VALUES ({placeholders})",
+                    "INSERT INTO {table} ({}){overriding} VALUES ({placeholders})",
                     quoted.join(", ")
+                )
+            }
+            Operation::Update if plan.rewrite_identity => {
+                let mut parameter = 0;
+                let selected = new
+                    .iter()
+                    .zip(&quoted)
+                    .map(|(value, name)| {
+                        if matches!(value, Value::UnchangedToast) {
+                            format!("rpgmigrate_old.{name}")
+                        } else {
+                            parameter += 1;
+                            format!("${parameter}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let columns = quoted.join(", ");
+                format!(
+                    "WITH rpgmigrate_old AS (DELETE FROM ONLY {table} WHERE ctid = (SELECT ctid FROM ONLY {table} WHERE {predicate} LIMIT 1 FOR UPDATE) RETURNING {columns}) INSERT INTO {table} ({columns}) OVERRIDING SYSTEM VALUE SELECT {selected} FROM rpgmigrate_old"
                 )
             }
             Operation::Update => {
@@ -132,128 +166,157 @@ impl DmlPlan {
                     .map(|(index, column)| format!("{} = ${}", quoted[*column], index + 1))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("UPDATE ONLY {table} SET {assignments} WHERE {predicate}")
+                format!("UPDATE ONLY {table} SET {assignments} WHERE {ordinary_predicate}")
             }
-            Operation::Delete => format!("DELETE FROM ONLY {table} WHERE {predicate}"),
+            Operation::Delete => format!("DELETE FROM ONLY {table} WHERE {ordinary_predicate}"),
         };
         Ok(plan)
     }
-
+    pub(super) fn expected_tag(&self) -> &'static str {
+        match self.operation {
+            Operation::Insert => "INSERT 0 1",
+            Operation::Update if self.rewrite_identity => "INSERT 0 1",
+            Operation::Update => "UPDATE 1",
+            Operation::Delete => "DELETE 1",
+        }
+    }
     pub(super) fn sql(&self) -> &str {
         &self.sql
     }
-
     pub(super) fn param_types(&self) -> &[u32] {
         &self.param_types
     }
-
-    /// Heap buffer capacity excludes inline storage, allocator overhead, and borrowed row values.
-    /// The cache counts its inline entry and map overhead separately.
     pub(super) fn owned_capacity_bytes(&self) -> Result<usize> {
         [
             (self.sql.capacity(), size_of::<u8>()),
             (self.param_types.capacity(), size_of::<u32>()),
             (self.key_columns.capacity(), size_of::<usize>()),
+            (self.always_columns.capacity(), size_of::<usize>()),
             (self.write_columns.capacity(), size_of::<usize>()),
         ]
         .into_iter()
-        .try_fold(0usize, |total, (capacity, element_bytes)| {
+        .try_fold(0usize, |total, (capacity, bytes)| {
             capacity
-                .checked_mul(element_bytes)
+                .checked_mul(bytes)
                 .and_then(|bytes| total.checked_add(bytes))
-                .ok_or_else(|| {
-                    refusal("serial DML: owned buffer capacity exceeds the accounting limit")
-                })
+                .ok_or_else(|| refusal("apply DML: capacity overflow"))
         })
     }
-
     pub(super) fn matches(&self, row: &Event) -> Result<bool> {
-        let RowValues { operation, new, .. } = self.values(row)?;
-        Ok(self.shape_matches(operation, new))
+        self.shape_matches(&self.values(row)?)
     }
-
     pub(super) fn bind<'a>(&self, row: &'a Event) -> Result<Vec<PgParam<'a>>> {
+        let values = self.values(row)?;
+        if !self.shape_matches(&values)? {
+            return Err(refusal("apply DML: prepared shape differs"));
+        }
         let RowValues {
             operation,
             new,
             old,
-        } = self.values(row)?;
-        if !self.shape_matches(operation, new) {
-            return Err(refusal(
-                "serial DML: row does not match the prepared plan shape",
-            ));
-        }
+        } = values;
         let mut params = Vec::with_capacity(self.param_types.len());
         for index in &self.write_columns {
             params.push(parameter(&new[*index])?);
         }
         if operation != Operation::Insert {
-            for (index, column) in self.key_columns.iter().enumerate() {
-                let value = match old {
-                    Some(old) => &old[index],
+            for column in &self.key_columns {
+                params.push(parameter(match old {
+                    Some(old) => &old.values[*column],
                     None => &new[*column],
-                };
-                params.push(parameter(value)?);
+                })?);
             }
         }
         Ok(params)
     }
-
-    fn shape_matches(&self, operation: Operation, new: &[Value]) -> bool {
-        operation == self.operation
-            && (operation != Operation::Update
-                || self
-                    .write_columns
-                    .iter()
-                    .copied()
-                    .eq(new.iter().enumerate().filter_map(|(index, value)| {
-                        (!matches!(value, Value::UnchangedToast)).then_some(index)
-                    })))
+    fn shape_matches(&self, values: &RowValues<'_>) -> Result<bool> {
+        if values.operation != self.operation {
+            return Ok(false);
+        }
+        let rewrite = self.needs_identity_rewrite(values)?;
+        Ok(rewrite == self.rewrite_identity
+            && self.write_columns.iter().copied().eq(self.writable_columns(
+                values.operation,
+                values.new,
+                rewrite,
+            )))
     }
-
+    fn writable_columns<'a>(
+        &'a self,
+        operation: Operation,
+        new: &'a [Value],
+        rewrite: bool,
+    ) -> impl Iterator<Item = usize> + 'a {
+        new.iter().enumerate().filter_map(move |(index, value)| {
+            (!matches!(value, Value::UnchangedToast)
+                && (operation != Operation::Update
+                    || rewrite
+                    || !self.always_columns.contains(&index)))
+            .then_some(index)
+        })
+    }
+    fn needs_identity_rewrite(&self, values: &RowValues<'_>) -> Result<bool> {
+        if values.operation != Operation::Update {
+            return Ok(false);
+        }
+        let mut rewrite = false;
+        for column in &self.always_columns {
+            let new = &values.new[*column];
+            if matches!(new, Value::UnchangedToast) {
+                return Err(refusal("apply DML: ALWAYS identity value unavailable"));
+            }
+            let unchanged = match values.old {
+                Some(old) if old.kind == OldTupleKind::Full => old.values[*column] == *new,
+                Some(old) => self.key_columns.contains(column) && old.values[*column] == *new,
+                None => self.key_columns.contains(column),
+            };
+            rewrite |= !unchanged;
+        }
+        Ok(rewrite
+            || self
+                .writable_columns(values.operation, values.new, false)
+                .next()
+                .is_none())
+    }
     fn values<'a>(&self, row: &'a Event) -> Result<RowValues<'a>> {
         let (relation, operation, new, old) = match row {
             Event::Insert { relation, values } => {
                 (relation, Operation::Insert, values.as_slice(), None)
             }
             Event::Update { relation, old, new } => {
-                (relation, Operation::Update, new.as_slice(), old.as_deref())
+                (relation, Operation::Update, new.as_slice(), old.as_ref())
             }
-            Event::Delete { relation, old } => {
-                (relation, Operation::Delete, &[][..], Some(old.as_slice()))
-            }
-            Event::Truncate { .. } => return Err(truncate_refusal()),
-            Event::Relation { .. } => {
-                return Err(refusal("serial DML: a row event is required"));
-            }
+            Event::Delete { relation, old } => (relation, Operation::Delete, &[][..], Some(old)),
+            _ => return Err(refusal("apply DML: row event required")),
         };
         if *relation != self.relation {
-            return Err(refusal(
-                "serial DML: relation identity or generation does not match",
-            ));
+            return Err(refusal("apply DML: relation generation differs"));
         }
         if operation != Operation::Delete {
             if new.len() != self.column_count {
-                return Err(refusal("serial DML: new column count does not match"));
+                return Err(refusal("apply DML: new tuple width differs"));
             }
-            for value in new {
-                if matches!(value, Value::Binary(_)) {
-                    return Err(binary_refusal());
-                }
-                if operation == Operation::Insert && matches!(value, Value::UnchangedToast) {
-                    return Err(refusal("serial DML: INSERT cannot contain unchanged TOAST"));
-                }
-            }
-            for index in &self.key_columns {
-                require_key(&new[*index])?;
+            if operation == Operation::Insert
+                && new.iter().any(|v| matches!(v, Value::UnchangedToast))
+            {
+                return Err(refusal("apply DML: INSERT has unavailable value"));
             }
         }
         if let Some(old) = old {
-            if old.len() != self.key_columns.len() {
-                return Err(refusal("serial DML: old key count does not match"));
+            if old.values.len() != self.column_count
+                || (old.kind == OldTupleKind::Full) != self.full_identity
+            {
+                return Err(refusal("apply DML: old tuple shape differs"));
             }
-            for value in old {
-                require_key(value)?;
+        } else if self.full_identity && operation != Operation::Insert {
+            return Err(refusal("apply DML: FULL requires old tuple"));
+        }
+        if operation != Operation::Insert {
+            for column in &self.key_columns {
+                let value = old.map_or_else(|| &new[*column], |old| &old.values[*column]);
+                if matches!(value, Value::UnchangedToast) {
+                    return Err(refusal("apply DML: identity value unavailable"));
+                }
             }
         }
         Ok(RowValues {
@@ -264,55 +327,36 @@ impl DmlPlan {
     }
 }
 
+fn operation(row: &Event) -> Result<Operation> {
+    match row {
+        Event::Insert { .. } => Ok(Operation::Insert),
+        Event::Update { .. } => Ok(Operation::Update),
+        Event::Delete { .. } => Ok(Operation::Delete),
+        _ => Err(refusal("apply DML: row event required")),
+    }
+}
 fn parameter_count(columns: usize, keys: usize) -> Result<usize> {
     columns
         .checked_add(keys)
         .filter(|count| *count <= pq_sys::PQ_QUERY_PARAM_MAX_LIMIT as usize)
-        .ok_or_else(|| refusal("serial DML: parameter count exceeds the protocol limit"))
+        .ok_or_else(|| refusal("apply DML: too many parameters"))
 }
-
-fn quote_identifier(name: &str) -> Result<String> {
+pub(super) fn quote_identifier(name: &str) -> Result<String> {
     if name.is_empty() || name.contains('\0') {
-        return Err(refusal(
-            "serial DML: identifier is empty or contains a NUL byte",
-        ));
+        return Err(refusal("apply DML: invalid identifier"));
     }
     Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
-
-fn require_key(value: &Value) -> Result<()> {
-    match value {
-        Value::Text(_) => Ok(()),
-        Value::Binary(_) => Err(binary_refusal()),
-        Value::Null | Value::UnchangedToast => Err(refusal(
-            "serial DML: primary-key value is missing or unavailable",
-        )),
-    }
-}
-
 fn parameter(value: &Value) -> Result<PgParam<'_>> {
     match value {
         Value::Null => Ok(PgParam::Null),
         Value::Text(bytes) => Ok(PgParam::Text(bytes)),
-        Value::Binary(_) => Err(binary_refusal()),
-        Value::UnchangedToast => Err(refusal("serial DML: unchanged TOAST cannot be bound")),
+        Value::UnchangedToast => Err(refusal("apply DML: unchanged TOAST cannot be bound")),
     }
 }
-
-fn binary_refusal() -> Error {
-    refusal("serial DML: binary values are unsupported by the first apply profile")
-}
-
-fn truncate_refusal() -> Error {
-    refusal("serial DML: TRUNCATE requires verified target scope closure")
-}
-
+#[track_caller]
 fn refusal(message: &'static str) -> Error {
-    Error {
-        kind: ErrorKind::Target,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::Target, message)
 }
-
 #[cfg(test)]
 mod tests;

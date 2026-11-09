@@ -24,6 +24,11 @@ use crate::identity::{SourceEndLsn, StreamId};
 
 mod clone_state;
 pub(crate) use clone_state::{CloneInspection, ClonePhase, CloneState, inspect_clone, open_clone};
+mod follow_state;
+pub(crate) use follow_state::{
+    FollowControl, FollowRestart, FollowState, MAX_FOLLOW_CONTROL_BYTES, PublicationProvenance,
+    open_follow, validate_follow_binding, validate_follow_source_types,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -162,9 +167,9 @@ pub(crate) enum TargetProvenance {
 const MANIFEST: &CStr = c"manifest.json";
 const TEMP: &CStr = c".manifest.tmp";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 7;
 const MAX_TARGET_PROVENANCE: usize = 1;
-pub(crate) const TARGET_METADATA_VERSION: u32 = 4;
+pub(crate) const TARGET_METADATA_VERSION: u32 = 5;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -183,6 +188,8 @@ struct Manifest {
     source_slot: Option<SourceSlotProvenance>,
     #[serde(deserialize_with = "Option::deserialize")]
     clone_state: Option<CloneState>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    follow_state: Option<FollowState>,
     #[serde(deserialize_with = "Option::deserialize")]
     operator: Option<OperatorIdentity>,
 }
@@ -213,7 +220,7 @@ pub(crate) struct NativeState {
 }
 
 pub(crate) fn open(request: &StateRequest) -> Result<NativeState> {
-    open_native(request, false)
+    open_native(request, false, false)
 }
 
 /// Reload local records only; these do not prove a live source snapshot or fresh fenced target authority.
@@ -229,10 +236,17 @@ pub(crate) fn open_for_provenance_recovery(path: &Path) -> Result<NativeState> {
             action: StateAction::Resume,
         },
         true,
+        false,
     )
 }
 
-fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<NativeState> {
+fn open_native(
+    request: &StateRequest,
+    recover_provenance: bool,
+    allow_fresh_restart: bool,
+) -> Result<NativeState> {
+    let can_initialize = request.action == StateAction::Create
+        || allow_fresh_restart && request.action == StateAction::Restart;
     let leaf = request.path.file_name().ok_or_else(|| {
         bad_state("state-unsafe: specify a state directory below an existing parent")
     })?;
@@ -250,7 +264,7 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
     let handle = match open_at(&parent, &name, DIRECTORY_FLAGS, 0) {
         Ok(handle) => handle,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if request.action != StateAction::Create {
+            if !can_initialize {
                 return Err(bad_state("state-missing: native state does not exist"));
             }
             check_same(&parent, &open_parent(&parent_path)?)?;
@@ -296,9 +310,14 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
     if entries.manifest {
         let (manifest, manifest_file) = read_manifest(&directory, &path)?;
         if recover_provenance {
+            let init_retry = allow_fresh_restart
+                && matches!(request.action, StateAction::Restart | StateAction::Resume)
+                && manifest.is_init_only();
             if manifest.target_provenance.is_empty()
                 && manifest.source_slot.is_none()
                 && manifest.clone_state.is_none()
+                && manifest.follow_state.is_none()
+                && !init_retry
             {
                 return Err(bad_state(
                     "state-provenance: native state has no provisioning intent",
@@ -326,7 +345,7 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
             "state-recovery-unsupported: E1 cannot resume or restart; recovery requires source and target identity binding",
         ));
     }
-    if request.action != StateAction::Create {
+    if !can_initialize {
         return Err(bad_state(
             "state-missing: native state manifest does not exist",
         ));
@@ -349,6 +368,7 @@ fn open_native(request: &StateRequest, recover_provenance: bool) -> Result<Nativ
         target_provenance: Vec::new(),
         source_slot: None,
         clone_state: None,
+        follow_state: None,
         operator: None,
     };
     let manifest_file = publish(&directory, &manifest, None)?;
@@ -377,7 +397,27 @@ impl NativeState {
     ) -> Result<SourceSlotIntent> {
         binding.validate(self.identity.run)?;
         let mut next = self.checked_manifest()?;
-        if !self.fresh_created || next.source_slot.is_some() || next.copy_complete.is_some() {
+        let restarting = next
+            .follow_state
+            .as_ref()
+            .and_then(|f| f.restart.as_ref())
+            .is_some_and(|r| r.slot_absent && r.publication_absent && !r.new_bound);
+        let prepared_publication = next.follow_state.as_ref().is_some_and(|follow| {
+            follow
+                .preliminary
+                .as_ref()
+                .is_some_and(|plan| plan.source.identity == binding.stream().source)
+                && follow
+                    .publication
+                    .as_ref()
+                    .and_then(PublicationProvenance::confirmed)
+                    .is_some()
+                && binding.stream().generation == 1
+        });
+        if (!self.fresh_created && !restarting && !prepared_publication)
+            || next.source_slot.is_some()
+            || next.copy_complete.is_some()
+        {
             return Err(bad_state(
                 "state-source: source slot intent requires a fresh incomplete run without prior source intent",
             ));
@@ -423,6 +463,7 @@ impl NativeState {
     }
 
     /// Confirmed local records cannot reconstruct an imported snapshot or prove source history.
+    #[cfg(test)]
     pub(crate) fn checked_source_binding(&self, expected: &SourceSlotBinding) -> Result<()> {
         expected.validate(self.identity.run)?;
         let current = self.checked_manifest()?;
@@ -518,15 +559,6 @@ impl NativeState {
             bytes: report.bytes,
         });
         self.replace_manifest(completed)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_copy_complete_with_create_failure(
-        &mut self,
-        report: &CopyReport,
-    ) -> Result<()> {
-        let _failure = tests::PublicationFailure::at(tests::PublicationStep::Create);
-        self.record_copy_complete(report)
     }
 
     fn checked_manifest(&self) -> Result<Manifest> {
@@ -662,6 +694,13 @@ impl TargetProvenance {
 }
 
 impl Manifest {
+    fn is_init_only(&self) -> bool {
+        self.copy_complete.is_none()
+            && self.target_provenance.is_empty()
+            && self.source_slot.is_none()
+            && self.clone_state.is_none()
+    }
+
     fn validate_provenance(&self) -> Result<()> {
         if self.target_provenance.len() > MAX_TARGET_PROVENANCE {
             return Err(bad_state(
@@ -680,6 +719,9 @@ impl Manifest {
                     "state-source: source and target provenance streams differ",
                 ));
             }
+        }
+        if let Some(follow) = &self.follow_state {
+            follow.validate(self)?;
         }
         if let Some(clone) = &self.clone_state {
             clone.validate()?;
@@ -745,11 +787,9 @@ impl Directory {
     }
 }
 
+#[track_caller]
 fn bad_state(message: &'static str) -> Error {
-    Error {
-        kind: ErrorKind::BadState,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadState, message)
 }
 
 fn metadata(file: &File) -> Result<Metadata> {
@@ -1221,8 +1261,8 @@ mod tests {
 
     #[test]
     fn clone_state_uses_new_explicit_native_and_target_formats() {
-        assert_eq!(FORMAT_VERSION, 5);
-        assert_eq!(TARGET_METADATA_VERSION, 4);
+        assert_eq!(FORMAT_VERSION, 7);
+        assert_eq!(TARGET_METADATA_VERSION, 5);
     }
 
     #[test]
@@ -1231,7 +1271,7 @@ mod tests {
         let state = tmp.create();
         let value = manifest(&tmp.path());
         assert_eq!(value["magic"], "RPGMIGRATE");
-        assert_eq!(value["format_version"], 5);
+        assert_eq!(value["format_version"], 7);
         assert_eq!(value["canonical_path"], tmp.path().to_str().unwrap());
         assert_eq!(value["run"].as_array().unwrap().len(), 16);
         assert_ne!(value["run"], json!(vec![0; 16]));
@@ -1241,7 +1281,7 @@ mod tests {
         assert_eq!(value.get("clone_state"), Some(&Value::Null));
         assert_eq!(value.get("operator"), Some(&Value::Null));
         assert_eq!(state.identity().canonical_path, tmp.path());
-        assert_eq!(state.identity().format_version, 5);
+        assert_eq!(state.identity().format_version, 7);
         assert_eq!(value["run"], json!(state.identity().run.0));
         let directory = fs::metadata(tmp.path()).unwrap();
         assert_eq!(value["directory_inode"], directory.ino());
@@ -1378,7 +1418,7 @@ mod tests {
     fn unknown_version_is_rejected_before_restart() {
         let tmp = TempDir::new();
         drop(tmp.create());
-        change_manifest(&tmp.path(), |value| value["format_version"] = json!(6));
+        change_manifest(&tmp.path(), |value| value["format_version"] = json!(8));
         refusal(&tmp.path(), StateAction::Restart, "state-version:");
     }
 
@@ -1568,6 +1608,7 @@ mod tests {
             "target_provenance",
             "source_slot",
             "clone_state",
+            "follow_state",
             "operator",
             "run",
             "canonical_path",
@@ -1775,7 +1816,14 @@ mod tests {
 
     #[test]
     fn prior_metadata_versions_are_refused_without_rewrite() {
-        for (version, confirming) in [(1, false), (1, true), (2, false), (2, true)] {
+        for (version, confirming) in [
+            (1, false),
+            (1, true),
+            (2, false),
+            (2, true),
+            (4, false),
+            (4, true),
+        ] {
             let tmp = TempDir::new();
             let mut state = tmp.create();
             let mut old_binding = binding(&state);
@@ -1800,7 +1848,7 @@ mod tests {
                 };
                 intent["binding"]["metadata_version"] = json!(version);
             });
-            assert_eq!(manifest(&tmp.path())["format_version"], 5);
+            assert_eq!(manifest(&tmp.path())["format_version"], 7);
             recovery_refusal(&tmp.path(), "state-provenance:");
             for action in [
                 StateAction::Create,
@@ -2044,7 +2092,7 @@ mod tests {
 
     #[test]
     fn recovery_refuses_v1_and_unknown_versions_without_conversion() {
-        for version in [1, 2, 3, 4, 6] {
+        for version in [1, 2, 3, 4, 5, 6, 8] {
             let tmp = TempDir::new();
             drop(tmp.create());
             change_manifest(&tmp.path(), |value| {
@@ -2065,7 +2113,7 @@ mod tests {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(recovered.identity().format_version, 5);
+        assert_eq!(recovered.identity().format_version, 7);
     }
 
     #[test]
@@ -2366,8 +2414,8 @@ mod tests {
         fs::write(
             &path,
             original.replace(
-                "\"metadata_version\":4",
-                "\"metadata_version\":4,\"metadata_version\":4",
+                "\"metadata_version\":5",
+                "\"metadata_version\":5,\"metadata_version\":5",
             ),
         )
         .unwrap();
@@ -2720,7 +2768,7 @@ mod tests {
         state.checked_source_binding(&desired).unwrap();
         assert_eq!(
             manifest(&tmp.path())["target_provenance"][0]["record"]["intent"]["binding"]["metadata_version"],
-            4
+            5
         );
     }
 
@@ -2822,7 +2870,7 @@ mod tests {
     }
 
     #[test]
-    fn source_slot_escaped_token_remains_within_the_version_five_manifest_bound() {
+    fn source_slot_escaped_token_remains_within_the_native_manifest_bound() {
         let tmp = TempDir::new();
         let mut state = tmp.create();
         let desired = source_binding(&state);
@@ -3089,7 +3137,7 @@ mod tests {
         for action in [StateAction::Resume, StateAction::Restart] {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
-        for version in [1, 2, 3, 4, 6, u32::MAX] {
+        for version in [1, 2, 3, 4, 5, 6, 8, u32::MAX] {
             change_manifest(&tmp.path(), |value| {
                 value["format_version"] = json!(version);
                 value.as_object_mut().unwrap().remove("source_slot");

@@ -1,18 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod clone;
+pub(crate) mod follow;
 pub(crate) use clone::{
     analyze_clone, clone_object_inventory, inspect_clone_tables, plan_clone, read_clone_source,
     read_clone_target, reconcile_clone_tables, sync_clone_sequences, verify_exact_exclusions,
+};
+pub(crate) use follow::{
+    FollowRelation, check_follow_health, follow_confirmed_flush, follow_start_confirmed_flush,
+    preflight_follow_relation,
 };
 
 use crate::cdc::contracts::{Column as CdcColumn, Event, RelationKey};
 use crate::contracts::{
     CopyFormat, CopyPlan, CopyTable, Error, ErrorKind, IoControl, QualifiedTable, Result,
 };
-use crate::identity::{SourceId, StreamId};
+use crate::identity::SourceId;
+#[cfg(test)]
+use crate::identity::StreamId;
 use crate::pg::{PgConnection, PgParam, PgResult, TransactionStatus};
-use crate::state::{NativeState, SourceSlotBinding};
+#[cfg(test)]
+use crate::state::SourceSlotBinding;
 
 const CATALOG_PAGE: usize = 128;
 const CATALOG_BYTES: usize = 8 * 1024 * 1024;
@@ -37,29 +45,22 @@ struct Column {
     collation: String,
 }
 
-const COPY_INVENTORY_SQL: &str = r#"DECLARE rpgmigrate_copy_inventory NO SCROLL CURSOR WITHOUT HOLD FOR
-SELECT c.oid, n.nspname, c.relname
-FROM pg_catalog.pg_class AS c
-JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-WHERE n.nspname !~ '^pg_'
-  AND n.nspname <> 'information_schema'
-  AND c.relkind IN ('r','p','v','m','f')
-ORDER BY n.nspname::pg_catalog.text COLLATE pg_catalog."C",
-         c.relname::pg_catalog.text COLLATE pg_catalog."C", c.oid"#;
-
 #[derive(Debug, Eq, PartialEq)]
+#[cfg(test)]
 enum CopyInventoryPhase {
     Open,
     Eof,
     Failed,
 }
 
+#[cfg(test)]
 pub(crate) struct CopyInventory {
     previous: Option<QualifiedTable>,
     phase: CopyInventoryPhase,
     backend_pid: u32,
 }
 
+#[cfg(test)]
 impl CopyInventory {
     fn require_owner(&self, pid: u32, status: TransactionStatus, logical: bool) -> Result<()> {
         if pid == 0
@@ -137,6 +138,7 @@ fn require_copy_name(table: &QualifiedTable) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn require_copy_inventory_columns(columns: usize) -> Result<()> {
     if columns != 3 {
         return Err(refusal("COPY inventory requires exactly three fields"));
@@ -144,6 +146,7 @@ fn require_copy_inventory_columns(columns: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn copy_inventory_row(fields: &[Option<&[u8]>]) -> Result<(QualifiedTable, u32)> {
     if fields.len() != 3 {
         return Err(refusal("COPY inventory requires exactly three fields"));
@@ -164,82 +167,13 @@ fn copy_inventory_row(fields: &[Option<&[u8]>]) -> Result<(QualifiedTable, u32)>
     Ok((table, oid))
 }
 
-/// The owning importer retains its snapshot, session guards, and namespace DDL quiescence.
-pub(crate) fn open_copy_inventory(
-    source: &mut PgConnection,
-    io: &IoControl,
-) -> Result<CopyInventory> {
-    let inventory = CopyInventory {
-        previous: None,
-        phase: CopyInventoryPhase::Open,
-        backend_pid: source.backend_pid()?,
-    };
-    inventory.require_owner(
-        source.backend_pid()?,
-        source.transaction_status()?,
-        source.is_replication()?,
-    )?;
-    command(source, COPY_INVENTORY_SQL, "DECLARE CURSOR", io)?;
-    Ok(inventory)
-}
-
-pub(crate) fn fetch_copy_inventory(
-    source: &mut PgConnection,
-    inventory: &mut CopyInventory,
-    io: &IoControl,
-) -> Result<Option<Vec<(QualifiedTable, u32)>>> {
-    let result = (|| {
-        if !inventory.ready(
-            source.backend_pid()?,
-            source.transaction_status()?,
-            source.is_replication()?,
-        )? {
-            return Ok(None);
-        }
-        let result = source.query("FETCH FORWARD 128 FROM rpgmigrate_copy_inventory", io)?;
-        require_copy_inventory_columns(result.columns()?)?;
-        if result.rows() > CATALOG_PAGE {
-            return Err(refusal("COPY inventory returned an oversized page"));
-        }
-        let mut rows = Vec::with_capacity(result.rows());
-        for row in 0..result.rows() {
-            rows.push(copy_inventory_row(&[
-                result.cell(row, 0)?,
-                result.cell(row, 1)?,
-                result.cell(row, 2)?,
-            ])?);
-        }
-        inventory.accept_page(result.command_tag()?, rows)
-    })();
-    if result.is_err() {
-        inventory.phase = CopyInventoryPhase::Failed;
-    }
-    result
-}
-
-pub(crate) fn close_copy_inventory(
-    source: &mut PgConnection,
-    inventory: CopyInventory,
-    io: &IoControl,
-) -> Result<()> {
-    inventory.require_owner(
-        source.backend_pid()?,
-        source.transaction_status()?,
-        source.is_replication()?,
-    )?;
-    command(
-        source,
-        "CLOSE rpgmigrate_copy_inventory",
-        "CLOSE CURSOR",
-        io,
-    )
-}
-
+#[cfg(test)]
 pub(crate) struct CopyRelation {
     event: Event,
     layout: Vec<Column>,
 }
 
+#[cfg(test)]
 impl CopyRelation {
     pub(crate) fn into_parts(self, format: CopyFormat) -> Result<(CopyTable, Event)> {
         let (schema, name) = cdc_target_expected(&self.event)?;
@@ -270,34 +204,7 @@ impl CopyRelation {
     }
 }
 
-fn copy_source_lookup(source: &mut PgConnection, oid: u32, io: &IoControl) -> Result<Relation> {
-    let eligibility = relation_eligibility(false);
-    source.prepare(
-        "",
-        &format!(
-            "SELECT c.oid, n.nspname, c.relname, {eligibility}
-         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
-         WHERE c.oid = $1::pg_catalog.oid
-           AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-           AND c.relkind IN ('r','p','v','m','f') LIMIT 2"
-        ),
-        &[26],
-        io,
-    )?;
-    let oid = oid.to_string();
-    let result = source.execute_prepared("", &[PgParam::Text(oid.as_bytes())], io)?;
-    if result.rows() != 1 {
-        return Err(refusal("COPY source relation is missing or ambiguous"));
-    }
-    Ok(Relation {
-        oid: cdc_object_id(text(&result, 0, 0)?)?,
-        schema: text(&result, 0, 1)?.into(),
-        table: text(&result, 0, 2)?.into(),
-        supported: result.cell(0, 3)? == Some(b"t"),
-    })
-}
-
+#[cfg(test)]
 fn require_copy_source_relation(
     table: &QualifiedTable,
     oid: u32,
@@ -319,6 +226,7 @@ fn require_copy_source_relation(
     Ok(())
 }
 
+#[cfg(test)]
 fn require_copy_locked_oid(expected: u32, resolved: &str) -> Result<()> {
     if expected == 0 || cdc_object_id(resolved)? != expected {
         return Err(refusal("COPY locked source relation OID does not match"));
@@ -326,66 +234,7 @@ fn require_copy_locked_oid(expected: u32, resolved: &str) -> Result<()> {
     Ok(())
 }
 
-/// The caller supplies a confirmed catalog epoch and retains its imported snapshot and DDL quiescence.
-pub(crate) fn inspect_copy_relation(
-    source: &mut PgConnection,
-    table: &QualifiedTable,
-    expected_oid: u32,
-    catalog_epoch: u64,
-    io: &IoControl,
-) -> Result<CopyRelation> {
-    require_copy_name(table)?;
-    if expected_oid == 0
-        || catalog_epoch == 0
-        || source.is_replication()?
-        || source.transaction_status()? != TransactionStatus::InTransaction
-    {
-        return Err(refusal(
-            "COPY source admission requires its active importer and confirmed identity",
-        ));
-    }
-    let before = copy_source_lookup(source, expected_oid, io)?;
-    require_copy_source_relation(table, expected_oid, catalog_epoch, &before)?;
-    let quoted = qualified(source, &table.schema, &table.table)?;
-    command(
-        source,
-        &format!("LOCK TABLE ONLY {quoted} IN ACCESS SHARE MODE"),
-        "LOCK TABLE",
-        io,
-    )?;
-    source.prepare(
-        "",
-        "SELECT pg_catalog.to_regclass($1::pg_catalog.text)::pg_catalog.oid",
-        &[25],
-        io,
-    )?;
-    let resolved = source.execute_prepared("", &[PgParam::Text(quoted.as_bytes())], io)?;
-    if resolved.rows() != 1 {
-        return Err(refusal(
-            "COPY source lock returned invalid identity metadata",
-        ));
-    }
-    require_copy_locked_oid(expected_oid, text(&resolved, 0, 0)?)?;
-    let locked = copy_source_lookup(source, expected_oid, io)?;
-    require_copy_source_relation(table, expected_oid, catalog_epoch, &locked)?;
-    let layout = cdc_relation_layout(source, &locked, io)?;
-    require_plain_indexes(source, expected_oid, io)?;
-    let count = layout.len();
-    let privileges = source.query(&format!(
-        "SELECT count(*) = {count} AND COALESCE(pg_catalog.bool_and(
-            pg_catalog.has_column_privilege({expected_oid}::pg_catalog.oid, a.attnum, 'SELECT')), false)
-         FROM pg_catalog.pg_attribute a
-         WHERE a.attrelid = {expected_oid} AND a.attnum > 0 AND NOT a.attisdropped"), io)?;
-    if privileges.rows() != 1 || privileges.cell(0, 0)? != Some(b"t") {
-        return Err(refusal(
-            "COPY source lacks required column SELECT privileges",
-        ));
-    }
-    let remaining = cdc_relation_budget(&table.schema, &table.table)?;
-    let event = cdc_relation_event(source, locked, &layout, catalog_epoch, remaining, io)?;
-    Ok(CopyRelation { event, layout })
-}
-
+#[cfg(test)]
 fn require_copy_layout(expected: &[Column], actual: &[Column]) -> Result<()> {
     if expected != actual {
         return Err(refusal(
@@ -452,29 +301,9 @@ fn copy_target_class_oid(
     Ok(oid)
 }
 
-/// The fenced caller retains all locks and completes every table's admission before copying any row.
-/// Authority supplies its verified target table/index class OIDs, never source or schema OIDs.
-pub(crate) fn preflight_copy_target(
-    target: &mut PgConnection,
-    relation: &CopyRelation,
-    owned_target_relations: &[u32; 2],
-    io: &IoControl,
-) -> Result<()> {
-    require_copy_owned_relations(owned_target_relations)?;
-    let actual =
-        checked_cdc_target_layout(target, &relation.event, Some(owned_target_relations), io)?;
-    require_copy_layout(&relation.layout, &actual)?;
-    let (schema, name) = cdc_target_expected(&relation.event)?;
-    let quoted = qualified(target, schema, name)?;
-    let rows = target.query(&format!("SELECT 1 FROM ONLY {quoted} LIMIT 1"), io)?;
-    if rows.rows() != 0 {
-        return Err(refusal("COPY requires empty target tables"));
-    }
-    Ok(())
-}
-
-/// SourceSnapshot probes after importing its snapshot, so caller transaction and session state must survive.
+/// Probing source identity must preserve the caller's transaction and session state.
 /// Missing control-read privilege is an error because source identity cannot be optional.
+#[cfg(test)]
 pub(crate) fn read_source_identity(
     connection: &mut PgConnection,
     io: &IoControl,
@@ -497,6 +326,7 @@ pub(crate) fn read_source_identity(
     ])
 }
 
+#[cfg(test)]
 fn source_identity_fields(fields: [&str; 4]) -> Result<(SourceId, u32)> {
     let system = fields[0]
         .parse::<i64>()
@@ -529,110 +359,7 @@ fn source_identity_fields(fields: [&str; 4]) -> Result<(SourceId, u32)> {
     ))
 }
 
-/// Only the fresh online producer may admit this owner while table/namespace DDL is quiescent.
-/// Current metadata and confirmed local records cannot authenticate historical or offline events.
-/// The native borrow retains its lock; callers check each relation on first touch per target transaction.
-pub(crate) struct VerifiedCdcSource<'native> {
-    connection: Option<PgConnection>,
-    native: &'native NativeState,
-    binding: SourceSlotBinding,
-    pid: u32,
-}
-
-impl<'native> VerifiedCdcSource<'native> {
-    pub(crate) fn acquire(
-        mut connection: PgConnection,
-        native: &'native NativeState,
-        binding: &SourceSlotBinding,
-        io: &IoControl,
-    ) -> Result<Self> {
-        native.checked_source_binding(binding)?;
-        require_cdc_source_idle(
-            connection.transaction_status()?,
-            connection.is_replication()?,
-        )?;
-        let pid = connection.backend_pid()?;
-        require_cdc_source_identity(
-            binding.stream().source,
-            pid,
-            read_source_identity(&mut connection, io)?,
-        )?;
-        require_cdc_source_idle(
-            connection.transaction_status()?,
-            connection.is_replication()?,
-        )?;
-        Ok(Self {
-            connection: Some(connection),
-            native,
-            binding: binding.clone(),
-            pid,
-        })
-    }
-
-    pub(crate) fn stream(&self) -> StreamId {
-        self.binding.stream()
-    }
-
-    pub(crate) fn check_relation(&mut self, expected: &Event, io: &IoControl) -> Result<()> {
-        let outcome = (|| {
-            let connection = self
-                .connection
-                .as_mut()
-                .ok_or_else(|| refusal("CDC source capability is poisoned"))?;
-            self.native.checked_source_binding(&self.binding)?;
-            let table = cdc_source_table(expected, self.binding.catalog_epoch())?;
-            require_cdc_source_idle(
-                connection.transaction_status()?,
-                connection.is_replication()?,
-            )?;
-            command(
-                connection,
-                "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY",
-                "BEGIN",
-                io,
-            )?;
-            require_cdc_source_identity(
-                self.binding.stream().source,
-                self.pid,
-                read_source_identity(connection, io)?,
-            )?;
-            let actual = load_cdc_relation(connection, &table, self.binding.catalog_epoch(), io)?;
-            require_cdc_source_match(expected, &actual)?;
-            let settings = connection.query(
-                "SELECT pg_catalog.current_setting('transaction_read_only'),
-                        pg_catalog.current_setting('transaction_isolation'),
-                        pg_catalog.pg_is_in_recovery()",
-                io,
-            )?;
-            if settings.rows() != 1 {
-                return Err(refusal("CDC source returned invalid transaction settings"));
-            }
-            require_cdc_source_settings(
-                text(&settings, 0, 0)?,
-                text(&settings, 0, 1)?,
-                text(&settings, 0, 2)?,
-            )?;
-            require_cdc_source_identity(
-                self.binding.stream().source,
-                self.pid,
-                read_source_identity(connection, io)?,
-            )?;
-            if connection.transaction_status()? != TransactionStatus::InTransaction {
-                return Err(refusal("CDC source check lost its read-only transaction"));
-            }
-            command(connection, "COMMIT", "COMMIT", io)?;
-            require_cdc_source_idle(
-                connection.transaction_status()?,
-                connection.is_replication()?,
-            )
-        })();
-        if outcome.is_err() {
-            self.connection.take();
-        }
-        outcome
-    }
-}
-
+#[cfg(test)]
 fn require_cdc_source_idle(status: TransactionStatus, logical: bool) -> Result<()> {
     if status != TransactionStatus::Idle || logical {
         return Err(refusal(
@@ -642,6 +369,7 @@ fn require_cdc_source_idle(status: TransactionStatus, logical: bool) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
 fn require_cdc_source_identity(
     expected: SourceId,
     pid: u32,
@@ -653,6 +381,7 @@ fn require_cdc_source_identity(
     Ok(())
 }
 
+#[cfg(test)]
 fn require_cdc_source_settings(read_only: &str, isolation: &str, recovery: &str) -> Result<()> {
     if read_only != "on" || isolation != "read committed" || recovery != "f" {
         return Err(refusal(
@@ -662,6 +391,7 @@ fn require_cdc_source_settings(read_only: &str, isolation: &str, recovery: &str)
     Ok(())
 }
 
+#[cfg(test)]
 fn cdc_source_table(expected: &Event, catalog_epoch: u64) -> Result<QualifiedTable> {
     let Event::Relation {
         key, schema, name, ..
@@ -681,6 +411,7 @@ fn cdc_source_table(expected: &Event, catalog_epoch: u64) -> Result<QualifiedTab
     })
 }
 
+#[cfg(test)]
 fn require_cdc_source_match(expected: &Event, actual: &Event) -> Result<()> {
     if !matches!(
         (expected, actual),
@@ -806,6 +537,7 @@ fn cdc_relation_budget(schema: &str, table: &str) -> Result<usize> {
 /// The caller establishes the source catalog snapshot, generation, and table/namespace DDL quiescence.
 /// A fresh lookup cannot prove which metadata described an earlier change.
 /// The caller retains ownership of its transaction and locks.
+#[cfg(test)]
 pub(crate) fn load_cdc_relation(
     source: &mut PgConnection,
     table: &QualifiedTable,
@@ -1352,6 +1084,7 @@ pub(crate) fn configure_session(connection: &mut PgConnection, io: &IoControl) -
         ("DateStyle", "ISO, YMD"),
         ("IntervalStyle", "postgres"),
         ("TimeZone", "UTC"),
+        ("lc_monetary", "C"),
         ("extra_float_digits", "3"),
         ("bytea_output", "hex"),
         ("row_security", "off"),
@@ -1408,8 +1141,13 @@ pub(crate) fn confirm_durability(
     required: &str,
     io: &IoControl,
 ) -> Result<()> {
-    require_setting(connection, "fsync", "on", io)?;
+    require_durable_storage(connection, io)?;
     set_setting(connection, "synchronous_commit", required, io)
+}
+
+fn require_durable_storage(connection: &mut PgConnection, io: &IoControl) -> Result<()> {
+    require_setting(connection, "fsync", "on", io)?;
+    require_setting(connection, "full_page_writes", "on", io)
 }
 
 fn durable_setting(setting: &str) -> Result<&'static str> {
@@ -1762,11 +1500,9 @@ pub(crate) fn rollback(source: &mut PgConnection, target: &mut PgConnection, io:
     let _ = source.query("ROLLBACK", io);
 }
 
+#[track_caller]
 fn refusal(message: &str) -> Error {
-    Error {
-        kind: ErrorKind::BadConfig,
-        message: message.into(),
-    }
+    Error::new(ErrorKind::BadConfig, message)
 }
 
 #[cfg(test)]
@@ -2760,7 +2496,10 @@ mod tests {
             },
             Event::Delete {
                 relation,
-                old: vec![],
+                old: crate::cdc::contracts::OldTuple {
+                    kind: crate::cdc::contracts::OldTupleKind::Key,
+                    values: vec![],
+                },
             },
             Event::Truncate {
                 relations: vec![relation],
@@ -2951,6 +2690,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the owned catalog PostgreSQL harness"]
     fn live_clone_admission_selects_each_heap_once_and_omits_generated_input() {
         let io = IoControl {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
@@ -3000,6 +2740,181 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires owned PostgreSQL with private German and US monetary locales"]
+    fn live_money_clone_preserves_values_and_defaults_across_role_locales() {
+        use crate::contracts::{
+            CloneOptions, CopyGeneration, RestorePolicy, StateAction, StateRequest,
+        };
+        let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
+        let context: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
+        let root = std::path::PathBuf::from(context["root"].as_str().unwrap());
+        let token = context["token"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+            token
+        );
+        let io = IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        let source_admin = Conninfo::new(
+            std::env::var_os("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN").expect("owned source required"),
+        )
+        .unwrap();
+        let target_admin = Conninfo::new(
+            std::env::var_os("RPGMIGRATE_TEST_CLONE_TARGET_ADMIN").expect("owned target required"),
+        )
+        .unwrap();
+        let role_info = |info: &Conninfo, role: &str| {
+            Conninfo::new(
+                format!(
+                    "{} user={role}",
+                    std::str::from_utf8(info.as_c_str().to_bytes()).unwrap()
+                )
+                .into(),
+            )
+            .unwrap()
+        };
+        let source_info = role_info(&source_admin, "e1_source");
+        let target_info = role_info(&target_admin, "e1_target");
+        for (info, role, locale) in [
+            (&source_admin, "e1_source", "de_DE.UTF-8"),
+            (&target_admin, "e1_target", "en_US.UTF-8"),
+        ] {
+            let mut admin = PgConnection::connect(info, &io).unwrap();
+            let actual = admin.query("SHOW cluster_name", &io).unwrap();
+            assert_eq!(actual.cell(0, 0).unwrap(), Some(token.as_bytes()));
+            admin
+                .query(
+                    &format!("ALTER ROLE {role} SET lc_monetary TO '{locale}'"),
+                    &io,
+                )
+                .unwrap();
+            admin.query(&format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system(),pg_catalog.pg_control_checkpoint() TO {role}"),&io).unwrap();
+        }
+        let mut source = PgConnection::connect(&source_info, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        for (connection, locale) in [(&mut source, "de_DE.UTF-8"), (&mut target, "en_US.UTF-8")] {
+            require_setting(connection, "lc_monetary", locale, &io).unwrap();
+            let role=connection.query("SELECT NOT rolsuper AND NOT rolreplication AND NOT rolcreatedb AND NOT rolcreaterole FROM pg_catalog.pg_roles WHERE rolname=CURRENT_USER",&io).unwrap();
+            assert_eq!(role.cell(0, 0).unwrap(), Some(b"t".as_slice()));
+            command(connection, "SET lc_monetary TO 'C'", "SET", &io).unwrap();
+            require_setting(connection, "lc_monetary", "C", &io).unwrap();
+            command(connection, "RESET lc_monetary", "RESET", &io).unwrap();
+            require_setting(connection, "lc_monetary", locale, &io).unwrap();
+        }
+        let defaults=source.query("SELECT (1234.56::pg_catalog.numeric)::pg_catalog.money::pg_catalog.text,ARRAY[(1234.56::pg_catalog.numeric)::pg_catalog.money,NULL]::pg_catalog.text",&io).unwrap();
+        let english = target
+            .query(
+                "SELECT (1234.56::pg_catalog.numeric)::pg_catalog.money::pg_catalog.text",
+                &io,
+            )
+            .unwrap();
+        assert_ne!(
+            defaults.cell(0, 0).unwrap(),
+            english.cell(0, 0).unwrap(),
+            "monetary locale contrast is required"
+        );
+        let money = source
+            .quote_literal(text(&defaults, 0, 0).unwrap())
+            .unwrap();
+        let array = source
+            .quote_literal(text(&defaults, 0, 1).unwrap())
+            .unwrap();
+        source.query(&format!("CREATE TABLE public.money_values(id integer PRIMARY KEY,amount pg_catalog.money DEFAULT {money}::pg_catalog.money,amounts pg_catalog.money[] DEFAULT {array}::pg_catalog.money[])"),&io).unwrap();
+        source.query("INSERT INTO public.money_values VALUES(1,DEFAULT,DEFAULT),(2,(-42.01::pg_catalog.numeric)::pg_catalog.money,ARRAY[(-42.01::pg_catalog.numeric)::pg_catalog.money,NULL]),(3,NULL,NULL)",&io).unwrap();
+        let mut snapshot =
+            crate::snapshot::CloneSnapshot::export(source, CopyGeneration(1), &io).unwrap();
+        let policy = RestorePolicy {
+            no_owner: true,
+            no_acl: true,
+            ..RestorePolicy::default()
+        };
+        let plan = plan_clone(
+            snapshot.connection().unwrap(),
+            &mut target,
+            CopyGeneration(1),
+            policy,
+            &[],
+            &[],
+            &io,
+        )
+        .unwrap();
+        let options = CloneOptions {
+            source: source_info,
+            target: target_info,
+            state: StateRequest {
+                path: root.join("money-clone-state"),
+                action: StateAction::Create,
+            },
+            operator: None,
+            table_jobs: 2,
+            post_data_jobs: 4,
+            policy,
+            not_consistent: false,
+        };
+        let mut state = crate::state::open_clone(&options.state, None, &io).unwrap();
+        state.bind_clone(&plan, snapshot.ticket()).unwrap();
+        crate::schema::preflight(&options, &plan, &io).unwrap();
+        let archive = crate::schema::dump(&options, snapshot.ticket(), &state, &io).unwrap();
+        let mut authority = crate::apply::CloneAuthority::acquire(
+            PgConnection::connect(&options.target, &io).unwrap(),
+            &mut state,
+            &plan,
+            &io,
+        )
+        .unwrap();
+        let objects =
+            crate::schema::restore_pre(&options, &plan, &archive, &mut state, &io).unwrap();
+        authority
+            .mark_stage(crate::state::ClonePhase::PreDataPending, &io)
+            .unwrap();
+        let tables = reconcile_clone_tables(&mut target, &plan, &objects, &io).unwrap();
+        state.confirm_pre_data(objects, tables).unwrap();
+        authority.bind_tables(&state, &io).unwrap();
+        let copied = crate::copy::run_tables(
+            &options,
+            &plan,
+            &mut snapshot,
+            &mut state,
+            &mut authority,
+            &io,
+        )
+        .unwrap();
+        assert_eq!((copied.tables, copied.rows), (1, 3));
+        crate::schema::restore_post(&options, &archive, &io).unwrap();
+        require_setting(snapshot.connection().unwrap(), "lc_monetary", "C", &io).unwrap();
+        require_setting(&mut target, "lc_monetary", "C", &io).unwrap();
+        let rows=target.query("SELECT id,amount::pg_catalog.numeric,amounts[1]::pg_catalog.numeric,amounts[2] IS NULL,amounts IS NULL FROM public.money_values ORDER BY id",&io).unwrap();
+        assert_eq!(rows.rows(), 3);
+        for (row, amount) in [
+            (0, Some(b"1234.56".as_slice())),
+            (1, Some(b"-42.01".as_slice())),
+            (2, None),
+        ] {
+            assert_eq!(rows.cell(row, 1).unwrap(), amount);
+            assert_eq!(rows.cell(row, 2).unwrap(), amount);
+            assert_eq!(rows.cell(row, 3).unwrap(), Some(b"t".as_slice()));
+        }
+        assert_eq!(rows.cell(2, 4).unwrap(), Some(b"t".as_slice()));
+        target
+            .query("INSERT INTO public.money_values(id) VALUES(4)", &io)
+            .unwrap();
+        let restored_default=target.query("SELECT amount::pg_catalog.numeric,amounts[1]::pg_catalog.numeric,amounts[2] IS NULL FROM public.money_values WHERE id=4",&io).unwrap();
+        assert_eq!(
+            restored_default.cell(0, 0).unwrap(),
+            Some(b"1234.56".as_slice())
+        );
+        assert_eq!(
+            restored_default.cell(0, 1).unwrap(),
+            Some(b"1234.56".as_slice())
+        );
+        assert_eq!(restored_default.cell(0, 2).unwrap(), Some(b"t".as_slice()));
+        snapshot.finish(&io).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the owned catalog PostgreSQL harness"]
     fn live_clone_admission_refuses_unsupported_relations_and_trigger_states() {
         let io = IoControl {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),

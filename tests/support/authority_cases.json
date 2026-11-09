@@ -15,6 +15,7 @@
   "apply::checkpoint::live_tests::readonly_refusal",
   "apply::checkpoint::live_tests::standby_refusal",
   "apply::checkpoint::live_tests::backend_fence_loss",
+  "apply::checkpoint::live_tests::identity_rewrite_origin_deferred_constraint_failure_rolls_back",
   "apply::checkpoint::live_tests::metadata_boundary_locks",
   "apply::checkpoint::live_tests::transaction_boundary_faults"
 ]

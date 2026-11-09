@@ -54,6 +54,14 @@ def load_manifest():
 
 
 def module_cases(manifest, profile):
+    if profile == "FollowSnapshot":
+        from follow_snapshot_fixture import follow_snapshot_cases
+        return follow_snapshot_cases()
+    if profile in ("FollowSource", "FollowAuthority", "FollowReceive", "FollowApply"):
+        name = profile.removeprefix("Follow").lower()
+        cases = json.loads(Path(__file__).with_name(f"follow_{name}_cases.json").read_text())
+        assert isinstance(cases, list) and cases and len(cases) == len(set(cases)), "missing or duplicate follow component inventory"
+        return cases
     if profile == "Schema":
         return ["schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"]
     if profile == "Clone":
@@ -68,9 +76,6 @@ def module_cases(manifest, profile):
         ]
     if profile == "Transport":
         return manifest["transport_cases"]
-    if profile == "SourceSnapshot":
-        from source_snapshot_fixture import snapshot_cases
-        return snapshot_cases()
     if profile == "Catalog":
         catalog = json.loads(Path(__file__).with_name("catalog_cases.json").read_text())
         assert isinstance(catalog, list) and catalog, "missing catalog test inventory"

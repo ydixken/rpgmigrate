@@ -1,5 +1,5 @@
 use super::error;
-use crate::contracts::{IoControl, Result};
+use crate::contracts::{Error, ErrorKind, IoControl, Result};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -41,7 +41,10 @@ pub(crate) fn operation_control(io: &IoControl) -> IoControl {
 
 pub(super) fn check(io: &IoControl) -> Result<()> {
     if io.cancelled.load(Ordering::Acquire) {
-        return Err(error("PostgreSQL operation cancelled"));
+        return Err(Error::cancelled(
+            ErrorKind::Pgsql,
+            "PostgreSQL operation cancelled",
+        ));
     }
     if io.is_expired() {
         return Err(error("PostgreSQL operation deadline exceeded"));
@@ -182,13 +185,12 @@ mod tests {
         let io = control(Duration::from_secs(1));
         assert!(check(&io).is_ok());
         io.cancelled.store(true, Ordering::Relaxed);
-        assert!(check(&io).unwrap_err().message.contains("cancel"));
-        assert!(
-            check(&control(Duration::ZERO))
-                .unwrap_err()
-                .message
-                .contains("deadline")
-        );
+        let cancelled = check(&io).unwrap_err();
+        assert!(cancelled.message.contains("cancel"));
+        assert!(cancelled.is_cancelled());
+        let expired = check(&control(Duration::ZERO)).unwrap_err();
+        assert!(expired.message.contains("deadline"));
+        assert!(!expired.is_cancelled());
     }
 
     #[test]

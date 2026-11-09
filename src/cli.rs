@@ -238,12 +238,17 @@ fn base(name: &'static str, parser: Parser) -> Command {
 }
 
 fn leaf(name: &'static str, parser: Parser) -> Command {
-    base(name, parser).arg(
+    let command = base(name, parser).arg(
         Arg::new("operands")
             .num_args(0..)
             .trailing_var_arg(parser != Parser::Version)
             .value_parser(OsStringValueParser::new()),
-    )
+    );
+    if matches!(name, "clone" | "follow") {
+        command.after_help("Native follow requires --skip-large-objects and admits only pgoutput v1 with durable commits. Limits: 1024 queued messages, 8 MiB queued capacity plus one message up to 16 MiB when empty; apply groups default to 100 transactions, 10000 rows or 8 MiB, closing only at a source COMMIT. M3 follow remains streaming until interrupted; successful drain is unavailable.")
+    } else {
+        command
+    }
 }
 
 fn group(name: &'static str, parser: Parser, leaves: &[&'static str]) -> Command {
@@ -263,7 +268,7 @@ fn command() -> Command {
     base("rpgmigrate", Parser::Root)
         .bin_name("rpgmigrate")
         .about("PostgreSQL migration engine")
-        .after_help("Runtime support: ping and restricted copy table-data. Other commands fail before database or state changes.")
+        .after_help("Native profiles: clone, read-only progress and comparison, ping, restricted copy table-data, and bounded follow. Unsupported profile options fail before database or state changes. Follow runtime qualification remains open.")
         .subcommands(["clone", "fork", "follow"].map(|name| leaf(name, Parser::Copy)))
         .subcommand(leaf("snapshot", Parser::Snapshot))
         .subcommand(leaf("ping", Parser::Ping))
@@ -306,15 +311,17 @@ fn used(matches: &ArgMatches, name: &str) -> bool {
 
 pub(crate) fn parse(args: &[OsString], env: &Environment) -> Result<Invocation> {
     if args.is_empty() {
-        return Err(Error {
-            kind: ErrorKind::BadArgs,
-            message: "argv must include the executable".into(),
-        });
+        return Err(Error::new(
+            ErrorKind::BadArgs,
+            "argv must include the executable",
+        ));
     }
-    let matches = command().try_get_matches_from(args).map_err(|_| Error {
-        kind: ErrorKind::BadArgs,
+    let matches = command().try_get_matches_from(args).map_err(|_| {
         // Clap diagnostics can include the original arguments and their secrets.
-        message: "invalid command or option syntax; use --help for accepted arguments".into(),
+        Error::new(
+            ErrorKind::BadArgs,
+            "invalid command or option syntax; use --help for accepted arguments",
+        )
     })?;
     let mut path = CommandPath(Vec::new());
     let mut current = &matches;
@@ -346,10 +353,10 @@ pub(crate) fn parse(args: &[OsString], env: &Environment) -> Result<Invocation> 
             .clone();
     }
     if tree.has_subcommands() {
-        return Err(Error {
-            kind: ErrorKind::BadArgs,
-            message: "a command is required; use --help for available commands".into(),
-        });
+        return Err(Error::new(
+            ErrorKind::BadArgs,
+            "a command is required; use --help for available commands",
+        ));
     }
     settings.invocation(parser, path, env)
 }
@@ -364,9 +371,8 @@ pub(crate) fn render_help(path: &CommandPath) -> Result<String> {
         path.0.as_slice()
     };
     for part in path {
-        selected = selected.find_subcommand_mut(part).ok_or_else(|| Error {
-            kind: ErrorKind::Internal,
-            message: "help command path is not registered".into(),
+        selected = selected.find_subcommand_mut(part).ok_or_else(|| {
+            Error::new(ErrorKind::Internal, "help command path is not registered")
         })?;
     }
     Ok(format!("{}\n", selected.render_help()))
@@ -374,10 +380,9 @@ pub(crate) fn render_help(path: &CommandPath) -> Result<String> {
 
 #[cfg(test)]
 pub(crate) fn contract_oracle(args: &[OsString], env: &Environment) -> Result<serde_json::Value> {
-    let matches = command().try_get_matches_from(args).map_err(|_| Error {
-        kind: ErrorKind::BadArgs,
-        message: "invalid command or option syntax".into(),
-    })?;
+    let matches = command()
+        .try_get_matches_from(args)
+        .map_err(|_| Error::new(ErrorKind::BadArgs, "invalid command or option syntax"))?;
     let mut current = &matches;
     let mut path = CommandPath(Vec::new());
     while let Some((name, submatches)) = current.subcommand() {
@@ -432,6 +437,126 @@ mod tests {
         ("PGCOPYDB_SOURCE_PGURI", "dbname=source"),
         ("PGCOPYDB_TARGET_PGURI", "dbname=target"),
     ];
+
+    #[test]
+    fn follow_defaults_to_pgoutput_with_bounded_durable_groups() {
+        for args in [
+            vec!["follow", "--skip-large-objects"],
+            vec!["clone", "--follow", "--skip-large-objects"],
+        ] {
+            let Invocation::Follow(options) = invoke(&args, CONNECTIONS).unwrap() else {
+                panic!("expected follow")
+            };
+            assert_eq!(options.apply_group_txns, 100);
+            assert_eq!(options.limits, crate::contracts::FollowLimits::default());
+            assert_eq!(options.clone.table_jobs, 4);
+            assert_eq!(options.clone.post_data_jobs, 4);
+            assert!(options.origin_name.is_none());
+        }
+    }
+
+    #[test]
+    fn follow_records_explicit_unowned_origin_and_native_resource_names() {
+        let Invocation::Follow(options) = invoke(
+            &[
+                "follow",
+                "--skip-large-objects",
+                "--plugin",
+                "pgoutput",
+                "--durability",
+                "durable",
+                "--slot-name",
+                "native_slot",
+                "--publication",
+                "native publication",
+                "--origin",
+                "unowned-origin",
+            ],
+            CONNECTIONS,
+        )
+        .unwrap() else {
+            panic!("expected follow")
+        };
+        assert_eq!(options.slot_name, "native_slot");
+        assert_eq!(options.publication_name, "native publication");
+        assert_eq!(options.origin_name.as_deref(), Some("unowned-origin"));
+    }
+
+    #[test]
+    fn follow_admits_positive_apply_group_environment_only_for_follow() {
+        for value in ["1", "100", "18446744073709551615"] {
+            let mut env = CONNECTIONS.to_vec();
+            env.push(("PGCOPYDB_APPLY_GROUP_TXNS", value));
+            let Invocation::Follow(options) =
+                invoke(&["follow", "--skip-large-objects"], &env).unwrap()
+            else {
+                panic!("expected follow")
+            };
+            assert_eq!(options.apply_group_txns, value.parse::<u64>().unwrap());
+            assert!(invoke(&["clone"], &env).is_err());
+        }
+        for value in ["", "0", "-1", "18446744073709551616", "not-an-integer"] {
+            let mut env = CONNECTIONS.to_vec();
+            env.push(("PGCOPYDB_APPLY_GROUP_TXNS", value));
+            let error = invoke(&["follow", "--skip-large-objects"], &env).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadConfig);
+            assert!(error.message.contains("PGCOPYDB_APPLY_GROUP_TXNS"));
+        }
+    }
+
+    #[test]
+    fn follow_preserves_operator_resume_not_consistent_retry() {
+        let Invocation::Follow(options) = invoke(
+            &[
+                "clone",
+                "--follow",
+                "--skip-large-objects",
+                "--resume",
+                "--not-consistent",
+            ],
+            CONNECTIONS,
+        )
+        .unwrap() else {
+            panic!("expected follow")
+        };
+        assert_eq!(options.clone.state.action, StateAction::Resume);
+        assert!(options.clone.not_consistent);
+        assert!(
+            invoke(
+                &["follow", "--skip-large-objects", "--not-consistent"],
+                CONNECTIONS,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn follow_refuses_unsupported_effective_settings_before_io() {
+        assert!(
+            invoke(&["follow"], CONNECTIONS)
+                .unwrap_err()
+                .message
+                .contains("--skip-large-objects")
+        );
+        for args in [
+            vec!["--plugin", "test_decoding"],
+            vec!["--plugin", "wal2json"],
+            vec!["--durability", "replay-safe"],
+            vec!["--use-copy-binary"],
+            vec!["--split-tables-larger-than", "1GB"],
+            vec!["--endpos", "0/10"],
+        ] {
+            let mut argv = vec!["follow", "--skip-large-objects"];
+            argv.extend(args);
+            let error = invoke(&argv, CONNECTIONS).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadConfig);
+            assert!(
+                error
+                    .message
+                    .contains("no database or state action was started")
+            );
+        }
+    }
 
     #[test]
     fn clone_uses_effective_four_job_defaults_and_admits_restore_policy() {

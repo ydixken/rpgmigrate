@@ -1,0 +1,11 @@
+[
+  "snapshot::follow_fault_tests::live_follow_empty_snapshot",
+  "snapshot::follow_fault_tests::live_follow_wrong_source_refused",
+  "snapshot::follow_fault_tests::live_follow_control_permission_denied",
+  "snapshot::follow_fault_tests::live_follow_create_reply_lost",
+  "snapshot::follow_fault_tests::live_follow_create_tail_lost",
+  "snapshot::follow_fault_tests::live_follow_expired_export_refused",
+  "snapshot::follow_fault_tests::live_follow_imported_identity_mismatch",
+  "snapshot::follow_fault_tests::live_follow_source_finish_unknown",
+  "snapshot::follow_fault_tests::live_follow_application_name_preserved"
+]

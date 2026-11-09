@@ -14,8 +14,8 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 HARNESS = (
     "tests/support/test_harness.py", "tests/support/test_catalog_harness.py",
-    "tests/support/test_source_catalog_harness.py", "tests/support/test_source_snapshot_harness.py",
-    "tests/support/test_copy_snapshot_harness.py",
+    "tests/support/test_source_catalog_harness.py",
+    "tests/support/test_copy_snapshot_harness.py", "tests/support/test_follow_snapshot_harness.py",
 )
 CONTENT = "import unittest\nclass Tests(unittest.TestCase):\n    def test_required(self): pass\n"
 
@@ -23,7 +23,7 @@ CONTENT = "import unittest\nclass Tests(unittest.TestCase):\n    def test_requir
 class VerificationTests(unittest.TestCase):
     def test_inventory_contains_each_retained_suite_once(self):
         self.assertEqual(runner.HARNESS_SUITES, HARNESS)
-        self.assertEqual(runner.CI_SUITES, ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/image/test_smoke.py", *HARNESS))
+        self.assertEqual(runner.CI_SUITES, ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/image/test_smoke.py", *HARNESS))
         self.assertEqual(len(set(runner.CI_SUITES)), len(runner.CI_SUITES))
 
     def populate(self, root):

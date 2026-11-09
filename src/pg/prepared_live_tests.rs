@@ -1,4 +1,4 @@
-use super::{Conninfo, IoControl, PgConnection, PgParam, TransactionStatus};
+use super::{CommitObservation, Conninfo, IoControl, PgConnection, PgParam, TransactionStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -18,6 +18,181 @@ fn connection(io: &IoControl) -> PgConnection {
     )
     .unwrap();
     PgConnection::connect(&conninfo, io).unwrap()
+}
+
+pub(super) const IDENTITY_REWRITE_SQL: &str = "WITH rpgmigrate_old AS (DELETE FROM ONLY \"pg_temp\".\"identity_rewrite\" WHERE ctid = (SELECT ctid FROM ONLY \"pg_temp\".\"identity_rewrite\" WHERE \"id\" IS NOT DISTINCT FROM $3 AND \"other\" IS NOT DISTINCT FROM $4 LIMIT 1 FOR UPDATE) RETURNING \"id\", \"body\", \"other\") INSERT INTO \"pg_temp\".\"identity_rewrite\" (\"id\", \"body\", \"other\") OVERRIDING SYSTEM VALUE SELECT $1, rpgmigrate_old.\"body\", $2 FROM rpgmigrate_old";
+
+pub(super) fn identity_rewrite_fixture(connection: &mut PgConnection, io: &IoControl) {
+    connection
+        .query(
+            "CREATE TEMP TABLE identity_rewrite(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, body text, other text NOT NULL)",
+            io,
+        )
+        .unwrap();
+    connection
+        .query(
+            "INSERT INTO identity_rewrite OVERRIDING SYSTEM VALUE VALUES (1, repeat('x', 65536), 'first'), (2, 'keep', 'second')",
+            io,
+        )
+        .unwrap();
+    connection
+        .query("CREATE TEMP TABLE identity_sentinel(value integer)", io)
+        .unwrap();
+    connection
+        .query("INSERT INTO identity_sentinel VALUES (0)", io)
+        .unwrap();
+}
+
+pub(super) fn assert_identity_rewrite_state(
+    connection: &mut PgConnection,
+    id: u32,
+    sentinel: u32,
+    io: &IoControl,
+) {
+    let result = connection
+        .query(
+            &format!(
+                "SELECT (SELECT count(*) FROM identity_rewrite)=2 AND EXISTS (SELECT FROM identity_rewrite WHERE id={id} AND body=repeat('x', 65536) AND other='changed') AND EXISTS (SELECT FROM identity_rewrite WHERE id=2 AND body='keep' AND other='second') AND (SELECT value FROM identity_sentinel)={sentinel} AND (SELECT last_value=1 AND NOT is_called FROM identity_rewrite_id_seq)"
+            ),
+            io,
+        )
+        .unwrap();
+    assert_eq!(result.rows(), 1);
+    assert_eq!(result.cell(0, 0).unwrap(), Some(&b"t"[..]));
+}
+
+#[test]
+#[ignore = "requires isolated harness connection"]
+fn prepared_with_identity_rewrite_is_atomic() {
+    let io = control();
+    let mut connection = connection(&io);
+    identity_rewrite_fixture(&mut connection, &io);
+    connection
+        .prepare("rewrite", IDENTITY_REWRITE_SQL, &[23, 25, 23, 25], &io)
+        .unwrap();
+    connection.query("BEGIN", &io).unwrap();
+    connection
+        .query("UPDATE identity_sentinel SET value=1", &io)
+        .unwrap();
+    let result = connection
+        .execute_prepared(
+            "rewrite",
+            &[
+                PgParam::Text(b"11"),
+                PgParam::Text(b"changed"),
+                PgParam::Text(b"1"),
+                PgParam::Text(b"first"),
+            ],
+            &io,
+        )
+        .unwrap();
+    assert_eq!(result.rows(), 0);
+    assert_eq!(result.command_tag().unwrap(), "INSERT 0 1");
+    assert_eq!(
+        connection.transaction_status().unwrap(),
+        TransactionStatus::InTransaction
+    );
+    assert_identity_rewrite_state(&mut connection, 11, 1, &io);
+    assert_eq!(
+        connection.commit_observed(&io).unwrap(),
+        CommitObservation::Committed
+    );
+    for (id, other, sqlstate) in [
+        (&b"2"[..], PgParam::Text(b"changed"), "23505"),
+        (&b"12"[..], PgParam::Null, "23502"),
+    ] {
+        connection.query("BEGIN", &io).unwrap();
+        connection
+            .query("UPDATE identity_sentinel SET value=2", &io)
+            .unwrap();
+        let failure = connection
+            .execute_prepared(
+                "rewrite",
+                &[
+                    PgParam::Text(id),
+                    other,
+                    PgParam::Text(b"11"),
+                    PgParam::Text(b"changed"),
+                ],
+                &io,
+            )
+            .err()
+            .expect("failed insertion after DELETE was accepted");
+        assert!(failure.message.contains(sqlstate));
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::InError
+        );
+        assert_eq!(
+            connection.commit_observed(&io).unwrap(),
+            CommitObservation::RolledBack
+        );
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::Idle
+        );
+        assert_identity_rewrite_state(&mut connection, 11, 1, &io);
+    }
+}
+
+#[test]
+#[ignore = "requires isolated harness connection"]
+fn prepared_with_transaction_escapes_never_commit() {
+    let io = control();
+    let mut connection = connection(&io);
+    connection
+        .query(
+            "CREATE TEMP TABLE prepared_escape_sentinel(value integer)",
+            &io,
+        )
+        .unwrap();
+    connection
+        .query("INSERT INTO prepared_escape_sentinel VALUES (0)", &io)
+        .unwrap();
+    for (sql, state, message) in [
+        ("COMMIT", TransactionStatus::InTransaction, "internal data"),
+        ("SELECT 1; COMMIT", TransactionStatus::InError, "42601"),
+        (
+            "WITH x AS (COMMIT) SELECT 1",
+            TransactionStatus::InError,
+            "42601",
+        ),
+        (
+            "WITH x AS (SELECT 1) COMMIT",
+            TransactionStatus::InError,
+            "42601",
+        ),
+        (
+            "WITH x AS (SELECT 1) SELECT 1; COMMIT",
+            TransactionStatus::InError,
+            "42601",
+        ),
+    ] {
+        connection.query("BEGIN", &io).unwrap();
+        connection
+            .query("UPDATE prepared_escape_sentinel SET value=1", &io)
+            .unwrap();
+        let failure = connection.prepare("escape", sql, &[], &io).unwrap_err();
+        assert!(
+            failure.message.contains(message),
+            "{sql}: {}",
+            failure.message
+        );
+        assert_eq!(connection.transaction_status().unwrap(), state);
+        connection.query("ROLLBACK", &io).unwrap();
+        assert_eq!(
+            connection.transaction_status().unwrap(),
+            TransactionStatus::Idle
+        );
+        assert_eq!(
+            connection
+                .query("SELECT value FROM prepared_escape_sentinel", &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap(),
+            Some(&b"0"[..])
+        );
+    }
 }
 
 #[test]

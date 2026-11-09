@@ -7,6 +7,7 @@ mod compare;
 mod config;
 mod contracts;
 mod copy;
+mod follow;
 mod identity;
 mod pg;
 mod progress;
@@ -39,10 +40,7 @@ pub fn run() -> u8 {
         } else {
             std::io::stdout().lock().write_all(output.as_bytes())
         };
-        written.map_err(|_| Error {
-            kind: ErrorKind::Internal,
-            message: "cannot write command output".into(),
-        })
+        written.map_err(|_| Error::new(ErrorKind::Internal, "cannot write command output"))
     });
     match outcome {
         Ok(()) => 0,
@@ -58,10 +56,10 @@ fn execute(invocation: Invocation) -> Result<String> {
         Invocation::Help(path) => return cli::render_help(&path),
         Invocation::Version { json } => return Ok(cli::render_version(json)),
         Invocation::Unsupported(path) => {
-            return Err(Error {
-                kind: ErrorKind::BadConfig,
-                message: format!("unimplemented command: {}", path.0.join(" ")),
-            });
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                format!("unimplemented command: {}", path.0.join(" ")),
+            ));
         }
         _ => {}
     }
@@ -69,6 +67,7 @@ fn execute(invocation: Invocation) -> Result<String> {
     let io = if matches!(
         invocation,
         Invocation::Clone(_)
+            | Invocation::Follow(_)
             | Invocation::Progress { .. }
             | Invocation::CompareSchema(_)
             | Invocation::CompareData { .. }
@@ -109,6 +108,7 @@ fn execute(invocation: Invocation) -> Result<String> {
             ))
         })(),
         Invocation::Clone(options) => clone::run(options, &io),
+        Invocation::Follow(options) => follow::run(options, &io),
         Invocation::Progress { options, json } => {
             let progress = progress::read(&options, &io)?;
             if json {
@@ -149,30 +149,22 @@ fn execute(invocation: Invocation) -> Result<String> {
             };
             comparison_output(output, matched)
         }
-        Invocation::Help(_) | Invocation::Version { .. } | Invocation::Unsupported(_) => {
-            Err(Error {
-                kind: ErrorKind::Internal,
-                message: "invalid runtime invocation".into(),
-            })
-        }
+        Invocation::Help(_) | Invocation::Version { .. } | Invocation::Unsupported(_) => Err(
+            Error::new(ErrorKind::Internal, "invalid runtime invocation"),
+        ),
     };
     let restored = handlers.restore();
     let output = outcome?;
     restored?;
     if io.cancelled.load(Ordering::Relaxed) {
-        return Err(Error {
-            kind: ErrorKind::Pgsql,
-            message: "command cancelled".into(),
-        });
+        return Err(Error::new(ErrorKind::Pgsql, "command cancelled"));
     }
     Ok(output)
 }
 
+#[track_caller]
 fn output_error() -> Error {
-    Error {
-        kind: ErrorKind::Internal,
-        message: "cannot encode command output".into(),
-    }
+    Error::new(ErrorKind::Internal, "cannot encode command output")
 }
 
 fn comparison_output(output: String, matched: bool) -> Result<String> {
@@ -183,10 +175,10 @@ fn comparison_output(output: String, matched: bool) -> Result<String> {
         .lock()
         .write_all(output.as_bytes())
         .map_err(|_| output_error())?;
-    Err(Error {
-        kind: ErrorKind::BadState,
-        message: "comparison found differences".into(),
-    })
+    Err(Error::new(
+        ErrorKind::BadState,
+        "comparison found differences",
+    ))
 }
 
 fn io_control(cancelled: Arc<AtomicBool>) -> IoControl {
@@ -209,9 +201,18 @@ fn diagnostic(error: &Error) -> String {
         "category": format!("{:?}", error.kind),
         "exit_code": error.exit_code(),
         "error_severity": "ERROR",
+        "error_origin": {
+            "file": diagnostic_file(error.origin.file()),
+            "line": error.origin.line(),
+            "column": error.origin.column(),
+        },
         "message": format!("native:{:?}: {}", error.kind, error.message),
     })
     .to_string()
+}
+
+fn diagnostic_file(file: &str) -> &str {
+    file.rsplit(['/', '\\']).next().unwrap_or("unknown")
 }
 
 static CANCELLATION: OnceLock<Arc<AtomicBool>> = OnceLock::new();
@@ -288,11 +289,12 @@ fn replace_handler(signal: libc::c_int, action: &libc::sigaction) -> Result<libc
     Ok(unsafe { previous.assume_init() })
 }
 
+#[track_caller]
 fn signal_error() -> Error {
-    Error {
-        kind: ErrorKind::Internal,
-        message: "cannot install or restore cancellation signal handlers".into(),
-    }
+    Error::new(
+        ErrorKind::Internal,
+        "cannot install or restore cancellation signal handlers",
+    )
 }
 
 #[cfg(test)]
@@ -303,21 +305,17 @@ mod tests {
 
     #[test]
     fn endpoint_context_preserves_configuration_errors() {
-        let error = Error {
-            kind: ErrorKind::BadConfig,
-            message: "transport configuration is invalid".into(),
-        };
+        let error = Error::new(ErrorKind::BadConfig, "transport configuration is invalid");
+        let origin = error.origin;
         let error = endpoint_error(error, ErrorKind::Source);
+        assert!(std::ptr::eq(error.origin, origin));
         assert_eq!(error.kind, ErrorKind::BadConfig);
         assert_eq!(error.exit_code(), 2);
 
-        let error = endpoint_error(
-            Error {
-                kind: ErrorKind::Pgsql,
-                message: "connection failed".into(),
-            },
-            ErrorKind::Target,
-        );
+        let error = Error::new(ErrorKind::Pgsql, "connection failed");
+        let origin = error.origin;
+        let error = endpoint_error(error, ErrorKind::Target);
+        assert!(std::ptr::eq(error.origin, origin));
         assert_eq!(error.exit_code(), 7);
     }
 
@@ -335,10 +333,7 @@ mod tests {
 
     #[test]
     fn structured_errors_preserve_category_and_escape_record_delimiters() {
-        let error = Error {
-            kind: ErrorKind::BadState,
-            message: "commit-outcome-unknown\nsecond line".into(),
-        };
+        let error = Error::new(ErrorKind::BadState, "commit-outcome-unknown\nsecond line");
         let record = diagnostic(&error);
         assert!(!record.contains('\n'));
         let value: serde_json::Value = serde_json::from_str(&record).unwrap();
@@ -347,9 +342,36 @@ mod tests {
         assert_eq!(value["exit_code"], 3);
         assert_eq!(value["error_severity"], "ERROR");
         assert_eq!(
+            value["error_origin"],
+            serde_json::json!({
+                "file": "lib.rs",
+                "line": error.origin.line(),
+                "column": error.origin.column(),
+            })
+        );
+        assert_eq!(
             value["message"],
             format!("native:BadState: {}", error.message)
         );
+    }
+
+    #[test]
+    fn diagnostic_origin_excludes_build_paths_and_connection_input() {
+        for file in [
+            "src/lib.rs",
+            "/private/build/src/lib.rs",
+            r"C:\build\src\lib.rs",
+        ] {
+            assert_eq!(diagnostic_file(file), "lib.rs");
+        }
+        let error =
+            contracts::Conninfo::new("password=secret\0host=example.invalid".into()).unwrap_err();
+        let record = diagnostic(&error);
+        assert!(!record.contains("secret"));
+        assert!(!record.contains("example.invalid"));
+        assert!(!record.contains(env!("CARGO_MANIFEST_DIR")));
+        let value: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(value["error_origin"]["file"], "contracts.rs");
     }
 
     #[test]

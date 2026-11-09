@@ -1,0 +1,13 @@
+[
+  "apply::plan::tests::live_full_duplicate_null_and_casefold_preserves_exact_multiset",
+  "apply::plan::tests::live_target_domain_oid_identity_override_and_oversize_text",
+  "apply::plan::tests::live_serial_and_pipeline_agree_on_repeated_keys_and_full_duplicates",
+  "apply::plan::tests::live_identity_updates_match_independent_oracle_and_preserve_sequence",
+  "apply::plan::tests::live_identity_full_and_physical_leaf_rewrites_preserve_exact_rows",
+  "apply::plan::tests::live_identity_missing_row_refuses_result_and_failed_insert_rolls_back",
+  "catalog::follow::tests::live_identity_source_mode_drift_refuses_before_resources",
+  "catalog::follow::tests::live_identity_internal_replica_callbacks_refuse_both_endpoints",
+  "catalog::clone::tests::live_identity_catalog_tracks_physical_and_partition_root_modes",
+  "catalog::follow::tests::live_identity_target_modes_and_partition_normalization_refuse_drift",
+  "catalog::follow::tests::live_identity_cross_major_independent_leaf_refuses_before_resources"
+]
