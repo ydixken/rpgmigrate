@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::catalog;
+use crate::contracts::connection_files::{ConnectionFiles, SOURCE_FILES_ENV, TARGET_FILES_ENV};
 use crate::contracts::{
     CloneOptions, ClonePlan, CloneTarget, Error, ErrorKind, IoControl, OwnedObject, RestorePolicy,
     Result, SnapshotTicket,
@@ -144,11 +146,16 @@ fn run(command: &mut Command, io: &IoControl, deadline: Option<Instant>) -> Resu
     }
 }
 
-fn capture(program: &Path, args: &[&str], io: &IoControl) -> Result<Vec<u8>> {
+fn capture(program: &Path, args: &[&str], io: &IoControl, internal_files: bool) -> Result<Vec<u8>> {
     let mut files = PrivateFiles::new()?;
     let (path, file) = files.file("output")?;
+    let mut command = Command::new(program);
+    command.args(args).stdout(file);
+    if internal_files {
+        ConnectionFiles::inherit_only(&mut command, None)?;
+    }
     let status = run(
-        Command::new(program).args(args).stdout(file),
+        &mut command,
         io,
         Some(Instant::now() + Duration::from_secs(10)),
     )?;
@@ -172,17 +179,17 @@ fn capture(program: &Path, args: &[&str], io: &IoControl) -> Result<Vec<u8>> {
 }
 
 fn tools(major: u32, io: &IoControl) -> Result<Tools> {
-    tools_in(major, io, Path::new("/usr/lib/postgresql"))
+    tools_in(major, io, Path::new("/usr/lib/postgresql"), false)
 }
 
-fn tools_in(major: u32, io: &IoControl, stock_root: &Path) -> Result<Tools> {
+fn tools_in(major: u32, io: &IoControl, stock_root: &Path, internal_files: bool) -> Result<Tools> {
     let explicit = if let Some(path) = std::env::var_os("PG_BINDIR") {
         if path.is_empty() {
             return Err(failure("PG_BINDIR must select an existing tool directory"));
         }
         Some(PathBuf::from(path))
     } else if let Some(config) = std::env::var_os("PG_CONFIG") {
-        let bytes = capture(Path::new(&config), &["--bindir"], io)?;
+        let bytes = capture(Path::new(&config), &["--bindir"], io, internal_files)?;
         let value = std::str::from_utf8(&bytes)
             .map_err(|_| failure("pg_config returned an invalid tool directory"))?
             .trim_end_matches(['\n', '\r']);
@@ -210,8 +217,14 @@ fn tools_in(major: u32, io: &IoControl, stock_root: &Path) -> Result<Tools> {
         if !dump.is_file() || !restore.is_file() {
             continue;
         }
-        let dump_version = tool_major(&capture(&dump, &["--version"], io)?, "pg_dump")?;
-        let restore_version = tool_major(&capture(&restore, &["--version"], io)?, "pg_restore")?;
+        let dump_version = tool_major(
+            &capture(&dump, &["--version"], io, internal_files)?,
+            "pg_dump",
+        )?;
+        let restore_version = tool_major(
+            &capture(&restore, &["--version"], io, internal_files)?,
+            "pg_restore",
+        )?;
         if dump_version != major || restore_version != major {
             return Err(failure(
                 "pg_dump and pg_restore must match the target major",
@@ -230,8 +243,21 @@ fn tools_in(major: u32, io: &IoControl, stock_root: &Path) -> Result<Tools> {
 
 fn utility(program: &Path, connection: &PgConnection) -> Result<Command> {
     let environment = connection.utility_environment()?;
-    let mut options = environment
-        .values
+    utility_command(
+        program,
+        environment.remove,
+        environment.values,
+        environment.files,
+    )
+}
+
+fn utility_command(
+    program: &Path,
+    remove: Vec<OsString>,
+    values: Vec<(OsString, OsString)>,
+    files: Option<Arc<ConnectionFiles>>,
+) -> Result<Command> {
+    let mut options = values
         .iter()
         .find(|(name, _)| name == "PGOPTIONS")
         .map(|(_, value)| value.clone())
@@ -240,7 +266,13 @@ fn utility(program: &Path, connection: &PgConnection) -> Result<Command> {
         " -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C",
     );
     let mut command = Command::new(program);
-    for name in environment.remove.iter().map(OsStr::new).chain([
+    command
+        .env_remove(SOURCE_FILES_ENV)
+        .env_remove(TARGET_FILES_ENV);
+    if let Some(files) = files {
+        ConnectionFiles::inherit_only(&mut command, Some(files))?;
+    }
+    for name in remove.iter().map(OsStr::new).chain([
         OsStr::new("PGSERVICEFILE"),
         OsStr::new("PGSYSCONFDIR"),
         OsStr::new("PGSERVICE"),
@@ -248,7 +280,7 @@ fn utility(program: &Path, connection: &PgConnection) -> Result<Command> {
         command.env_remove(name);
     }
     command
-        .envs(environment.values)
+        .envs(values)
         .env("PGOPTIONS", options)
         .env("PGAPPNAME", "rpgmigrate-schema")
         .arg("--no-password")
@@ -654,7 +686,12 @@ fn compare_schemas(
             "source schema collides with target bookkeeping exclusion",
         ));
     }
-    let tools = tools(target_identity.major, io)?;
+    let tools = tools_in(
+        target_identity.major,
+        io,
+        Path::new("/usr/lib/postgresql"),
+        options.source.files().is_some(),
+    )?;
     let mut files = PrivateFiles::new()?;
     let (source_path, _) = files.file("source.sql")?;
     let (target_path, _) = files.file("target.sql")?;
@@ -717,6 +754,126 @@ fn failure(message: &str) -> Error {
 mod tests {
     use super::*;
     use crate::contracts::Conninfo;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn internal_utility_builder_retains_only_selected_role_files() {
+        use crate::contracts::connection_files::tests::{bound_source, sealed};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        const MODE: &str = "RPGMIGRATE_TEST_UTILITY_FILES_MODE";
+        const PROBE: &str = "RPGMIGRATE_TEST_UTILITY_FILES_PROBE";
+        const TEST: &str =
+            "schema::tests::internal_utility_builder_retains_only_selected_role_files";
+        match std::env::var(MODE).as_deref() {
+            Ok("probe") => {
+                assert!(std::env::var_os(SOURCE_FILES_ENV).is_none());
+                assert!(std::env::var_os(TARGET_FILES_ENV).is_none());
+                let cert = std::env::var_os("PGSSLCERT").unwrap();
+                assert_eq!(std::env::var_os("PGSSLKEY").unwrap(), cert);
+                assert_eq!(std::fs::read(cert).unwrap(), b"source-fixture");
+                let probe: serde_json::Value =
+                    serde_json::from_str(&std::env::var(PROBE).unwrap()).unwrap();
+                for entry in probe.as_array().unwrap() {
+                    let path = format!("/proc/self/fd/{}", entry[0].as_i64().unwrap());
+                    let leaked = std::fs::metadata(path).is_ok_and(|metadata| {
+                        metadata.dev() == entry[1].as_u64().unwrap()
+                            && metadata.ino() == entry[2].as_u64().unwrap()
+                    });
+                    assert!(!leaked);
+                }
+                return;
+            }
+            Ok("build") => {}
+            _ => {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(MODE, "build")
+                    .env(SOURCE_FILES_ENV, "private-parent-map")
+                    .env(TARGET_FILES_ENV, "private-parent-map")
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                return;
+            }
+        }
+        let source = sealed(b"source-fixture");
+        let target = sealed(b"target-fixture");
+        let ambient = sealed(b"unrelated-fixture");
+        // SAFETY: only this owned fixture is made inheritable for the negative control.
+        assert_eq!(
+            unsafe { libc::fcntl(ambient.as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        let bound = bound_source(
+            "host=source.invalid",
+            &format!(
+                "{{\"sslcert\":{},\"sslkey\":{}}}",
+                source.as_raw_fd(),
+                source.as_raw_fd()
+            ),
+            &format!("{{\"passfile\":{}}}", target.as_raw_fd()),
+        );
+        let files = bound.source.files().unwrap().clone();
+        let lifetime = Arc::downgrade(&files);
+        let mut values: Vec<(OsString, OsString)> = files
+            .options()
+            .map(|(key, value)| {
+                (
+                    if key == c"sslcert" {
+                        "PGSSLCERT".into()
+                    } else {
+                        "PGSSLKEY".into()
+                    },
+                    OsString::from_vec(value.to_bytes().to_vec()),
+                )
+            })
+            .collect();
+        values.push(("PGOPTIONS".into(), "-c search_path=pg_catalog".into()));
+        let mut forbidden = vec![source.as_raw_fd(), target.as_raw_fd(), ambient.as_raw_fd()];
+        forbidden.extend(bound.target.files().unwrap().options().map(|(_, path)| {
+            path.to_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .parse::<i32>()
+                .unwrap()
+        }));
+        let probe: Vec<_> = forbidden
+            .into_iter()
+            .map(|fd| {
+                let metadata = std::fs::metadata(format!("/proc/self/fd/{fd}")).unwrap();
+                serde_json::json!([fd, metadata.dev(), metadata.ino()])
+            })
+            .collect();
+        let mut private = PrivateFiles::new().unwrap();
+        let (program, mut script) = private.file("probe").unwrap();
+        use std::io::Write;
+        let executable = std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace('\'', "'\\''");
+        writeln!(
+            script,
+            "#!/bin/sh\nexec '{executable}' --exact {TEST} --nocapture"
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(script);
+        let mut command = utility_command(&program, vec![], values, Some(files)).unwrap();
+        command
+            .env(MODE, "probe")
+            .env(PROBE, serde_json::to_string(&probe).unwrap());
+        drop(bound);
+        assert!(lifetime.upgrade().is_some());
+        let status = command.status().unwrap();
+        assert!(status.success());
+        drop(command);
+        assert!(lifetime.upgrade().is_none());
+    }
     use std::ffi::OsString;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     struct ToolFixtures(PrivateFiles);
@@ -1651,7 +1808,7 @@ mod tests {
         let io = IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
         )));
-        let result = tools_in(major, &io, Path::new(&root));
+        let result = tools_in(major, &io, Path::new(&root), false);
         if let Some(expected) = std::env::var_os("RPGMIGRATE_TEST_TOOL_DIRECTORY") {
             let selected = result.unwrap();
             assert_eq!(selected.dump, Path::new(&expected).join("pg_dump"));

@@ -3,6 +3,7 @@ use super::{
     CreatedLogicalSlot, IdentifySystem, ReplicationFrame, ReplicationPoll, SlotCreateOutcome,
     StandbyStatus, error, io,
 };
+use crate::contracts::connection_files::ConnectionFiles;
 use crate::contracts::{Conninfo, Error, IoControl, Result};
 use pq_sys as pq;
 use std::cell::Cell;
@@ -11,6 +12,7 @@ use std::marker::PhantomData;
 use std::os::unix::ffi::OsStringExt;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[path = "pipeline.rs"]
@@ -41,6 +43,7 @@ pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
 pub(crate) struct UtilityEnvironment {
     pub(crate) remove: Vec<OsString>,
     pub(crate) values: Vec<(OsString, OsString)>,
+    pub(crate) files: Option<Arc<ConnectionFiles>>,
 }
 
 /// # Safety
@@ -51,6 +54,7 @@ unsafe fn copy_utility_options(
     let mut environment = UtilityEnvironment {
         remove: Vec::new(),
         values: Vec::new(),
+        files: None,
     };
     let mut current = options.as_ptr();
     // SAFETY: the caller retains the complete keyword-terminated option array.
@@ -103,6 +107,7 @@ enum Mode {
 struct Connection {
     raw: NonNull<pq::PGconn>,
     notices: Rc<NoticeState>,
+    files: Option<Arc<ConnectionFiles>>,
     _owner: PhantomData<Rc<()>>,
 }
 
@@ -208,6 +213,35 @@ fn is_data_command(sql: &str) -> bool {
     )
 }
 
+fn connect_start(conninfo: &Conninfo, mode: Mode) -> Result<*mut pq::PGconn> {
+    if mode == Mode::Sql {
+        if let Some(files) = conninfo.files() {
+            files.validate()?;
+            let mut keys = vec![c"dbname".as_ptr()];
+            let mut values = vec![conninfo.as_c_str().as_ptr()];
+            for (key, value) in files.options() {
+                keys.push(key.as_ptr());
+                values.push(value.as_ptr());
+            }
+            keys.push(ptr::null());
+            values.push(ptr::null());
+            // SAFETY: libpq expands the untouched first dbname and copies these live options.
+            return Ok(unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) });
+        }
+        // SAFETY: Conninfo owns a valid NUL-terminated string for this call.
+        return Ok(unsafe { pq::PQconnectStart(conninfo.as_c_str().as_ptr()) });
+    }
+    validate_conninfo(conninfo)?;
+    let keys = [c"dbname".as_ptr(), c"replication".as_ptr(), ptr::null()];
+    let values = [
+        conninfo.as_c_str().as_ptr(),
+        c"database".as_ptr(),
+        ptr::null(),
+    ];
+    // SAFETY: terminated arrays and strings stay live while libpq expands and copies them.
+    Ok(unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) })
+}
+
 impl PgConnection {
     pub(crate) fn utility_environment(&self) -> Result<UtilityEnvironment> {
         if self.mode != Mode::Sql || self.phase != Phase::Idle {
@@ -233,6 +267,7 @@ impl PgConnection {
         // SAFETY: this is the single release of PQconninfo's array, including refusal paths.
         unsafe { pq::PQconninfoFree(options.as_ptr()) };
         let mut environment = outcome?;
+        environment.files = self.raw.as_ref().and_then(|owner| owner.files.clone());
         // Pin the validated peer while keeping its hostname for TLS and passfile matching.
         // SAFETY: all accessors read strings retained by this owned connection allocation.
         let selected = unsafe {
@@ -290,28 +325,13 @@ impl PgConnection {
     fn connect_mode(conninfo: &Conninfo, mode: Mode, io: &IoControl) -> Result<Self> {
         let io = &io::operation_control(io);
         io::check(io)?;
-        let raw = match mode {
-            Mode::Sql => {
-                // SAFETY: Conninfo owns a valid NUL-terminated string for this call.
-                unsafe { pq::PQconnectStart(conninfo.as_c_str().as_ptr()) }
-            }
-            Mode::Logical => {
-                validate_conninfo(conninfo)?;
-                let keys = [c"dbname".as_ptr(), c"replication".as_ptr(), ptr::null()];
-                let values = [
-                    conninfo.as_c_str().as_ptr(),
-                    c"database".as_ptr(),
-                    ptr::null(),
-                ];
-                // SAFETY: terminated arrays/strings stay live while libpq expands and copies them.
-                unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) }
-            }
-        };
+        let raw = connect_start(conninfo, mode)?;
         let raw =
             NonNull::new(raw).ok_or_else(|| error("PostgreSQL connection allocation failed"))?;
         let owner = Connection {
             raw,
             notices: Rc::new(NoticeState::default()),
+            files: conninfo.files().cloned(),
             _owner: PhantomData,
         };
         let notices = owner.notices.as_ref() as *const NoticeState;
@@ -1694,6 +1714,7 @@ mod tests {
             raw: Some(Connection {
                 raw: NonNull::new(raw).unwrap(),
                 notices: Rc::new(NoticeState::default()),
+                files: None,
                 _owner: PhantomData,
             }),
             phase: Phase::Idle,
@@ -1767,6 +1788,60 @@ mod tests {
             assert_eq!(failure.kind, crate::contracts::ErrorKind::Pgsql);
             assert!(!failure.message.contains("private-connection-value"));
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn internal_file_params_override_raw_dsn_and_connection_retains_owners() {
+        use crate::contracts::connection_files::tests::{bound_source, sealed};
+        use std::os::fd::AsRawFd;
+        let fixture = sealed(b"private-fixture");
+        let map = format!("{{\"passfile\":{}}}", fixture.as_raw_fd());
+        let dsn = "host=/rpgmigrate-no-such-private-socket port=1 dbname=fixture user=fixture password=fixture sslmode=disable passfile=/unselected-original";
+        let bound = bound_source(dsn, &map, "{}");
+        assert_eq!(bound.source.as_c_str().to_bytes(), dsn.as_bytes());
+        let expected = bound
+            .source
+            .files()
+            .unwrap()
+            .options()
+            .next()
+            .unwrap()
+            .1
+            .to_owned();
+        let lifetime = Arc::downgrade(bound.source.files().unwrap());
+        let raw = NonNull::new(connect_start(&bound.source, Mode::Sql).unwrap()).unwrap();
+        let owner = Connection {
+            raw,
+            notices: Rc::new(NoticeState::default()),
+            files: bound.source.files().cloned(),
+            _owner: PhantomData,
+        };
+        // SAFETY: the owner keeps the connection live throughout option capture.
+        let settings = NonNull::new(unsafe { pq::PQconninfo(raw.as_ptr()) }).unwrap();
+        // SAFETY: libpq returned the complete live option array.
+        let environment = unsafe { copy_utility_options(settings) }.unwrap();
+        // SAFETY: release exactly the option allocation returned above.
+        unsafe { pq::PQconninfoFree(settings.as_ptr()) };
+        for (key, expected) in [
+            ("PGPASSFILE", expected.to_bytes()),
+            ("PGDATABASE", b"fixture"),
+            ("PGUSER", b"fixture"),
+            ("PGHOST", b"/rpgmigrate-no-such-private-socket"),
+        ] {
+            assert!(
+                environment
+                    .values
+                    .iter()
+                    .any(|(name, value)| name == key && value.as_encoded_bytes() == expected)
+            );
+        }
+        drop(bound);
+        drop(fixture);
+        assert!(lifetime.upgrade().is_some());
+        owner.files.as_ref().unwrap().validate().unwrap();
+        drop(owner);
+        assert!(lifetime.upgrade().is_none());
     }
 
     #[test]

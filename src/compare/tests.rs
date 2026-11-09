@@ -1,5 +1,55 @@
 use super::*;
 
+#[test]
+fn internal_file_maps_refuse_before_state_access() {
+    const CHILD: &str = "RPGMIGRATE_TEST_COMPARE_FILES_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let path = std::env::temp_dir().join(format!(
+            "rpgmigrate-uncreated-compare-files-{}",
+            std::process::id()
+        ));
+        assert!(!path.exists());
+        let options = CloneOptions {
+            source: crate::contracts::Conninfo::new("host=source.invalid".into()).unwrap(),
+            target: crate::contracts::Conninfo::new("host=target.invalid".into()).unwrap(),
+            state: crate::contracts::StateRequest {
+                path: path.clone(),
+                action: crate::contracts::StateAction::Create,
+            },
+            operator: None,
+            table_jobs: 1,
+            post_data_jobs: 1,
+            policy: crate::contracts::RestorePolicy::default(),
+            not_consistent: false,
+        };
+        let io = IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        assert_eq!(
+            schema(&options, &io).unwrap_err().kind,
+            ErrorKind::BadConfig
+        );
+        assert_eq!(data(&options, &io).unwrap_err().kind, ErrorKind::BadConfig);
+        assert!(!path.exists());
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "compare::tests::internal_file_maps_refuse_before_state_access",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RPGMIGRATE_INTERNAL_COMPARE_SOURCE_FILES", "{}")
+        .env(
+            "RPGMIGRATE_INTERNAL_COMPARE_TARGET_FILES",
+            "{\"password\":3}",
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+}
+
 fn table(name: &str, oid: u32) -> CloneTable {
     CloneTable {
         source_oid: oid,

@@ -46,6 +46,7 @@ impl TableComparison {
 }
 
 pub(crate) fn schema(options: &CloneOptions, io: &IoControl) -> Result<SchemaComparison> {
+    let options = &crate::contracts::connection_files::bind_compare(options)?;
     let (mut source, mut target, inspection, metadata) = peers(options, io)?;
     let mut effective = options.clone();
     effective.policy = inspection.clone_state.plan.policy;
@@ -56,6 +57,7 @@ pub(crate) fn schema(options: &CloneOptions, io: &IoControl) -> Result<SchemaCom
 }
 
 pub(crate) fn data(options: &CloneOptions, io: &IoControl) -> Result<Vec<TableComparison>> {
+    let options = &crate::contracts::connection_files::bind_compare(options)?;
     let started = Instant::now();
     let (mut source, mut target, _inspection, metadata) = peers(options, io)?;
     let source_tables = catalog::inspect_clone_tables(&mut source, &[], io)?;

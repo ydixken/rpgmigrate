@@ -11,6 +11,9 @@ use crate::cli::CommandPath;
 pub(crate) use crate::identity::RunId;
 use crate::identity::{SourceEndLsn, SourceId, StreamId};
 
+pub(crate) mod connection_files;
+use connection_files::ConnectionFiles;
+
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const MAX_SNAPSHOT_TOKEN_BYTES: usize = 1024;
@@ -84,7 +87,10 @@ impl Error {
 }
 
 #[derive(Clone)]
-pub(crate) struct Conninfo(CString);
+pub(crate) struct Conninfo {
+    raw: CString,
+    files: Option<Arc<ConnectionFiles>>,
+}
 
 impl Conninfo {
     pub(crate) fn new(value: OsString) -> Result<Self> {
@@ -95,7 +101,7 @@ impl Conninfo {
             ));
         }
         CString::new(value.into_encoded_bytes())
-            .map(Self)
+            .map(|raw| Self { raw, files: None })
             .map_err(|_| {
                 Error::new(
                     ErrorKind::BadConfig,
@@ -105,7 +111,11 @@ impl Conninfo {
     }
 
     pub(crate) fn as_c_str(&self) -> &CStr {
-        &self.0
+        &self.raw
+    }
+
+    pub(crate) fn files(&self) -> Option<&Arc<ConnectionFiles>> {
+        self.files.as_ref()
     }
 }
 
