@@ -96,7 +96,7 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
 > M6–M10 remain open: production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
-> VM preservation/resize maintenance and the user-exception three-container cleanup passed; the failed M7 UP remains unqualified and needs corrected fresh source/RUN.
+> VM preservation/resize maintenance and failed-node cleanup passed; corrected M7 UP/load passed for the legacy-only inventory, with monitor continuity blocked and the loaded-digest CHECK bug still open.
 > Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
@@ -276,8 +276,11 @@ The earlier admission-reader handoff separately passed thirteen top-level tests 
 The new relay export passed 29 Python and nineteen focused Go tests (including ten relay subcases), with five mutation controls RED.
 The new transport export passed 97 checks/92 leaf cases; these are focused mechanism proofs, without runtime qualification.
 These focused checks do not qualify packaged Python/libpq, database, Kubernetes/PVC, or opaque-file runtime behavior.
-Checked WebSocket transport has focused passing checks; the [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) replaces the default-disabled split-log prerequisite, with implementation and qualification pending.
-The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) is approved and building; ordinary-file runtime proof, service handling, and exact packaged-libc resolver qualification remain unresolved without permanently narrowing the approved contracts.
+The exact eleven-file Task 0 composition is gofmt-clean, but its source checkpoint is blocked by an incompatible linter.
+The dependency-validated tool 2.14/Go 1.27.3/logcheck upgrade is under independent actual-build/focused-lint qualification; it changes no runtime behavior.
+The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
+The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) has a cap-only admission handoff with nine tests/105 checks on the old relay input; it does not qualify the new Python binding implementation.
+A tiny actual Linux ARM primitive probe passed six nonconnecting groups on M5 image `b463`; TLS/database/Kubernetes/full-helper, ordinary-file, service, and resolver qualification remain open.
 The approved Python/ctypes/libpq exception and no-added-Secret-read/RBAC boundary remain in force: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than latest-Secret-version attestation.
 The user explicitly approved existing operator-feature GitLab mirroring on 2026-11-09; the prior authorization hold is resolved, with CI/mirror outcomes tracked separately below.
 One independent whole-M6 review belongs at milestone close, and users retain write fencing/outstanding-transaction duties through cutover.
@@ -289,6 +292,14 @@ One independent whole-M6 review belongs at milestone close, and users retain wri
 - [ ] Unit and envtest coverage; operator docs for the native engine.
 
 ### M7: Operator-driven E2E
+
+First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes, API readyz, and verified aggregate caps of six CPUs/12 GiB.
+The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
+Tracked CHECK before load and load passed; phase is `Loaded` with six loaded-digest receipts and positive post-load readiness.
+The original finite supervisor hit a read timeout during load; guarded DOWN correctly refused the active RUN lock and exited its handoff without deletion or source/receipt repair.
+Monitor continuity is temporarily blocked: only a watch-only replacement under the same hard deadline is authorized, with restoration proof pending and no renewal.
+Explicit CHECK currently replaces the image ledger and erases loaded digests; use only the accepted pre-load CHECK plus nonmutating post-validation until the harness fix is qualified before M7 closure or the next inventory.
+These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 The leader accepted the [M7 bootstrap slice](superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for code-only implementation by separate lifecycle and suite owners on isolated operator branches.
 The frozen eleven-file M7 join includes 57 passing bootstrap controls and its self-check plus focused suite checks; full custom lint remains a closing blocker.
@@ -320,12 +331,12 @@ The preparation receipt itself authorized no cleanup or resize; the later dated 
 The first M7 UP failed after tracked check/source/37-output and capacity admission passed.
 The omitted `podman exec -i` source fix is ready with 81 focused checks and the separate 169-check full wrapper/self-check run; these overlapping counts are not additive.
 The diagnosed fake marker/label controls did not retain state; the [ledger](../tasks/todo.md) binds the frozen source and check receipts.
-Corrected fresh source, a source-bound manager, and a fresh RUN remain required; no repaired UP qualification is claimed.
+The following source-fix and failed-RUN history precedes the corrected first-UP acceptance above.
 The real frozen-marker probe passed root-owned mode-0600 readback, no-clobber, and exact owned-probe absence checks; the [ledger](../tasks/todo.md) binds its receipt.
 Fresh source `78a663` prepared successfully, and its first UP verified all three node caps before refusing a kubeconfig kind-prefix mismatch.
 The fresh RUN remains `creating`; guarded DOWN refused the same naming check, and the approved exact three-container cleanup passed exact absence/preservation checks.
 The two-comparison guard export `6277b1f1` and realistic fixture export `aa76c08c` now compose GREEN: 87 focused checks and one 175-check full wrapper run, with original-guard RED.
-These are source-level contract tests; new source composition is next, with no third UP, readiness/API qualification, RUN repair, or broad repository audit.
+Those source-level contract tests preceded the corrected first-UP acceptance above; failed RUN evidence remains preserved without repair.
 The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
 The one-off user-exception cleanup passed for exactly the three failed-node containers, with no volume flags or other deletions.
 The source and every old RUN file remain unchanged in creating/empty state; volumes, kind network, images, backups, and original services are retained.
@@ -349,6 +360,9 @@ No manual proof JSON or lease renewal is allowed.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
 ### M9: Durability modes and measured performance
+
+The user requested benchmark planning only; no benchmark runs or VM reservation are authorized before plan approval.
+M10 remains open.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
 - [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.

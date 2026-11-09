@@ -702,6 +702,12 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ### Current composed Go closing profile and blockers
 
+The exact eleven-file Task 0 composition is gofmt-clean, but its source checkpoint is blocked by an incompatible linter; no source commit is claimed.
+The dependency-validated tool 2.14/Go 1.27.3/logcheck proposal `7a5ad71f` and four-file implementation `47df566e` are under independent actual-build/focused-lint qualification, with no runtime changes.
+The cap-only two-file admission export `98c097e1` passed nine tests/105 checks against cap-only Go `561533e8` plus the old relay; this does not qualify the new Python file-binding work.
+The tiny actual Linux ARM primitive probe passed six nonconnecting groups on image `b4631063096125a84d3428571fe81d7057c91cf3356adf54cc738744709e52b0`, with no canary exposure and the exact probe container absent.
+Receipt: `/Users/ydixken/.codex/tmp/m6-explicit-linux-primitives-20261109/receipt.json`, SHA-256 `aca2a3816d8406ca5c40a2e4d92baa43f04014571646653ccbc53b7bb4eff266`; independent runtime qualification is explicitly false and TLS/database/Kubernetes/full-helper gates remain open.
+
 The [2026-11-09 explicit-file/cap amendment](../docs/roadmap.md#m6-explicit-connection-file-and-cap-amendment-2026-11-09) and [approved plan](../docs/superpowers/plans/2026-11-09-m6-explicit-file-binding.md) authorize sealed mode-0400 memfd inputs and the sole immutable missing path before connecting, preserving raw libpq DSN/explicit-empty/permission/optional-absence behavior.
 The main-only caps are 122880 source bytes and 126976 complete argument bytes including NUL; wire/relay/prelude limits are unchanged and native evidence Job JSON is limited to 1 MiB.
 The Linux 131072-byte minimum per-argument limit clears no aggregate argv/env/stack, Kubernetes/proxy, or opaque Secret-length gate; exact image/read-only-rootfs/mount-shadow/runtime tests remain required.
@@ -720,7 +726,7 @@ Final Reader manifest: `/Users/ydixken/.codex/tmp/m6-admission-reader-relay-expo
 The new relay export is `/Users/ydixken/.codex/tmp/m6-python-relay-export-20261109/manifest.json`, SHA-256 `4226dd85ee2d4aad7ac80799ab135d1c036b7fcb42c4273bdd49ccda889a72ed`: 29 Python and nineteen focused Go tests (ten relay subcases) passed, with five mutation controls RED.
 The new transport manifest `/Users/ydixken/.codex/tmp/m6-default-transport-t35vz_yh/manifest.json`, SHA-256 `512263a8cdd49e56497dc7a75d3fb8913ab0f4451b4f07bc69a92fdd529e8aef`, records 97 checks/92 leaf cases, zero failures/skips; no actual default-cluster/log-completeness/rotation/relay-flock runtime qualification follows.
 Runtime qualification and production activation remain false; exact packaged-libc resolver bounds and opaque-file stability before first consumption, including service expansion, are unresolved.
-Checked WebSocket transport has focused passing checks; the approved [delivery correction](../docs/superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md) replaces the default-disabled split-log prerequisite, with three disjoint source owners building it.
+The approved [delivery correction](../docs/superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md) replaces the default-disabled split-log prerequisite; its eleven-file composition still requires a valid source checkpoint and runtime qualification.
 The [dated roadmap amendment](../docs/roadmap.md#m6-default-kubernetes-delivery-amendment-2026-11-09) keeps SQL in main, separate result streams in checked exec, and terminal Job success/complete empty ordinary logs as a separate requirement; no Stream query is used.
 Require Running before exec and the same incarnation Running or successful exit 0/signal 0 afterward; neither post-exec state bypasses terminal Job verification.
 Earlier focused handoffs do not qualify this correction; runtime/image/resolver/file/TLS/PVC gates and production admission remain open.
@@ -815,6 +821,18 @@ Application write fencing and ending outstanding transactions remain the operato
 
 ## M7: Operator-driven E2E
 
+First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes, API readyz, and verified aggregate caps of six CPUs/12 GiB.
+The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
+Tracked CHECK before load and load passed; phase is `Loaded` with six loaded-digest receipts and positive post-load readiness.
+The original finite supervisor hit a read timeout during load; guarded DOWN correctly refused the active RUN lock and exited its handoff without deletion or source/receipt repair.
+Monitor continuity is temporarily blocked: only a watch-only replacement under the same hard deadline is authorized, with restoration proof pending and no renewal.
+Explicit CHECK currently replaces the image ledger and erases loaded digests; use only the accepted pre-load CHECK plus nonmutating post-validation until the harness fix is qualified before M7 closure or the next inventory.
+These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
+
+First-UP proof: `/private/var/tmp/rpgmigrate-m7-kubeconfig-fixed-first-up-5_122d1k/first-UP-handoff-proof.json`, SHA-256 `5e18acb1d9761eb7751c13815898fbf76c5f344b8f5cd077facdbd536aa5f4bd`.
+Load proof: `/private/var/tmp/rpgmigrate-m7-declared-load-ihjsd0zy/final-load-proof.json`, SHA-256 `5ffd59a2c1231940f497862e8e5b65525b1ec6e5bf9a6a7fc52ae8a467d3b525`, explicitly `HANDOFF-required` after the final monitor-continuity assertion failed.
+Load took 93.117 seconds; supervisor PID 47985 hit its read timeout, and any watch-only replacement retains hard deadline `16:58:11.799173Z` / monotonic `529583.5440380573`, without renewal.
+
 The leader accepted the [M7 bootstrap slice](../docs/superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for two code-only owners based on operator checkpoint `5e8cbcb`: lifecycle in `/Users/ydixken/development/pgcopydb-operator-m7-bootstrap` on `feat/m7-kind-bootstrap`, and suite in `/Users/ydixken/development/pgcopydb-operator-m7-suite` on `feat/m7-kind-suite`.
 The read-only image provenance research at `/tmp/m7-image-research.json` resolves the approved major-17 image to 17.11 and retains the existing OTel 0.162.0 constant and approved CNPG 1.30.1 manifest hash.
 The bootstrap receipt must prove an actual executed/passed legacy case count and selected spec name, Complete/CutoverCompleted, nonempty data and sequence checks, and fixture cleanup.
@@ -883,9 +901,9 @@ The approved exact three-container cleanup passed: containers/processes/cgroups 
 Final proof: `/private/var/tmp/rpgmigrate-m7-second-exception-cleanup-7xoc3tat/cleanup-proof.json`, SHA-256 `7ef026e0161d9d8ea48c20dc2a2eec9dbe16dc4fb3ba5f4855fcad4ca60ae6b7`.
 Volume metadata, images, immutable network properties, original four services, backup hashes, all 530 source entries, and every RUN byte remain preserved with phase `creating`; this exception disposal is not guarded DOWN qualification.
 The two-comparison guard export `6277b1f1` and realistic fixture export `aa76c08c` compose GREEN: 87 focused checks and one 175-check full wrapper run, with original-guard RED.
-This is source-level contract testing only; new source composition is next, with no third UP, readiness/API or lifecycle qualification, RUN repair, or broad repository audit claimed.
+Those source-level contract tests preceded the corrected first-UP acceptance above; failed RUN evidence remains preserved without repair.
 The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
-Corrected fresh source, a source-bound manager, and a fresh RUN remain required; source readiness is not a repaired UP or lifecycle qualification.
+The preceding failed-source readiness was not UP qualification; the later corrected first-UP acceptance above remains a distinct source-bound result.
 The exact user-exception cleanup is independently verified at `/private/var/tmp/rpgmigrate-m7-exception-cleanup-xz08ws2q/final-exception-cleanup-verification.json`, SHA-256 `846f6314b9a729fb291adc53947e0464a540687f49c5f65bdda14a8675eaa759`.
 The approved containers were `5a59d137a4039907737030d0bf07ec1a511568a3222ea6a27413bef3935371e7`, `ed1456fddbb6c6fbe42178e6699f0c551d00f25ad0ba83374a93b294140a261f`, and `ec087f13078d0ebc16c1c21fce55cc42cc807f7b204f9b8b8a3346610cbe74de`.
 Graceful stop/exact removal used no volume flags; all three containers, their init processes/cgroups, and matching controllers are absent.
@@ -895,7 +913,7 @@ The quiet reservation is released; this is the explicit human container exceptio
 The source RUN creating/empty markers stay untouched; no volumes, network, images, backups, originals, or generic guard bypass are covered by that one-off exception.
 The failed window used an approved private finite supervisor with a monitored 12-GiB first-UP envelope, not a quota, a maximum 7200-second lease without renewal, and guarded DOWN handoff.
 Earlier partial runs remain preserved and never adopted.
-The failed first-UP attempt does not qualify kind topology, caps, or operator workflow; its exact failed nodes require the bounded cleanup recorded above.
+The historical failed first-UP attempt does not qualify kind topology, caps, or operator workflow; its exact failed nodes were removed by the bounded cleanup recorded above.
 The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap.
 Its receipt is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m7-node-cap-aligned-probe-8ktx3pxr/receipt.json`, SHA-256 `ab3d8ba884a56203f2f58b8fa384e06e21371a3b870fa806f2d7e4ed01c80d39`.
 That existing-container update does not qualify actual kind topology or cluster resource caps.
@@ -915,6 +933,8 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
 ## M9: Durability modes and measured performance
+
+The user requested benchmark planning only; no benchmark runs or VM reservation are authorized before plan approval, and M10 remains open.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
 - [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.
