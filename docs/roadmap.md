@@ -285,7 +285,8 @@ This checkpoint adds no push, CI, or runtime result.
 The [worker construction/dispatch packet](superpowers/plans/2026-11-09-m6-native-worker-construction-dispatch.md) is now integrated in the central operator branch at `cba3fa03fe051432da3ef2650db2db2c8a9b2ad4`, with eleven paths/566 source files verified, each commit prefix lint-qualified, final joined lint zero, lifecycle 108 checks, and eleven exact Linux engine CLI cases passing.
 The integration-only retry display-label lint correction was refrozen under strict lint; it is not a gate exception, and top-level `UnsupportedEngine` remains unchanged.
 The approved [discovery/preflight plan](superpowers/plans/2026-11-09-m6-native-discovery-preflight.md) separates a credential-free version Job from fixed Python DB preflight, requires actual capabilities before credentials, and reuses no legacy raw-DSN argv or raw stderr.
-Frozen successor transport/helper/preflight handoffs remain uncommitted and unactivated; canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides.
+The new sixteen-path/575-file preflight candidate exactly matches its 114-check/zero-lint source; four checkpoint commits are being made, without a final commit or central fast-forward claim.
+Canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides; runtime qualification and activation remain closed.
 Jobs/controller preflight implementation is active; resolver policy still always refuses, and actual DNS/NSS/HOME/TLS/image qualification remains open.
 This packet adds no DB/operator-migration qualification, push, CI, whole-M6 review, or full-Go result; production activation and runtime closure remain open.
 The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.
@@ -314,8 +315,9 @@ Exact three-node container/process/cgroup removal is complete under standing app
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified and no lease is renewed.
 The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is building with bounded installed-client-go sanitization/cancellation fixes; metrics permission remains unapplied.
-The Python handoff passed 198 source-level tests; the Go hook is finishing 124 focused checks plus actual installed-SDK tests, without live qualification or a new UP.
-The guide update is assigned, and the old prepared RUN remains obsolete after successor source changes.
+The final Go six-file packet `9fcb71e2` passed 160 source checks with zero lint; Python 198 and the guide are final.
+The 532-entry integration candidate `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f` has a full 31-path Git delta including inherited changes; its qualification map is being resolved, without source checkpoint, fresh manager/RUN, or UP.
+The old prepared RUN remains obsolete after successor source changes.
 The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
@@ -396,6 +398,10 @@ Initial-copy planning keeps fork async and native per-table durability enabled; 
 
 The approved [M10 implementation plan](superpowers/plans/2026-11-09-m10-release-readiness.md) uses bounded mutation tests, native Linux ASAN with its nightly still unverified, STE source/license provenance, and exact production OCI artifacts for the final matrix.
 These preparation decisions close no release or runtime gate.
+The reviewed structural STE script, exact MIT license, and [provenance](../tools/docs/provenance.md) are now vendored unchanged, reusing the same-input self-test, ten CLI controls, and provenance checks.
+This prepares the checker only: the repository gate must enforce a nonempty expected inventory and parseable findings, because upstream accepts empty stdin and malformed UTF-8 exits 1 with a traceback.
+
+- [x] Vendor the reviewed STE script, license, and provenance as preparation only.
 
 - [ ] README index, getting started, durability, operator guide, troubleshooting; docs drift and STE100 checks.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
