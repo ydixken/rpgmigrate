@@ -219,7 +219,9 @@ The first PostgreSQL 16 to 16 producer case failed its active-fence assertion, l
 The retained sentinel failure was CLI `BadArgs` exit 1 from a trailing-capture parser bug; worker Target7 after teardown is not causal evidence.
 All three owned containers and the network were proved absent.
 A two-file retention repair passed 93 focused checks, and a separate one-file CLI fix at `39b791fd` passed 31 parser checks.
-The Linux rebuild and first-case retry remain unrun; M4 runtime is unqualified.
+The CLI correction is joined and rebuilt for Linux at candidate manifest `ee2aa26dcf86ca48a80dd50360698290754fe6b1556171dc1bcf445fcf7e6cb8`.
+All 31 Linux parser tests and the database-free explicit-E/after-E-JSON check passed; host formatting and strict Clippy passed.
+The first-case cutover retry and full matrix remain unrun; M4 runtime is unqualified.
 Positive cutover Go qualification still awaits the independent M6 reader.
 Completed-positive Go validation explicitly depends on the M6 independent reader; the old clone probe cannot accept the new completion fields, so engine producer checks are not a Go gate pass.
 The 2026-11-08 clarifications are recorded in the [M4 plan](superpowers/plans/2026-11-08-m4-cutover-control.md), covering endpos, retained frontiers, fresh proof, durable sealing, and guarded closure.
@@ -241,6 +243,9 @@ Native 8 / metadata 6 applies only if the accepted M3 identity-fix baseline is 7
 The development-only M2 harness image builds, and the documentation lint gate passes all 17 discovered Markdown files.
 M5 workflow controls (seven tests), image smoke controls (12 tests), actionlint, yamllint, and dependency license/advisory checks pass.
 The native ARM64 image passed its read-only packaging smoke with UID 65532, libpq 18.6, and client tools 16.15/18.6; later clone/schema edits mean that receipt does not bind the final source.
+The isolated implicit stock-target-major utility-routing implementation passed nineteen child-process scenarios and ten Rust tests, with one existing database test ignored.
+Formatting and strict Clippy passed; the two-file utility-routing export is frozen at manifest `4ed44353c90377845c28ec16e739f04f6f35aa0436ad79e39e5f6a4fad8ddb40`.
+A source-only join into the M4 candidate is assigned; no new binary is qualified by that join.
 The final-source image, AMD64 and hosted checks, and the M5 closing gate remain unqualified.
 These checks do not complete the released runner or hosted engine CI gates below.
 
@@ -263,6 +268,8 @@ The composed PostgreSQL 16 run recorded 26 passes before the first lost-COMMIT c
 The fault is proven through fifteen stages and relay observation of COMMIT/Idle without completion evidence.
 A fresh retry refused target open; source tracing points to absent environment values becoming empty, with a pure environment correction under work.
 No healthy retry or PostgreSQL 18 qualification is claimed.
+The leader approved a test-only actual-native-8 producer interoperability plan; two-file implementation is assigned, with no actual-producer PostgreSQL 18 run.
+Task 0 real/work-PVC ancestor permissions remain unqualified; no guard relaxation or root initialization is approved.
 This prototype does not qualify Task 0 or authorize production activation.
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both cutover modes; no fencing subsystem is added.
 

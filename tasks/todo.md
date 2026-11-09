@@ -425,7 +425,10 @@ The later retained sentinel result is CLI `BadArgs` exit 1, caused by trailing-c
 All three exact owned containers and the network were proved absent.
 The two-file retention repair is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-fence-retention-an15cuee/export/manifest.json`, SHA-256 `e5404197bf902d72aa3b99875ea163a12f2ef83210232aa3663b37657c61fcee`.
 Its 93 focused checks pass.
-The one-file CLI correction `39b791fd` passed 31 parser checks; the Linux rebuild and first-case retry are unrun.
+The one-file CLI correction `39b791fd` is joined and rebuilt in candidate manifest `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-parser-linux-u77pw5bk/manifest.json`, SHA-256 `ee2aa26dcf86ca48a80dd50360698290754fe6b1556171dc1bcf445fcf7e6cb8`.
+The Linux binary is `b9e8f6c424ca9deda8237e5363dc22d281661f1d4d8050e527a5e01655dad5f0`.
+All 31 Linux parser tests and the database-free explicit-E/after-E-JSON check passed; host formatting and strict Clippy passed.
+The first-case cutover retry and full matrix remain unrun; these checks do not qualify cutover runtime.
 The harness peer passed six portable checks and registered cases, without actual M4 E2E.
 The frozen eight-file CLI export passed 31 adapter/parser checks only; no assembled-source or runtime result follows.
 All 41 implementation steps remain open; these static checks establish no M4 runtime qualification.
@@ -447,6 +450,9 @@ Exclusive slot administration is an accepted prerequisite; uncertain incarnation
 
 ## M5: Packaging and engine CI (starts with M2)
 
+The isolated implicit stock-target-major utility-routing implementation passed nineteen child-process scenarios and ten Rust tests, with one existing database test ignored.
+Formatting and strict Clippy passed; the exact `schema.rs`/`runner-image.md` export is `/tmp/rpgmigrate-m5-tools-export-d799/manifest.json`, SHA-256 `4ed44353c90377845c28ec16e739f04f6f35aa0436ad79e39e5f6a4fad8ddb40`.
+A source-only join into the M4 candidate is assigned; no new binary is qualified by that join.
 The local ARM64 read-only packaging smoke binds an older source snapshot; final-source image, AMD64, and hosted qualification remain open.
 
 - [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
@@ -475,6 +481,9 @@ The run recorded 26 PostgreSQL 16 passes before the lost-COMMIT case failed to q
 Fifteen fault stages and relay COMMIT/Idle observations prove the lost reply, without completion evidence.
 A fresh retry refused target open; the source-backed hypothesis is that absent environment values became empty.
 A pure environment correction is under work; no healthy retry or PostgreSQL 18 result is qualified, and Task 0/production activation remain open.
+The approved test-only actual-native-8 producer interoperability plan is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-m6-actual-producer-plan-u3xog4xr/2026-11-09-actual-native8-producer-interop-plan.md`, SHA-256 `e89bb99b7c10876130d4b9fa26c61b5f45979239aa00d74d9d10b3b77b450c9c`.
+Two-file implementation is assigned; no actual-producer PostgreSQL 18 run has occurred.
+Task 0 real/work-PVC ancestor permissions remain unqualified; no guard relaxation or root initialization is approved.
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both Manual and Automatic modes; no new fencing subsystem is authorized.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
