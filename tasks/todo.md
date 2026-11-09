@@ -3,8 +3,9 @@
 The [roadmap](../docs/roadmap.md) defines the milestone scope and its 2026-11-08 amendments override conflicting older design text.
 The [M0 implementation plan](../docs/superpowers/plans/2026-11-08-m0-preserve-reset.md) defines worker ownership and acceptance.
 Keep implementation evidence separate from parser compatibility and operator runtime qualification.
-M0–M3 are closed at source commit `7b6037f` and maintained documentation commit `23f6d90`.
-M4–M10 remain open; no runnable native operator or cutover workflow is qualified.
+M0–M4 are closed; M4 engine source and six accepted behavior documents are integrated at `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`, with separate operator test-only commit `c262322909ac03a7101ea3bfac2c4823efa62e95`.
+M5–M10 remain open; production native operator admission, final images, kind E2E, power-loss/performance, and release qualification remain unqualified.
+Continue through the existing M5/M6/M7 dependencies without treating M4 engine evidence as operator activation or approval of pending maintenance/dependency choices.
 
 ## M0: Preserve and reset (rpgmigrate)
 
@@ -373,7 +374,7 @@ The source and testing guide are committed as `7b6037f9ac8214696936a21c865cd9730
 Actual primary `task check` returned zero; formatting, strict Clippy, 433 Rust tests, 24 CLI tests, 254 portable tests, and eighty COPY tests passed.
 The 232 native cases and 63 follow cases with 42 Go clone-report checks retain their exact-source receipts; they are not additional offline test counts.
 The separate operator lint repair is committed as `2bdc7614c04bc6aa8a8f4c709a84cbcc07340b5c`, tree `d9003a7939eac53ffe471134196440906794f45f`.
-M4 cutover, M6 native activation, M8 widening, and M9 power-loss/performance qualification remain open.
+M4 cutover closed under the qualification recorded below; M6 native activation, M8 widening, and M9 power-loss/performance qualification remain open.
 The operator checks above retain their exact-source scope and do not qualify native operator runtime.
 
 - [x] pgoutput v1 decoder (B, C, R, Y, I, U, D, T, O; others fatal) with relation generations and PostgreSQL 16/18 regression coverage.
@@ -393,6 +394,52 @@ Parser fuzzing and measured catch-up performance remain M10 and M9 qualification
 ## M4: Cutover, drain proof, cleanup (engine)
 
 ### Current M4 closing gate
+
+The checked-close successor is frozen at `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/manifest.json`, SHA-256 `2034c420f18ec0f32064eb8bb90c74c14da8a54a8f858095abbb888ab714a926`, inventory `48f3253f662f7bafee9a667d6d1968b7a6db546396b8bc9ba1669da3852b09e4`.
+Six disjoint source/test paths changed, with 348 other identities, 304 files, and fifty absences exact; native 8 / metadata 6 / 29-column bytes are unchanged.
+Fresh joined-input host gates passed on `2034c420`: Wire24/Cutover36 with warnings as errors, canonical `task lint test` with 499 Rust PASS/22 ignored/107 filtered, 27 CLI tests, and 324 portable tests, followed by explicit `task check` exit zero.
+Host proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/host-gate-proof.json`, SHA-256 `6d6451bb367cd1767daac9971febda47d46fc2023961f4776e120121f1180d0e`.
+Generated target outputs are retained outside source, and all 304 files/fifty absences remain exact; the production edit still requires live acceptance of its newly built runtime.
+The old-runtime RED harness is frozen at sibling `red-harness/manifest.json`, SHA-256 `ef2cb69c58c4bb815f113ccfbbbeacc348acd1a5b9e638176918a5bdd1348da5`, deliberately combining the five new test-harness paths with unchanged `96e1` production and `cadadfbf`/`87a0` build.
+That is not the repaired production input.
+The old `cadadfbf` PostgreSQL 16-to-16 control reproduced meaningful RED: `engine-completed-resume-close` rejected an actual engine exit zero with one validated completed frame.
+The relay delivered the second COMMIT plus Idle, then observed frontend X/`old_drop=true`; independent observation proved the exact BackendKeyData-bound PID absent on the selected target.
+All state-preservation checks were true and the worker/relay were reaped; Task exit 201 is rejection of the old behavior, not a green test exit or arbitrary fixture failure.
+Frozen old RED proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/red-harness/e2e-runtime/old-runtime-red-proof.json`, SHA-256 `c012d3e0fa9a954e6a8d945712670b37440bc43c889a2d9d7314c784bf1adb8f`.
+All three owned containers and the network were proved absent, source remained exact at 304 files/fifty absences, privacy scans were clean, and free disk was 12,515,401,728 bytes.
+The repaired ordinary Linux runtime is built from `2034` as SHA-256 `1fd03e42f9656495816d6c36a5be32eec9fa69a319d2ab28506d9cd979578a52`.
+Build proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/runtime/build-proof.json`, SHA-256 `e2797532b737dc3bb0ec61abccddb65f190f7bb04e26f1ece49661219f2a84f0`; stock libpq 180006 and its `094cbe08` artifact remain unchanged.
+The build runner and network were removed; minimum free disk was 12,515,061,760 bytes and peak cgroup memory was 492,146,688 bytes.
+Fresh repaired-input SourceCatalog3 and FollowAuthority17 passed on PostgreSQL 16.15 and 18.6: forty cases total with zero ignored, on `2034`/`1fd03e42`.
+Proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/native-sampling-proof.json`, SHA-256 `9e2c66442af6f16bf383633236370503efb2c20bad035aa0df9a84c0648813cc`.
+All six owned clusters and sockets were absent, original stock state stayed unchanged, the lease was released, and minimum free disk was 12,237,631,488 bytes.
+This is forty fresh sampling cases, not an addition to the prior 266-case subset yielding an invented all-current native total.
+Repaired Cutover10 on PostgreSQL 16 to 16 passed all ten cases on `1fd03e42`/`2034`, accepting the first checked-close GREEN and a healthy completed retry.
+Proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/e2e-runtime/first-close-green-proof.json`, SHA-256 `c5af7f2b8e4c70fdaf6aacb6db0452494c1ea9200f5e163fa8a32f83601ef0a5`.
+The fault delivered the same final COMMIT/Idle, independently proved wire-bound PID 286 absent, then observed frontend B/non-X, Pgsql exit 4, and empty stdout.
+Authority/native/E/resource/foreign/oracle fingerprints remained unchanged, healthy completed retry was valid, and worker/relay reaping passed.
+Old RED remains an explicit ancestor control; the repaired Follow21/Cutover10 matrix now passed all 93 cases on `2034`/`1fd03e42`, including checked-close GREEN on each pair.
+The earlier immutable 52-case partial receipts remain historical, superseded by the final matrix proof below.
+The same independent reviewer resolved the P2 on `2034`/`1fd03e42`, with no findings remaining and both documentation corrections resolved.
+Resolution: `/Users/ydixken/.codex/tmp/m4-independent-closing-review-r_lw2ucz/p2-resolution.md`, SHA-256 `fd2535519a8c0725f156925a4d4942ecffa2432295f6e0668ab202a7cdf15970`; this continues the original review rather than a second whole review.
+Repaired-runtime actual-seven passed final verification on `2034`/`1fd03e42` in one uncached invocation, with seven PASS and zero skips/failures.
+Receipt: `/Users/ydixken/.codex/tmp/m4-checked-close-actual7-ovf_vw65/runtime-receipt.json`, SHA-256 `2be671b4335e6188df1650ec25c4dd45b3a9a492f6bf55d42321478f48affc27`; sibling `verification-addendum.json` SHA-256 `c8e6d76cf31c61f0c16281ba27e4490fe01db66ad155aa8dc3d577a85eae8587`; final artifact manifest SHA-256 `dab741629b852f3d46bbd3abf55899eac269445d42afc1bfc8285e545c87532c`.
+The nineteen-stage helper, both EOFs, empty stderr, closed source session, independent Go ParseReport, and matching same-E acknowledgment/token are proven.
+All 28 fixture caps were observed with zero unknowns or violations; all 31 owned objects (29 containers and two volumes) were independently absent, original three objects exact, secrets/driver/observers absent, and privacy scans clean.
+Go 546-file/24-staged-path/tree `7442` stayed unchanged; existing Go closing proof `2f6e44ce` was reused without repeated broad suites.
+The 42.612-second lease recorded minimum free disk of 12,527,251,456 bytes; qualification remains private PostgreSQL 18 with mocked Kubernetes ownership and `production_admission=false`, not native activation or power-loss proof.
+The private orchestration-only static engine census passed pure controls; the overlapping run released its marker before the boundary, with `held=false`, no process signals, and no interrupted case.
+The repaired matrix, final actual-seven, engine integration, and source commit are complete; M4 is closed.
+Final repaired composite: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/checked-close-supplemental-proof.json`, SHA-256 `8eda6f19049d59e2a7ba9e356610c60a475f332b8fbc1cfb8d78c89d552c4d7c`.
+The sibling `e2e-runtime/runtime-matrix-proof.json`, SHA-256 `98c8578b4872582bb97887f3d49abe794757b511911fdb94be757dd0933c1621`, accepts all 93 Follow21/Cutover10 cases with source/binary/libpq identity unchanged.
+The sibling `e2e-runtime/cleanup-proof.json`, SHA-256 `83cc6a8cc549d4d65666a6d0253db4ebce45f6a6089edfb341ebc2fb98440897`, proves all thirteen owned containers and the internal network absent, the native lease released, and original stock state unchanged.
+Source remained exact at 304 files/fifty absences, and all 954 artifact privacy scans were clean; minimum matrix free disk was 12,502,048,768 bytes and final free disk 12,565,581,824 bytes.
+The composite links fresh host 499/27/324/lint/check, forty fresh native samples, meaningful old RED/new GREEN, new actual-seven, and prior 266-case evidence with original labels; these scopes are not merged into a fictitious current total.
+The separate 24-path operator test-only work is committed as `c262322909ac03a7101ea3bfac2c4823efa62e95` (`test: qualify native cutover producer evidence`), preserving production native refusal.
+The `m4_engine_integration` owner is preparing a private feature tree from `2034` plus final six-doc `23ca0fd`, preserving primary plans, lessons, M7, and current trackers; no commit is authorized by that preparation.
+The same reviewer accepted bounded repair inspection and final six-document export `23ca0fd`, with no actionable delta finding.
+Addendum: `/Users/ydixken/.codex/tmp/m4-independent-closing-review-r_lw2ucz/repair-inspection-pending.md`, SHA-256 `8296f191004270d15beff407365d6840eb5edc1c26b9e764e55ad57f36a6a395`.
+The original P2 is resolved by the same reviewer after reproduced old-runtime RED and verified repaired-runtime GREEN; all retained 266/90/actual-seven results below remain prior-source evidence.
 
 Ancestor `5de` passed fresh host lint/check, 497 Rust tests with twenty ignored and 107 filtered, 27 CLI tests, and 306 portable tests.
 PostgreSQL 16 Source12 and Snapshot9 passed, including five fault receipts and three tail phases.
@@ -453,7 +500,7 @@ The three-path successor is frozen at `/Users/ydixken/.codex/tmp/m4-engine-closi
 All 351 other predecessor entries remain unchanged, with 304 files and fifty explicit absences; the ordinary runtime remains `cadadfbf` under the test-only projection.
 Exact Engine50 passed on PostgreSQL 16.15 and 18.6 with zero ignored cases; Catalog13 passed on PostgreSQL 18, supplementing the earlier PostgreSQL 16 Catalog13 PASS.
 PostgreSQL 16 Source12 and Snapshot9 passed, including five snapshot fault receipts and three tail phases.
-These are completed partial closing results only; later Authority/Receive11 and other profiles, final three-pair runtime matrices, and whole-M4 review remain pending.
+These five stages were partial results only; the nine-profile closing-subset acceptance below supersedes their pending-profile status while preserving the immutable partial receipt.
 The active lease recorded minimum free disk of 12,135,612,416 bytes with no watchdog violation; no final lease-cleanup claim follows before release.
 Immutable five-profile receipt: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/native-progress-five-profiles.json`, SHA-256 `72e7cd943e56c4bac6882f3b9b4fec0266ea53bcc64f84ac644d400dec91ed13`.
 The sibling `production-input-projection.json`, SHA-256 `14e67af740c02c430ce3fe25417446df45e9b46ab0a4f1adec131d2ee3b92bd9`, retains the unchanged ordinary runtime and prior host/Schema proof; later profiles are excluded from this frozen five-stage result.
@@ -471,9 +518,53 @@ The sibling final `proof.json`, SHA-256 `c3ac7badb30f8116e071b30e21e56a93f041abb
 All six owned clusters/sockets were proved absent, original stock configuration/PID1/postmasters stayed unchanged, the lease was released, source remained exact at 304 files/fifty absences, and privacy scans were clean.
 Strict lint has no staging-policy exception.
 TLS proof remains option-byte and selected-hostname/address mapping with TLS disabled; no TLS handshake, client-certificate, or encrypted-key qualification is claimed.
-Remaining native profiles, final three-pair runtime matrices, and one whole-M4 review remain pending; the actual seven-case interoperability proof is accepted within its explicit test-only scope.
+The nine-profile M4 native closing subset passed on `96e1`, combining 233 fresh named cases with 33 retained Schema3/Clone7/Catalog16 cases for 266 total, 133 per major, with zero required skips.
+SourceCatalog3 is a separate registered retained M3 gate; its fresh repaired-input acceptance on both majors is recorded above, separately from this prior nine-profile subset.
+Authority17, Receive11, and Apply11 passed on PostgreSQL 16.15 and 18.6; Receive16 ran 72.98 seconds in the test binary and 74.361 seconds total, while Receive18 ran 73.03 seconds and 74.497 seconds total.
+Both required 70-second cadence controls completed without interruption; Snapshot9 retained five fault receipts and three tail phases on each major.
+Immutable native closing proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/native-closing-proof.json`, SHA-256 `d779e8252d87bcd4b2a0ec331ef767a6431084f403e510b1a547fc95e26938f5`.
+All nineteen owned clusters and nineteen owned sockets were proved absent; original stock configuration, postmasters, PID1, and socket inventory remained unchanged, and the lease was released.
+Minimum free disk was 12,135,612,416 bytes and peak RSS was 960,483,328 bytes, with zero watchdog violations.
+The first current runtime pair, PostgreSQL 16 to 16 Follow21, passed all 21 named cases in 189.99 seconds on unchanged `cadadfbf` with the final `96e1` projection.
+Its fourteen original startup reports were validated by `local_m3_contract`; this is not Go/probe validation.
+Proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/e2e-runtime/follow-16-16-proof.json`, SHA-256 `23da896ec9430f64acb0db18118b2db4113b730224f77fb4ca8a2f5528ecdc80`.
+Both owned PostgreSQL 16 server containers were removed and proved absent; minimum free disk was 12,506,144,768 bytes and peak aggregate RSS was 868,581,376 bytes.
+The current PostgreSQL 18 to 18 Follow21 pair then passed all 21 named cases in 192.31 seconds on the same `96e1` source and `cadadfbf` runtime, with fourteen original reports validated by `local_m3_contract`.
+Proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/e2e-runtime/follow-18-18-proof.json`, SHA-256 `813623a87ece5b3c1e45a8793bec3172a84f2861a781f06014e2497918c8a5da`.
+Actual PostgreSQL 18.6 image/tools and exact source inventory were verified; owned server absence was proved, while the runner remained owned for later pairs.
+Minimum free disk was 12,545,638,400 bytes and peak aggregate memory was 879,013,888 bytes, without watchdog violations.
+The remaining cross-major Follow21 pair and all three Cutover9 pairs passed, completing 90 of 90 declared runtime case executions on exact `96e1` source and `cadadfbf` runtime.
+Cutover16-to-16, 18-to-18, and 16-to-18 took 26.04, 25.89, and 25.91 seconds respectively, with sixteen original streaming/completed reports per pair under `engine_producer`/`local_m4_producer` and `probe_checked=false`.
+Follow reports retain `local_m3_contract` validation; neither producer matrix is Go/probe evidence.
+Final runtime-matrix proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/e2e-runtime/runtime-matrix-proof.json`, SHA-256 `50548ecac0b7ab9536dfad472b67c576111c0d9efe76d078c4ec35b3fb08233f`, accepts Follow63 plus Cutover27, all ninety cases, with exact source/runtime/libpq bindings.
+The sibling `cleanup-proof.json`, SHA-256 `4e787dbee1124f9fb0dacf857508f0b65db78e60622551a51a3d4d513c853570`, proves all twelve servers, runner, and network absent, original stock state unchanged, and the lease released.
+The aggregate parent `proof.json`, SHA-256 `9257058b6ff1cae83eeda88672b70dfec45fa5ef4bb55794a2d990ac5445dde1`, preserves exact 304-file/fifty-absence source and binary/linkage identity after all gates.
+All 411 runtime artifact files passed privacy scans with zero canary hits; matrix minimum free disk was 12,506,144,768 bytes and peak aggregate memory was 880,824,320 bytes.
+The single independent whole-M4 xhigh review finished with one confirmed P2: the completed-resume branch in `src/follow.rs` obtains `CompletedFollow` but omits consuming checked `TargetAuthority::close` before reporting success.
+The synchronous completion proof is not invalidated; the missing guarantee is observed shutdown guard/unlock/local-disposal failure handling.
+No other actionable source finding was identified, and no earlier per-task independent reviews occurred.
+Review: `/Users/ydixken/.codex/tmp/m4-independent-closing-review-r_lw2ucz/review.md`, SHA-256 `dc87ac4c075b6109a02f0423a7391d5691cff0a0935946648cabd54a24548295`.
+The leader approved the now-joined checked-close plan at `/Users/ydixken/.codex/tmp/m4-completed-resume-close-plan-bbee5qk2/plan.md`, SHA-256 `d627e7fe79a1d72e814fa0ae2a3653e0937bc9e86485737ccb0f2871c3f56e4a`, and its disjoint source/test exports are joined.
+The one-line source export is `/Users/ydixken/.codex/tmp/rpgmigrate-m4-resume-close-do6apchb/manifest.json`, SHA-256 `5097b2bcfc802814f680a5f390fa9e4323c4ec26c06bba4d6aff3e2679a1652d`; focused strict Clippy, library compilation, and 23 root-follow tests passed.
+Separate test owners implement the test-only wire mode and `completed_resume_requires_checked_authority_close`, without production hooks or relaxed guards.
+The new case extends Cutover9 to Cutover10, not Follow21 to Follow22; all 93 repaired three-pair cases are now qualified.
+Planned qualification requires meaningful RED on the old runtime, new source/binary identity, SourceCatalog3 and FollowAuthority17 on both majors, the new 93-case matrix, and actual-seven interoperability on the new binary.
+The same-review P2 is resolved as recorded above; pending matrix and final actual-seven evidence remain separate milestone gates.
+Existing 266-case native, ninety-case runtime, and ancestor actual-seven evidence remains accepted on `96e1`/`cadadfbf`, separately from the final repaired-input proofs above.
+The `m4_documentation_reconcile` owner reconciled exactly six behavior documents from current primary, preserving M3/M6 amendments and lessons and stating that cleanup requires both source and target.
+The same review requires the nine-profile inventory distinction above and narrows unsupported-option refusal to before pre-data intent, without claiming refusal before all prior effects.
+The final six-document export `23ca0fd7872b8624233af6ad88a13ee9421496820f51d29a2bef94f671434acf` preserves current primary and corrects intent, subset, and Cutover10 wording; it claims no new runtime result.
+The integration plan now identifies 55 source effects plus six behavior documents, 61 paths total, preserving primary trackers/plans/M7/lessons for one coherent engine commit.
+The separate 24-path operator test-only commit is recorded as `c262322909ac03a7101ea3bfac2c4823efa62e95`, without activating production native paths.
+The P2, documentation corrections, separate operator test-only commit, and 61-path engine integration/source commit are complete; M4 is closed.
+Primary `feat/native-engine` is fast-forwarded to `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`, tree `4e9a151afa82c039aa2bb2c705fded6d358d5d4a`.
+Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m4-engine-integration-hiifg12a/fast-forward-proof.json`, SHA-256 `e02a7e60892fa1f52a8bdfa4e5c26f80f54b3be06f837b0f7bc210d03a1c2c13`; sibling `postcommit-proof.json`, SHA-256 `ddb8da4c816f8655459d53266c3f5258e29ed58997ccd03005dade159ff9e8f4`.
+The integration verified 285 source files, six accepted documents, fifty explicit absences, and 244 protected files; only `src/apply/serial/tests.rs` changed from private mode 0600 to repository mode 0644 with identical bytes.
+The operator test-only commit `c262322909ac03a7101ea3bfac2c4823efa62e95` remains separate; its commit proof SHA-256 is `74d2e8263f7552025923cf18c3490c227485a910b1a98a8c570e945a04ca2ac4`.
+Source integration preserved primary trackers/plans/M7/lessons and kept the index empty; this final tracker closure does not change source or production operator admission.
+The nine-profile native closing-subset qualification and actual-seven interoperability remain accepted within their separate explicit scopes.
 The earlier `ef4` producer 27-case PASS and `134`/`d75` actual seven-case Go interoperability PASS below are ancestor evidence, pending fresh current-code matrices.
-Current-engine/current-Go actual seven-case acceptance is complete within its test-only scope; one whole-M4 xhigh review remains pending.
+Prior-source/current-Go actual-seven acceptance retains its test-only scope; final repaired-input qualification and same-review resolution are complete as recorded above.
 
 ### Ancestor M4 evidence
 
@@ -530,7 +621,7 @@ No informational JSON may expose unproven certified or durability counters; loca
 The native operator must sample and persist one E, then retry that identical E explicitly after a bounded refusal.
 The worker processes persisted E independently of acknowledgment; the M6 standalone helper retries identical E for final positive proof after the worker exits.
 We add no IPC or fence handoff for this path.
-Native 8 / metadata 6 is conditional on acceptance of the planned M3 identity-fix baseline as 7 / 5.
+The qualified runtime uses native 8 / metadata 6 with 29 control columns and strict older-format refusal.
 Exclusive slot administration is an accepted prerequisite; uncertain incarnation or reappearance requires preservation and refusal, without an invented slot OID or new privilege mechanism.
 
 - [x] Retain the ancestor 27-case engine-producer PASS across all three pairs.
@@ -539,11 +630,18 @@ Exclusive slot administration is an accepted prerequisite; uncertain incarnation
 - [x] Pass the exact three-case Schema profile on PostgreSQL 16.15 and 18.6 for the repaired utility successor.
 - [x] Pass Clone7 on PostgreSQL 16.15 and 18.6 after restoring the source-parity marker-test literal.
 - [x] Pass exact Engine50 on PostgreSQL 16.15 and 18.6 after the selector and M3 assertion restorations.
-- [ ] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
-- [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
-- [ ] Drain certification, final sequence sync, exit 0 only with proof.
-- [ ] `stream cleanup`: owned slot and publication only, idempotent, workdir kept for later compares.
-- [ ] Engine E2E: full follow migration under pgbench load (including `synchronous_commit=off` writers), endpos, drain, compare match and cleanup, plus a crash in each phase, on 16→16, 18→18 and 16→18.
+- [x] Pass the nine-profile M4 native closing subset on PostgreSQL 16.15 and 18.6, including uninterrupted Receive11 cadence coverage.
+- [x] Retain all ninety reviewed-ancestor Follow21/Cutover9 runtime case executions across the three declared pairs.
+- [x] Pass fresh checked-close SourceCatalog3/FollowAuthority17 sampling on both majors: forty cases, zero ignored.
+- [x] Pass the first repaired Cutover10 pair on PostgreSQL 16 to 16, including checked-close GREEN and healthy retry.
+- [x] Qualify the checked-close successor, including SourceCatalog3/FollowAuthority17 on both majors, the new 93-case matrix, and actual-seven interoperability on its new binary.
+- [x] Record the separate 24-path operator test-only commit `c262322909ac03a7101ea3bfac2c4823efa62e95`.
+- [x] Close M4 at engine source commit `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476` after verified integration and the separate operator test-only commit.
+- [x] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
+- [x] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
+- [x] Drain certification, final sequence sync, exit 0 only with proof.
+- [x] `stream cleanup`: owned slot and publication only, idempotent, workdir kept for later compares.
+- [x] Engine E2E: full follow migration under pgbench load (including `synchronous_commit=off` writers), endpos, drain, compare match and cleanup, plus a crash in each phase, on 16→16, 18→18 and 16→18.
 
 ## M5: Packaging and engine CI (starts with M2)
 
@@ -571,7 +669,7 @@ Each major passed fourteen helper functions and 158 entries with no required ski
 PG16 explicitly combines seven completed helper results from an observer-interrupted invocation and seven fresh exit-zero results; PG18 passed all fourteen in an exit-zero invocation.
 Proof: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-helper-observer-resume-z995h42h/go-closing-proof.json`, SHA-256 `2f6e44cefbf4a39d6944891321300da721c13a72bc58100882cd166398b6710a`.
 All owned objects were proved absent; all source files and 24 staged paths remained exact, with no secret or canary leak.
-These test-only closing checks do not activate production native paths; the actual seven-case addendum above accepts current-engine interoperability, while whole-M4 closing review remains pending.
+These test-only closing checks do not activate production native paths; final repaired-runtime actual-seven acceptance is recorded above, the P2 is resolved, and the remaining engine matrix/integration gates stay open.
 
 The retained engine utility-routing reproduction showed explicit or inherited `PGSERVICE` redirecting schema children from parent-validated alpha to beta.
 Snapshot-bound dump refused the wrong database, while exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
