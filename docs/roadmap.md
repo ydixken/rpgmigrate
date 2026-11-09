@@ -273,6 +273,8 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
 Production native admission still returns `UnsupportedEngine`; M4's engine and mocked-Kubernetes helper evidence does not qualify the operator lifecycle.
+The clean central operator checkpoint is `a9bbc487975cf35054a8d1cff00f28b8b31a888d`, with env-value-cleared privacy correlation hashing and source-only head/informational-lag client, strict codec/Python, and golden coverage.
+Full canonical in-memory admission remains authoritative; correlation hashes and informational lag supply no target durability or completion authority, runtime acceptance, or new image qualification.
 Task 0's five-file pure-helper export is frozen with nineteen Python and eighteen focused Go tests passing, including exact PG16/18 SQL fixture equality.
 The earlier admission-reader handoff separately passed thirteen top-level tests and 330 focused checks with zero failures or skips; the final relay-aware Reader composition passed fourteen top-level tests and 344 focused checks with zero failures/skips against the exact new relay/transport inputs.
 The new relay export passed 29 Python and nineteen focused Go tests (including ten relay subcases), with five mutation controls RED.
@@ -288,8 +290,9 @@ The approved [discovery/preflight plan](superpowers/plans/2026-11-09-m6-native-d
 The dormant preflight source checkpoint is fast-forwarded into the clean central operator branch at `727e45da94a5b2d099e97380e086a36206e68451`, with 575 source paths verified against the accepted prefix/source receipts; no broad rerun, push, CI, or activation follows.
 Canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides; runtime qualification and activation remain closed.
 The preflight field is not injected and resolver policy still always refuses; remaining consumers, runtime, whole-M6 review, and closing gates remain open.
-The capability source candidate publishes the fixed ordered six-name discovery set and keeps its metadata inside the fixture contract; see the [native protocol](native-protocol.md#discovery).
-Both repositories retain identical fixtures, including the historical accepted empty array and the new qualified-profile producer golden.
+Engine checkpoint `96d37073716768c21993c3b2df724d6c3b425415` publishes the fixed ordered six-name discovery set and keeps metadata inside the fixture contract; see the [native protocol](native-protocol.md#discovery).
+The operator six-capability fixture candidate `7b9` is not central yet; source discovery does not qualify a newly built executable or image.
+The engine and separate operator fixture candidate retain identical fixtures, including the historical accepted empty array and the new qualified-profile producer golden; the operator central handoff is pending.
 The producer/help, portable fixture/consumer, and packaging-smoke packets have focused source evidence only.
 No newly built executable or image is qualified by those packets or by the historical M5 `b463`/hosted `7c04dff` receipts.
 Fresh ARM packaging must precede the actual-image M6 three-pair native acceptance; AMD64 retains packaging-only scope until exact-image native database qualification in M10.
@@ -326,8 +329,10 @@ The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/pl
 The final Go six-file packet `9fcb71e2` passed 160 source checks with zero lint; Python 198 and the guide are final.
 The final 532-entry dirty-source freeze `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f` retains legacy provenance gaps; the full 31-path Git delta is neither committed nor lint-clean.
 Source-equal controller/API/CRD/module evidence binds accepted M4 `c262322`, without qualifying all M7.
-A fresh source-bound manager build passed with expected version `m7-d5698bf5f130`; final PREPARE/CHECK proof is pending, without a runtime-version, UP, live-lease, or node claim.
-The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the fresh preparation inputs.
+The later legacy gate failed before CNPG apply: the pinned kubectl renderer emits 26 concatenated JSON objects, which the old single-document `json.loads` rejected.
+A read-only exact-renderer reproduction confirms that framing defect; successor source `8af5c480741caa760294c52ece74c4a89c586bab80d4995a522acd4dcc3be65d` changes only three files with 529 peers preserved and matches the 214 focused passing checks.
+Phase-1 retirement removed the exact S2 and three nodes while retaining all 206 volumes; the later independent unused barrier passed and only three exact nonforced volume removals are authorized under the existing disk approval, with reclaim effects pending.
+The successor requires a new manager, archive, and RUN; old acceptance is not reusable and no M7 stage completion follows.The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the fresh preparation inputs.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 The leader accepted the [M7 bootstrap slice](superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for code-only implementation by separate lifecycle and suite owners on isolated operator branches.

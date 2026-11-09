@@ -706,11 +706,12 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 - [x] Compose the exact fixture, producer/help, and packaging-smoke packets on engine baseline `ef37214b55e7a082f6e2ee949768649e83163ea4`, with a separate fixture/consumer candidate on operator baseline `727e45da94a5b2d099e97380e086a36206e68451`.
 - [x] Verify packet manifests, every exported and baseline blob, intended modes, preserved peer files, and identical 133-file fixture trees.
 - [x] Update discovery/profile documentation without changing the three-field DTO, command-specific reports, historical empty parser fixture, or operator activation gates.
-- [ ] Review the combined source/doc candidate and authorize one atomic engine commit plus the separate operator fixture commit.
+- [ ] Complete the reviewed operator fixture central handoff; the engine discovery source checkpoint is recorded below.
 - [ ] Qualify fresh ARM and AMD64 packaging artifacts from the exact new source and retain observed executable digests.
 - [ ] Bind the new ARM executable/image to the scheduled M6 helper/preflight/controller and three-pair native acceptance packet.
 - [ ] Qualify exact-image AMD64 native database runtime in M10 before claiming multi-architecture runtime support.
 
+Engine source checkpoint `96d37073716768c21993c3b2df724d6c3b425415` contains the discovery implementation; the operator six-capability fixture candidate `7b9` is not central yet.
 The [native protocol](../docs/native-protocol.md#discovery) records the six ordered names, restrictions, and fixture-only `qualified_capabilities` metadata.
 Retained source checks cover sixteen fixture tests, ten protocol tests, 31 CLI unit tests, 28 executable CLI tests, 28 smoke tests, focused Go capability/fixture tests, strict Clippy/formatting, and zero focused Go lint findings.
 Input hashes match the retained producer Cargo/CLI scope (217 files), fixture-tool scope (134 files), and focused operator package scope (286 files).
@@ -723,6 +724,8 @@ M0 through M5 stay closed; M6 through M10 remain open.
 
 ### Current composed Go closing profile and blockers
 
+The authoritative clean central operator HEAD is `a9bbc487975cf35054a8d1cff00f28b8b31a888d`, including privacy env-value-cleared correlation hashing, source-only head/informational lag, strict codec/Python, and golden coverage.
+Full canonical in-memory admission remains authoritative; these source-only clients and correlation hashes grant no target durability/completion authority, production native acceptance, or new image qualification.
 The four clean M6 source/tool commits `ccda81f3`, `3d1bfe6f`, `f6f7de44`, and `32dbcfc` are fast-forwarded into the central operator feature branch at `32dbcfc`; remote origin remains `5616d82`, without a checkpoint push.
 The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings, retaining focused tests; no M6 activation, whole review, full-Go, or runtime closure follows.
 Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m6-checkpoint-ff-gp9fk58d/fast-forward-proof.json`, SHA-256 `17e8dd22a95c8b1412f9a50cfe60cefd08e4128cfce7548bce0082e5cb3b1ab8`.
@@ -885,7 +888,13 @@ The final 532-entry dirty-source freeze is `d5698bf5f130519336382828ecbfcf899959
 Legacy source-provenance gaps remain explicit; source-equal controller/API/CRD/module evidence binds accepted M4 `c262322`, without qualifying all M7.
 Fresh RUN `/private/var/tmp/rpgmigrate-m7-manager-runtime-run-85za8902` has preparation evidence under `/private/var/tmp/rpgmigrate-m7-manager-runtime-preparation-fulc261h`.
 The manager build exited 0 with image `0584f2e5fea8ab4cc2c0145b7f55927787f9909ade8e3d3106c1585cbc74fdf1` and source-bound build argv/expected version `m7-d5698bf5f130`; this is not an observed runtime-version claim.
-Final PREPARE/CHECK proof is pending; no UP, live lease, or nodes are claimed, and the old `5dcceda`/`47a` preparation is obsolete.
+The later legacy gate failed before CNPG apply because the pinned kubectl renderer emitted 26 concatenated JSON objects and the old single-document `json.loads` rejected them.
+Read-only exact reproduction: `/private/var/tmp/rpgmigrate-m7-exact-renderer-6r2vq853/capture-report.json`, SHA-256 `57bf2aa5de50bc1aafd34b1d3e8a2c97637d466ecf0695869070742153254aeb`.
+Successor `/private/var/tmp/rpgmigrate-m7-manifest-integration-rgpbyxg6/source` is frozen at `8af5c480741caa760294c52ece74c4a89c586bab80d4995a522acd4dcc3be65d`, manifest SHA-256 `1f7d8a9b54641db01d8eee64508888a463799eba9fb53c44fdf35ed64def835f`: only three files changed, 529 peers match, and its source input matches 214 focused passing checks.
+It requires a new manager/archive/RUN; no old acceptance reuse, CNPG stage completion, or new runtime qualification is claimed.
+Phase-1 retirement proof: `/private/var/tmp/rpgmigrate-m7-phase1-retirement-kf0hbluu/phase1-final-proof.json`, SHA-256 `9c7b65266a8a1fd0d567e60afae3099f79c1682fe534d72e6c59b93d38fecd61`: exact S2 and three node containers/processes/cgroups are absent while all 206 volumes, images/network/originals, source, and RUN evidence remain preserved.
+The later independent unused barrier passed: `/private/var/tmp/rpgmigrate-m7-independent-unused-barrier-n3eby4u2/independent-unused-barrier-proof.json`, SHA-256 `01e1de3b257925a8fc7d3850f2950907737d6c8d9b213da13383cc1a9a0000f3`.
+Root authorized only the three exact nonforced unused-volume removals under the existing disk approval; reclaim effects remain pending, without a deletion or guarded-DOWN qualification claim.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-loaded-retirement-ai592_0t/retirement-proof.json`, SHA-256 `32c45afc9b3962979c2cde03c8d4a847fb9c3ffc0266b6d6b94d6777b114e513`.

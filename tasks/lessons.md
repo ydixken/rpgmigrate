@@ -460,3 +460,8 @@ Attribute runtime-synthesized HOME/passwd observations to that runtime; they do 
 Keep secret-bearing temporary storage in one canonical materialization policy and require builders and independent admission to consume the same output.
 For the native helper/preflight profile, preserve the canonical Memory-backed 64-MiB `/tmp`; a builder-local override can silently break both credential isolation and exact admission even when its own tests pass.
 Keep targeted materialization boundary checks separate from actual Kubernetes, PVC, resolver, and runtime qualification.
+
+## Validate the exact external renderer framing
+
+Capture the pinned external renderer’s real output before defining parser fixtures; `-o json` does not by itself promise one JSON document.
+Keep framing coverage faithful to that output and retain bounded object/identity checks, then require a fresh source-bound manager/archive/RUN after a bootstrap parser change instead of reusing old acceptance.
