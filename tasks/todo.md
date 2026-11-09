@@ -418,7 +418,7 @@ The full candidate is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigra
 The offline native-8 build passed against integrated source `9158fef5601fa3b9c3d7c5c0c1223a761071a0aafce8d9e635ca207f79edb155`.
 Its binary is SHA-256 `c185bedf97c021558092b0930815ff7b17fcc9e85c5a666552bb779607af2187`, linked to libpq 180006.
 The private capped tool runner and owned internal network are approved for serial nine-case producer runs on three pairs, starting with PostgreSQL 16 to 16; no runtime qualification result is claimed.
-Positive cutover Go qualification awaits the independent M6 reader, and M4 runtime, E2E, and closing review stay open.
+The test-only PostgreSQL 18 M6 interoperability PASS leaves the required PostgreSQL 16/18 helper qualification, broad closing checks, and whole-M4 safety review open.
 The first actual PostgreSQL 16 to 16 producer attempt failed the active-fence assertion and qualified no cases at that input.
 Failure summary: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-producer-integration-6z_7deja/runtime/failure-summary.json`, SHA-256 `43806493f8f06570b34c536961966c4d003389e8b071b89f4711829a660f8f07`.
 The later retained sentinel result is CLI `BadArgs` exit 1, caused by trailing-capture parsing; post-teardown worker Target7 is not causal evidence.
@@ -480,7 +480,7 @@ The final export passed 53 focused leaf cases with zero skips, including 15 exac
 Synchronous-warning exit-zero/COMMIT and post-COMMIT loss with exit-zero/empty-stderr were refused by the required warning/closure guards.
 All 32 tool containers, PostgreSQL 16/18 containers, and the network were proved absent, and the pool was released.
 The later test-only boundary prototype passed 194 cases: 120 without a database, 37 on PostgreSQL 16, and 37 on PostgreSQL 18.
-That receipt does not complete Task 0, establish a production constructor/helper API, or authorize native activation; qualification and a reviewed addendum remain required.
+That receipt does not complete Task 0, establish a production constructor/helper API, or authorize native activation; qualification and a root-reviewed addendum remain required.
 Opaque `CheckpointEvidence` must never derive from reports or native acknowledgments; consumer interfaces and native activation remain unfrozen/refused pending evidence and review.
 The leader accepted final M6 plan SHA-256 `c3ba6a68ac5dc4ca2ad269ccf0cd3d6949a2ffc15d5fb888ad28b1815d9b47ac`, retaining informational source-slot telemetry for the existing two-sample `CaughtUp` decision.
 Twenty-second freshness uses new private constant-size state on the existing Sampler run, without a CRD or new cache.
@@ -492,17 +492,30 @@ The latest `5f` input passed the single focused PostgreSQL 16 lost-COMMIT case.
 Receipt: `/Users/ydixken/.codex/tmp/m6-env-single-e7u8etqr/runtime-receipt.json`, SHA-256 `9c13ca3ab8a0cf39295495f9b1f23d0405f84a395ece108d17bf8578c84b56f9`.
 The lost-ack attempt retained fifteen stages, relay COMMIT/Idle, refusal, and no observation.
 A distinct fresh PID/ID retry passed nineteen stages, EOF, exit zero, and the same row/token; cleanup and source checks passed.
-This does not qualify other PostgreSQL 18 cases, full M6, or production activation.
+That single-case receipt supplies only PostgreSQL 16 lost-COMMIT evidence; the later PostgreSQL 18 producer result below is separate.
 The approved test-only actual-native-8 producer interoperability plan is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-m6-actual-producer-plan-u3xog4xr/2026-11-09-actual-native8-producer-interop-plan.md`, SHA-256 `e89bb99b7c10876130d4b9fa26c61b5f45979239aa00d74d9d10b3b77b450c9c`.
-The actual-producer fixture is frozen at `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m6-actual-producer-ouiswzeh/manifest.json`, SHA-256 `09efb7a3eee140477013a16b9fbaae2be493243bf07047eba63cabffd9611e28`.
-The manifest contains 23 files, with all 21 predecessor files unchanged.
-Two named pure tests produced 146 PASS entries without skips; the probe, three embedded-syntax checks, and gofmt passed.
-The seven-case actual-producer live profile remains unrun.
+The corrected actual-native-8 fixture is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m6-producer-stream-nwon5ddr/manifest.json`, SHA-256 `134907f9302a745e3c786fe500d205623e742eaf98555f249da6a3ab2c998390`.
+It removes only three unsupported `--resume` tokens from scalar endpos, JSON acknowledgment, and cleanup; native resume remains internal.
+The other 22 files and caps remain unchanged from the `2b` predecessor: one CPU, 512-MiB memory/swap, and 128 PIDs.
+Two named pure tests produced 146 PASS entries without skips; gofmt and diff checks passed.
+Independent direct PostgreSQL 18 to 18 execution passed one `positive_keepalive` case and six negative controls, all seven PASS with zero skips.
+Receipt: `/Users/ydixken/.codex/tmp/m6-direct-corrected-live-3xaedze9/runtime-receipt.json`, SHA-256 `d75d809991b8fa18a3e6a4014aef2f75e8b5506486abad83c499781bbbda75b0`.
+The sibling `verification-addendum.json` has SHA-256 `0f33af8dd984f48152d5f843f47fca1de52b2720af8436ac52e5238f9a8182a8`.
+The positive path proves actual COPY/follow, same-E source persistence, successful worker exit, and a fresh nineteen-stage helper with both EOFs, exit zero, empty stderr, and the source connection closed.
+Independent Go ParseReport and the same-E drained JSON acknowledgment passed.
+All 28 container caps were verified, with no more than two simultaneous containers; all 31 owned objects were proved absent while the original three remained.
+All 23 source files remained unchanged and credential scanning passed; the lease lasted 33.483 seconds.
+This is test-only interoperability with mocked Kubernetes ownership and false real-PVC/production admission, not a native operator alpha.
+Earlier failures are retained in `/Users/ydixken/.codex/tmp/m6-actual-tcp-live-r9dubh_l/diagnostic-summary.json` and its sibling `transport-diagnosis.json`, hashes `617118fb240d0a23172ff443bc060bdbb158ea4ca840caab207a177c75db821f` and `1248e2591e7f37637e5827da3c1b1b7b2b854bdc847142d56682f755d6091902`.
+Their causal sequence was private-wrapper stdout buffering, then unsupported fixture `--resume` flags; neither establishes an engine defect.
 The independent private fresh-volume capability probe passed: `/Users/ydixken/.codex/tmp/m6-private-parent-independent-o92c12a9/runtime-receipt.json`, SHA-256 `b5573b26d44529bcc04a7c90d55eee5c9b16afccaa4f9113943d051652591803`.
 UID/GID 65532 changed a fresh owned empty directory from mode 0755 to 0700 without privilege, then completed actual fsync.
 A new container retained owner, mode, device/inode, and empty-state proof; exact owned cleanup passed.
 The earlier private-probe stops were stat/id-map list-context harness bugs, fixed through scalar/arity handling and five pure RED/GREEN controls, without engine or production changes.
 This does not qualify real Kubernetes fsGroup/PVC or work-PVC ancestor permissions; existing-state/PVC guards remain unchanged, with no guard relaxation or root initialization approved.
+Production signatures, checked transport, tool dependencies, URI/SecretRef handling without argv credentials, and real PVC/work permission qualification remain pending.
+Composition of the exact 23 files with clean operator commit `2bdc7614` prepares closing Go gates and does not authorize activation.
+Task 0 acceptance uses the approved root-reviewed addendum; one independent xhigh whole-M6 review belongs at milestone close.
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both Manual and Automatic modes; no new fencing subsystem is authorized.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
