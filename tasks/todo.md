@@ -3,6 +3,8 @@
 The [roadmap](../docs/roadmap.md) defines the milestone scope and its 2026-11-08 amendments override conflicting older design text.
 The [M0 implementation plan](../docs/superpowers/plans/2026-11-08-m0-preserve-reset.md) defines worker ownership and acceptance.
 Keep implementation evidence separate from parser compatibility and operator runtime qualification.
+M0–M3 are closed at source commit `7b6037f` and maintained documentation commit `23f6d90`.
+M4–M10 remain open; no runnable native operator or cutover workflow is qualified.
 
 ## M0: Preserve and reset (rpgmigrate)
 
@@ -520,7 +522,10 @@ Final inspection: `/private/var/tmp/m7-fourth-tracked-control-p42xzbbk/final-pre
 Kind up was not attempted: fresh free disk is 13,300,498,432 bytes versus 14,780,850,176 required, short by 1,480,351,744 bytes.
 The requirement preserves the 10-GiB floor plus a three-node work bound and 1-GiB margin.
 No owned reclaim of at least 1.5 GB is proved; no prune ran.
-The read-only AppleHV 100-to-128-GiB resize plan awaits final PGDATA-preservation checks; user approval was neither requested nor executed.
+First up remains blocked on the disk reserve and explicit approval of the read-only AppleHV 100-to-128-GiB resize plan.
+Backup Phase A is verified; Phase B is pending.
+The original PostgreSQL 18 data uses tmpfs and needs a tested persistent replacement before any VM or original-container restart.
+Preparation success does not authorize restart, resize, or kind creation.
 Earlier partial runs remain preserved and never adopted.
 Actual kind remains unrun, with no created kind resources.
 The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap.
@@ -556,22 +561,20 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 
 ## Capacity and parallel execution, user update 2026-11-08
 
-At approximately 21:45 UTC, the user stopped and restarted idle `podman-machine-default` after resizing it from 9 CPUs / 12 GiB to 14 CPUs / 32 GiB; its 100 GiB disk is unchanged.
-The stock `rpgmigrate-m0-stock-20261108` and `m1-contract-pg16` / `m1-contract-pg18` containers were restarted; PostgreSQL 16 accepts on `127.0.0.1:46631` and PostgreSQL 18 on `127.0.0.1:38209`.
-The 21:35 UTC startup RED predates the resize and is unrelated to it.
-The user revoked the old exclusive M7 database lease and permits kind/image preparation alongside M3/M4 PostgreSQL tests, subject to verified capacity and host Cargo headroom.
-The integrator observed 14 VM CPUs, MemTotal `32781892` kB and MemAvailable `31862904` kB (about 31.3 / 30.4 GiB), and graph-disk free `21256830976` bytes (about 19.8 GiB).
-The host has 18 CPUs / 48 GiB; its observed free disk was 267 GiB.
-Packaging uses Podman client 6.1.4 and server 5.8.3; retain a 10 GiB VM disk floor without cache purging.
-The current two-PostgreSQL-track window allocates six CPUs per track plus two reserve CPUs, totaling fourteen CPUs / 18 GiB.
-M7 image preparation waits until one PostgreSQL track is idle.
-The approved preparation window is 11 CPUs / 17 GiB: PostgreSQL six CPUs / 6 GiB, image preparation three CPUs / 5 GiB, and reserve two CPUs / 6 GiB.
-The capped kind steady window is 14 CPUs / 24 GiB: kind six CPUs / 12 GiB, PostgreSQL six CPUs / 6 GiB, and reserve two CPUs / 6 GiB.
-Do not overlap image preparation, full PostgreSQL load, and kind.
-Initial uncapped kind creation requires PostgreSQL and host Cargo idle until exact kind caps are proved.
-Preserve at least four host CPUs of headroom when allocating Cargo jobs; a VM cap is not permission to oversubscribe the 18-CPU host.
-Do not resize the VM or purge caches under this update.
-All milestone closing gates remain open, and no additional commit is authorized.
+The user-approved VM allocation is 14 CPUs, 32 GiB memory, and a 100-GiB disk.
+The original 21:35 UTC startup failure predates the CPU/memory resize.
+The user permits M7 image preparation alongside database testing, subject to measured capacity and host Cargo headroom.
+The two-database-track window reserves six CPUs per track plus two reserve CPUs, totaling fourteen CPUs and 18 GiB.
+Image preparation waits for one database track to be idle.
+The preparation window is 11 CPUs and 17 GiB: database testing six CPUs/6 GiB, images three CPUs/5 GiB, reserve two CPUs/6 GiB.
+The capped kind window is 14 CPUs and 24 GiB: kind six CPUs/12 GiB, database testing six CPUs/6 GiB, reserve two CPUs/6 GiB.
+Do not overlap image preparation, full database load, and kind.
+Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
+Retain at least four host CPUs of headroom when assigning Cargo jobs on the 18-CPU host.
+Preserve the 10-GiB VM disk floor and the additional first-up work reserve recorded under M7.
+The M7 section records the pending persistent PostgreSQL 18 replacement, backup Phase B, and explicit resize approval.
+Do not restart the VM or original PostgreSQL 18 container before that persistent replacement is tested.
+Do not resize the VM or purge caches under this capacity notice.
 
 ## Executable command scope
 

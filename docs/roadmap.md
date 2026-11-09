@@ -95,7 +95,8 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > Follow qualification passed 63 cases across all three pairs, with 42 actual clone-bound Go report checks.
 > Native results combine 142 fresh tests and ninety retained PostgreSQL 16 tests with exact provenance.
 > Primary `task check` passed; legacy-stage retirement is integrated and the former scaffold strict-lint blocker is resolved.
-> The leader accepted M0, M1, M2, and M3 closure using their recorded reviews and qualified evidence, including the now-resolved strict-lint hold.
+> M0–M3 are closed: source is committed at `7b6037f`, and maintained milestone evidence and plans are committed at `23f6d90`.
+> M4–M10 remain open; no runnable native operator or cutover workflow is qualified.
 > Canonical operator tests remain bound to `5e8cbcb`; full lint passed its equivalent twelve-path successor, committed separately as `2bdc7614c04bc6aa8a8f4c709a84cbcc07340b5c`.
 > Cutover, native operator activation, power-loss durability, feature widening, and performance qualification remain open under M4, M6, M8, and M9.
 
@@ -291,7 +292,10 @@ The Task 13 correction separates transient CID files from immutable receipts and
 The later tracked prepare and check passed on source `6222196c83af94e5652e72921b1e4010c72160221a90a58cab702942a10ce1bf`, with all 530 source entries unchanged.
 Kind up remains blocked by the fresh disk check: 13,300,498,432 bytes available versus 14,780,850,176 required, a shortfall of 1,480,351,744 bytes.
 The requirement includes the 10-GiB floor, three-node work bound, and 1-GiB margin.
-No up, prune, or resize ran; a read-only AppleHV 100-to-128-GiB resize plan awaits final PGDATA-preservation checks and user approval.
+First up remains blocked on the disk reserve and explicit approval of the read-only AppleHV 100-to-128-GiB resize plan.
+Backup Phase A is verified and Phase B is pending.
+The original PostgreSQL 18 data uses tmpfs and requires a tested persistent replacement before any VM or original-container restart.
+No up, prune, or resize is authorized by the preparation receipt.
 Earlier partial run directories remain preserved and cannot be adopted.
 The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap; it does not qualify actual kind topology or cluster resource caps.
 The successful preparation binds only its exact source; actual kind topology/caps, legacy workflow, and AMD64 remain unqualified.
@@ -330,16 +334,11 @@ Each milestone gets a detailed implementation plan (superpowers:writing-plans) b
 Parallelize the build phase as far as file ownership allows: independent owners work at the same time, each in its own git worktree off `feat/native-engine` (user-approved 2026-11-08, overriding the earlier no-worktree rule), and the leader integrates.
 Run the independent review (at the effort its risk calls for) and the Go test suites once per milestone, at its close, not after each task; workers run only the focused tests for their own change while building.
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
-On 2026-11-08 at approximately 21:45 UTC, the user resized idle `podman-machine-default` from 9 CPUs / 12 GiB to 14 CPUs / 32 GiB, retaining the 100 GiB disk.
-The user revoked the earlier exclusive M7 database lease: kind and image preparation may run alongside M3/M4 PostgreSQL tests subject to verified capacity and host Cargo headroom.
-The 21:35 UTC startup RED predates this resize and is unrelated to it.
-The current two-PostgreSQL-track window allocates six CPUs per track plus two reserve CPUs, totaling fourteen CPUs / 18 GiB.
-M7 image preparation waits until one PostgreSQL track is idle.
-The approved preparation window is 11 CPUs / 17 GiB: PostgreSQL six CPUs / 6 GiB, image preparation three CPUs / 5 GiB, and reserve two CPUs / 6 GiB.
-The capped kind steady window is 14 CPUs / 24 GiB: kind six CPUs / 12 GiB, PostgreSQL six CPUs / 6 GiB, and reserve two CPUs / 6 GiB.
-Do not overlap image preparation, full PostgreSQL load, and kind.
-Initial uncapped kind creation requires PostgreSQL and host Cargo idle until exact kind caps are proved.
-Preserve four CPUs of headroom on the 18-CPU / 48-GiB host and a 10-GiB VM disk floor.
+The user-approved VM allocation is 14 CPUs, 32 GiB memory, and a 100-GiB disk.
+The original 21:35 UTC startup failure predates the CPU/memory resize.
+M7 image preparation may overlap database testing within the approved measured-capacity windows, retaining host Cargo headroom.
+Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
+See the [capacity and preservation record](../tasks/todo.md#capacity-and-parallel-execution-user-update-2026-11-08) for budgets and the restart prerequisites.
 Commits are small, conventional and lint-clean; nothing is pushed or merged without the user's go-ahead.
 
 > [!important]
