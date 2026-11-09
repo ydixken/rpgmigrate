@@ -11,6 +11,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent / "fixtures/native/v1"
 KINDS = {"version", "report", "transport", "compare_array", "compare_progress", "argv"}
+QUALIFIED_CAPABILITIES = [
+    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
+]
 
 
 def unique_object(pairs):
@@ -67,6 +70,19 @@ def verify_inventory(root):
     contract = read_json(root / "contract.json")
     if contract.get("protocol_version") != 1 or contract.get("m1_capabilities") != []:
         raise ValueError("invalid native contract")
+    if contract.get("qualified_capabilities") != QUALIFIED_CAPABILITIES:
+        raise ValueError("invalid qualified capabilities")
+    qualified = [case for case in cases["cases"] if case["id"] == "version-qualified-profile"]
+    if qualified != [{
+        "id": "version-qualified-profile", "kind": "version",
+        "payload": "payloads/version-qualified-profile.json", "accept": True,
+    }]:
+        raise ValueError("invalid qualified version case")
+    version = read_json(root / qualified[0]["payload"])
+    if version != {
+        "protocol_version": 1, "engine_version": "0.1.0", "capabilities": contract["qualified_capabilities"],
+    } or type(version["protocol_version"]) is not int:
+        raise ValueError("qualified version differs from contract")
     options = contract["options"]
     if len(options) != 43 or len({option["name"] for option in options}) != 43:
         raise ValueError("operator option inventory differs")
@@ -94,6 +110,62 @@ class NativeFixtureTests(unittest.TestCase):
                 (root / "manifest.json").write_text(json.dumps(manifest))
             with self.assertRaises((ValueError, OSError)):
                 verify_inventory(root)
+
+    def change_json(self, root, name, change):
+        data = read_json(root / name)
+        change(data)
+        (root / name).write_text(json.dumps(data))
+
+    def test_qualified_metadata_matches_producer_golden(self):
+        self.assertEqual(read_json(ROOT / "contract.json").get("qualified_capabilities"), QUALIFIED_CAPABILITIES)
+        cases = verify_inventory(ROOT)
+        qualified = [case for case in cases if case["id"] == "version-qualified-profile"]
+        self.assertEqual(qualified, [{
+            "id": "version-qualified-profile", "kind": "version",
+            "payload": "payloads/version-qualified-profile.json", "accept": True,
+        }])
+        self.assertEqual(read_json(ROOT / qualified[0]["payload"]), {
+            "protocol_version": 1, "engine_version": "0.1.0", "capabilities": QUALIFIED_CAPABILITIES,
+        })
+        empty = next(case for case in cases if case["id"] == "version-empty-capabilities")
+        self.assertTrue(empty["accept"])
+        self.assertEqual(read_json(ROOT / empty["payload"])["capabilities"], [])
+
+    def test_invalid_qualified_metadata_is_refused_even_with_updated_digest(self):
+        invalid = [None, "clone.single_db", [], QUALIFIED_CAPABILITIES + ["unknown"],
+                   QUALIFIED_CAPABILITIES + ["clone.single_db"], list(reversed(QUALIFIED_CAPABILITIES))]
+        invalid += [QUALIFIED_CAPABILITIES[:i] + QUALIFIED_CAPABILITIES[i + 1:] for i in range(len(QUALIFIED_CAPABILITIES))]
+        invalid += [QUALIFIED_CAPABILITIES + [capability] for capability in ["copy.large_objects", "copy.binary_fallback", "copy.split"]]
+        for capabilities in invalid:
+            with self.subTest(capabilities=capabilities):
+                self.mutate(lambda root: self.change_json(root, "contract.json", lambda data: data.update(qualified_capabilities=capabilities)), refresh=True)
+        self.mutate(lambda root: self.change_json(root, "contract.json", lambda data: data.pop("qualified_capabilities", None)), refresh=True)
+
+    def test_qualified_golden_drift_is_refused_even_with_updated_digest(self):
+        for change in [
+            lambda data: data.update(capabilities=[]),
+            lambda data: data.update(capabilities=list(reversed(QUALIFIED_CAPABILITIES))),
+            lambda data: data.update(engine_version="0.2.0"),
+            lambda data: data.update(protocol_version=2),
+            lambda data: data.update(protocol_version=True),
+            lambda data: data.update(protocol_version=1.0),
+            lambda data: data.update(qualified_capabilities=QUALIFIED_CAPABILITIES),
+            lambda data: data.pop("capabilities"),
+        ]:
+            with self.subTest(change=change):
+                self.mutate(lambda root: self.change_json(root, "payloads/version-qualified-profile.json", change), refresh=True)
+
+    def test_qualified_case_drift_is_refused_even_with_updated_digest(self):
+        for change in [
+            lambda case: case.update(accept=False),
+            lambda case: case.update(kind="report"),
+            lambda case: case.update(id="renamed-qualified-version"),
+            lambda case: case.update(payload="payloads/version-empty-capabilities.json"),
+        ]:
+            with self.subTest(change=change):
+                def mutate(root):
+                    self.change_cases(root, lambda data: change(next(case for case in data["cases"] if case["id"] == "version-qualified-profile")))
+                self.mutate(mutate, refresh=True)
 
     def test_missing_payload_is_refused(self):
         self.mutate(lambda root: (root / "payloads/progress-copying.json").unlink())

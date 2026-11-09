@@ -16,6 +16,9 @@ class CliContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.baseline = json.loads((ROOT / "tests/fixtures/cli/baseline.json").read_text())
+        cls.qualified_version = json.loads(
+            (ROOT / "tests/fixtures/native/v1/payloads/version-qualified-profile.json").read_text()
+        )
         storage = tempfile.TemporaryDirectory(prefix="rpgmigrate-cli-offline-")
         cls.addClassCleanup(storage.cleanup)
         socket = Path(storage.name) / "absent-socket"
@@ -52,6 +55,23 @@ class CliContract(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertRegex(result.stdout, r"^rpgmigrate \d+\.\d+\.\d+\nlibpq \d+\n$")
                 self.assertNotIn("Usage:", result.stdout)
+
+    def test_json_version_is_identity_free_and_matches_qualified_profile(self):
+        result = self.invoke("version", "--json", env={
+            "PGCOPYDB_SOURCE_PGURI": "invalid connection",
+            "PGCOPYDB_TARGET_PGURI": "invalid connection",
+            "RPGMIGRATE_MIGRATION_UID": "invalid",
+            "RPGMIGRATE_RUN_ID": "invalid",
+            "RPGMIGRATE_WORKDIR_ID": "invalid",
+            "RPGMIGRATE_CHECKPOINT_GENERATION": "invalid",
+            "PGCOPYDB_APPLY_GROUP_TXNS": "invalid",
+            "PGCOPYDB_LOG_JSON": "on",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), self.qualified_version)
+        self.assertEqual(result.stdout.count("\n"), 1)
+        self.assertTrue(result.stdout.endswith("\n"))
+        self.assertEqual(result.stderr, "")
 
     def test_unknown_command_and_option_are_argument_errors(self):
         for args in [("unknown-command",), ("ping", "--unknown-option")]:
@@ -445,10 +465,7 @@ class CliContract(unittest.TestCase):
                             self.assertFalse(state.exists())
                         if json_version:
                             report = json.loads(result.stdout)
-                            self.assertEqual(set(report), {"protocol_version", "engine_version", "capabilities"})
-                            self.assertEqual(report["protocol_version"], 1)
-                            self.assertRegex(report["engine_version"], r"^\d+\.\d+\.\d+$")
-                            self.assertEqual(report["capabilities"], [])
+                            self.assertEqual(report, self.qualified_version)
                             self.assertEqual(result.stderr, "")
                     count += 1
             self.assertEqual(count, 188 if short else 220)

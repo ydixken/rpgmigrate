@@ -8,19 +8,25 @@ The image is a packaging artifact; migration support follows the engine's qualif
 Use a running Podman instance on the native architecture.
 The production image build is separate from the M2 development-container build.
 
-1. Build the runner from the working tree.
+1. Verify the shared fixture inventory from the same checkout.
+
+   ```sh
+   python3 tests/test_native_fixtures.py
+   ```
+
+2. Build the runner from the working tree.
 
    ```sh
    task image:build
    ```
 
-2. Check the built image without rebuilding it.
+3. Check the built image without rebuilding it.
 
    ```sh
    task image:smoke
    ```
 
-3. Retain the immutable image ID and observations in a receipt.
+4. Retain the immutable image ID and observations in a receipt.
 
    ```sh
    task --silent image:smoke > /tmp/rpgmigrate-image-smoke.json
@@ -69,6 +75,34 @@ Run the smoke from the checkout whose bytes built the image.
 Base manifests are digest-pinned; signed APT repositories select available package updates within the specified majors.
 Retain build logs and the receipt because a later build can resolve different package updates.
 
+## Discovery and artifact identity
+
+The smoke requires the exact three-field discovery document in `tests/fixtures/native/v1/payloads/version-qualified-profile.json`.
+It decodes the local golden and `contract.json` with duplicate-field refusal, checks both against the independent ordered producer expectation, and compares the observed document with that golden.
+The required capability array is:
+
+```json
+["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1"]
+```
+
+The accepted `version-empty-capabilities` fixture preserves historical parser behavior; an image that advertises `[]` fails this producer check.
+The narrowed engine profile covers single-database text COPY, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
+The command paths include `clone`, `follow`, `list progress --json`, the supported `stream sentinel get` and `stream sentinel set endpos` forms, `stream cleanup`, and `compare schema` or `compare data`.
+The profile requires PostgreSQL 16 or 18 with source major no greater than target, explicit large-object skipping for follow, unsplit text COPY, and `durable` mode.
+Binary COPY, splitting, large objects, replay-safe cadence, and relaxed durability remain outside this advertisement.
+Discovery permits capability assessment; it does not open operator admission or certify helper, database, recovery, or cutover behavior.
+
+The probe requires `/usr/local/bin/rpgmigrate` to be a regular file without a final symlink and records its actual SHA-256 from `sha256sum` at that exact path.
+The receipt retains this observed digest as `runtime_binary_sha256`, a lowercase 64-digit string.
+The hash is an observation from the selected immutable image, with no caller-supplied expected binary hash or qualification authority.
+The receipt's `image_id` is the local image configuration ID returned by inspection; a registry manifest digest is a separate artifact identity.
+`build_inputs_sha256` identifies the complete source-input manifest, while `runtime_binary_sha256` identifies the installed executable bytes.
+Retain any image archive hash and its mapping to the image configuration ID or registry manifest digest alongside these fields.
+A tag, revision label, source-input digest, executable hash, and image manifest digest each describe different evidence and cannot substitute for one another.
+
+Keep the passing fixture-inventory result and hashes of the smoke script, contract, qualified golden, and fixture manifest with the frozen qualification packet or exact CI commit.
+These qualification inputs remain outside the production build context and its source-input digest.
+
 ## Writable mounts and isolation
 
 The configured uid and gid are both `65532`, and the working directory is `/work`.
@@ -81,7 +115,7 @@ The default command is `rpgmigrate --help`; no entrypoint prevents callers from 
 
 The smoke uses temporary filesystems for both writable paths, disables networking, drops all capabilities, and enables `no-new-privileges`.
 We disable Podman's automatic read-only-container temporary mounts and use `--mount` with `U=true` to assign both explicit mounts to the configured user, following the [Podman runtime documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html).
-It verifies the configured and effective uid, actual machine architecture, version protocol, linked libpq resolution and installed PGDG package ownership, both client-tool majors, default `psql`, GNU utilities, and retained notices.
+It verifies the configured and effective uid, actual machine architecture, exact discovery document, executable hash, linked libpq resolution and installed PGDG package ownership, both client-tool majors, default `psql`, GNU utilities, and retained notices.
 The Python probe imports the required standard-library modules, checks the libpq symbol inventory, and calls `PQlibVersion` with an explicit ctypes ABI without opening a connection.
 It validates the fixed runtime metadata file as a regular root-owned mode `0444` file, checks its size and exact schema, and binds its canonical library path and hash to installed package ownership, architecture, version, and the mapped library.
 The receipt retains the metadata digest, installed binary/source package versions, resolved package copyright paths and hashes, Python license bytes by hash, Cargo notice inventory, and repository NOTICE hash.
@@ -115,5 +149,9 @@ An arm64 result does not qualify amd64.
 
 The M2 development image and clone matrix test engine behavior independently of the production runtime.
 Packaging smoke does not qualify migration contents, follow/drain, crash recovery, power-loss durability, or operator integration.
+Changing discovery metadata or the smoke contract requires fresh image build-and-smoke evidence for the rebuilt bytes.
+Earlier M5 receipts remain evidence for their recorded images and empty discovery arrays; they do not qualify a rebuilt image under this contract.
+M6 runtime acceptance must bind the selected image and executable digest to actual clone, progress, pgoutput follow, persisted endpos/drain, schema/data comparison, and exact owned cleanup on 16:16, 18:18, and 16:18.
+Keep that acceptance pending until the exact artifact runs those checks.
 Final release qualification runs the required migration matrix on the exact production image digest.
 Publication remains a separate authorized release step after licensing and qualification gates pass.

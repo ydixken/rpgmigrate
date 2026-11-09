@@ -287,7 +287,13 @@ The integration-only retry display-label lint correction was refrozen under stri
 The approved [discovery/preflight plan](superpowers/plans/2026-11-09-m6-native-discovery-preflight.md) separates a credential-free version Job from fixed Python DB preflight, requires actual capabilities before credentials, and reuses no legacy raw-DSN argv or raw stderr.
 The dormant preflight source checkpoint is fast-forwarded into the clean central operator branch at `727e45da94a5b2d099e97380e086a36206e68451`, with 575 source paths verified against the accepted prefix/source receipts; no broad rerun, push, CI, or activation follows.
 Canonical secret-bearing `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical materialization without overrides; runtime qualification and activation remain closed.
-The preflight field is not injected, resolver policy still always refuses, and native capabilities, remaining consumers, runtime, whole-M6 review, and closing gates remain open.
+The preflight field is not injected and resolver policy still always refuses; remaining consumers, runtime, whole-M6 review, and closing gates remain open.
+The capability source candidate publishes the fixed ordered six-name discovery set and keeps its metadata inside the fixture contract; see the [native protocol](native-protocol.md#discovery).
+Both repositories retain identical fixtures, including the historical accepted empty array and the new qualified-profile producer golden.
+The producer/help, portable fixture/consumer, and packaging-smoke packets have focused source evidence only.
+No newly built executable or image is qualified by those packets or by the historical M5 `b463`/hosted `7c04dff` receipts.
+Fresh ARM packaging must precede the actual-image M6 three-pair native acceptance; AMD64 retains packaging-only scope until exact-image native database qualification in M10.
+Production `UnsupportedEngine` and resolver refusal remain unchanged.
 The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is a final route.
 This packet adds no DB/operator-migration qualification, push, CI, whole-M6 review, or full-Go result; production activation and runtime closure remain open.
 The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.

@@ -272,7 +272,7 @@ fn command() -> Command {
     base("rpgmigrate", Parser::Root)
         .bin_name("rpgmigrate")
         .about("PostgreSQL migration engine")
-        .after_help("Native profiles: clone, read-only progress and comparison, ping, restricted copy table-data, and bounded follow. Unsupported profile options fail before database or state changes. Follow runtime qualification remains open.")
+        .after_help("Native profiles: single-database clone, read-only progress and schema/data comparison, ping, restricted copy table-data, bounded follow, stream sentinel get, stream sentinel set endpos, and stream cleanup of owned resources. Clone and follow use unsplit text COPY; follow requires --skip-large-objects, pgoutput v1, and durable commits. PostgreSQL pairs: 16 to 16, 18 to 18, and 16 to 18. Unsupported profile options fail before database or state changes.")
         .subcommands(["clone", "fork", "follow"].map(|name| leaf(name, Parser::Copy)))
         .subcommand(leaf("snapshot", Parser::Snapshot))
         .subcommand(leaf("ping", Parser::Ping))
@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn json_version_is_identity_free_and_advertises_no_runtime_capabilities() {
+    fn json_version_is_identity_free_and_advertises_only_qualified_capabilities() {
         let env = [
             ("PGCOPYDB_SOURCE_PGURI", "invalid connection"),
             ("PGCOPYDB_TARGET_PGURI", "invalid connection"),
@@ -894,7 +894,14 @@ mod tests {
             serde_json::json!({
                 "protocol_version": 1,
                 "engine_version": env!("CARGO_PKG_VERSION"),
-                "capabilities": [],
+                "capabilities": [
+                    "clone.single_db",
+                    "cdc.pgoutput",
+                    "progress.v1",
+                    "cutover.v1",
+                    "verify.v1",
+                    "cleanup.v1"
+                ],
             })
         );
     }

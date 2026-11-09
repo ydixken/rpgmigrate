@@ -701,6 +701,26 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ## M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
+### Capability discovery source candidate, 2026-11-09
+
+- [x] Compose the exact fixture, producer/help, and packaging-smoke packets on engine baseline `ef37214b55e7a082f6e2ee949768649e83163ea4`, with a separate fixture/consumer candidate on operator baseline `727e45da94a5b2d099e97380e086a36206e68451`.
+- [x] Verify packet manifests, every exported and baseline blob, intended modes, preserved peer files, and identical 133-file fixture trees.
+- [x] Update discovery/profile documentation without changing the three-field DTO, command-specific reports, historical empty parser fixture, or operator activation gates.
+- [ ] Review the combined source/doc candidate and authorize one atomic engine commit plus the separate operator fixture commit.
+- [ ] Qualify fresh ARM and AMD64 packaging artifacts from the exact new source and retain observed executable digests.
+- [ ] Bind the new ARM executable/image to the scheduled M6 helper/preflight/controller and three-pair native acceptance packet.
+- [ ] Qualify exact-image AMD64 native database runtime in M10 before claiming multi-architecture runtime support.
+
+The [native protocol](../docs/native-protocol.md#discovery) records the six ordered names, restrictions, and fixture-only `qualified_capabilities` metadata.
+Retained source checks cover sixteen fixture tests, ten protocol tests, 31 CLI unit tests, 28 executable CLI tests, 28 smoke tests, focused Go capability/fixture tests, strict Clippy/formatting, and zero focused Go lint findings.
+Input hashes match the retained producer Cargo/CLI scope (217 files), fixture-tool scope (134 files), and focused operator package scope (286 files).
+The joined offline smoke reran once against the two changed producer sources and passed all 28 tests.
+The five affected Markdown files passed the repository Markdown policy; both candidates passed whitespace checks, and the private composition proof retains exact inventories.
+These packets change discovery/help and test/smoke observations without changing migration state, WAL, ACK, checkpoint, SQL, dependencies, or the Dockerfile.
+Historical M5 local image `b463` and hosted `7c04dff` receipts retain their original scope and cannot qualify these new bytes.
+Production `UnsupportedEngine`, resolver refusal, helper/PVC/file/SQL qualification, and whole-M6 closing gates remain closed.
+M0 through M5 stay closed; M6 through M10 remain open.
+
 ### Current composed Go closing profile and blockers
 
 The four clean M6 source/tool commits `ccda81f3`, `3d1bfe6f`, `f6f7de44`, and `32dbcfc` are fast-forwarded into the central operator feature branch at `32dbcfc`; remote origin remains `5616d82`, without a checkpoint push.
@@ -721,7 +741,8 @@ The preflight packet is fast-forwarded into clean central operator HEAD `727e45d
 The four commits are `2d895828` (native), `1041e59d` (Jobs), `f02373ab` (transport), and `727e45da` (lifecycle); exact qualified prefix/source receipts are reused without broad reruns.
 Fast-forward proof: `/Users/ydixken/.codex/tmp/m6-preflight-integration-evidence-20261109-fyhieb3e/central-fast-forward-proof.json`, SHA-256 `22c2086a759b8361d8d060b0dba684eec231e614a93ede924bae92d60ad62665`.
 Canonical `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical output without overriding it; no runtime/guard activation follows.
-The preflight field is not injected; resolver always refuses and native capabilities, remaining consumers, runtime, whole-M6 review, and closing gates remain open.
+The preflight field is not injected; resolver always refuses and remaining consumers, runtime, whole-M6 review, and closing gates remain open.
+The capability source candidate above supplies discovery metadata and pure consumer evidence without opening those gates.
 The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is recorded as the final route, and no push/CI/activation is claimed.
 No runtime activation, whole-M6 review, or full-Go closure is claimed.
 Resolver disposition: `/Users/ydixken/.codex/tmp/m6-containerd-dns-research-20261109/existing-containerd-dns-disposition.md`, SHA-256 `b78e83c046be9441e8d0fd25362b500af30cfb8180e1c4a824a7d7a8d7f24a00`, favors qualifying the existing standard ClusterFirst sandbox resolver.

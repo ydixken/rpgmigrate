@@ -8,7 +8,7 @@ use crate::identity::RunId;
 pub(crate) struct Version {
     protocol_version: u32,
     engine_version: &'static str,
-    capabilities: [&'static str; 0],
+    capabilities: [&'static str; 6],
 }
 
 impl Version {
@@ -16,7 +16,14 @@ impl Version {
         Self {
             protocol_version: 1,
             engine_version: env!("CARGO_PKG_VERSION"),
-            capabilities: [],
+            capabilities: [
+                "clone.single_db",
+                "cdc.pgoutput",
+                "progress.v1",
+                "cutover.v1",
+                "verify.v1",
+                "cleanup.v1",
+            ],
         }
     }
 }
@@ -557,7 +564,14 @@ mod tests {
         assert_eq!(bound["replication"], standalone["replication"]);
         assert_eq!(
             serde_json::to_value(Version::current()).unwrap()["capabilities"],
-            serde_json::json!([])
+            serde_json::json!([
+                "clone.single_db",
+                "cdc.pgoutput",
+                "progress.v1",
+                "cutover.v1",
+                "verify.v1",
+                "cleanup.v1"
+            ])
         );
     }
 
@@ -568,7 +582,7 @@ mod tests {
         let catalog: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("cases.json")).unwrap()).unwrap();
         let mut argv_count = 0;
-        let mut version_count = 0;
+        let mut producer_count = 0;
         for case in catalog["cases"].as_array().unwrap() {
             let id = case["id"].as_str().unwrap();
             if case["kind"] == "version" && case["accept"] == true {
@@ -576,12 +590,14 @@ mod tests {
                     &std::fs::read(root.join(case["payload"].as_str().unwrap())).unwrap(),
                 )
                 .unwrap();
-                assert_eq!(
-                    serde_json::to_value(Version::current()).unwrap(),
-                    fixture,
-                    "{id}"
-                );
-                version_count += 1;
+                if id == "version-qualified-profile" {
+                    assert_eq!(
+                        serde_json::to_value(Version::current()).unwrap(),
+                        fixture,
+                        "{id}"
+                    );
+                    producer_count += 1;
+                }
                 continue;
             }
             if case["kind"] != "argv" {
@@ -633,7 +649,7 @@ mod tests {
             }
         }
         assert!(argv_count >= 43);
-        assert!(version_count > 0);
+        assert_eq!(producer_count, 1);
     }
 
     fn environment() -> crate::cli::Environment {

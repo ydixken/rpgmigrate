@@ -2,7 +2,9 @@
 
 We freeze the engine/operator boundary here and in the shared [contract fixtures](../tests/fixtures/native/v1/contract.json).
 The [M1 plan](superpowers/plans/2026-11-08-m1-native-contract.md) defines the implementation boundary.
-M1 defines discovery and pure contract validation; discovery advertises no migration capabilities until runtime qualification passes.
+M1 defines discovery and pure contract validation; its empty capability fixture remains accepted parser evidence.
+The current producer advertises the narrowed engine profile qualified through M4.
+New executable and image bytes require their own packaging and M6 runtime evidence before operator activation.
 Shared fixture payloads remain synthetic contracts, separate from actual producer checks.
 Use the [Native cutover handoff](native-cutover-handoff.md) for M4 command behavior, native format 8, metadata version 6, and the M6 observation procedure.
 Neither fixtures nor parser acceptance qualify follow, recovery, cutover, cleanup, PostgreSQL version support, or durability.
@@ -19,7 +21,20 @@ Run discovery without PostgreSQL, a workdir, or operator identity:
 
 The command writes one JSON object and a newline to stdout.
 Its exact required fields are `protocol_version`, `engine_version`, and `capabilities`.
-`protocol_version` is integer `1`, `engine_version` comes from Cargo package metadata, and the M1 capability array is explicitly empty.
+`protocol_version` is integer `1`, and `engine_version` comes from Cargo package metadata.
+The current producer emits this fixed ordered capability array:
+
+```json
+["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1"]
+```
+
+The profile covers single-database clone with unsplit text COPY, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
+It admits PostgreSQL 16 to 16, 18 to 18, and 16 to 18, with explicit large-object skipping for follow and `durable` commits.
+Binary COPY, splitting, large objects, replay-safe cadence, and relaxed mode remain outside this advertisement.
+Operational reports retain their command-specific capability arrays.
+The accepted `version-empty-capabilities` fixture preserves historical discovery syntax; it cannot satisfy native clone capability admission.
+The fixture contract records this producer array as `qualified_capabilities`, historical M1 syntax as `m1_capabilities: []`, and all nine reserved names as `capabilities`.
+These metadata fields do not extend the three-field discovery document.
 Discovery MUST NOT contain operational identity or report fields.
 Plain `version` retains text identity and libpq version output.
 Operational identity and apply-group settings do not gate discovery.
@@ -27,6 +42,9 @@ Operational identity and apply-group settings do not gate discovery.
 The reserved capability names are `clone.single_db`, `copy.large_objects`, `copy.binary_fallback`, `copy.split`, `cdc.pgoutput`, `progress.v1`, `cutover.v1`, `verify.v1`, and `cleanup.v1`.
 Unknown or duplicate capabilities MUST fail validation.
 A reserved name does not mean that the runtime implements that capability.
+Discovery supplies configuration-assessment input; production `UnsupportedEngine`, resolver refusal, helper/PVC/file/SQL qualification, and M6 lifecycle gates remain closed.
+Fresh ARM image packaging and exact-image three-pair M6 runtime checks remain required.
+AMD64 packaging evidence alone cannot qualify native database runtime; M10 retains that architecture gate.
 
 ## Operational transport and document rules
 
@@ -232,7 +250,7 @@ No test substitutes a duplicate migration runtime for the future producer.
 2. At milestone close, compare the fixture trees using the actual sibling checkouts.
 
    ```sh
-   diff -ru tests/fixtures/native/v1 ../pgcopydb-operator-native-contract-v1/internal/native/testdata/v1
+   diff -ru tests/fixtures/native/v1 ../pgcopydb-operator-m4-closing-m6-composed-20261109/internal/native/testdata/v1
    ```
 
 The parity gate is explicit and separate from repository-local unit tests.

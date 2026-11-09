@@ -8,7 +8,7 @@ The original source audit is pinned to `pgcopydb-operator` commit `639bdf997f2ed
 
 > [!IMPORTANT]
 > Plain clone and ongoing follow passed all three engine pair profiles, including independent comparisons and actual Go clone-report checks.
-> Engine M3 is committed at `7b6037f9ac8214696936a21c865cd97307cc5c6e`; cutover and native operator activation remain unqualified.
+> M0 through M5 are closed, including the narrowed M4 engine cutover profile; native operator activation remains unqualified.
 > No native operator workflow is qualified by the existing component results.
 > Use the [maintained task ledger](../tasks/todo.md) for exact implementation and qualification evidence.
 
@@ -129,7 +129,14 @@ M1 freezes native DTOs for version/capabilities, status and COPY metrics, distin
 Comparison keeps its existing transport outside the native Report DTO.
 Use `version --json` capabilities in preflight, `native-report: {json}` stdout for phase/progress/drain/cleanup, and work identity derived from the Migration UID and PVC.
 Keep the existing per-table comparison JSON array and `"compare progress: "` shapes outside `ParseReport`.
-Discovery is identity-free and advertises an explicit empty capability array until runtime features qualify.
+Discovery is identity-free and advertises exactly `clone.single_db`, `cdc.pgoutput`, `progress.v1`, `cutover.v1`, `verify.v1`, and `cleanup.v1`, in that order.
+The current producer covers the narrowed text-COPY, no-large-object, durable pgoutput profile; its three discovery fields stay unchanged.
+The shared `version-qualified-profile` golden and fixture-only `qualified_capabilities` metadata describe that set.
+The historical accepted empty-array fixture remains parser evidence and cannot pass native clone capability admission.
+Pure consumer tests admit narrowed clone/follow and optional verification, reject every required omission, and continue refusing the binary/split/large-object defaults.
+Production `UnsupportedEngine` and resolver refusal remain closed; discovery does not qualify helpers, PVC/file delivery, SQL authority, or lifecycle behavior.
+New ARM executable/image bytes need fresh packaging and exact-image M6 checks on all three declared pairs.
+AMD64 packaging scope stays separate from native database runtime qualification, which remains an M10 gate.
 Supplied operator identity grants no native-state authority; M2 binds all four values to recorded state and refuses mismatches before mutation.
 Only that bound mode emits operational native-report framing; standalone clone/progress/stream emit unframed JSON without synthetic Migration/PVC identity.
 Keep JSON error classes in `{error_severity, message}`, and OR both engines' application_name patterns in matching.

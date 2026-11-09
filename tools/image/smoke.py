@@ -11,6 +11,9 @@ import subprocess
 import sys
 
 
+QUALIFIED_CAPABILITIES = [
+    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
+]
 HEADER = re.compile(r"^===rpgmigrate-smoke:([a-z0-9_]+)===$", re.MULTILINE)
 EMIT = r'''
 set -eu
@@ -218,6 +221,9 @@ if __name__ == '__main__':
     main()
 '''
 PROBE = EMIT + r'''
+test -f /usr/local/bin/rpgmigrate
+test ! -L /usr/local/bin/rpgmigrate
+emit binary_sha256 sha256sum /usr/local/bin/rpgmigrate
 emit uid id -u
 emit gid id -g
 emit machine uname -m
@@ -287,6 +293,23 @@ def unique_fields(items):
 
 def decode_json(value):
     return json.loads(value, object_pairs_hook=unique_fields)
+
+
+def qualified_version():
+    root = Path(__file__).resolve().parents[2] / "tests/fixtures/native/v1"
+    try:
+        version = decode_json((root / "payloads/version-qualified-profile.json").read_bytes())
+        contract = decode_json((root / "contract.json").read_bytes())
+    except (OSError, ValueError) as error:
+        raise RuntimeError("invalid local qualified discovery fixtures") from error
+    require(type(version) is dict and set(version) == {"protocol_version", "engine_version", "capabilities"},
+            "invalid qualified version fields")
+    require(type(version["protocol_version"]) is int and version["protocol_version"] == 1
+            and type(version["engine_version"]) is str and re.fullmatch(r"\d+\.\d+\.\d+", version["engine_version"])
+            and version["capabilities"] == QUALIFIED_CAPABILITIES
+            and type(contract) is dict and contract.get("qualified_capabilities") == QUALIFIED_CAPABILITIES,
+            "invalid qualified version contract")
+    return version
 
 
 def run(argv):
@@ -360,6 +383,7 @@ def validate_python(value, architecture, package, runtime_version):
 def probe(image, runtime):
     require(image and not image.startswith("-"), "invalid image reference")
     try:
+        expected_version = qualified_version()
         metadata = decode_json(run([runtime, "image", "inspect", image]))
         require(isinstance(metadata, list) and len(metadata) == 1, "invalid image metadata")
         metadata = metadata[0]
@@ -382,18 +406,18 @@ def probe(image, runtime):
         output = run([*base, PROBE])
         require("rpgmigrate-private-input-canary" not in output, "private input appeared in probe output")
         observed = records(output)
-        expected_observations = {"uid", "gid", "machine", "version", "plain_version", "ldd", "coreutils", "sed",
+        expected_observations = {"uid", "gid", "machine", "binary_sha256", "version", "plain_version", "ldd", "coreutils", "sed",
                                  "default_psql", "mountinfo", "work_owner", "tmp_owner", "inputs", "inputs_manifest",
                                  "notice", "work_write", "tmp_write", "root_write", "python"}
         expected_observations.update(f"{tool}_{major}" for major in (16, 18) for tool in ("pg_dump", "pg_restore", "psql"))
         require(set(observed) == expected_observations, "unexpected or missing smoke observation")
+        binary = re.fullmatch(r"([0-9a-f]{64})  /usr/local/bin/rpgmigrate", observed["binary_sha256"])
+        require(binary, "invalid executable hash observation")
         require(observed["uid"] == "65532" and observed["gid"] == "65532", "wrong effective uid/gid")
         require(observed["machine"] == {"amd64": "x86_64", "arm64": "aarch64"}[architecture], "architecture mismatch")
         version = decode_json(observed["version"])
         require(isinstance(version, dict) and set(version) == {"protocol_version", "engine_version", "capabilities"}, "invalid version protocol")
-        require(type(version["protocol_version"]) is int and version["protocol_version"] == 1
-                and re.fullmatch(r"\d+\.\d+\.\d+", version["engine_version"])
-                and version["capabilities"] == [], "unexpected version contract")
+        require(type(version["protocol_version"]) is int and version == expected_version, "unexpected version contract")
         plain = re.fullmatch(r"rpgmigrate " + re.escape(version["engine_version"]) + r"\nlibpq (18\d{4})", observed["plain_version"])
         require(plain, "wrong runtime libpq version")
         require("not found" not in observed["ldd"], "unresolved native library")
@@ -432,7 +456,7 @@ def probe(image, runtime):
         minor = int(re.match(r"18\.(\d+)", fields[1])[1])
         require(int(plain[1]) == 180000 + minor, "runtime libpq differs from installed package")
         python = validate_python(decode_json(observed["python"]), architecture, package, int(plain[1]))
-        return {"python": python, "source_inputs": expected_manifest.splitlines(), "image_id": image_id, "architecture": architecture, "effective_uid": 65532,
+        return {"runtime_binary_sha256": binary[1], "python": python, "source_inputs": expected_manifest.splitlines(), "image_id": image_id, "architecture": architecture, "effective_uid": 65532,
                 "version": version, "libpq": {"runtime_version": int(plain[1]), "ldd": observed["ldd"],
                 "resolved_path": package["path"], "package_version": fields[1], "package_owner": package["owner"]},
                 "clients": clients, "default_psql": observed["default_psql"], "build_inputs_sha256": inputs[1],

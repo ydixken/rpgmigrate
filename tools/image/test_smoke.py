@@ -21,6 +21,9 @@ from unittest.mock import Mock, patch
 
 
 PATH = Path(__file__).with_name("smoke.py")
+QUALIFIED_CAPABILITIES = [
+    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
+]
 
 
 class SmokeTests(unittest.TestCase):
@@ -34,7 +37,8 @@ class SmokeTests(unittest.TestCase):
                                      "Entrypoint": None, "Cmd": ["rpgmigrate", "--help"]}}]
         self.observed = {
             "uid": "65532", "gid": "65532", "machine": "aarch64",
-            "version": json.dumps({"protocol_version": 1, "engine_version": "0.1.0", "capabilities": []}),
+            "binary_sha256": "1" * 64 + "  /usr/local/bin/rpgmigrate",
+            "version": json.dumps({"protocol_version": 1, "engine_version": "0.1.0", "capabilities": QUALIFIED_CAPABILITIES}),
             "plain_version": "rpgmigrate 0.1.0\nlibpq 180001",
             "ldd": "libpq.so.5 => /lib/aarch64-linux-gnu/libpq.so.5 (0xffff)",
             "coreutils": "id (GNU coreutils) 9.7", "sed": "sed (GNU sed) 4.9",
@@ -467,14 +471,128 @@ class SmokeTests(unittest.TestCase):
             self.smoke.probe(image, "podman")
         self.assertEqual(self.calls[0][0], ["podman", "image", "inspect", image])
 
-    def test_version_contract_does_not_advertise_unqualified_capabilities(self):
-        for version in ({"protocol_version": True, "engine_version": "0.1.0", "capabilities": []},
-                        {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone"]},
-                        {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": [], "linked_libpq": 180001}):
-            self.observed["version"] = json.dumps(version)
+    def test_version_contract_requires_exact_qualified_capabilities(self):
+        self.assertEqual(self.probe()["version"], {
+            "protocol_version": 1, "engine_version": "0.1.0", "capabilities": QUALIFIED_CAPABILITIES,
+        })
+        valid = json.loads(self.observed["version"])
+        sets = [[], None, True, "clone.single_db", {}, list(reversed(QUALIFIED_CAPABILITIES)),
+                QUALIFIED_CAPABILITIES + [QUALIFIED_CAPABILITIES[0]],
+                QUALIFIED_CAPABILITIES[:-1] + ["copy.split"],
+                QUALIFIED_CAPABILITIES[:-1] + ["unknown"],
+                *[QUALIFIED_CAPABILITIES[:index] + QUALIFIED_CAPABILITIES[index + 1:]
+                  for index in range(len(QUALIFIED_CAPABILITIES))],
+                *[QUALIFIED_CAPABILITIES + [extra] for extra in
+                  ("copy.binary_fallback", "copy.split", "copy.large_objects", "unknown")]]
+        versions = [{**valid, "capabilities": capabilities} for capabilities in sets]
+        versions += [{**valid, "protocol_version": True}, {**valid, "protocol_version": 1.0},
+                     {**valid, "engine_version": None}, {**valid, "engine_version": "0.2.0"},
+                     {**valid, "linked_libpq": 180001}]
+        versions += [{key: value for key, value in valid.items() if key != missing} for missing in valid]
+        for version in versions:
+            with self.subTest(version=version):
+                self.observed["version"] = json.dumps(version)
+                self.calls = []
+                with self.assertRaises(RuntimeError):
+                    self.probe()
+        self.observed["version"] = json.dumps(valid).replace('"protocol_version": 1,',
+                                                           '"protocol_version": 1,"protocol_version": 1,')
+        with self.assertRaises(RuntimeError):
+            self.probe()
+
+    def test_runtime_binary_hash_is_required_and_retained(self):
+        for digest in ("1" * 64, "2" * 64):
             self.calls = []
-            with self.assertRaises(RuntimeError):
+            self.observed["binary_sha256"] = digest + "  /usr/local/bin/rpgmigrate"
+            self.assertEqual(self.probe()["runtime_binary_sha256"], digest)
+        invalid = ["", True, False, None, 1, {}, [], "x" * 64 + "  /usr/local/bin/rpgmigrate",
+                   "A" * 64 + "  /usr/local/bin/rpgmigrate",
+                   "1" * 63 + "  /usr/local/bin/rpgmigrate",
+                   "1" * 64 + "  /usr/local/bin/other",
+                   "1" * 64 + "  /usr/local/bin/../bin/rpgmigrate",
+                   "1" * 64 + "  /tmp/rpgmigrate",
+                   "1" * 64 + "  /usr/local/bin/rpgmigrate extra",
+                   "1" * 64 + "  /usr/local/bin/rpgmigrate\n" + "2" * 64 + "  /usr/local/bin/rpgmigrate"]
+        for value in invalid:
+            with self.subTest(value=value):
+                self.calls = []
+                self.observed["binary_sha256"] = value
+                with self.assertRaises(RuntimeError):
+                    self.probe()
+        del self.observed["binary_sha256"]
+        self.calls = []
+        with self.assertRaises(RuntimeError):
+            self.probe()
+        with self.assertRaises(RuntimeError):
+            self.smoke.records("===rpgmigrate-smoke:binary_sha256===\n" + "1" * 64
+                               + "  /usr/local/bin/rpgmigrate\n===rpgmigrate-smoke:binary_sha256===\n"
+                               + "2" * 64 + "  /usr/local/bin/rpgmigrate\n")
+
+    def test_binary_probe_requires_regular_exact_file_and_successful_hash(self):
+        prefix = self.smoke.PROBE.split("emit uid", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Path(directory) / "rpgmigrate"
+            runner.write_bytes(b"reviewed runner bytes")
+            script = prefix.replace("/usr/local/bin/rpgmigrate", shlex.quote(str(runner)))
+            result = subprocess.run(["/bin/sh", "-c", script], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.smoke.records(result.stdout)["binary_sha256"],
+                             hashlib.sha256(b"reviewed runner bytes").hexdigest() + "  " + str(runner))
+            runner.rename(Path(directory) / "target")
+            runner.symlink_to(Path(directory) / "target")
+            for kind in ("symlink", "directory", "fifo", "missing"):
+                with self.subTest(kind=kind):
+                    result = subprocess.run(["/bin/sh", "-c", script], text=True, capture_output=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                if kind == "symlink":
+                    runner.unlink()
+                    runner.mkdir()
+                elif kind == "directory":
+                    runner.rmdir()
+                    os.mkfifo(runner)
+                elif kind == "fifo":
+                    runner.unlink()
+            runner.write_bytes(b"reviewed runner bytes")
+            command = Path(directory) / "sha256sum"
+            command.write_text("#!/bin/sh\nprintf private-output\nexit 1\n")
+            command.chmod(0o700)
+            result = subprocess.run(["/bin/sh", "-c", script], env={**os.environ, "PATH": directory},
+                                    text=True, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("private-output", result.stdout + result.stderr)
+
+    def test_qualified_expectation_refuses_invalid_local_golden_or_metadata(self):
+        fixtures = PATH.parents[2] / "tests/fixtures/native/v1"
+        golden_path = fixtures / "payloads/version-qualified-profile.json"
+        contract_path = fixtures / "contract.json"
+        golden = json.loads(golden_path.read_bytes())
+        contract = json.loads(contract_path.read_bytes())
+        wrong_set = QUALIFIED_CAPABILITIES[:-1] + ["copy.split"]
+        variants = [
+            {golden_path: b"{}"}, {golden_path: b"not json"}, {golden_path: b"null"},
+            {contract_path: b"{}"}, {contract_path: b"not json"}, {contract_path: b"null"},
+            {golden_path: json.dumps({**golden, "extra": 1}).encode()},
+            {golden_path: json.dumps({**golden, "protocol_version": True}).encode()},
+            {golden_path: json.dumps({**golden, "capabilities": []}).encode()},
+            {golden_path: json.dumps({key: value for key, value in golden.items() if key != "capabilities"}).encode()},
+            {contract_path: json.dumps({**contract, "qualified_capabilities": []}).encode()},
+            {contract_path: contract_path.read_bytes().replace(b'"protocol_version": 1,',
+                            b'"protocol_version": 1,"protocol_version": 1,')},
+            {golden_path: json.dumps({**golden, "capabilities": wrong_set}).encode(),
+             contract_path: json.dumps({**contract, "qualified_capabilities": wrong_set}).encode()},
+            {golden_path: golden_path.read_bytes().replace(b'"protocol_version": 1,',
+                        b'"protocol_version": 1,"protocol_version": 1,')},
+        ]
+        read_bytes = Path.read_bytes
+        for replacement in variants:
+            def read(path):
+                return replacement[path] if path in replacement else read_bytes(path)
+            with self.subTest(replacement=replacement), patch.object(Path, "read_bytes", read), self.assertRaises(RuntimeError):
                 self.probe()
+        with patch.object(Path, "read_bytes", side_effect=FileNotFoundError("private path")), self.assertRaises(RuntimeError) as error:
+            self.probe()
+        self.assertNotIn("private path", str(error.exception))
 
 
 if __name__ == "__main__":
