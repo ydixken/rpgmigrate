@@ -419,7 +419,7 @@ The offline native-8 build passed against integrated source `9158fef5601fa3b9c3d
 Its binary is SHA-256 `c185bedf97c021558092b0930815ff7b17fcc9e85c5a666552bb779607af2187`, linked to libpq 180006.
 The private capped tool runner and owned internal network are approved for serial nine-case producer runs on three pairs, starting with PostgreSQL 16 to 16; no runtime qualification result is claimed.
 Positive cutover Go qualification awaits the independent M6 reader, and M4 runtime, E2E, and closing review stay open.
-The first actual PostgreSQL 16 to 16 producer case failed the active-fence assertion; zero M4 runtime cases are qualified.
+The first actual PostgreSQL 16 to 16 producer attempt failed the active-fence assertion and qualified no cases at that input.
 Failure summary: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-producer-integration-6z_7deja/runtime/failure-summary.json`, SHA-256 `43806493f8f06570b34c536961966c4d003389e8b071b89f4711829a660f8f07`.
 The later retained sentinel result is CLI `BadArgs` exit 1, caused by trailing-capture parsing; post-teardown worker Target7 is not causal evidence.
 All three exact owned containers and the network were proved absent.
@@ -428,10 +428,15 @@ Its 93 focused checks pass.
 The one-file CLI correction `39b791fd` is joined and rebuilt in candidate manifest `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-parser-linux-u77pw5bk/manifest.json`, SHA-256 `ee2aa26dcf86ca48a80dd50360698290754fe6b1556171dc1bcf445fcf7e6cb8`.
 The Linux binary is `b9e8f6c424ca9deda8237e5363dc22d281661f1d4d8050e527a5e01655dad5f0`.
 All 31 Linux parser tests and the database-free explicit-E/after-E-JSON check passed; host formatting and strict Clippy passed.
-The first-case cutover retry and full matrix remain unrun; these checks do not qualify cutover runtime.
+All 27 engine-producer cases then passed on the same combined M4/M5 input: nine each on PostgreSQL 16.15 to 16.15, 18.6 to 18.6, and 16.15 to 18.6.
+Source manifest: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-m5-source-q2vjbxdx/manifest.json`, SHA-256 `8bf95549278eafacc60ccc3498b43d0396335a0cc1d18370170d9cf44d8ec312`.
+The binary is `ef4ece807906345e3be6645833d1060c11aab3be3bf607ed1699c2795f31840b`.
+The sibling `runtime-aggregate-proof.json` has SHA-256 `9c92e1f905e55546938dab9f7fc2e60ae34419eede69117897556f362aa0d9e9`.
+Source/binary/linkage/credential checks passed, and all nine owned containers, three networks, and the builder were proved absent.
+The scope is `engine_producer` with `probe_checked=false`; independent M6 Go qualification and M4 closing review/gates remain pending.
 The harness peer passed six portable checks and registered cases, without actual M4 E2E.
 The frozen eight-file CLI export passed 31 adapter/parser checks only; no assembled-source or runtime result follows.
-All 41 implementation steps remain open; these static checks establish no M4 runtime qualification.
+The 27 cases qualify the declared engine-producer profile; consumer qualification and the remaining closing gates keep M4 open.
 The 2026-11-08 [M4 plan](../docs/superpowers/plans/2026-11-08-m4-cutover-control.md) clarifications freeze endpos/frontier handling, fresh reproof, durable final sealing, guarded closure, and boxed proof without lint allowances.
 The plan API text now omits the unused snapshot-floor accessor and refers to the plain publication floor at sealing, preserving the unfenced admission-veto contract.
 The reconciled plan has 490 lines and SHA-256 `1367c9ad707381e36032cb203346e19406c78ba60f072dcf9ecde5dd1e1d6e8b`.
@@ -443,6 +448,7 @@ We add no IPC or fence handoff for this path.
 Native 8 / metadata 6 is conditional on acceptance of the planned M3 identity-fix baseline as 7 / 5.
 Exclusive slot administration is an accepted prerequisite; uncertain incarnation or reappearance requires preservation and refusal, without an invented slot OID or new privilege mechanism.
 
+- [x] Pass the 27-case engine-producer profile across all three pairs, without an independent M6 Go qualification claim.
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
 - [ ] `stream cleanup`: owned slot and publication only, idempotent, workdir kept for later compares.
@@ -452,7 +458,8 @@ Exclusive slot administration is an accepted prerequisite; uncertain incarnation
 
 The isolated implicit stock-target-major utility-routing implementation passed nineteen child-process scenarios and ten Rust tests, with one existing database test ignored.
 Formatting and strict Clippy passed; the exact `schema.rs`/`runner-image.md` export is `/tmp/rpgmigrate-m5-tools-export-d799/manifest.json`, SHA-256 `4ed44353c90377845c28ec16e739f04f6f35aa0436ad79e39e5f6a4fad8ddb40`.
-A source-only join into the M4 candidate is assigned; no new binary is qualified by that join.
+The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
+Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
 The local ARM64 read-only packaging smoke binds an older source snapshot; final-source image, AMD64, and hosted qualification remain open.
 
 - [ ] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
@@ -477,13 +484,15 @@ Twenty-second freshness uses new private constant-size state on the existing Sam
 It adds no CLI, DTO, application-fence subsystem, or `CheckpointEvidence` authority.
 The composed 21-file test-only successor `031f9d4` passed 67 focused Go checks and eight Perl checks.
 The actual PostgreSQL 16 live run uses a new owned two-CPU/1-GiB database container and a half-CPU/256-MiB helper.
-The run recorded 26 PostgreSQL 16 passes before the lost-COMMIT case failed to qualify; all owned resources were cleaned.
-Fifteen fault stages and relay COMMIT/Idle observations prove the lost reply, without completion evidence.
-A fresh retry refused target open; the source-backed hypothesis is that absent environment values became empty.
-A pure environment correction is under work; no healthy retry or PostgreSQL 18 result is qualified, and Task 0/production activation remain open.
+The earlier run recorded 26 PostgreSQL 16 passes before the lost-COMMIT case failed to qualify; its owned resources were cleaned.
+The latest `5f` input passed the single focused PostgreSQL 16 lost-COMMIT case.
+Receipt: `/Users/ydixken/.codex/tmp/m6-env-single-e7u8etqr/runtime-receipt.json`, SHA-256 `9c13ca3ab8a0cf39295495f9b1f23d0405f84a395ece108d17bf8578c84b56f9`.
+The lost-ack attempt retained fifteen stages, relay COMMIT/Idle, refusal, and no observation.
+A distinct fresh PID/ID retry passed nineteen stages, EOF, exit zero, and the same row/token; cleanup and source checks passed.
+This does not qualify other PostgreSQL 18 cases, full M6, or production activation.
 The approved test-only actual-native-8 producer interoperability plan is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-m6-actual-producer-plan-u3xog4xr/2026-11-09-actual-native8-producer-interop-plan.md`, SHA-256 `e89bb99b7c10876130d4b9fa26c61b5f45979239aa00d74d9d10b3b77b450c9c`.
-Two-file implementation is assigned; no actual-producer PostgreSQL 18 run has occurred.
-Task 0 real/work-PVC ancestor permissions remain unqualified; no guard relaxation or root initialization is approved.
+The two-file test-only actual-producer fixture passed pure checks; runtime remains unrun.
+Fresh-volume provisioning and Task 0 real/work-PVC ancestor permissions remain unqualified; existing-state/PVC guards remain unchanged, with no guard relaxation or root initialization approved.
 Application write fencing and ending outstanding transactions remain the operator user’s duty in both Manual and Automatic modes; no new fencing subsystem is authorized.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
