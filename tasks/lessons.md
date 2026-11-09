@@ -448,3 +448,9 @@ Clean exact recorded observer UIDs/resourceVersions on every bounded exit; prese
 
 The user directed us to push through M10; continue approved M6–M10 execution instead of treating intermediate plans or source checkpoints as the end of the assignment.
 Keep roadmap and todo synchronized, require evidence for closure, and retain the benchmark hold and main/tag/release/GHCR boundaries; performance ranges are inferences until measured.
+
+## Execution admission and runtime metadata attribution, 2026-11-09
+
+Approved milestone scope already permits owned M7 UP/load/legacy/native tests and ordinary fresh owned fault fixtures; enforce source/ownership/resource guards without inventing another blanket user-approval gate.
+Keep the actual benchmark artifact/argv hold and out-of-scope shared-VM/original-resource/main/tag/release/GHCR boundaries explicit.
+Attribute runtime-synthesized HOME/passwd observations to that runtime; they do not prove immutable-image metadata or a different container runtime’s defaults.

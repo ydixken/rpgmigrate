@@ -708,7 +708,10 @@ The exact fifteen-path/557-file checkpoint passed both packages with zero lint f
 Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m6-checkpoint-ff-gp9fk58d/fast-forward-proof.json`, SHA-256 `17e8dd22a95c8b1412f9a50cfe60cefd08e4128cfce7548bce0082e5cb3b1ab8`.
 The second clean packet (`f28c450`, `b8c6f51`, `1a569b7`, `4ecbd69`) is accepted and fast-forwarded into the central operator feature branch at `4ecbd69cc9e56e4710096b6f0475fc7d2a62fe8b`, tree `978f450c0976ef9f6d21a1feb0d42438eac7a943`, with exact four commits/fourteen paths/560 files verified clean and index empty.
 Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m6-components-ff-gnwrr55e/fast-forward-proof.json`, SHA-256 `6ab717a902a583d57ad04c376280655f2293fb5cfe9857dbc24a52a05d086e8b`; original checkout and all 44 other worktree refs are preserved, with no new push/CI/runtime result.
-The real native worker producer/dispatch remains missing and is being planned; no runtime activation, whole-M6 review, or full-Go closure is claimed.
+The approved [worker construction/dispatch plan](../docs/superpowers/plans/2026-11-09-m6-native-worker-construction-dispatch.md) has frozen Commands manifest `04994db3` (91 focused plus thirteen legacy checks, zero lint) and worker builder manifest `dbc3d84e` (52 checks, zero lint, 28 production lines, three new connection goldens with legacy preserved), neither committed yet.
+Lifecycle focused tests passed 94 checks, with final owned-test lint fixes underway; the native optimistic status patch is approved and top-level `UnsupportedEngine` remains unchanged.
+Actual Linux executable parity is assigned in a network-none ephemeral M5 container, with no result yet; discovery/preflight planning must not reuse legacy raw-DSN argv/raw-stderr scripts.
+No runtime activation, whole-M6 review, or full-Go closure is claimed.
 Resolver disposition: `/Users/ydixken/.codex/tmp/m6-containerd-dns-research-20261109/existing-containerd-dns-disposition.md`, SHA-256 `b78e83c046be9441e8d0fd25362b500af30cfb8180e1c4a824a7d7a8d7f24a00`, favors qualifying the existing standard ClusterFirst sandbox resolver.
 Actual runtime/NSS/HOME bindings remain gaps; no ConfigMap, numeric-only restriction, or HOME change is authorized.
 The approved [Jobs/lifecycle plan](../docs/superpowers/plans/2026-11-09-m6-native-helper-jobs-lifecycle-direct-image.md) and [dated amendment](../docs/roadmap.md#m6-native-helper-jobslifecycle-amendment-2026-11-09) use canonical pure policy exports, fresh bounded 90-second Job/operation, earlier persisted E, and administrator-selected immutable image expectations; D1 exports are frozen and Jobs/lifecycle focused verification is joined, configuration later.
@@ -717,6 +720,8 @@ D1 manifest: `/Users/ydixken/.codex/tmp/m6-d1-policy-export-20261109/manifest.js
 The cap-only two-file admission export `98c097e1` passed nine tests/105 checks against cap-only Go `561533e8` plus the old relay; this does not qualify the new Python file-binding work.
 The tiny actual Linux ARM primitive probe passed six nonconnecting groups on image `b4631063096125a84d3428571fe81d7057c91cf3356adf54cc738744709e52b0`, with no canary exposure and the exact probe container absent.
 Receipt: `/Users/ydixken/.codex/tmp/m6-explicit-linux-primitives-20261109/receipt.json`, SHA-256 `aca2a3816d8406ca5c40a2e4d92baa43f04014571646653ccbc53b7bb4eff266`; independent runtime qualification is explicitly false and TLS/database/Kubernetes/full-helper gates remain open.
+Metadata report: `/Users/ydixken/.codex/tmp/m6-m5-runtime-metadata-20261109/metadata-report.md`, SHA-256 `3124f3bec6d5e283cbda9a5d6c6d6787db77017ea13feef419d1803b94cdbd7a`: image ENV HOME is absent while Podman synthesized HOME/passwd `/work`, so immutable-image/containerd HOME remains unproven.
+Stock libpq 18.6/default-path absence and exact probe cleanup/original preservation are narrow observations, not normal helper/resolver/TLS/DB qualification.
 
 The [2026-11-09 explicit-file/cap amendment](../docs/roadmap.md#m6-explicit-connection-file-and-cap-amendment-2026-11-09) and [approved plan](../docs/superpowers/plans/2026-11-09-m6-explicit-file-binding.md) authorize sealed mode-0400 memfd inputs and the sole immutable missing path before connecting, preserving raw libpq DSN/explicit-empty/permission/optional-absence behavior.
 The main-only caps are 122880 source bytes and 126976 complete argument bytes including NUL; wire/relay/prelude limits are unchanged and native evidence Job JSON is limited to 1 MiB.
@@ -840,7 +845,8 @@ The blocked Loaded workflow was then retired under standing container-only autho
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda` (manifest `2f46f044`); fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 Fresh PREPARE/CHECK proof: `/private/var/tmp/rpgmigrate-m7-check-index-preparation-mlwoh9ym/final-preparation-proof.json`, SHA-256 `4d89e0731c37a2f8331f07af03bdda713d28b8f7823bcba540ae6e46d9cd394d`; the new manager/RUN has no UP result, and the retired Loaded RUN remains preserved.
 The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified, with no lease renewal.
-The tracked kind-only Go pre-uninstall build-info hook plan `6324b61a` awaits exact contract review and supersedes the private observer implementation proposal; metrics permission remains approved but unapplied.
+The approved [tracked kind-only Go pre-uninstall build-info hook plan](../docs/superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal; Go implementation is building with bounded installed-client-go sanitization/cancellation fixes, and metrics permission remains approved but unapplied.
+The Python final export passed 198 source-level checks (wrapper `fa4038`, tests `9670d6`); no live qualification or new UP follows, and the old prepared RUN is obsolete after successor source changes.
 The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
@@ -949,6 +955,9 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 
 ## M8: Feature widening (each item enables its capability)
 
+The approved [M8 plan](../docs/superpowers/plans/2026-11-09-m8-feature-widening.md) freezes fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative binary fallback, and mandatory exact LO comparison under the unchanged array contract plus a proven-empty inventory guard.
+No format/runtime gate or capability is qualified by this plan.
+
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
 - [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
 - [ ] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
@@ -956,7 +965,8 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 
 ## M9: Durability modes and measured performance
 
-The user requested benchmark planning only; no benchmark runs or VM reservation are authorized before plan approval, and M10 remains open.
+The approved [M9 plan](../docs/superpowers/plans/2026-11-09-m9-durability-performance.md) follows M8 with native format 10 / metadata 7 and the settings/status capability extension; no ACK derives from volatile frontier and cadence awaits actual measurements.
+Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized, and M10 remains open.
 Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
@@ -965,6 +975,8 @@ Initial-copy planning keeps fork async and native per-table durability enabled; 
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
 ## M10: Release readiness
+
+The approved [M10 plan](../docs/superpowers/plans/2026-11-09-m10-release-readiness.md) covers bounded mutation testing, native ASAN with nightly unverified, STE source/license provenance, and exact production OCI artifacts/final matrix; preparation is not release qualification.
 
 - [ ] README index, getting started, durability, operator guide, troubleshooting; docs drift and STE100 checks.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.

@@ -282,11 +282,15 @@ Four clean M6 source/tool commits (`ccda81f3`, `3d1bfe6f`, `f6f7de44`, `32dbcfc`
 The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings and retained focused tests; remote origin remains `5616d82`, without a checkpoint push or M6 activation/review/full-Go/runtime closure.
 The second four-commit M6 packet (`f28c450`, `b8c6f51`, `1a569b7`, `4ecbd69`) is accepted and fast-forwarded into the central operator feature branch at `4ecbd69cc9e56e4710096b6f0475fc7d2a62fe8b`, with all fourteen paths/560 files verified and clean.
 This checkpoint adds no push, CI, or runtime result.
-The real native worker producer/dispatch remains missing and is being planned; production activation, whole-M6 review, full-Go, and runtime closure remain open.
+The approved [worker construction/dispatch plan](superpowers/plans/2026-11-09-m6-native-worker-construction-dispatch.md) has frozen Commands (91 focused plus thirteen legacy checks, zero lint) and worker builder (52 checks, zero lint, three new connection goldens with legacy preserved) handoffs, not yet committed.
+Lifecycle focused tests passed 94 checks, with final owned-test lint repairs underway; the native optimistic status patch is approved and top-level `UnsupportedEngine` remains unchanged.
+Actual Linux executable parity is assigned to a network-none ephemeral M5 container, without a result yet; discovery/preflight planning must not reuse legacy raw-DSN argv or raw-stderr scripts.
+Production activation, whole-M6 review, full-Go, and runtime closure remain open.
 The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.
 The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
 The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) has a cap-only admission handoff with nine tests/105 checks on the old relay input; it does not qualify the new Python binding implementation.
-A tiny actual Linux ARM primitive probe passed six nonconnecting groups on M5 image `b463`; TLS/database/Kubernetes/full-helper, ordinary-file, service, and resolver qualification remain open.
+A tiny actual Linux ARM primitive probe passed six nonconnecting groups on M5 image `b463`; the later metadata probe found image ENV HOME absent and Podman-synthesized HOME/passwd `/work`, without proving immutable-image/containerd HOME.
+Stock libpq 18.6 and absent default paths were observed, with exact probe cleanup/original preservation; TLS/database/Kubernetes/full-helper, ordinary-file, service, and resolver qualification remain open.
 The approved Python/ctypes/libpq exception and no-added-Secret-read/RBAC boundary remain in force: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than latest-Secret-version attestation.
 The user explicitly approved existing operator-feature GitLab mirroring on 2026-11-09; the prior authorization hold is resolved, with CI/mirror outcomes tracked separately below.
 One independent whole-M6 review belongs at milestone close, and users retain write fencing/outstanding-transaction duties through cutover.
@@ -307,7 +311,8 @@ The watcher was restored under the original deadline with a recorded 648.049941-
 Exact three-node container/process/cgroup removal is complete under standing approval; all 203 volumes, 339 images, immutable network properties, original four services, backups, source, and Loaded RUN evidence remain preserved, with actual CPU/RAM reservation released.
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
 The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified and no lease is renewed.
-The tracked kind-only Go pre-uninstall build-info hook plan `6324b61a` awaits exact contract review and supersedes the private observer implementation proposal; existing metrics permission is unapplied.
+The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is building with bounded installed-client-go sanitization/cancellation fixes; metrics permission remains unapplied.
+The Python handoff passed 198 source-level tests; neither handoff establishes live qualification or a new UP.
 The prepared `5dcceda`/`47a` source/manager RUN has no UP result and requires a fresh source/manager/RUN freeze after the hook.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
@@ -364,6 +369,9 @@ No manual proof JSON or lease renewal is allowed.
 
 ### M8: Feature widening (each item enables its capability)
 
+The approved [M8 implementation plan](superpowers/plans/2026-11-09-m8-feature-widening.md) targets fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative whole-table binary fallback, and exact mandatory large-object comparison with the unchanged array contract plus a proven-empty inventory guard.
+These are implementation decisions, without format/runtime qualification or capability activation.
+
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
 - [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
 - [ ] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
@@ -371,7 +379,8 @@ No manual proof JSON or lease renewal is allowed.
 
 ### M9: Durability modes and measured performance
 
-The user requested benchmark planning only; no benchmark runs or VM reservation are authorized before plan approval.
+The approved [M9 implementation plan](superpowers/plans/2026-11-09-m9-durability-performance.md) follows M8 with native format 10 / metadata 7 and the settings/status capability extension; no ACK may derive from a volatile frontier, and cadence is selected from later measurements.
+Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized.
 M10 remains open.
 Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
 
@@ -381,6 +390,9 @@ Initial-copy planning keeps fork async and native per-table durability enabled; 
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
 ### M10: Release readiness
+
+The approved [M10 implementation plan](superpowers/plans/2026-11-09-m10-release-readiness.md) uses bounded mutation tests, native Linux ASAN with its nightly still unverified, STE source/license provenance, and exact production OCI artifacts for the final matrix.
+These preparation decisions close no release or runtime gate.
 
 - [ ] README index, getting started, durability, operator guide, troubleshooting; docs drift and STE100 checks.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
