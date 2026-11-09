@@ -99,7 +99,7 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > M4–M10 remain open; no runnable native operator or cutover workflow is qualified.
 > Canonical operator tests remain bound to `5e8cbcb`; full lint passed its equivalent twelve-path successor, committed separately as `2bdc7614c04bc6aa8a8f4c709a84cbcc07340b5c`.
 > Cutover, native operator activation, power-loss durability, feature widening, and performance qualification remain open under M4, M6, M8, and M9.
-> Native alpha is blocked by confirmed schema-child service routing and pending current-code acceptance.
+> Native alpha remains blocked on current-code acceptance; the repaired schema-child routing passed Schema3 on both supported majors.
 > User decisions remain pending for data-preserving VM disk growth/restart and qualification of the M6 URI-secret helper.
 
 ### M0: Preserve and reset (rpgmigrate)
@@ -219,12 +219,18 @@ The `ensure_transaction` repair and test-only synchronization successor passed a
 The focused source is `866981b9176e4e3e6d0abc93872d0e56f64818e707efec57e87a3ae1168e8edd`; this library-test result does not qualify the final runtime or broad engine gates.
 The schema-utility exports assembled at manifest `6a92ea235076e7d5438997203842af512c3ed4e45c67c3e499b69f2c918a1879`; canonical `task lint test` passed formatting, then stopped at two strict-Clippy test assertions.
 The repaired `87a0` successor passed canonical `task lint test`: formatting/strict Clippy, 499 Rust tests, 27 CLI tests, and 308 portable tests; `task check` also passed.
-The Rust result separately records 22 ignored and 107 filtered cases; Linux build and fresh Schema/live acceptance remain pending.
+The Rust result separately records 22 ignored and 107 filtered cases; exact Schema3 then passed on PostgreSQL 16.15 and 18.6 with zero ignored cases.
+The source-parity test-literal restoration passed Clone7 on PostgreSQL 16.15 and 18.6, seven cases per major with zero ignored cases, including the final marker guards.
+The earlier Engine selection/assertion failures are retained in the ledger; the repaired three-path successor is frozen at `96e1fbbbd1e9c6e37b605bfcd6e43da8c81dfbc21c4dd2f7aa6a1ca6afdc8234`.
+Exact Engine50 passed on PostgreSQL 16.15 and 18.6 with zero ignored cases; Catalog13 passed on both majors, while Source12 and Snapshot9 passed on PostgreSQL 16.
+The snapshot result includes five fault receipts and three tail phases; remaining profiles, including Receive11's 70-second case, are not qualified by these results.
+One current-engine/current-Go actual seven-case invocation passed with final input, nineteen-stage helper, independent report, same-E acknowledgment, privacy, cap, and cleanup verification.
+This is test-only PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled, not native activation.
 It pins the validated SQL owner's resolved connection and selected peer; the required Schema profile expands to three cases using the existing TCP/SCRAM fixture and an owned relay for peer-loss checks.
 The earlier `ef4` engine-producer 27-case PASS and `134`/`d75` actual seven-case Go interoperability PASS are ancestor evidence pending fresh current-code matrices.
 The composed operator Go closing profile is green on 546 source files, source hash `732fcf1f9fefe21db5b6ae15f4f3e3508fc31f8899bfb5e489281358602edd1c` and tree `7442e438270f2d3ae47317447f7f07299fcf5322`.
 It covers full lint, fifteen uncached unit/envtest packages, PG16/PG18 cluster-free checks, and fourteen helper functions per major; the ledger records exact counts and composite PG16 provenance.
-Final actual seven-case interoperability on the current engine/current Go, current matrices, and one whole-M4 xhigh review remain pending.
+Current three-pair runtime matrices and one whole-M4 xhigh review remain pending; actual seven-case interoperability is accepted only within its test-only scope.
 These checks leave M4 open and qualify no native operator activation.
 Local endpos reads are allowed, but informational JSON cannot expose unproven certified or durability counters.
 Durable replay, drained status, and proof reads require positive fenced observation, with bounded explicit refusal when busy or unknown.
@@ -236,6 +242,9 @@ Native 8 / metadata 6 applies only if the accepted M3 identity-fix baseline is 7
 - [x] Retain the ancestor 27-case engine-producer PASS across all three pairs.
 - [x] Pass the exact seventeen-case FollowAuthority profile on PostgreSQL 16.15 and 18.6 for the focused repair successor.
 - [x] Pass canonical host `task lint test` and `task check` on the repaired utility successor.
+- [x] Pass the exact three-case Schema profile on PostgreSQL 16.15 and 18.6 for the repaired utility successor.
+- [x] Pass Clone7 on PostgreSQL 16.15 and 18.6 after restoring the source-parity marker-test literal.
+- [x] Pass exact Engine50 on PostgreSQL 16.15 and 18.6 after the selector and M3 assertion restorations.
 - [ ] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
@@ -269,11 +278,12 @@ Each major passed fourteen helper functions and 158 entries with no required ski
 The 128 Go shared-fixture cases (186 inventory cases) are already included, not additional runs.
 Owned cleanup, exact source/staged identity, and credential/canary checks passed.
 
-A confirmed engine utility-routing defect blocks native alpha: explicit or inherited `PGSERVICE` can redirect schema child utilities from validated database alpha to beta.
+The retained utility-routing reproduction showed explicit or inherited `PGSERVICE` redirecting schema children from validated database alpha to beta.
 The snapshot-bound dump refused the wrong database, but exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
-The effective-connection/selected-peer repair is frozen in the assembled closing candidate; final acceptance remains pending.
+The effective-connection/selected-peer repair passed exact Schema3 on PostgreSQL 16.15 and 18.6; final engine/runtime acceptance remains pending.
 TLS evidence covers option bytes and selected hostname/address mapping with TLS disabled, not handshakes, client certificates, or encrypted keys.
-Fresh three-case Schema acceptance and final runtime/current-engine interoperability remain pending; the unchanged Go closing proof is retained without repeated broad Go suites.
+Exact Schema3 passed on both majors, and current-engine/current-Go actual seven-case PostgreSQL 18 interoperability passed its final verification.
+These are test-only checks with mocked Kubernetes ownership and production admission disabled; broad Go suites were not repeated for unchanged source.
 
 Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify a Python 3 plus stock-libpq helper for password-bearing URI Secrets without secret argv.
 The host proof of concept passed nine URI cases and a PostgreSQL 18 connection/empty COMMIT, but the measured tool image lacks Python/ctypes and Perl DBI/DBD::Pg/FFI.

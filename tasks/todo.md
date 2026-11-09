@@ -425,12 +425,55 @@ The repaired successor is frozen at `/Users/ydixken/.codex/tmp/m4-engine-closing
 Its canonical `task lint test` passed with exit zero in 62.605 seconds: formatting, strict Clippy, 499 Rust PASS with 22 ignored and 107 filtered, 27 CLI tests, and 308 portable tests without skips.
 Canonical `task check` then passed with exit zero in 2.929 seconds; the log canary scan was clean.
 Canonical host proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/utility-lint-successor/host-gate-proof.json`, SHA-256 `6ab8f932b9ef3ecd7296f53d782b7a6a08f1fd5a1e3e6bb0de9aaa14bb0563a1`.
-The earlier `6a92` failure remains scoped history; final Linux build and fresh Schema3 acceptance on both majors are next, without a live-pass claim.
+The earlier `6a92` failure remains scoped history.
+Exact Schema3 passed on PostgreSQL 16.15 and 18.6 with zero ignored cases on source `87a0` and runtime `cadadfbf`.
+PostgreSQL 16 Clone7 then stopped at six PASS and one FAIL in `clone_marker_tests::live_markers_commit_atomically_and_refuse_stale_generation_and_foreign_metadata`, at `checkpoint.rs:3637`.
+After `authority.resolve_unknown`, the synchronous-wait cancellation helper's synthetic-table id query returned 5 where the fixture expected 6; this is not a metadata-version or column-count assertion.
+All six snapshot/COPY clone cases passed; outer exit 201 and library-test exit 101 stopped later profiles, runtime matrices, and actual seven-case interoperability.
+Read-only diagnosis identified a stale literal: COPY supplied `b"5\n"`, while the final assertion expected `b"6"`; the otherwise byte-identical qualified primary M3 helper expects 5.
+The leader assigned `m4_empty_group_fix` the one-byte test-literal restoration, grounded in that source parity, before fresh Clone7 acceptance on PostgreSQL 16 and 18.
+No runtime defect is established; the failed run did not reach or qualify the final guard conjunct.
+Partial closing proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/utility-lint-successor/proof.json`, SHA-256 `20a5b74b194d605549c10d4574b2b8fe74d03582f99cb97fa10d8c7ab717e300`.
+Immutable Schema3 proof: sibling `schema-profile-proof.json`, SHA-256 `146a963ab3b9a31cfb1b552bb2f546fafef78d9d6bb97c5a9c6d0b22af4a8cc1`.
+Three owned clusters and sockets were proved absent, stock configuration/postmasters remained unchanged, the lease was released, and the build runner/network were removed.
+Source remained exact at 304 files and fifty absences, with zero URI/password/canary scan hits.
+The one-byte test-only restoration is frozen at `/Users/ydixken/.codex/tmp/rpgmigrate-m4-clone-marker-literal-3zh36foz/manifest.json`, SHA-256 `04d53f79a22433e4a6cb9c18eb299037387cd47028aae373310eb0ac66a78b22`, with 353 other entries and fifty absences exact against `87a0`.
+Fresh Clone7 passed all seven cases on PostgreSQL 16.15 and all seven on 18.6, with zero ignored cases and the final marker guards exercised.
+PostgreSQL 16 Catalog13 then passed; the intended Engine50 selection expanded to 55 cases and stopped at 49 PASS and six FAIL.
+Five catalog-follow cleanup tests lacked Engine context and were wrongly included; the one intended `async_barrier` failure at `checkpoint_live_tests.rs:795` expects the message to contain `fsync on`, while the actual message was not emitted in the failure.
+The leader stopped dependent profiles and runtime matrices, assigning read-only exact selection analysis across all remaining profiles to `m4_utility_harness` and assertion/M3-lineage analysis to `m4_clone_marker_diagnosis`.
+These are separate findings, not six established engine defects; the pause is a bounded test-lineage/selection replan, not a whole-code audit.
+Read-only lineage analysis proved that the stale `contains("fsync on")` assertion omitted the qualified M3 combined-guard correction already recorded above; the actual runtime message was not captured.
+The leader assigned `m4_empty_group_fix` the exact M3 assertion restoration, preserving M4 metadata adaptation and the empty-group regression, without runtime changes.
+The selector repair is frozen at `/Users/ydixken/.codex/tmp/rpgmigrate-m4-profile-selectors-y62fxrtl/manifest.json`, SHA-256 `e9326b7561600782177f65b4e19c9a87a2de6f1c3a09ebb601590ac65abe22ed`.
+All fourteen actual Task selectors match their exact inventories; the ten closing profiles are pairwise disjoint across 45 checks, preserving Engine50 and restoring FollowReceive11 from the old four-case selection.
+Thirty-nine focused Task and two receipt checks passed, with proof SHA-256 `f92ffe695733d76195cadf507b14bec1cd0f5434a79dff02221402e5810b0130`.
+The exact M3 assertion restoration is frozen at `/Users/ydixken/.codex/tmp/rpgmigrate-m4-async-assertion-z7mlwzds/manifest.json`, SHA-256 `a33bd3c2a5ed5862cd4c05345fc1465eea80958f933a74c52e492daca3d472d2`, with focused strict Clippy, 27 checkpoint tests, and discovery passing.
+The three-path successor is frozen at `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/manifest.json`, SHA-256 `96e1fbbbd1e9c6e37b605bfcd6e43da8c81dfbc21c4dd2f7aa6a1ca6afdc8234`, inventory `18f099200e706cf165fc9a4f00ba8ab9e744aa9c6b5e638c1d62e63ee97b1916`.
+All 351 other predecessor entries remain unchanged, with 304 files and fifty explicit absences; the ordinary runtime remains `cadadfbf` under the test-only projection.
+Exact Engine50 passed on PostgreSQL 16.15 and 18.6 with zero ignored cases; Catalog13 passed on PostgreSQL 18, supplementing the earlier PostgreSQL 16 Catalog13 PASS.
+PostgreSQL 16 Source12 and Snapshot9 passed, including five snapshot fault receipts and three tail phases.
+These are completed partial closing results only; later Authority/Receive11 and other profiles, final three-pair runtime matrices, and whole-M4 review remain pending.
+The active lease recorded minimum free disk of 12,135,612,416 bytes with no watchdog violation; no final lease-cleanup claim follows before release.
+Immutable five-profile receipt: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/profile-resume-successor/native-progress-five-profiles.json`, SHA-256 `72e7cd943e56c4bac6882f3b9b4fec0266ea53bcc64f84ac644d400dec91ed13`.
+The sibling `production-input-projection.json`, SHA-256 `14e67af740c02c430ce3fe25417446df45e9b46ab0a4f1adec131d2ee3b92bd9`, retains the unchanged ordinary runtime and prior host/Schema proof; later profiles are excluded from this frozen five-stage result.
+The leader independently authorized one actual seven-case interoperability run on unchanged `cadadfbf`/`87a0` production inputs and the `04d` test projection, with unchanged Go tree `7442e438270f2d3ae47317447f7f07299fcf5322`.
+That run retained its separate four-CPU/two-GiB cap and joint safety floor and passed one uncached invocation with all seven exact cases and no cleanup error.
+Its receipt is `/Users/ydixken/.codex/tmp/m4-current-actual7-37r9nd_1/runtime-receipt.json`, SHA-256 `92e8cf628a79adab7224660ed5c59fd8554def146679fe5636bae7798e81f266`.
+Final verification passed at sibling `verification-addendum.json`, SHA-256 `d94fd59b5e6c5a0c852de1c499f0109cf98fddf2f8fe92ea620d4364d02b2833`, with artifact-manifest SHA-256 `57aa03030cd8e16e01c69871ec7001b36df56038e6b5ab867a519284809b424a`.
+The positive case proves actual COPY/follow, a distinct fresh UID 65532 helper with nineteen ordered stages, both EOFs, empty stderr, closed source session, independent Go ParseReport, and a matching same-E drained acknowledgment/token; all six negative controls passed.
+All 28 container caps were observed with zero unknowns or violations, all 31 owned objects were absent, Go 546-file/24-staged-path tree `7442` stayed unchanged, secrets were removed, and credential/canary scans passed.
+This single 38.948-second lease recorded minimum free disk 12,533,616,640 bytes; its scope is test-only PostgreSQL 18 interoperability with mocked Kubernetes ownership and `production_admission=false`.
+No retry or repeated broad Go gate was run, and this result does not close M4 or activate production M6.
+Clone7 acceptance proof: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/clone-marker-successor/clone-profile-proof.json`, SHA-256 `25f2f6ae4b9056dedae7fefa32cf8be91ff2de0c0f76b65dd7219efc496d17b0`.
+The sibling `production-input-projection.json`, SHA-256 `c950b9418cc670bf5987e2420eabc483baacfdaa929765183124c586e8501268`, proves the one-byte cfg-test-only change and preserves the exact ordinary runtime `cadadfbf24eaab1d621a846d1a25e6a77dff5d4ce7d6db121b24b90767fd3d6c`, prior host proof, and Schema3 proof.
+The sibling final `proof.json`, SHA-256 `c3ac7badb30f8116e071b30e21e56a93f041abb9432f998cb99ae3ab70861fca`, binds Catalog13 PASS and the unqualified Engine55 selection result.
+All six owned clusters/sockets were proved absent, original stock configuration/PID1/postmasters stayed unchanged, the lease was released, source remained exact at 304 files/fifty absences, and privacy scans were clean.
 Strict lint has no staging-policy exception.
 TLS proof remains option-byte and selected-hostname/address mapping with TLS disabled; no TLS handshake, client-certificate, or encrypted-key qualification is claimed.
-Final assembled runtime, current engine gates, actual seven-case Go interoperability, and one whole-M4 review remain pending.
+Remaining native profiles, final three-pair runtime matrices, and one whole-M4 review remain pending; the actual seven-case interoperability proof is accepted within its explicit test-only scope.
 The earlier `ef4` producer 27-case PASS and `134`/`d75` actual seven-case Go interoperability PASS below are ancestor evidence, pending fresh current-code matrices.
-Final actual seven-case acceptance on current engine/current Go and one whole-M4 xhigh review remain pending.
+Current-engine/current-Go actual seven-case acceptance is complete within its test-only scope; one whole-M4 xhigh review remains pending.
 
 ### Ancestor M4 evidence
 
@@ -493,6 +536,9 @@ Exclusive slot administration is an accepted prerequisite; uncertain incarnation
 - [x] Retain the ancestor 27-case engine-producer PASS across all three pairs.
 - [x] Pass the exact seventeen-case FollowAuthority profile on PostgreSQL 16.15 and 18.6 for the focused repair successor.
 - [x] Pass canonical host `task lint test` and `task check` on the repaired utility successor.
+- [x] Pass the exact three-case Schema profile on PostgreSQL 16.15 and 18.6 for the repaired utility successor.
+- [x] Pass Clone7 on PostgreSQL 16.15 and 18.6 after restoring the source-parity marker-test literal.
+- [x] Pass exact Engine50 on PostgreSQL 16.15 and 18.6 after the selector and M3 assertion restorations.
 - [ ] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
@@ -525,13 +571,13 @@ Each major passed fourteen helper functions and 158 entries with no required ski
 PG16 explicitly combines seven completed helper results from an observer-interrupted invocation and seven fresh exit-zero results; PG18 passed all fourteen in an exit-zero invocation.
 Proof: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m4-helper-observer-resume-z995h42h/go-closing-proof.json`, SHA-256 `2f6e44cefbf4a39d6944891321300da721c13a72bc58100882cd166398b6710a`.
 All owned objects were proved absent; all source files and 24 staged paths remained exact, with no secret or canary leak.
-These test-only closing checks do not activate production native paths; current-engine actual interoperability and whole-M4 closing review remain pending.
+These test-only closing checks do not activate production native paths; the actual seven-case addendum above accepts current-engine interoperability, while whole-M4 closing review remains pending.
 
-A confirmed engine utility-routing defect blocks native alpha: explicit or inherited `PGSERVICE` can redirect schema children from parent-validated alpha to beta.
+The retained engine utility-routing reproduction showed explicit or inherited `PGSERVICE` redirecting schema children from parent-validated alpha to beta.
 Snapshot-bound dump refused the wrong database, while exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
 Receipt: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m6-service-precedence-t7l0ql_r/receipt.json`, SHA-256 `10f7d53c6c687e768f7940218d64b9153b9e3d57f31dc5695f6ff3e79cc49320`.
-The existing-libpq effective-connection/selected-peer repair exports are frozen and joined in the closing candidate; final acceptance remains pending.
-The current three-case Schema acceptance and final runtime interoperability remain pending; broad Go suites are not repeated for unchanged operator source.
+The existing-libpq effective-connection/selected-peer repair passed exact Schema3 on PostgreSQL 16.15 and 18.6 in the joined closing candidate.
+Current-engine/current-Go actual seven-case PostgreSQL 18 interoperability passed final verification with mocked Kubernetes ownership and production admission disabled; broad Go suites were not repeated for unchanged source.
 
 Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify Python 3 plus stock libpq for password-bearing URI Secrets without secret argv.
 The original PostgreSQL 18 tmpfs requires a tested persistent replacement before restart; disk resize/restart remains unapproved.
