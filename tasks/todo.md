@@ -702,8 +702,12 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ### Current composed Go closing profile and blockers
 
-The exact eleven-file Task 0 composition is gofmt-clean, but its source checkpoint is blocked by an incompatible linter; no source commit is claimed.
-The dependency-validated tool 2.14/Go 1.27.3/logcheck proposal `7a5ad71f` and four-file implementation `47df566e` are under independent actual-build/focused-lint qualification, with no runtime changes.
+The four clean M6 source/tool commits `ccda81f3`, `3d1bfe6f`, `f6f7de44`, and `32dbcfc` are fast-forwarded into the central operator feature branch at `32dbcfc`; remote origin remains `5616d82`, without a checkpoint push.
+The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings, retaining focused tests; no M6 activation, whole review, full-Go, or runtime closure follows.
+Fast-forward proof: `/Users/ydixken/.codex/tmp/rpgmigrate-m6-checkpoint-ff-gp9fk58d/fast-forward-proof.json`, SHA-256 `17e8dd22a95c8b1412f9a50cfe60cefd08e4128cfce7548bce0082e5cb3b1ab8`.
+The approved [Jobs/lifecycle plan](../docs/superpowers/plans/2026-11-09-m6-native-helper-jobs-lifecycle-direct-image.md) and [dated amendment](../docs/roadmap.md#m6-native-helper-jobslifecycle-amendment-2026-11-09) use canonical pure policy exports, fresh bounded 90-second Job/operation, earlier persisted E, and administrator-selected immutable image expectations; D1 exports are frozen and Jobs/lifecycle focused verification is joined, configuration later.
+The future status.Image display-only correction preserves exact spec/imageID equality; actual direct runtime, identical-E acknowledgment, PVC/file/resolver gates remain open.
+D1 manifest: `/Users/ydixken/.codex/tmp/m6-d1-policy-export-20261109/manifest.json`, SHA-256 `3571c6de4d1cd3a27045fbeeaa31f967f080d1f410b99e4ab1bb3a409ca344ae`; sibling proof SHA-256 `93f72c0797215f9c03bcaf3e5a0c3432b39beb4c997d4406e8fa47c55e4eb400`, recording seven tests/86 checks and zero native lint findings, without activation.
 The cap-only two-file admission export `98c097e1` passed nine tests/105 checks against cap-only Go `561533e8` plus the old relay; this does not qualify the new Python file-binding work.
 The tiny actual Linux ARM primitive probe passed six nonconnecting groups on image `b4631063096125a84d3428571fe81d7057c91cf3356adf54cc738744709e52b0`, with no canary exposure and the exact probe container absent.
 Receipt: `/Users/ydixken/.codex/tmp/m6-explicit-linux-primitives-20261109/receipt.json`, SHA-256 `aca2a3816d8406ca5c40a2e4d92baa43f04014571646653ccbc53b7bb4eff266`; independent runtime qualification is explicitly false and TLS/database/Kubernetes/full-helper gates remain open.
@@ -726,7 +730,7 @@ Final Reader manifest: `/Users/ydixken/.codex/tmp/m6-admission-reader-relay-expo
 The new relay export is `/Users/ydixken/.codex/tmp/m6-python-relay-export-20261109/manifest.json`, SHA-256 `4226dd85ee2d4aad7ac80799ab135d1c036b7fcb42c4273bdd49ccda889a72ed`: 29 Python and nineteen focused Go tests (ten relay subcases) passed, with five mutation controls RED.
 The new transport manifest `/Users/ydixken/.codex/tmp/m6-default-transport-t35vz_yh/manifest.json`, SHA-256 `512263a8cdd49e56497dc7a75d3fb8913ab0f4451b4f07bc69a92fdd529e8aef`, records 97 checks/92 leaf cases, zero failures/skips; no actual default-cluster/log-completeness/rotation/relay-flock runtime qualification follows.
 Runtime qualification and production activation remain false; exact packaged-libc resolver bounds and opaque-file stability before first consumption, including service expansion, are unresolved.
-The approved [delivery correction](../docs/superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md) replaces the default-disabled split-log prerequisite; its eleven-file composition still requires a valid source checkpoint and runtime qualification.
+The approved [delivery correction](../docs/superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md) replaces the default-disabled split-log prerequisite; its source checkpoint is now integrated, while runtime qualification remains open.
 The [dated roadmap amendment](../docs/roadmap.md#m6-default-kubernetes-delivery-amendment-2026-11-09) keeps SQL in main, separate result streams in checked exec, and terminal Job success/complete empty ordinary logs as a separate requirement; no Stream query is used.
 Require Running before exec and the same incarnation Running or successful exit 0/signal 0 afterward; neither post-exec state bypasses terminal Job verification.
 Earlier focused handoffs do not qualify this correction; runtime/image/resolver/file/TLS/PVC gates and production admission remain open.
@@ -825,9 +829,19 @@ First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes,
 The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
 Tracked CHECK before load and load passed; phase is `Loaded` with six loaded-digest receipts and positive post-load readiness.
 The original finite supervisor hit a read timeout during load; guarded DOWN correctly refused the active RUN lock and exited its handoff without deletion or source/receipt repair.
-Monitor continuity is temporarily blocked: only a watch-only replacement under the same hard deadline is authorized, with restoration proof pending and no renewal.
-Explicit CHECK currently replaces the image ledger and erases loaded digests; use only the accepted pre-load CHECK plus nonmutating post-validation until the harness fix is qualified before M7 closure or the next inventory.
+The watch-only replacement restored monitoring under the original deadline with a recorded 648.049941-second gap; do not claim uninterrupted continuity.
+The blocked Loaded workflow was then retired under standing container-only authorization, with the watch intentionally stopped before expiry rather than a fabricated deadline event.
+The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda` (manifest `2f46f044`); fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
+Fresh PREPARE/CHECK proof: `/private/var/tmp/rpgmigrate-m7-check-index-preparation-mlwoh9ym/final-preparation-proof.json`, SHA-256 `4d89e0731c37a2f8331f07af03bdda713d28b8f7823bcba540ae6e46d9cd394d`; the new manager/RUN has no UP result, and the retired Loaded RUN remains preserved.
+The approved watch-handover plan `5149c85d` has fourteen fake controls; live handover remains unqualified, no lease is renewed, and metrics permission is approved but unapplied.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
+
+Retirement proof: `/private/var/tmp/rpgmigrate-m7-loaded-retirement-ai592_0t/retirement-proof.json`, SHA-256 `32c45afc9b3962979c2cde03c8d4a847fb9c3ffc0266b6d6b94d6777b114e513`.
+Exact three nodes/processes/cgroups are absent; all 203 volumes, 339 images, immutable network properties, original four services, backups, all 530 source entries, and all 42 RUN files’ bytes remain unchanged with phase `Loaded` and six load receipts.
+Actual CPU/RAM reservation is released and the historical lease remains untouched; this is exception retirement, not guarded DOWN or M7 closure.
+The [user-approved metrics observer policy](../docs/roadmap.md#user-approved-owned-kind-metrics-observer-policy-2026-11-09) applies only to fresh independently admitted owned kind E2E runs, with no repeated approval within scope.
+Policy: `/private/var/tmp/rpgmigrate-m7-metrics-policy-7s2s5o81/policy.md`, SHA-256 `2342fdf3350981d5de4346165f70781cb74a3478c4247ac2527038dba11806df`; template `metrics-owned-minimal.template.yaml`, SHA-256 `667625c2045edd030000e3c5065b83a92206d6d499df7ea77009aa2ea572bb9c`.
+No observer action, namespace creation, production RBAC/Secret access, lease renewal, or benchmark execution is implied by this decision record.
 
 First-UP proof: `/private/var/tmp/rpgmigrate-m7-kubeconfig-fixed-first-up-5_122d1k/first-UP-handoff-proof.json`, SHA-256 `5e18acb1d9761eb7751c13815898fbf76c5f344b8f5cd077facdbd536aa5f4bd`.
 Load proof: `/private/var/tmp/rpgmigrate-m7-declared-load-ihjsd0zy/final-load-proof.json`, SHA-256 `5ffd59a2c1231940f497862e8e5b65525b1ec6e5bf9a6a7fc52ae8a467d3b525`, explicitly `HANDOFF-required` after the final monitor-continuity assertion failed.
@@ -935,6 +949,7 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 ## M9: Durability modes and measured performance
 
 The user requested benchmark planning only; no benchmark runs or VM reservation are authorized before plan approval, and M10 remains open.
+Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
 - [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.

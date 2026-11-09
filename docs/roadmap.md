@@ -96,7 +96,7 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
 > M6–M10 remain open: production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
-> VM preservation/resize maintenance and failed-node cleanup passed; corrected M7 UP/load passed for the legacy-only inventory, with monitor continuity blocked and the loaded-digest CHECK bug still open.
+> VM preservation/resize maintenance and failed-node cleanup passed; corrected legacy-only M7 UP/load passed, then its blocked Loaded workflow was retired with retained evidence and source-only CHECK/index fixes awaiting fresh runtime qualification.
 > Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
@@ -276,8 +276,8 @@ The earlier admission-reader handoff separately passed thirteen top-level tests 
 The new relay export passed 29 Python and nineteen focused Go tests (including ten relay subcases), with five mutation controls RED.
 The new transport export passed 97 checks/92 leaf cases; these are focused mechanism proofs, without runtime qualification.
 These focused checks do not qualify packaged Python/libpq, database, Kubernetes/PVC, or opaque-file runtime behavior.
-The exact eleven-file Task 0 composition is gofmt-clean, but its source checkpoint is blocked by an incompatible linter.
-The dependency-validated tool 2.14/Go 1.27.3/logcheck upgrade is under independent actual-build/focused-lint qualification; it changes no runtime behavior.
+Four clean M6 source/tool commits (`ccda81f3`, `3d1bfe6f`, `f6f7de44`, `32dbcfc`) are integrated by fast-forward in the central operator feature branch.
+The exact fifteen-path/557-file checkpoint passed both packages with zero lint findings and retained focused tests; remote origin remains `5616d82`, without a checkpoint push or M6 activation/review/full-Go/runtime closure.
 The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
 The [dated explicit-file/cap amendment](#m6-explicit-connection-file-and-cap-amendment-2026-11-09) has a cap-only admission handoff with nine tests/105 checks on the old relay input; it does not qualify the new Python binding implementation.
 A tiny actual Linux ARM primitive probe passed six nonconnecting groups on M5 image `b463`; TLS/database/Kubernetes/full-helper, ordinary-file, service, and resolver qualification remain open.
@@ -297,8 +297,10 @@ First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes,
 The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
 Tracked CHECK before load and load passed; phase is `Loaded` with six loaded-digest receipts and positive post-load readiness.
 The original finite supervisor hit a read timeout during load; guarded DOWN correctly refused the active RUN lock and exited its handoff without deletion or source/receipt repair.
-Monitor continuity is temporarily blocked: only a watch-only replacement under the same hard deadline is authorized, with restoration proof pending and no renewal.
-Explicit CHECK currently replaces the image ledger and erases loaded digests; use only the accepted pre-load CHECK plus nonmutating post-validation until the harness fix is qualified before M7 closure or the next inventory.
+The watcher was restored under the original deadline with a recorded 648.049941-second gap, then intentionally stopped before expiry when the blocked Loaded workflow was retired.
+Exact three-node container/process/cgroup removal is complete under standing approval; all 203 volumes, 339 images, immutable network properties, original four services, backups, source, and Loaded RUN evidence remain preserved, with actual CPU/RAM reservation released.
+The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
+The approved watch-handover plan has fourteen fake controls; live handover remains unqualified, no lease is renewed, and metrics permission remains approved but unapplied.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.
 
 The leader accepted the [M7 bootstrap slice](superpowers/plans/2026-11-08-m7-kind-bootstrap.md) for code-only implementation by separate lifecycle and suite owners on isolated operator branches.
@@ -363,6 +365,7 @@ No manual proof JSON or lease renewal is allowed.
 
 The user requested benchmark planning only; no benchmark runs or VM reservation are authorized before plan approval.
 M10 remains open.
+Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
 - [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.
@@ -396,6 +399,24 @@ Linux's minimum 131072-byte per-argument boundary does not qualify aggregate arg
 A dedicated native helper's final decorated create-site size check remains future integration; generic `ensureJob` remains unchanged.
 Two disjoint owners are building the four-file helper and two-file admission changes; resolver, service, PVC, image, and activation gates remain open.
 Numeric-alpha resolver research `c567134f` remains a proposal, without qualification clearance.
+
+## M6 native helper Jobs/lifecycle amendment, 2026-11-09
+
+We approved the [direct-image Jobs/lifecycle plan](superpowers/plans/2026-11-09-m6-native-helper-jobs-lifecycle-direct-image.md) with canonical pure policy exports and one fresh helper Job/operation per bounded 90-second invocation, using E persisted in an earlier reconciliation.
+The administrator-configured immutable single-platform pin supplies both expected `ImageRef` and `PlatformImageID`; retain exact Job/Pod spec image and original status.ImageID comparisons without observed self-expectations, normalization, or a receipt service.
+The narrow future removal of only the status.Image display equality is approved; it does not weaken immutable spec/imageID binding or grant runtime clearance.
+D1 policy exports are frozen with seven tests/86 checks and zero native lint findings; Jobs/lifecycle focused verification is joined, while configuration follows later and no full activation is claimed.
+Actual direct-runtime profile, identical-E acknowledgment, PVC, file, and resolver gates remain open with production admission disabled.
+
+## User-approved owned-kind metrics observer policy, 2026-11-09
+
+The user approved the temporary metrics observer policy for independently admitted owned kind E2E runs; do not request repeated approval within this exact scope.
+Use a run-scoped ServiceAccount with automount false, one ClusterRole granting only GET on `/metrics`, and one binding to that exact ServiceAccount in the independently verified suite-created namespace.
+Permit at most one in-memory 600-second TokenRequest without renewal, with at least 600 seconds left on the original run deadline; keep the token out of argv, environment, files, and diagnostics.
+Use only the validated exact owned manager Pod's loopback HTTPS tunnel, with the approved tunnel-local certificate pinning and unchanged Kubernetes API TLS checks.
+Clean only the recorded observer objects under exact UID/resourceVersion preconditions and verify absence; preserve replacement objects, namespaces, and suite resources.
+This approval grants no production RBAC, Secret access, new namespace creation, lease renewal, benchmark run, or broader runtime qualification.
+The [ledger](../tasks/todo.md) binds the approved policy and parameterized template hashes; each fresh render still requires exact source/RUN/namespace/manager/deadline admission.
 
 ## User-authorized continuation, 2026-11-09
 

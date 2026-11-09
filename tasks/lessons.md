@@ -437,3 +437,9 @@ On 2026-11-09, after approving the second exact failed-kind cleanup, the user au
 This standing authorization covers containers only: preserve volumes, networks, images, backups, original PostgreSQL containers, source, and RUN evidence; do not extend it to other resources or repair RUN markers.
 Verify ownership and failed state independently before cleanup, preserve exact resource identity evidence, and do not report completion until final absence checks pass.
 After repeated bootstrap-contract failures, re-plan bounded startup/DOWN metadata fixtures before another UP; preserve failed RUN evidence rather than repairing it in place.
+
+## Owned-kind temporary metrics observer authorization, 2026-11-09
+
+The user approved the bounded temporary metrics observer policy for owned kind E2E runs; reuse this authorization without asking again only after fresh source/RUN/namespace/manager/deadline admission.
+Keep automount false, GET `/metrics` only, one exact ServiceAccount binding, one in-memory 600-second token without renewal, and the admitted owned-Pod loopback TLS tunnel.
+Clean exact recorded observer UIDs/resourceVersions on every bounded exit; preserve replacements and never expand this approval to production RBAC, Secrets, new namespaces, lease renewal, or benchmark execution.
