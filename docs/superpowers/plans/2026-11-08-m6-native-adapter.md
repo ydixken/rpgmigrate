@@ -28,9 +28,22 @@ Read all four before implementation.
 - Use `/usr/local/bin/rpgmigrate`, matching-major tools in `/usr/lib/postgresql/16/bin` and `/usr/lib/postgresql/18/bin`, and default psql 18.
 - Keep `--rpgmigrate-runner-image` and `rpgmigrateRunnerImage` empty by default until image qualification.
 - Keep credentials and row contents out of argv, status, events, diagnostics, and fixtures.
-- Add no dependencies, new API version, lifecycle framework, pgcopydb executable alias, or second authority table.
+- Add no dependencies outside the [user-approved runner exception](#user-approved-runner-dependency-exception-2026-11-09).
+- Add no new API version, lifecycle framework, pgcopydb executable alias, or second authority table.
 - Run independent review and the Go suites once at milestone close; do not repeat full Go suites after individual tasks.
 - Commit only after the required checks pass and the leader requests a commit.
+
+## User-approved runner dependency exception (2026-11-09)
+
+The user explicitly authorized new runner dependencies, including Python 3 and its ctypes interface to stock libpq, for the private opaque URI Secret mechanism.
+We need direct libpq connection handling so URI Secret authentication and resolved credentials stay out of argv.
+This is a scoped exception to the dependency/executable prohibitions in this plan, not permission to add unrelated packages or change public contracts.
+Validate compatibility, licensing, security, runtime packaging, and the actual runner dependency set before adoption.
+Write and review the separate mechanism implementation/qualification plan before changing production consumers or freezing their private interfaces.
+Preserve the existing lifecycle, CLI/report/API boundaries, independent evidence authority, identity admission, checked transport, and failure guards.
+Dependency authorization does not qualify TLS, real Kubernetes/PVC/work permissions, images, or production native admission.
+Keep native production paths refused until the required mechanism, packaging, consumer, and milestone gates pass.
+Do not ask again for this approved dependency exception; return any new scope decision to the leader.
 
 ## Review Focus
 
@@ -44,12 +57,13 @@ Read all four before implementation.
 ## Readiness and ownership freeze
 
 M1 supplies strict DTO validation and fixtures, not a production adapter.
-Its discovery capability array is empty.
+At the M1 freeze, discovery advertised an empty capability array; production admission must consume actual qualified discovery.
 The focused plain PostgreSQL 16 clone evidence does not qualify native follow, recovery, cutover, cleanup, or the three-pair operator profile.
 The engine completion producer must also conform exactly to M1 before activation: discovery advertises only qualified capabilities, command reports retain their required protocol capability, and completed reports supply all required measured counters.
 Do not weaken `ParseReport` to accept the development clone receipt.
 The frozen M4 handoff defines native format 8, metadata version 6, and the 29-column logged authority row.
-Its assembled implementation is runtime-unqualified; do not infer qualification from this format freeze or convert older state.
+M4 engine qualification is closed at source commit `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`; its engine and mocked-Kubernetes helper evidence does not qualify production operator admission.
+Preserve strict older-state refusal rather than converting state.
 
 The leader freezes the interfaces below before parallel work.
 A worker that needs a different signature returns the decision to the leader before another worker consumes it.
@@ -354,7 +368,7 @@ The existing M6 opaque-reader interface preserves that separation.
 
 - [ ] Measure the exact existing runner image's executable inventory and versions before assessing filesystem or psql feasibility.
   Bind the inventory to its image digest, including psql 18 and any other stock tools actually present; do not assume only shell/psql are available or that an unmeasured tool exists.
-  Install nothing, and base feasibility conclusions on this measured inventory.
+  Install nothing during this baseline inventory; keep authorized dependency work in the separate mechanism plan, and base feasibility conclusions on measured tools.
 - [ ] Add `TestNativeEvidenceRefusesUnprovedInput` before implementing the reader.
   Assert that raw Report data, visible rows, missing provenance, unsupported layout, unknown COMMIT, and empty helper output cannot return a `ConfirmedCheckpoint`.
 - [ ] Prove a bounded private input route from the owned PVC to the independent reader using existing runner tools.
@@ -374,7 +388,7 @@ The existing M6 opaque-reader interface preserves that separation.
 - [ ] Publish a reviewed internal input/output and function-signature addendum in this plan before parallel consumers start.
   Keep `ConfirmedCheckpoint` opaque with private constructor and `Evidence() CheckpointEvidence` accessor; keep independently admitted cleanup obligations opaque until validated.
   The addendum must identify which existing tools enforce each private filesystem and SQL check, rather than promise an unspecified helper.
-  Add no dependency, executable, authority table, CLI option, public report DTO, or API field.
+  Add no dependency or executable outside the dated runner exception, and add no authority table, CLI option, public report DTO, or API field.
   If existing psql or private file transport cannot meet every check, stop and return the failing experiment and precise missing capability to the leader for re-planning.
 
 Focused commands, with private `PGCOPYDB_TEST_PGURI` already supplied for the selected disposable server:

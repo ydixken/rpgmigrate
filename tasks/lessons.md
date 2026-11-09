@@ -410,3 +410,16 @@ An immutable image does not prove the contents of a mutated running container; d
 
 Use `followup_task` to assign new work to a completed agent.
 An idle `send_message` does not start its next turn.
+
+## User-authorized maintenance and dependencies, 2026-11-09
+
+Retain the user's approval for unused Podman image/volume/build-cache pruning, `podman-machine-default` growth, and the scoped Python 3/ctypes/libpq runner dependency exception; do not ask again for those scopes.
+Preserve and test persistent PostgreSQL 18 data before stopping its original tmpfs container or restarting the VM, while retaining original service endpoints and data.
+Honor the exclusive maintenance lease and prune only confirmed-unused resources under the approved plan, without blanket cleanup of retained data or evidence.
+Dependency authorization supports private opaque URI Secret authentication without argv secrets; it does not qualify TLS, real PVC permissions, packaging, or production native admission.
+
+## User-authorized feature CI and one-off cleanup, 2026-11-09
+
+Retain the approval to push rpgmigrate `feat/native-engine` and the operator native-work feature branch to origin for hosted CI, including native AMD64 checks; do not extend it to main push/merge, tags, releases, or GHCR publication.
+Treat the failed-kind cleanup exception as exactly three approved container identities, with no volumes, network, images, backups, originals, RUN-marker mutation, or generic guard bypass.
+Keep creating/empty failed-RUN markers unchanged, require confirmed cleanup and the leader's resource-budget release before the held M5 build, and use fresh source/RUN after the diagnosed fix.

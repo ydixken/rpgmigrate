@@ -5,7 +5,28 @@ The [M0 implementation plan](../docs/superpowers/plans/2026-11-08-m0-preserve-re
 Keep implementation evidence separate from parser compatibility and operator runtime qualification.
 M0–M4 are closed; M4 engine source and six accepted behavior documents are integrated at `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`, with separate operator test-only commit `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 M5–M10 remain open; production native operator admission, final images, kind E2E, power-loss/performance, and release qualification remain unqualified.
-Continue through the existing M5/M6/M7 dependencies without treating M4 engine evidence as operator activation or approval of pending maintenance/dependency choices.
+Continue the user-approved M5/M6/M7 plans under the dated maintenance and runner-dependency authorizations below; M4 evidence does not activate the operator or qualify the new mechanism.
+
+## User authorization and active ownership, 2026-11-09
+
+The user approved both prior decisions and continuing the existing M5/M6/M7 plans.
+Unused Podman images, volumes, and build cache may be pruned, and `podman-machine-default` may be grown under the approved PostgreSQL 18 persistent-preservation maintenance plan.
+The leader selected 128 GiB, preserving 14 CPUs, 32 GiB memory, original service endpoints, and data; the user reported about 212 GiB free on the host.
+`vm_pg18_preservation_plan` completed maintenance; the later exact failed-node cleanup is independently verified and its quiet reservation released, with M5 image-budget authorization pending.
+Preserve and test persistent PostgreSQL 18 data before stopping its original tmpfs container or restarting the VM; retained resources are not blanket cleanup targets.
+The user also approved new runner dependencies including Python 3 and ctypes/stock-libpq for private opaque URI Secret authentication without argv credentials.
+The [dated M6 exception](../docs/superpowers/plans/2026-11-08-m6-native-adapter.md#user-approved-runner-dependency-exception-2026-11-09) preserves public API/lifecycle/authority/CLI boundaries and mandatory validation; write the separate mechanism implementation plan before production changes.
+The amended M6 plan is frozen at SHA-256 `b8039fb8fecae9e6486fa52517acd0c5ead756244a8f59442d61df3e3b997a6f` for mechanism planners.
+The decision alone claimed no execution success; the final maintenance acceptance is recorded below, while dependency/TLS/PVC/image/kind/production qualification remains separate.
+
+### Feature CI pushes and failed-node cleanup, 2026-11-09
+
+The user authorized pushing `rpgmigrate` `feat/native-engine` and the operator native-work feature branch to `origin` for hosted CI, including M5/M10 native AMD64 checks.
+Feature branches only are authorized, with no main push/merge, tags, releases, or GHCR publication; no push or CI result is recorded by this decision.
+The one-off cleanup exception permits exactly three failed kind-node containers for the failed RUN, not volumes, networks, images, backups, original services, RUN markers, or a general guard bypass.
+Final independent verification accepts the exact three-container cleanup; preserve all source RUN creating/empty files without mutation and use corrected fresh source/RUN.
+Operator push is held by preflight: current workflows would force-mirror all refs/tags to GitLab and skip tests; no GitLab publication is authorized.
+The leader assigned exactly two workflow files for CI guards/hosted tests before the authorized feature push; engine preflight found the intended checks/native-AMD64 route, but no push or CI result is claimed.
 
 ## M0: Preserve and reset (rpgmigrate)
 
@@ -650,7 +671,9 @@ Formatting and strict Clippy passed; the exact `schema.rs`/`runner-image.md` exp
 The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
 Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
 The production ARM64 image build disk peak remains unqualified despite cached base images.
-The latest baseline is 12,565,581,824 free bytes; the unknown exact build peak prevents a capacity claim.
+The final maintenance proof records 41,988,149,248 free VM bytes; the unknown exact image-build peak still prevents a capacity claim.
+The `m5_runtime_packaging` four-file source/pure-test export is ready and exact-node cleanup is verified; the runtime image build has not started.
+The failed-node quiet reservation is released, and the leader's fresh M5 image-budget authorization awaits its resource proof.
 Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
 The local ARM64 read-only packaging smoke binds an older source snapshot; final-source image, AMD64, and hosted qualification remain open.
 
@@ -677,9 +700,11 @@ Receipt: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m6-service-precedence
 The existing-libpq effective-connection/selected-peer repair passed exact Schema3 on PostgreSQL 16.15 and 18.6 in the joined closing candidate.
 Current-engine/current-Go actual seven-case PostgreSQL 18 interoperability passed final verification with mocked Kubernetes ownership and production admission disabled; broad Go suites were not repeated for unchanged source.
 
-Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify Python 3 plus stock libpq for password-bearing URI Secrets without secret argv.
-The original PostgreSQL 18 tmpfs requires a tested persistent replacement before restart; disk resize/restart remains unapproved.
-M7 preparation may overlap PostgreSQL tests under the approved capacity budget and host Cargo headroom, while actual kind/image operations must preserve the enforced disk floors, and unqualified phase growth still needs capacity validation.
+Both decisions are user-approved as of 2026-11-09: the preservation/VM maintenance plan and the scoped M6 Python 3/ctypes/stock-libpq runner dependency exception.
+The exception supports direct private libpq authentication for opaque URI Secrets without argv credentials; mechanism implementation/qualification remains open.
+The mechanism adds no Secret-read calls or RBAC scope: bind actual pod/template references, stable privately consumed bytes, and SQL identity, without claiming latest-Secret-resource-version attestation.
+The approved maintenance completed with a verified persistent PostgreSQL 18 replacement and released lease; the retired tmpfs container must never restart.
+The failed M7 nodes are removed under the exact user exception; the quiet reservation is released, and fresh resource-budget proof and ordinary kind/image capacity checks govern later work.
 The host proof of concept passed nine URI cases and a PostgreSQL 18 connection/empty COMMIT, but is research rather than a package addition or production mechanism choice.
 The measured `0b36` tool image lacks Python/ctypes and Perl DBI/DBD::Pg/FFI.
 Capability receipt: `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/m6-libpq-connection-poc-rwasyp5n/tool-capabilities.json`, SHA-256 `bb073df851a6a709a6f5a874ac50f30e43e6b9bea9edd0d5166fa29448f1c265`.
@@ -782,18 +807,35 @@ Final inspection: `/private/var/tmp/m7-fourth-tracked-control-p42xzbbk/final-pre
 Kind up was not attempted; the earlier 14.78-GB demand was a planning envelope incorporating a three-node work bound and margin, not a freshly verified hard requirement.
 The exact frozen `hack/e2e-kind.py` wrapper at source `6222196c` enforces only the recorded 10-GiB VM and 2-GiB host floors; no 14.78-GB aggregate-demand field or receipt was found in this bounded check.
 Its seven prepared archives total 798,203,904 bytes; the wrapper hash `1c884fe724126e688f11de57a72af7cd8a69b147288358ca4bb2884602799eab` matches the frozen source manifest.
-The latest read-only owned-cache check starts from 12,565,581,824 free bytes and finds 419,700,736 allocated bytes conservatively reclaimable.
+The pre-maintenance read-only owned-cache check started from 12,565,581,824 free bytes and found 419,700,736 allocated bytes conservatively reclaimable.
 Whole target plus Cargo upper bounds total 583,225,344 bytes, and the whole-prefix upper bound is 589,815,808 bytes; those upper bounds are not the conservative reclaim claim.
 No deletion, prune, or resource change occurred, and the conservative reclaim is insufficient against the prior planning envelope.
 Capacity receipt: `/Users/ydixken/.codex/tmp/m4-engine-closing-final-q31o707f/checked-close-successor/capacity-receipt-final.json`, SHA-256 `e9593bb2f2306c6917227a9a2a06d0f2438d5b4138a84108a00ecf623d733f9a`.
 It binds the existing creation/source-preflight/cleanup logs and canonicalized read-only capacity observations without claiming a nonexistent raw transcript; no repeated measurement or inspection occurred at receipt finalization.
 Bounded M5 image peak and M7 full-phase growth remain unqualified; no image/kind execution qualification follows from this read-only check.
-The data-preserving AppleHV 100-to-128-GiB maintenance decision remains pending after PostgreSQL 18 persistent preservation, without implied approval.
-Backup Phase A is verified; Phase B is pending.
-The original PostgreSQL 18 data uses tmpfs and needs a tested persistent replacement before any VM or original-container restart.
-Preparation success does not authorize restart, resize, or kind creation.
+The authorized maintenance passed and the exclusive lease is released, with stability verified across the launcher and two later tool exits.
+Final proof: `/private/var/tmp/rpgmigrate-vm-maintenance-1qbpv5lh/final-maintenance-proof.json`, SHA-256 `8049b048872366a5ae98e37f7325f053d7a1bf603b83be2eb8a8ecadf30e9f5f`; the earlier `85bf` proof is provisional.
+The rootless AppleHV VM has fourteen CPUs, 32768 MiB memory, and 128 GiB disk, with vda4/XFS grown; `/var` has 41,988,149,248 free bytes and the host has 237,409,554,432.
+Persistent PostgreSQL 18 CID `2474b0a76854696548c79e05d2ff23ccde9158b1ef305855b6027f14c87745a4` uses volume `rpgmigrate-pg18-persistent-07949d733b9b4c1d8a199dd7f8077f1f`.
+It preserves name/loopback port 38209, system ID `7705919902701522967`, timeline 1, settings, database/role/configuration, and data fingerprints.
+Old CID `f8ebf039713a75e4b69208d4871b1c6b9238c0b207995ff0044bd604b680651b` is retired, stopped, and retained: never restart it.
+Original PostgreSQL 16 on port 46631 and M0 retain their CIDs/configuration/mounts/tools; backups, existing images, and volumes are retained, with zero pruning.
+History includes the idle M0 PID1 forced stop, an unexpected first VM stop of unproven cause, a stale API-socket failed restart, and corrected detached launch.
+PostgreSQL 16/18 recovered ready with zero PANIC/FATAL and preserved metadata; this evidence is not an unconditionally graceful shutdown claim.
+Preparation success alone authorized no maintenance or kind creation; the later user decision separately authorizes the stated preservation/resize and unused-resource pruning plan.
+The first M7 UP failed after tracked check, source, 37 outputs, and capacity admission passed.
+Diagnosis identified missing `podman exec -i` and fake marker/label controls that did not retain state; the frozen recovery plan is `/private/var/tmp/rpgmigrate-m7-failed-up-recovery-hebu751n/plan.md`, SHA-256 `aeff403890a7cd4540a7dfc041ff22c9fd1b2c2543594354ac5968bd36413dc8`.
+Corrected fresh source and a fresh RUN remain required; no source implementation or new UP result follows from this plan.
+The exact user-exception cleanup is independently verified at `/private/var/tmp/rpgmigrate-m7-exception-cleanup-xz08ws2q/final-exception-cleanup-verification.json`, SHA-256 `846f6314b9a729fb291adc53947e0464a540687f49c5f65bdda14a8675eaa759`.
+The approved containers were `5a59d137a4039907737030d0bf07ec1a511568a3222ea6a27413bef3935371e7`, `ed1456fddbb6c6fbe42178e6699f0c551d00f25ad0ba83374a93b294140a261f`, and `ec087f13078d0ebc16c1c21fce55cc42cc807f7b204f9b8b8a3346610cbe74de`.
+Graceful stop/exact removal used no volume flags; all three containers, their init processes/cgroups, and matching controllers are absent.
+All three volumes, the kind network, images, backups, and four original services remain retained.
+All 530 source entries and every old RUN file remain byte-identical; phase stays `creating`, markers stay empty, and `node_limits` stays absent.
+The quiet reservation is released; this is the explicit human container exception, not guarded DOWN, UP qualification, or a general guard bypass.
+The source RUN creating/empty markers stay untouched; no volumes, network, images, backups, originals, or generic guard bypass are covered by that one-off exception.
+The failed window used an approved private finite supervisor with a monitored 12-GiB first-UP envelope, not a quota, a maximum 7200-second lease without renewal, and guarded DOWN handoff.
 Earlier partial runs remain preserved and never adopted.
-Actual kind remains unrun, with no created kind resources.
+The failed first-UP attempt does not qualify kind topology, caps, or operator workflow; its exact failed nodes require the bounded cleanup recorded above.
 The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap.
 Its receipt is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m7-node-cap-aligned-probe-8ktx3pxr/receipt.json`, SHA-256 `ab3d8ba884a56203f2f58b8fa384e06e21371a3b870fa806f2d7e4ed01c80d39`.
 That existing-container update does not qualify actual kind topology or cluster resource caps.
@@ -827,9 +869,9 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 
 ## Capacity and parallel execution, user update 2026-11-08
 
-The user-approved VM allocation is 14 CPUs, 32 GiB memory, and a 100-GiB disk.
+The verified VM allocation is fourteen CPUs, 32768 MiB memory, and a 128-GiB disk; final maintenance is accepted and its lease released.
 The original 21:35 UTC startup failure predates the CPU/memory resize.
-The user permits M7 image preparation alongside database testing, subject to measured capacity and host Cargo headroom.
+The earlier M7/database overlap permission remains subject to measured capacity and host Cargo headroom; failed-node cleanup and the leader's resource-budget release precede an M5 runtime build.
 The two-database-track window reserves six CPUs per track plus two reserve CPUs, totaling fourteen CPUs and 18 GiB.
 Image preparation waits for one database track to be idle.
 The preparation window is 11 CPUs and 17 GiB: database testing six CPUs/6 GiB, images three CPUs/5 GiB, reserve two CPUs/6 GiB.
@@ -838,9 +880,9 @@ Do not overlap image preparation, full database load, and kind.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
 Retain at least four host CPUs of headroom when assigning Cargo jobs on the 18-CPU host.
 Preserve the enforced 10-GiB VM and 2-GiB host floors; the earlier M7 first-up envelope is a planning estimate, not a verified wrapper threshold.
-The M7 section records the pending persistent PostgreSQL 18 replacement, backup Phase B, and explicit resize approval.
-Do not restart the VM or original PostgreSQL 18 container before that persistent replacement is tested.
-Do not resize the VM or purge caches under this capacity notice.
+The M7 section records completed preservation/resize, the final stable proof, retired tmpfs identity, and the separately owned first-UP window.
+Never restart the retired PostgreSQL 18 tmpfs container; retain its identity and evidence while using the verified persistent replacement.
+Perform the authorized resize and confirmed-unused pruning only under the approved preservation plan and exclusive maintenance owner; this is not blanket deletion authority.
 
 ## Executable command scope
 

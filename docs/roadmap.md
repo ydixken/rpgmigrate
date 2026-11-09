@@ -95,7 +95,9 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > The single whole-M4 review is resolved with no findings remaining; operator test-only evidence is committed separately as `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
 > M5–M10 remain open: final images/hosted CI, production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
-> User decisions remain pending for 128-GiB disk maintenance after PostgreSQL 18 preservation and the M6 Python/stock-libpq dependency amendment.
+> On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
+> VM preservation/resize maintenance and the user-exception three-container cleanup passed; the failed M7 UP remains unqualified and needs corrected fresh source/RUN.
+> Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
 Remaining work follows the existing M5 packaging/CI, M6 production adapter, and M7 operator E2E dependencies.
 Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explicit; M4 engine qualification does not activate the operator.
@@ -258,7 +260,8 @@ Formatting and strict Clippy passed; the two-file utility-routing export is froz
 The export is joined in the combined M4/M5 source and binary used by the 27 engine-producer cases.
 Linux schema checks passed ten Rust tests and nineteen child-process scenarios, with one existing database test ignored; host formatting and strict Clippy passed.
 The production ARM64 image build disk peak remains unqualified despite cached base images.
-The latest baseline is 12,565,581,824 free bytes; the unknown exact build peak prevents a capacity claim.
+The maintenance proof records 41,988,149,248 free VM bytes; the unknown exact build peak still prevents an image-build capacity claim.
+The M5 four-file source/pure-test export is ready and failed-node cleanup is confirmed; runtime image build has not started, with its fresh resource-budget authorization still pending.
 Approved M5 hosted clone jobs use the development image; the product migration matrix belongs to final release qualification.
 The final-source image, AMD64 and hosted checks, and the M5 closing gate remain unqualified.
 These checks do not complete the released runner or hosted engine CI gates below.
@@ -277,13 +280,15 @@ Owned cleanup, exact source/staged identity, and credential/canary checks passed
 
 The retained utility-routing reproduction showed explicit or inherited `PGSERVICE` redirecting schema children from validated database alpha to beta.
 The snapshot-bound dump refused the wrong database, but exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
-The effective-connection/selected-peer repair passed exact Schema3 on PostgreSQL 16.15 and 18.6; final engine/runtime acceptance remains pending.
+The effective-connection/selected-peer repair passed exact Schema3 on PostgreSQL 16.15 and 18.6 and final M4 engine acceptance; production operator admission remains refused.
 TLS evidence covers option bytes and selected hostname/address mapping with TLS disabled, not handshakes, client certificates, or encrypted keys.
 Prior-source Schema3 and actual-seven receipts remain separate from final repaired-runtime `1fd03e42` actual-seven acceptance.
 The new-runtime invocation passed seven cases with final independent verification; this remains private PostgreSQL 18/mocked Kubernetes evidence with production admission disabled.
 These are test-only checks with mocked Kubernetes ownership and production admission disabled; broad Go suites were not repeated for unchanged source.
 
-Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify a Python 3 plus stock-libpq helper for password-bearing URI Secrets without secret argv.
+The user approved both decisions on 2026-11-09: data-preserving VM maintenance and the [scoped runner dependency exception](superpowers/plans/2026-11-08-m6-native-adapter.md#user-approved-runner-dependency-exception-2026-11-09).
+Python 3/ctypes/stock-libpq dependencies may support direct private URI Secret authentication without credentials in argv; the separate mechanism plan retains all qualification gates.
+The mechanism adds no Secret-read calls or RBAC scope: bind actual pod/template references, stable privately consumed bytes, and SQL identity rather than attesting the latest Secret resource version.
 The host proof of concept passed nine URI cases and a PostgreSQL 18 connection/empty COMMIT, but the measured tool image lacks Python/ctypes and Perl DBI/DBD::Pg/FFI.
 No dependency was added and no mechanism was activated; this is not a production tool choice.
 Task 0 real Kubernetes/PVC/work permissions, production signatures, tool dependency, URI-secret handling, and checked transport remain unqualified.
@@ -311,18 +316,27 @@ Task 10 is frozen at manifest `5069c96437b0268ce7db86507d7f7d4c5e804fbc992197ee5
 Task 12 is frozen at manifest `85399fc3e8ebde3aa55a5c8101fd9114503c7c4ef7466e39bb0e82d0e3acfaab`, with 153 focused checks and its self-check passing.
 Task 11 documentation is frozen, and the third tracked preparation ran against source `1b7ca392fa63d4bd2c0662b355e3299f334df84fb19c3704a2b24d63baa2df46`.
 Its manager build and seven archive roles passed, but the baseline stage refused the multiline version-probe parser.
-No tracked check or up followed, all owned containers were proved absent, and actual kind remains unrun.
+No tracked check or up followed that third preparation attempt, and its owned containers were proved absent; the later first-UP failure is recorded below.
 Task 13 corrective planning found another producer boundary: Podman removal deletes transient CID files, leaving declared CID receipts missing.
 The Task 13 correction separates transient CID files from immutable receipts and validates complete version-output framing.
 The later tracked prepare and check passed on source `6222196c83af94e5652e72921b1e4010c72160221a90a58cab702942a10ce1bf`, with all 530 source entries unchanged.
 The earlier 14.78-GB demand was a planning envelope, not a freshly verified hard threshold or a field in the frozen wrapper/receipts.
 The exact frozen wrapper enforces a 10-GiB VM floor and 2-GiB host floor; its seven prepared archives total 798,203,904 bytes.
-The latest read-only baseline has 12,565,581,824 free bytes and only 419,700,736 conservatively reclaimable allocated bytes, insufficient against the prior envelope.
-No deletion or resource change occurred; M5 image peak and M7 full-phase growth remain unqualified, so these facts establish no execution capacity.
-The 128-GiB maintenance decision remains pending after PostgreSQL 18 persistent preservation; no resize or restart approval is inferred.
-Backup Phase A is verified and Phase B is pending.
-The original PostgreSQL 18 data uses tmpfs and requires a tested persistent replacement before any VM or original-container restart.
-No up, prune, or resize is authorized by the preparation receipt.
+The pre-maintenance read-only baseline had 12,565,581,824 free bytes and only 419,700,736 conservatively reclaimable allocated bytes, insufficient against the prior envelope.
+That read-only check made no resource change; the later authorized maintenance preserved all existing images/volumes and pruned nothing.
+M5 image peak and M7 full-phase growth remain unqualified despite the increased disk capacity.
+Final maintenance passed: rootless AppleHV is stable at 14 CPUs, 32 GiB memory, and a 128-GiB disk with vda4/XFS grown; the lease is released.
+PostgreSQL 18 now uses a verified persistent replacement on the same name/port and preserved database identity/settings/data; the old tmpfs container is retired, stopped, retained, and must never restart.
+Original PostgreSQL 16 and M0 identities/configuration/tools are preserved; all pre-existing images and volumes remain retained, with zero pruning.
+The maintenance included an idle M0 PID1 forced stop, unexpected first VM stop, stale API-socket failed restart, and corrected detached launch; PostgreSQL 16/18 recovered ready with zero PANIC/FATAL, so this was not an unconditionally graceful restart.
+The final proof records 41,988,149,248 free VM bytes and 237,409,554,432 free host bytes.
+The preparation receipt itself authorized no cleanup or resize; the later dated user decision authorizes only the stated maintenance and confirmed-unused pruning scope.
+The first M7 UP failed after tracked check/source/37-output and capacity admission passed.
+Diagnosis identified omitted `podman exec -i` and fake marker/label controls that were not stateful; the source-fix plan is frozen, and corrected fresh source plus a fresh RUN are required.
+The one-off user-exception cleanup passed for exactly the three failed-node containers, with no volume flags or other deletions.
+The source and every old RUN file remain unchanged in creating/empty state; volumes, kind network, images, backups, and original services are retained.
+The quiet reservation is released; this is neither guarded DOWN nor UP qualification.
+The failed first-UP window used a finite private supervisor with a monitored 12-GiB growth envelope, not a quota, and a 7200-second maximum lease without renewal; the cleanup exception does not generalize its guards.
 Earlier partial run directories remain preserved and cannot be adopted.
 The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap; it does not qualify actual kind topology or cluster resource caps.
 The successful preparation binds only its exact source; actual kind topology/caps, legacy workflow, and AMD64 remain unqualified.
@@ -353,6 +367,26 @@ No manual proof JSON or lease renewal is allowed.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
 - [ ] Independent reviews of durability, recovery and the operator diff; final matrix on the exact image digest.
 
+## User-authorized continuation, 2026-11-09
+
+The user authorized continuing the existing M5/M6/M7 plans and pruning unused Podman images, volumes, and build cache, plus growing `podman-machine-default`.
+The approved PostgreSQL 18 persistent-preservation maintenance plan must protect tmpfs data before any original-container stop or VM restart.
+The leader selected a 128-GiB disk, preserving 14 CPUs, 32 GiB memory, original service endpoints, and data; user-reported host free space is about 212 GiB.
+`vm_pg18_preservation_plan` completed maintenance; the exact failed-node cleanup is now verified and its quiet reservation released, with M5 build-budget authorization pending.
+Pruning is limited to confirmed-unused resources under that plan, with retained evidence and data preserved.
+The user also approved new runner dependencies, including Python 3 and ctypes/libpq, under the dated M6 exception so opaque URI Secret authentication stays out of argv.
+The separate mechanism plan and required validation remain open; this authorization proves no TLS, PVC, image, kind, or production-admission result.
+
+### Feature CI pushes and failed-node cleanup, 2026-11-09
+
+The user authorized pushing `rpgmigrate` branch `feat/native-engine` and the operator feature branch carrying native work to `origin` for hosted CI, including native AMD64 checks under M5/M10.
+This authorizes feature branches only: do not push or merge to main, create tags/releases, or publish to GHCR.
+The user separately authorized one-off removal of exactly the three failed kind-node containers identified for the failed RUN.
+That exception covers no volumes, networks, images, backups, original services, RUN-marker edits, or generic guard bypass; final independent verification now accepts its exact three-container cleanup.
+The cleanup result is recorded separately from its approval; no push, hosted-CI, image-build, or kind workflow success is claimed.
+Engine push preflight found the intended checks/native-AMD64 path; operator push is held because its workflows would force-mirror all refs/tags to GitLab and skip tests.
+The leader assigned an exact two-workflow CI-guard/hosted-test repair slice; no push has occurred and no GitLab publication is authorized.
+
 ## Execution model
 
 The leader decomposes, assigns one owner per file or subtree, and reviews; verification agents never review their own work.
@@ -361,12 +395,12 @@ Each milestone gets a detailed implementation plan (superpowers:writing-plans) b
 Parallelize the build phase as far as file ownership allows: independent owners work at the same time, each in its own git worktree off `feat/native-engine` (user-approved 2026-11-08, overriding the earlier no-worktree rule), and the leader integrates.
 Run the independent review (at the effort its risk calls for) and the Go test suites once per milestone, at its close, not after each task; workers run only the focused tests for their own change while building.
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
-The user-approved VM allocation is 14 CPUs, 32 GiB memory, and a 100-GiB disk.
+The verified VM allocation is 14 CPUs, 32 GiB memory, and a 128-GiB disk; the final maintenance proof records preservation and released-lease checks.
 The original 21:35 UTC startup failure predates the CPU/memory resize.
-M7 image preparation may overlap database testing within the approved measured-capacity windows, retaining host Cargo headroom.
+Maintenance and failed-node quiet reservations are released; M5 image build awaits the leader's fresh resource budget and proof, retaining host Cargo headroom.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
 See the [capacity and preservation record](../tasks/todo.md#capacity-and-parallel-execution-user-update-2026-11-08) for budgets and the restart prerequisites.
-Commits are small, conventional and lint-clean; nothing is pushed or merged without the user's go-ahead.
+Commits remain small, conventional, and lint-clean; feature-branch CI pushes have the dated user authorization above, while main pushes/merges, tags, releases, and GHCR publication remain unauthorized.
 
 > [!important]
 > On 2026-11-08, the user approved exactly two local WIP checkpoint commits: `e544f2d` on `feat/native-engine` and `5e8cbcb` on the isolated operator `feat/native-contract-v1` branch, as an exception to the lint-clean-per-commit rule.
