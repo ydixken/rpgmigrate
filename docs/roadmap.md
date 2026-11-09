@@ -99,6 +99,8 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > M4–M10 remain open; no runnable native operator or cutover workflow is qualified.
 > Canonical operator tests remain bound to `5e8cbcb`; full lint passed its equivalent twelve-path successor, committed separately as `2bdc7614c04bc6aa8a8f4c709a84cbcc07340b5c`.
 > Cutover, native operator activation, power-loss durability, feature widening, and performance qualification remain open under M4, M6, M8, and M9.
+> Native alpha is blocked by confirmed schema-child service routing and pending current-code acceptance.
+> User decisions remain pending for data-preserving VM disk growth/restart and qualification of the M6 URI-secret helper.
 
 ### M0: Preserve and reset (rpgmigrate)
 
@@ -208,27 +210,20 @@ Parser fuzzing and measured catch-up performance remain M10 and M9 qualification
 
 ### M4: Cutover, drain proof, cleanup (engine)
 
-The leader accepted the revised [M4 plan](superpowers/plans/2026-11-08-m4-cutover-control.md) design and contracts conditionally on the exact final M3 hash/interface/version freeze.
-On 2026-11-08, isolated M4 build work started from the exact `2b4` donor; authority, control, receiver, and apply owners use xhigh effort.
-The repaired isolated assembled candidate passed formatting, all-target check, and strict all-target Clippy without allowances, with all 304 files and 48 absences unchanged.
-These isolated M4 candidate checks do not qualify runtime, Go producer proof, E2E, or M4 closure.
-Catalog13 discovery passed on the attribute-only successor without database qualification.
-The M4 harness is frozen with 217 focused checks passing at full candidate manifest `6b63e0a9bff0bd33a5798a51cedd41feb0baccea4b7d560950455aecd87b221f`, preserving 306 files and 48 explicit absences.
-The offline native-8 build passed against integrated source `9158fef5601fa3b9c3d7c5c0c1223a761071a0aafce8d9e635ca207f79edb155`, producing binary `c185bedf97c021558092b0930815ff7b17fcc9e85c5a666552bb779607af2187` linked to libpq 180006.
-An earlier PostgreSQL 16 to 16 producer attempt failed its active-fence assertion before the parser correction below.
-The retained sentinel failure was CLI `BadArgs` exit 1 from a trailing-capture parser bug; worker Target7 after teardown is not causal evidence.
-All three owned containers and the network were proved absent.
-A two-file retention repair passed 93 focused checks, and a separate one-file CLI fix at `39b791fd` passed 31 parser checks.
-The CLI correction is joined and rebuilt for Linux at candidate manifest `ee2aa26dcf86ca48a80dd50360698290754fe6b1556171dc1bcf445fcf7e6cb8`.
-All 31 Linux parser tests and the database-free explicit-E/after-E-JSON check passed; host formatting and strict Clippy passed.
-The combined M4/M5 source passed all 27 engine-producer cases: nine on each of PostgreSQL 16.15 to 16.15, 18.6 to 18.6, and 16.15 to 18.6.
-The source manifest is `8bf95549278eafacc60ccc3498b43d0396335a0cc1d18370170d9cf44d8ec312`; its aggregate proof is `9c92e1f905e55546938dab9f7fc2e60ae34419eede69117897556f362aa0d9e9`.
-Source, binary, linkage, credential checks, and exact owned cleanup passed.
-The scope is `engine_producer` with `probe_checked=false`; independent M6 Go qualification and M4 closing review/gates remain pending.
-The test-only PostgreSQL 18 M6 interoperability PASS leaves the required PostgreSQL 16/18 helper qualification, broad closing checks, and whole-M4 safety review open.
-Completed-positive Go validation explicitly depends on the M6 independent reader; the old clone probe cannot accept the new completion fields, so engine producer checks are not a Go gate pass.
-The 2026-11-08 clarifications are recorded in the [M4 plan](superpowers/plans/2026-11-08-m4-cutover-control.md), covering endpos, retained frontiers, fresh proof, durable sealing, and guarded closure.
-The 27 cases qualify the declared engine-producer profile; consumer qualification and the remaining closing gates keep M4 open.
+The assembled M4 baseline is undergoing current-code qualification under the [M4 plan](superpowers/plans/2026-11-08-m4-cutover-control.md).
+Ancestor `5de` passed fresh host lint, check, 497 Rust tests (twenty ignored, 107 filtered), 27 CLI tests, and 306 portable tests.
+PostgreSQL 16 Source12 and Snapshot9 passed, including five fault receipts and three tail phases.
+Authority17 produced eleven PASS and six FAIL when empty advancing serial transactions reached COMMIT without BEGIN; no CAS or proof occurred.
+Independent xhigh diagnosis found a lazy-BEGIN omission in the serial route; the active pipeline route already handles it.
+The `ensure_transaction` repair and test-only synchronization successor passed all seventeen FollowAuthority cases on PostgreSQL 16.15 and all seventeen on 18.6, with zero failed or ignored cases.
+The focused source is `866981b9176e4e3e6d0abc93872d0e56f64818e707efec57e87a3ae1168e8edd`; this library-test result does not qualify the final runtime or broad engine gates.
+The approved schema-utility effective-connection repair is assigned to separate implementation and harness owners.
+It pins the validated SQL owner's resolved connection and selected peer; the required Schema profile expands to three cases using the existing TCP/SCRAM fixture and an owned relay for peer-loss checks.
+The earlier `ef4` engine-producer 27-case PASS and `134`/`d75` actual seven-case Go interoperability PASS are ancestor evidence pending fresh current-code matrices.
+The composed operator Go closing profile is green on 546 source files, source hash `732fcf1f9fefe21db5b6ae15f4f3e3508fc31f8899bfb5e489281358602edd1c` and tree `7442e438270f2d3ae47317447f7f07299fcf5322`.
+It covers full lint, fifteen uncached unit/envtest packages, PG16/PG18 cluster-free checks, and fourteen helper functions per major; the ledger records exact counts and composite PG16 provenance.
+Final actual seven-case interoperability on the current engine/current Go, current matrices, and one whole-M4 xhigh review remain pending.
+These checks leave M4 open and qualify no native operator activation.
 Local endpos reads are allowed, but informational JSON cannot expose unproven certified or durability counters.
 Durable replay, drained status, and proof reads require positive fenced observation, with bounded explicit refusal when busy or unknown.
 The native operator must sample and persist one E, then retry that identical E explicitly after a bounded refusal.
@@ -236,7 +231,9 @@ The worker processes persisted E independently of acknowledgment; the M6 standal
 We add no IPC or fence handoff for this path.
 Native 8 / metadata 6 applies only if the accepted M3 identity-fix baseline is 7 / 5; uncertain slot incarnation or reappearance must be preserved under the accepted exclusive-administration prerequisite.
 
-- [x] Pass the 27-case engine-producer profile across all three pairs, without an independent M6 Go qualification claim.
+- [x] Retain the ancestor 27-case engine-producer PASS across all three pairs.
+- [x] Pass the exact seventeen-case FollowAuthority profile on PostgreSQL 16.15 and 18.6 for the focused repair successor.
+- [ ] Pass fresh current-code runtime matrices and actual engine/Go interoperability, then complete M4 closing review/gates.
 - [ ] `stream sentinel set endpos <lsn>|--current` and `get --endpos|--replay-lsn|--json` per decision 6.
 - [ ] Drain certification, final sequence sync, exit 0 only with proof.
 - [ ] `stream cleanup`: owned slot and publication only, idempotent, workdir kept for later compares.
@@ -262,35 +259,25 @@ These checks do not complete the released runner or hosted engine CI gates below
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
-Pure command and framing helpers passed focused checks on the separate operator branch, including legacy argv preservation and negative identity bindings.
-Production `UnsupportedEngine` activation remains unchanged, so none of the lifecycle gates below is complete.
-The actual Go producer proof covers the M2 clone/progress prerequisite; durable drain still depends on M3/M4.
-Remaining native lifecycle planning preserves independent checkpoint evidence through a bounded existing-psql/private-PVC qualification spike; engine reports or acknowledgments cannot supply that evidence.
-The later test-only boundary prototype passed 194 cases: 120 without a database, 37 on PostgreSQL 16, and 37 on PostgreSQL 18.
-This component evidence does not complete Task 0, establish a production API, or authorize native activation; qualification and a root-reviewed addendum remain required.
-Consumer interfaces remain unfrozen pending qualification and review; production constructors/helpers and native activation remain unauthorized.
-The leader accepted final M6 plan SHA-256 `c3ba6a68ac5dc4ca2ad269ccf0cd3d6949a2ffc15d5fb888ad28b1815d9b47ac`: informational source-slot telemetry uses twenty-second freshness held in new private constant-size state on the existing Sampler run.
-No CRD, new cache, CLI/DTO change, or checkpoint evidence authority is added.
-The composed 21-file test-only successor `031f9d4` passed 67 focused Go checks and eight Perl checks.
-The latest `5f` input passed one focused PostgreSQL 16 lost-COMMIT case.
-The first attempt retained fifteen stages and relay COMMIT/Idle proof with refusal and no observation; a distinct fresh PID/ID retry passed nineteen stages, EOF, exit zero, and the same row/token.
-That single-case receipt supplies PostgreSQL 16 lost-COMMIT evidence; the later PostgreSQL 18 actual-producer result below has separate scope.
-The corrected actual-native-8 fixture is frozen in 23-file manifest `134907f9302a745e3c786fe500d205623e742eaf98555f249da6a3ab2c998390`.
-It removes only three unsupported `--resume` tokens from the capped predecessor, preserving the other 22 files and resource caps.
-Two named pure tests produced 146 PASS entries without skips; gofmt and diff checks passed.
-Independent direct PostgreSQL 18 to 18 execution passed all seven cases: one `positive_keepalive` and six negative controls, with zero skips.
-The positive path proves actual COPY/follow, persisted same-E control, successful worker exit, fresh nineteen-stage helper closure, independent Go ParseReport, and the same-E drained JSON acknowledgment.
-All 31 owned objects were proved absent, the original three remained, all 23 source files were unchanged, and credential scanning passed.
-The scope is test-only with mocked Kubernetes ownership; real-PVC and production admission remain false.
-Earlier failures were private-wrapper stdout buffering followed by unsupported fixture flags; they are retained as harness evidence, not engine defects.
-An independent private fresh-volume capability probe passed with UID/GID 65532: same-owner empty mode 0755 changed to 0700, actual fsync passed, and a new container retained owner/mode/device/inode/empty-state proof.
-Exact owned cleanup passed; this is not Kubernetes fsGroup/PVC permission qualification.
-Real/work-PVC ancestor permissions remain open, with existing-state/PVC guards unchanged and no guard relaxation or root initialization approved.
-This prototype does not qualify Task 0 or authorize production activation.
-Production signatures, checked transport, tool dependencies, URI/SecretRef handling without argv credentials, and real PVC/work permission qualification remain pending.
-Composition of the exact 23 files with clean operator commit `2bdc7614` prepares closing Go gates and does not authorize activation.
-Task 0 acceptance uses the approved root-reviewed addendum; one independent xhigh whole-M6 review belongs at milestone close.
-Application write fencing and ending outstanding transactions remain the operator user’s duty in both cutover modes; no fencing subsystem is added.
+Production native activation remains refused; the composed operator closing checks establish test-only compatibility, not Task 0 production admission.
+On the 546-file composition, full lint passed all sixteen stages with zero issues, and `task test` passed fifteen uncached unit/envtest packages.
+PG16 race checks passed 508 entries with exactly two expected skips; the PG18 subset passed 158 without skips.
+Each major passed fourteen helper functions and 158 entries with no required skip; PG16 combines seven completed results from an observer-interrupted invocation with seven fresh exit-zero results.
+The 128 Go shared-fixture cases (186 inventory cases) are already included, not additional runs.
+Owned cleanup, exact source/staged identity, and credential/canary checks passed.
+
+A confirmed engine utility-routing defect blocks native alpha: explicit or inherited `PGSERVICE` can redirect schema child utilities from validated database alpha to beta.
+The snapshot-bound dump refused the wrong database, but exact restore invocations succeeded on beta in an isolated empty fixture; no user data was touched.
+The effective-connection/selected-peer repair plan is approved, and separate implementation and harness owners are building it.
+Fresh three-case Schema acceptance and final runtime/current-engine interoperability remain pending; the unchanged Go closing proof is retained without repeated broad Go suites.
+
+Two user decisions remain pending: data-preserving VM disk growth/restart, and the M6 plan 31 exception to qualify a Python 3 plus stock-libpq helper for password-bearing URI Secrets without secret argv.
+The host proof of concept passed nine URI cases and a PostgreSQL 18 connection/empty COMMIT, but the measured tool image lacks Python/ctypes and Perl DBI/DBD::Pg/FFI.
+No dependency was added and no mechanism was activated; this is not a production tool choice.
+Task 0 real Kubernetes/PVC/work permissions, production signatures, tool dependency, URI-secret handling, and checked transport remain unqualified.
+The private fresh-volume capability PASS remains distinct from real Kubernetes permission qualification; guards remain unchanged.
+Task 0 needs the approved root-reviewed addendum; one independent xhigh whole-M6 review belongs at milestone close.
+Users retain application write fencing and outstanding-transaction duties in both cutover modes.
 
 - [ ] Engine-aware argv0 and scripts (worker, verify, cleanup, compare, catalog, endpos exec); lift `UnsupportedEngine` for the qualified profile; `--rpgmigrate-runner-image` flag and chart value.
 - [ ] Preflight: `version --json` handshake into `validateNativeConfig`; native pg_restore gate by target major; skip the origin-grant probe; PG16 target allowed for native.
