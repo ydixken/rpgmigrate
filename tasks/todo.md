@@ -21,6 +21,8 @@ The decision alone claimed no execution success; the final maintenance acceptanc
 
 ### Feature CI pushes and failed-node cleanup, 2026-11-09
 
+On 2026-11-09, after approving the second exact failed-kind cleanup, the user authorized future removal of independently verified rpgmigrate-owned failed kind-node containers without repeated cleanup approval.
+This standing authorization covers containers only: preserve volumes, networks, images, backups, original PostgreSQL containers, source, and RUN evidence; do not extend it to other resources or repair RUN markers.
 The user authorized pushing `rpgmigrate` `feat/native-engine` and the operator native-work feature branch to `origin` for hosted CI, including M5/M10 native AMD64 checks.
 Feature branches only are authorized, with no main push/merge, tags, releases, or GHCR publication; no push or CI result is recorded by this decision.
 The one-off cleanup exception permits exactly three failed kind-node containers for the failed RUN, not volumes, networks, images, backups, original services, RUN markers, or a general guard bypass.
@@ -30,7 +32,10 @@ On 2026-11-09, the user explicitly approved the existing GitLab mirroring trigge
 We resolved the publication P1 by authorization and keep the existing mirror enabled; this decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
 The CI owner restored its mirror-guard edits to baseline and committed only `ci.yml` as `ccde83912cdbc9e152f0bc51c47c49954ede8a9d`, parent `c262322909ac03a7101ea3bfac2c4823efa62e95`; normal push to `origin/test/m4-closing-m6-composed-20261109` is verified.
 Early receipt: `/tmp/rpgmigrate-feature-ci-preflight-20261109/operator-ccde839-push-early-receipt.json`, SHA-256 `689243c6b62ae2549c1fce755530a3723988ae5e0cc0e1aaa1f165f71a57d149`.
-[Operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254706) is running and the [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254999) is queued at this receipt; neither outcome is accepted yet.
+The [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254999) passed; [operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254706) passed docs and its unit/envtest, cluster-free E2E, and PostgreSQL 18 coverage test job, failing only lint on SC2015.
+The reviewed mechanical fix `5616d82f03e6a917147e55ed4a3fb436a1cc6d89` was pushed normally to the feature ref after prior tests became terminal, without cancellation.
+Push/source receipt: `/tmp/rpgmigrate-feature-ci-preflight-20261109/operator-5616d82-push-early-receipt.json`, SHA-256 `2503a3d8cb6464ac90f2a52ad92a993a7dc3e77a588a3d88a7a4320534e26beb`.
+The new [operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42636601113) is in progress and its authorized [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42636601234) passed; no corrected-CI pass is claimed.
 Exact engine feature pushes and their hosted outcomes remain recorded under M5.
 
 ## M0: Preserve and reset (rpgmigrate)
@@ -701,7 +706,10 @@ Task 0's final five-file pure-helper export is frozen at `/Users/ydixken/.codex/
 Its sibling `proof.json`, SHA-256 `bb09761a5e4591f53d72e4bb676e0d071211c70cab9be0bde210f7cbddf42af1`, records nineteen Python and eighteen focused Go tests, with three mutation controls and exact PG16/18 SQL fixture equality.
 The admission-reader export is frozen at `/Users/ydixken/.codex/tmp/m6-admission-reader-export-20261109/manifest.json`, SHA-256 `e8d43f56bb813a64ddaa88fe140ab160b04bf04aa4425db1b4a9e961f8c51728`; sibling proof SHA-256 is `22cfb4fad23271dd072b286f822590ca2aab959cb2e4b96b9732644f00b62284`.
 Its observed thirteen top-level tests and 330 focused checks passed without failures or skips, using exact peer inputs and same-E/live-binding controls; these are separate from the pure-helper counts.
-All Task 0 source handoffs are frozen, without integration, production admission activation, or broad milestone closure.
+The earlier Task 0 handoffs remain historical inputs; final relay-aware Reader composition passed fourteen top-level tests and 344 focused checks with zero failures/skips against the exact new relay/transport inputs, without integration, production admission activation, or broad milestone closure.
+Final Reader manifest: `/Users/ydixken/.codex/tmp/m6-admission-reader-relay-export-20261109/manifest.json`, SHA-256 `4291d081b125c412a65d4bc4dfaa3bbfad501246e4b6211089130ff8d71b1ebc`; sibling proof SHA-256 `8d799b6a9e702a388691f101afaf20096b1320798567f981a6221d0bd936d15b`.
+The new relay export is `/Users/ydixken/.codex/tmp/m6-python-relay-export-20261109/manifest.json`, SHA-256 `4226dd85ee2d4aad7ac80799ab135d1c036b7fcb42c4273bdd49ccda889a72ed`: 29 Python and nineteen focused Go tests (ten relay subcases) passed, with five mutation controls RED.
+The new transport manifest `/Users/ydixken/.codex/tmp/m6-default-transport-t35vz_yh/manifest.json`, SHA-256 `512263a8cdd49e56497dc7a75d3fb8913ab0f4451b4f07bc69a92fdd529e8aef`, records 97 checks/92 leaf cases, zero failures/skips; no actual default-cluster/log-completeness/rotation/relay-flock runtime qualification follows.
 Runtime qualification and production activation remain false; exact packaged-libc resolver bounds and opaque-file stability before first consumption, including service expansion, are unresolved.
 Checked WebSocket transport has focused passing checks; the approved [delivery correction](../docs/superpowers/plans/2026-11-09-m6-default-kubernetes-delivery.md) replaces the default-disabled split-log prerequisite, with three disjoint source owners building it.
 The [dated roadmap amendment](../docs/roadmap.md#m6-default-kubernetes-delivery-amendment-2026-11-09) keeps SQL in main, separate result streams in checked exec, and terminal Job success/complete empty ordinary logs as a separate requirement; no Stream query is used.
@@ -859,7 +867,13 @@ Sibling `focused-green.json` has SHA-256 `a0743c7e5ede8d3bbad0eb42d419f06c1409db
 The new source integration preserves 527 unowned paths while changing exactly three fix/guide files; its 530-path manifest is `/private/var/tmp/rpgmigrate-m7-marker-guide-integration-ysunzd95/manifest.json`, SHA-256 `bc3d7721cd999bbd8156b5cbedafe80ced7ef2044d45575584b4acb60c122fbd`.
 The real frozen-marker probe passed root-owned mode-0600 readback, no-clobber, and exact owned-probe absence checks.
 Proof: `/private/var/tmp/rpgmigrate-m7-marker-roundtrip-1q0do84i/final.json`, SHA-256 `376d4e3a680ea4a0520bafc6b2ce9f38e76f698dc19f35a09600235dcd323de3`.
-Fresh RUN `/private/var/tmp/rpgmigrate-m7-marker-fixed-run-0x7obi5w` has manager preparation running, stopping before kind UP; no M7 workflow qualification is claimed.
+Fresh source `78a663` prepared successfully; the first UP for RUN `/private/var/tmp/rpgmigrate-m7-marker-fixed-run-0x7obi5w` verified all three caps, then failed at a kubeconfig kind-prefix mismatch.
+RUN remains `creating`; guarded DOWN refused the same naming check, with no RUN repair.
+Independent recovery observation: `/private/var/tmp/rpgmigrate-m7-kubeconfig-safety-review-8k92oct6/observation.json`, SHA-256 `e6550197bf935ac956f92e4853b9a2d643a787bd6045c2ec7f7c6bd0c9e0f48e`; runtime proof `/private/var/tmp/rpgmigrate-m7-marker-fixed-first-up-twnzphcp/failed-UP-recovery-proof.json`, SHA-256 `17fb5ca3728c323a2beffbaf7d69f558e0cae8be842f4fe7806f123bd090fbe1`.
+The approved exact three-container cleanup passed: containers/processes/cgroups are absent and the kind reservation is released.
+Final proof: `/private/var/tmp/rpgmigrate-m7-second-exception-cleanup-7xoc3tat/cleanup-proof.json`, SHA-256 `7ef026e0161d9d8ea48c20dc2a2eec9dbe16dc4fb3ba5f4855fcad4ca60ae6b7`.
+Volume metadata, images, immutable network properties, original four services, backup hashes, all 530 source entries, and every RUN byte remain preserved with phase `creating`; this exception disposal is not guarded DOWN qualification.
+After two bootstrap-contract failures, the leader is re-planning bounded startup/DOWN metadata fixtures before any third UP; this is not a broad repository audit or lifecycle qualification.
 The frozen manager recipe uses three CPUs, 5 GiB memory, no swap, and one build job; PID enforcement is outside that approved recipe.
 Corrected fresh source, a source-bound manager, and a fresh RUN remain required; source readiness is not a repaired UP or lifecycle qualification.
 The exact user-exception cleanup is independently verified at `/private/var/tmp/rpgmigrate-m7-exception-cleanup-xz08ws2q/final-exception-cleanup-verification.json`, SHA-256 `846f6314b9a729fb291adc53947e0464a540687f49c5f65bdda14a8675eaa759`.
@@ -875,7 +889,7 @@ The failed first-UP attempt does not qualify kind topology, caps, or operator wo
 The aligned standalone Podman cap probe proved update to two CPUs / 4 GiB with no effective swap.
 Its receipt is `/var/folders/k2/75psc6cn37z35v6mfyjn22qc0000gn/T/rpgmigrate-m7-node-cap-aligned-probe-8ktx3pxr/receipt.json`, SHA-256 `ab3d8ba884a56203f2f58b8fa384e06e21371a3b870fa806f2d7e4ed01c80d39`.
 That existing-container update does not qualify actual kind topology or cluster resource caps.
-The successful preparation binds only its exact source; actual kind topology/caps, legacy workflow, and AMD64 remain unqualified.
+The successful preparation binds only its exact source; verified node caps in the failed fresh attempt do not qualify the kind lifecycle, legacy workflow, or AMD64.
 No manual proof JSON, renewed lease, or new schema is allowed.
 
 - [ ] kind (podman provider) bootstrap with pinned CNPG, CRD apply and image load as Task targets; validated first with engine=pgcopydb on 17:17 (can start right after M1).

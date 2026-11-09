@@ -430,3 +430,10 @@ Origin feature-branch push approval does not authorize downstream default-main G
 
 The user explicitly approved the existing GitLab mirroring of the operator native feature branch, resolving its publication P1 and prior authorization hold.
 Keep the existing mirror enabled and retain the earlier origin-only rationale as history; do not ask again for the approved scope or infer repository settings/main edits, tags, releases, or GHCR permission.
+
+## Standing failed-kind container cleanup authorization, 2026-11-09
+
+On 2026-11-09, after approving the second exact failed-kind cleanup, the user authorized future removal of independently verified rpgmigrate-owned failed kind-node containers without repeated cleanup approval.
+This standing authorization covers containers only: preserve volumes, networks, images, backups, original PostgreSQL containers, source, and RUN evidence; do not extend it to other resources or repair RUN markers.
+Verify ownership and failed state independently before cleanup, preserve exact resource identity evidence, and do not report completion until final absence checks pass.
+After repeated bootstrap-contract failures, re-plan bounded startup/DOWN metadata fixtures before another UP; preserve failed RUN evidence rather than repairing it in place.
