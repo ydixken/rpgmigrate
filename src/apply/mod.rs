@@ -34,6 +34,8 @@ pub(crate) struct Checkpoint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ControlRow {
+    pub(self) drain: Option<checkpoint::DrainRecord>,
+    pub(super) follow_completed: bool,
     pub(super) applied: Option<Frontier>,
     pub(super) barrier_epoch: u64,
     pub(super) barrier_counter: u64,

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -10,10 +11,10 @@ use std::time::{Duration, Instant};
 
 use crate::catalog;
 use crate::contracts::{
-    CloneOptions, ClonePlan, CloneTarget, Conninfo, Error, ErrorKind, IoControl, OwnedObject,
-    RestorePolicy, Result, SnapshotTicket,
+    CloneOptions, ClonePlan, CloneTarget, Error, ErrorKind, IoControl, OwnedObject, RestorePolicy,
+    Result, SnapshotTicket,
 };
-use crate::pg::{self, PgConnection};
+use crate::pg::PgConnection;
 use crate::state::{ClonePhase, NativeState};
 
 struct PrivateFiles {
@@ -171,6 +172,10 @@ fn capture(program: &Path, args: &[&str], io: &IoControl) -> Result<Vec<u8>> {
 }
 
 fn tools(major: u32, io: &IoControl) -> Result<Tools> {
+    tools_in(major, io, Path::new("/usr/lib/postgresql"))
+}
+
+fn tools_in(major: u32, io: &IoControl, stock_root: &Path) -> Result<Tools> {
     let explicit = if let Some(path) = std::env::var_os("PG_BINDIR") {
         if path.is_empty() {
             return Err(failure("PG_BINDIR must select an existing tool directory"));
@@ -188,8 +193,14 @@ fn tools(major: u32, io: &IoControl) -> Result<Tools> {
     } else {
         None
     };
+    let packaged = stock_root.join(major.to_string()).join("bin");
     let directories = if let Some(directory) = explicit {
         vec![directory]
+    } else if packaged
+        .try_exists()
+        .map_err(|_| failure("cannot inspect packaged PostgreSQL tool directory"))?
+    {
+        vec![packaged]
     } else {
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect()
     };
@@ -217,20 +228,27 @@ fn tools(major: u32, io: &IoControl) -> Result<Tools> {
     ))
 }
 
-fn utility(program: &Path, conninfo: &Conninfo) -> Result<Command> {
-    let environment = pg::utility_environment(conninfo)?;
+fn utility(program: &Path, connection: &PgConnection) -> Result<Command> {
+    let environment = connection.utility_environment()?;
     let mut options = environment
+        .values
         .iter()
         .find(|(name, _)| name == "PGOPTIONS")
         .map(|(_, value)| value.clone())
-        .or_else(|| std::env::var_os("PGOPTIONS"))
         .unwrap_or_default();
     options.push(
         " -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C",
     );
     let mut command = Command::new(program);
+    for name in environment.remove.iter().map(OsStr::new).chain([
+        OsStr::new("PGSERVICEFILE"),
+        OsStr::new("PGSYSCONFDIR"),
+        OsStr::new("PGSERVICE"),
+    ]) {
+        command.env_remove(name);
+    }
     command
-        .envs(environment)
+        .envs(environment.values)
         .env("PGOPTIONS", options)
         .env("PGAPPNAME", "rpgmigrate-schema")
         .arg("--no-password")
@@ -260,10 +278,15 @@ pub(crate) struct SchemaArchive {
     target: CloneTarget,
 }
 
-pub(crate) fn preflight(options: &CloneOptions, plan: &ClonePlan, io: &IoControl) -> Result<()> {
+pub(crate) fn preflight(
+    source: &PgConnection,
+    target: &PgConnection,
+    plan: &ClonePlan,
+    io: &IoControl,
+) -> Result<()> {
     let _ = tools(plan.target.major, io)?;
-    let _ = pg::utility_environment(&options.source)?;
-    let _ = pg::utility_environment(&options.target)?;
+    let _ = source.utility_environment()?;
+    let _ = target.utility_environment()?;
     Ok(())
 }
 
@@ -295,7 +318,7 @@ pub(crate) fn dump(
     let tools = tools(target_identity.major, io)?;
     let mut files = PrivateFiles::new()?;
     let (path, file) = files.file("schema.dump")?;
-    let mut command = utility(&tools.dump, &options.source)?;
+    let mut command = utility(&tools.dump, &source)?;
     command
         .args([
             "--format=custom",
@@ -405,8 +428,8 @@ pub(crate) fn restore_pre(
     }
     catalog::configure_durability(&mut target, io)?;
     let before = catalog::clone_object_inventory(&mut target, io)?;
+    let mut command = utility(&archive.tools.restore, &target)?;
     state.begin_pre_data()?;
-    let mut command = utility(&archive.tools.restore, &options.target)?;
     // An empty explicit dbname selects restore connection mode; libpq reads PGDATABASE.
     command
         .args([
@@ -443,7 +466,7 @@ pub(crate) fn restore_post(
         ));
     }
     catalog::configure_durability(&mut target, io)?;
-    let mut command = utility(&archive.tools.restore, &options.target)?;
+    let mut command = utility(&archive.tools.restore, &target)?;
     command
         .args([
             "--dbname=",
@@ -475,7 +498,7 @@ struct ComparisonDump<'a> {
 
 fn comparison_dump(
     options: &CloneOptions,
-    connection: &Conninfo,
+    connection: &PgConnection,
     tools: &Tools,
     path: &Path,
     exclude: &BTreeSet<String>,
@@ -637,7 +660,7 @@ fn compare_schemas(
     let (target_path, _) = files.file("target.sql")?;
     comparison_dump(
         options,
-        &options.source,
+        &source,
         &tools,
         &source_path,
         &BTreeSet::new(),
@@ -649,7 +672,7 @@ fn compare_schemas(
     )?;
     comparison_dump(
         options,
-        &options.target,
+        &target,
         &tools,
         &target_path,
         &exclude,
@@ -693,6 +716,1195 @@ fn failure(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::Conninfo;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    struct ToolFixtures(PrivateFiles);
+
+    impl ToolFixtures {
+        fn pair(&self, name: &str, dump: u32, restore: u32) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = self.0.directory.join(name);
+            fs::create_dir_all(&directory).unwrap();
+            for (tool, major) in [("pg_dump", dump), ("pg_restore", restore)] {
+                let path = directory.join(tool);
+                fs::write(
+                    &path,
+                    format!("#!/bin/sh\nprintf '%s\\n' '{tool} (PostgreSQL) {major}.6'\n"),
+                )
+                .unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            directory
+        }
+
+        fn config(&self, name: &str, directory: &str) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.directory.join(name);
+            fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{directory}'\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        }
+    }
+
+    impl Drop for ToolFixtures {
+        fn drop(&mut self) {
+            // Only this test's exclusively created private tree is eligible for cleanup.
+            fs::remove_dir_all(&self.0.directory).unwrap();
+        }
+    }
+
+    fn utility_io() -> IoControl {
+        IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+    }
+
+    fn utility_context(io: &IoControl) -> (serde_json::Value, PgConnection) {
+        let path =
+            std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned schema context is required");
+        let context: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let token = context["token"].as_str().unwrap();
+        let root = Path::new(context["root"].as_str().unwrap());
+        assert!(
+            fs::read_to_string(root.join(".e1-owner")).unwrap() == token,
+            "fixture ownership differs"
+        );
+        let mut admin = PgConnection::connect(
+            &Conninfo::new(
+                std::env::var_os("RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN")
+                    .expect("schema admin is required"),
+            )
+            .unwrap(),
+            io,
+        )
+        .unwrap();
+        let identity = admin
+            .query("SELECT current_setting('cluster_name')", io)
+            .unwrap();
+        assert!(
+            identity.cell(0, 0).unwrap() == Some(token.as_bytes()),
+            "fixture cluster identity differs"
+        );
+        (context, admin)
+    }
+
+    fn utility_child(test: &str, case: &str, root: &Path) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            test,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        for (key, _) in std::env::vars_os() {
+            if key.as_bytes().starts_with(b"PG") && key != "PG_BINDIR" && key != "PG_CONFIG" {
+                command.env_remove(key);
+            }
+        }
+        command
+            .env("RPGMIGRATE_TEST_UTILITY_CHILD", case)
+            .env("RPGMIGRATE_TEST_UTILITY_ROOT", root);
+        command
+    }
+
+    fn utility_child_completed(command: &mut Command) {
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "schema utility subprocess failed; output withheld"
+        );
+        assert!(
+            output
+                .stdout
+                .windows(b"schema-utility-child-complete".len())
+                .any(|part| part == b"schema-utility-child-complete"),
+            "schema utility child did not execute"
+        );
+    }
+
+    fn connection_value(connection: &PgConnection, name: &str) -> OsString {
+        connection
+            .utility_environment()
+            .unwrap()
+            .values
+            .into_iter()
+            .find(|(key, _)| key == name)
+            .expect("required effective fixture setting is absent")
+            .1
+    }
+
+    fn uri_value(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("%{byte:02X}")).collect()
+    }
+
+    fn utility_uri(connection: &PgConnection, database: &str) -> String {
+        let mut uri = format!(
+            "postgresql:///?dbname={}&sslmode=disable",
+            uri_value(database.as_bytes())
+        );
+        for (parameter, name) in [
+            ("host", "PGHOST"),
+            ("port", "PGPORT"),
+            ("user", "PGUSER"),
+            ("passfile", "PGPASSFILE"),
+        ] {
+            uri.push_str(&format!(
+                "&{parameter}={}",
+                uri_value(connection_value(connection, name).as_bytes())
+            ));
+        }
+        uri
+    }
+
+    fn utility_probe(
+        connection: &PgConnection,
+        context: &serde_json::Value,
+        expected: &str,
+    ) -> Command {
+        let mut command = utility(
+            &Path::new(context["bindir"].as_str().unwrap()).join("psql"),
+            connection,
+        )
+        .unwrap();
+        assert!(
+            expected
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "fixture database name is invalid"
+        );
+        let literal = format!("'{expected}'");
+        command
+            .args(["-X", "-qAt", "--set=ON_ERROR_STOP=1", "--command"])
+            .arg(format!("SELECT 1/(current_database()={literal})::integer"));
+        command
+    }
+
+    fn utility_keyword(base: &OsStr, key: &str, value: &OsStr) -> OsString {
+        let mut bytes = base.as_bytes().to_vec();
+        bytes.extend_from_slice(format!(" {key}='").as_bytes());
+        for byte in value.as_bytes() {
+            if matches!(byte, b'\\' | b'\'') {
+                bytes.push(b'\\');
+            }
+            bytes.push(*byte);
+        }
+        bytes.push(b'\'');
+        OsString::from_vec(bytes)
+    }
+
+    fn utility_private_file(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+    }
+
+    struct UtilityRelay {
+        port: u16,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        sockets: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+        worker: Option<std::thread::JoinHandle<bool>>,
+    }
+
+    fn utility_relay_copy(
+        mut input: std::net::TcpStream,
+        mut output: std::net::TcpStream,
+        stop: &std::sync::atomic::AtomicBool,
+    ) {
+        use std::io::Write;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut buffer = [0u8; 8192];
+        let (mut start, mut end) = (0, 0);
+        while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
+            if start == end {
+                match input.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(length) => {
+                        start = 0;
+                        end = length;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => break,
+                }
+            }
+            match output.write(&buffer[start..end]) {
+                Ok(0) => break,
+                Ok(length) => start += length,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    impl UtilityRelay {
+        fn new(server_port: u16) -> Self {
+            use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sockets = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let worker_stop = stop.clone();
+            let worker_sockets = sockets.clone();
+            let worker = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !worker_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                    let client = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => return false,
+                    };
+                    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, server_port));
+                    let Ok(server) = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                    else {
+                        return false;
+                    };
+                    if client.set_nonblocking(true).is_err()
+                        || server.set_nonblocking(true).is_err()
+                    {
+                        return false;
+                    }
+                    let Ok(client_read) = client.try_clone() else {
+                        return false;
+                    };
+                    let Ok(server_write) = server.try_clone() else {
+                        return false;
+                    };
+                    {
+                        let mut owned = worker_sockets.lock().unwrap();
+                        if worker_stop.load(Ordering::Acquire) {
+                            let _ = client.shutdown(std::net::Shutdown::Both);
+                            let _ = server.shutdown(std::net::Shutdown::Both);
+                            return false;
+                        }
+                        owned.push(client.try_clone().unwrap());
+                        owned.push(server.try_clone().unwrap());
+                    }
+                    let outbound_stop = worker_stop.clone();
+                    let outbound = std::thread::spawn(move || {
+                        utility_relay_copy(client_read, server_write, &outbound_stop)
+                    });
+                    let inbound = std::thread::spawn(move || {
+                        utility_relay_copy(server, client, &worker_stop);
+                    });
+                    let outbound = outbound.join();
+                    let inbound = inbound.join();
+                    return outbound.is_ok() && inbound.is_ok();
+                }
+                false
+            });
+            Self {
+                port,
+                stop,
+                sockets,
+                worker: Some(worker),
+            }
+        }
+
+        fn close(&mut self) -> bool {
+            self.stop.store(true, Ordering::Release);
+            for stream in self.sockets.lock().unwrap().iter() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            self.worker
+                .take()
+                .is_none_or(|worker| worker.join().unwrap_or(false))
+        }
+    }
+
+    impl Drop for UtilityRelay {
+        fn drop(&mut self) {
+            let _ = self.close();
+        }
+    }
+
+    fn utility_selected_peer_loss(context: &serde_json::Value, io: &IoControl) {
+        let server_port = u16::try_from(context["port"].as_u64().unwrap()).unwrap();
+        let mut relay = UtilityRelay::new(server_port);
+        let base =
+            std::env::var_os("RPGMIGRATE_TEST_SOURCE").expect("owned TCP role fixture is required");
+        let password = std::env::var_os("RPGMIGRATE_TEST_AUTH_PASSWORD").unwrap();
+        let mut info = utility_keyword(&base, "password", &password);
+        for (name, value) in [
+            (
+                "host",
+                "selected.fixture.invalid,fallback.fixture.invalid".to_owned(),
+            ),
+            ("hostaddr", "127.0.0.1,127.0.0.1".to_owned()),
+            ("port", format!("{},{}", relay.port, server_port)),
+            ("connect_timeout", "2".to_owned()),
+        ] {
+            info = utility_keyword(&info, name, OsStr::new(&value));
+        }
+        let connection = PgConnection::connect(&Conninfo::new(info).unwrap(), io).unwrap();
+        let database = connection_value(&connection, "PGDATABASE");
+        let mut captured = utility_probe(&connection, context, database.to_str().unwrap());
+        for (name, expected) in [
+            ("PGHOST", "selected.fixture.invalid".to_owned()),
+            ("PGHOSTADDR", "127.0.0.1".to_owned()),
+            ("PGPORT", relay.port.to_string()),
+        ] {
+            assert!(
+                captured
+                    .get_envs()
+                    .any(|(key, value)| key == name && value == Some(OsStr::new(&expected))),
+                "selected TCP peer or TLS hostname changed"
+            );
+        }
+        let started = Instant::now();
+        assert!(
+            relay.close(),
+            "owned relay did not join its forwarding threads"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "owned relay teardown exceeded its bound"
+        );
+        assert!(
+            !run(&mut captured, io, None).unwrap().success(),
+            "utility failed over after losing the selected peer"
+        );
+        let mut direct = utility_keyword(&base, "password", &password);
+        for (name, value) in [
+            ("host", "fallback.fixture.invalid".to_owned()),
+            ("hostaddr", "127.0.0.1".to_owned()),
+            ("port", server_port.to_string()),
+        ] {
+            direct = utility_keyword(&direct, name, OsStr::new(&value));
+        }
+        let direct = PgConnection::connect(&Conninfo::new(direct).unwrap(), io).unwrap();
+        assert!(
+            run(
+                &mut utility_probe(&direct, context, database.to_str().unwrap()),
+                io,
+                None
+            )
+            .unwrap()
+            .success(),
+            "direct fallback positive control failed"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an owned PostgreSQL schema fixture"]
+    fn live_utility_effective_auth_and_tls_settings_are_private() {
+        const TEST: &str =
+            "schema::tests::live_utility_effective_auth_and_tls_settings_are_private";
+        let io = utility_io();
+        let (context, mut admin) = utility_context(&io);
+        let password = std::env::var_os("RPGMIGRATE_TEST_AUTH_PASSWORD")
+            .expect("isolated SCRAM credential is required");
+        if let Some(case) = std::env::var_os("RPGMIGRATE_TEST_UTILITY_CHILD") {
+            let root = PathBuf::from(std::env::var_os("RPGMIGRATE_TEST_UTILITY_ROOT").unwrap());
+            let info =
+                Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTH_BASE").unwrap()).unwrap();
+            let connection = PgConnection::connect(&info, &io);
+            if ["insecure", "nonregular", "wrong-password"]
+                .iter()
+                .any(|name| case == *name)
+            {
+                assert!(
+                    connection.is_err(),
+                    "unsafe or incorrect service passfile authenticated"
+                );
+            } else {
+                let connection = connection.unwrap();
+                let before = catalog::clone_object_inventory(&mut admin, &io).unwrap();
+                if case == "unsupported-secret" || case == "unsupported-fallback" {
+                    let failure = match utility(
+                        &Path::new(context["bindir"].as_str().unwrap()).join("psql"),
+                        &connection,
+                    ) {
+                        Err(error) => error,
+                        Ok(_) => panic!("unmapped effective option must be refused before spawn"),
+                    };
+                    assert!(
+                        failure.message
+                            == "PostgreSQL utility connection settings cannot be represented safely"
+                    );
+                } else {
+                    let environment = connection.utility_environment().unwrap();
+                    assert!(
+                        environment
+                            .values
+                            .iter()
+                            .any(|(name, value)| name == "PGUSER" && value == "e1_auth"),
+                        "effective role precedence changed"
+                    );
+                    if case != "service-passfile" {
+                        assert!(
+                            environment
+                                .values
+                                .iter()
+                                .any(|(name, value)| name == "PGPASSWORD" && value == &password),
+                            "effective credential precedence changed"
+                        );
+                    } else {
+                        assert!(
+                            environment
+                                .values
+                                .iter()
+                                .any(|(name, value)| name == "PGPASSFILE"
+                                    && value == root.join("passfile").as_os_str()),
+                            "effective service passfile changed"
+                        );
+                    }
+                    let mut command = utility_probe(
+                        &connection,
+                        &context,
+                        connection_value(&connection, "PGDATABASE")
+                            .to_str()
+                            .unwrap(),
+                    );
+                    let expected_root = if case == "explicit" {
+                        "root-explicit-"
+                    } else {
+                        "root-service-"
+                    };
+                    for (name, value) in [
+                        (
+                            "PGSSLROOTCERT",
+                            root.join(OsString::from_vec(
+                                [expected_root.as_bytes(), &[0xff]].concat(),
+                            ))
+                            .into_os_string(),
+                        ),
+                        (
+                            "PGSSLKEY",
+                            root.join(OsString::from_vec(b"key-service-\xfe".to_vec()))
+                                .into_os_string(),
+                        ),
+                        (
+                            "PGSSLCERT",
+                            root.join(OsString::from_vec(b"cert-environment-\xfd".to_vec()))
+                                .into_os_string(),
+                        ),
+                        ("PGSSLMODE", "disable".into()),
+                        ("PGAPPNAME", "rpgmigrate-schema".into()),
+                    ] {
+                        assert!(
+                            command
+                                .get_envs()
+                                .any(|(key, actual)| key == name
+                                    && actual == Some(value.as_os_str())),
+                            "effective TLS or application setting bytes changed"
+                        );
+                    }
+                    let options = if case == "explicit" {
+                        b"-c statement_timeout=12345".as_slice()
+                    } else {
+                        b"-c statement_timeout=23456"
+                    };
+                    let mut expected_options = options.to_vec();
+                    expected_options.extend_from_slice(b" -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C");
+                    assert!(
+                        command.get_envs().any(|(key, value)| key == "PGOPTIONS"
+                            && value.is_some_and(|value| value.as_bytes() == expected_options)),
+                        "effective options were replaced by process defaults"
+                    );
+                    for name in ["PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR"] {
+                        assert!(
+                            command
+                                .get_envs()
+                                .any(|(key, value)| key == name && value.is_none()),
+                            "service lookup remains enabled in child"
+                        );
+                    }
+                    assert!(!password.is_empty());
+                    for argument in command.get_args() {
+                        assert!(
+                            !argument
+                                .as_bytes()
+                                .windows(password.len())
+                                .any(|part| part == password.as_bytes()),
+                            "credential reached utility argv"
+                        );
+                        assert!(
+                            !argument
+                                .as_bytes()
+                                .windows(b"postgresql://".len())
+                                .any(|part| part == b"postgresql://"),
+                            "connection URI reached utility argv"
+                        );
+                    }
+                    fs::remove_file(root.join("service.conf")).unwrap();
+                    assert!(
+                        run(&mut command, &io, None).unwrap().success(),
+                        "captured authentication reread service or lost its credential"
+                    );
+                }
+                assert!(
+                    catalog::clone_object_inventory(&mut admin, &io).unwrap() == before,
+                    "authentication check mutated database objects"
+                );
+            }
+            println!("schema-utility-child-complete");
+            return;
+        }
+        let base = std::env::var_os("RPGMIGRATE_TEST_AUTH_BASE")
+            .expect("isolated SCRAM fixture is required");
+        let authenticated = PgConnection::connect(
+            &Conninfo::new(utility_keyword(&base, "password", &password)).unwrap(),
+            &io,
+        )
+        .unwrap();
+        let mut base_uri = "postgresql:///?sslmode=disable&service=auth".to_owned();
+        for (parameter, name) in [
+            ("host", "PGHOST"),
+            ("port", "PGPORT"),
+            ("dbname", "PGDATABASE"),
+        ] {
+            base_uri.push_str(&format!(
+                "&{parameter}={}",
+                uri_value(connection_value(&authenticated, name).as_bytes())
+            ));
+        }
+        for case in [
+            "explicit",
+            "service-password",
+            "service-passfile",
+            "insecure",
+            "nonregular",
+            "wrong-password",
+            "unsupported-secret",
+            "unsupported-fallback",
+        ] {
+            let files = ToolFixtures(PrivateFiles::new().unwrap());
+            let root = &files.0.directory;
+            let passfile = root.join("passfile");
+            if case == "nonregular" {
+                fs::DirBuilder::new().mode(0o700).create(&passfile).unwrap();
+            } else {
+                let value = if case == "wrong-password" {
+                    OsStr::new("synthetic-wrong-password")
+                } else {
+                    &password
+                };
+                let mut contents = b"*:*:*:*:".to_vec();
+                for byte in value.as_bytes() {
+                    if matches!(byte, b'\\' | b':') {
+                        contents.push(b'\\');
+                    }
+                    contents.push(*byte);
+                }
+                contents.push(b'\n');
+                utility_private_file(&passfile, &contents);
+                if case == "insecure" {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&passfile, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+            }
+            let mut service =
+                b"[auth]\nsslmode=disable\noptions=-c statement_timeout=23456\n".to_vec();
+            service.extend_from_slice(if case == "explicit" {
+                b"user=synthetic-wrong-role\n"
+            } else {
+                b"user=e1_auth\n"
+            });
+            for (key, value) in [
+                (
+                    "sslrootcert",
+                    root.join(OsString::from_vec(b"root-service-\xff".to_vec())),
+                ),
+                (
+                    "sslkey",
+                    root.join(OsString::from_vec(b"key-service-\xfe".to_vec())),
+                ),
+            ] {
+                service.extend_from_slice(format!("{key}=").as_bytes());
+                service.extend_from_slice(value.as_os_str().as_bytes());
+                service.push(b'\n');
+            }
+            if [
+                "service-passfile",
+                "insecure",
+                "nonregular",
+                "wrong-password",
+            ]
+            .contains(&case)
+            {
+                service.extend_from_slice(b"passfile=");
+                service.extend_from_slice(passfile.as_os_str().as_bytes());
+                service.push(b'\n');
+            } else {
+                service.extend_from_slice(b"password=");
+                service.extend_from_slice(if case == "explicit" {
+                    b"synthetic-wrong-password"
+                } else {
+                    password.as_bytes()
+                });
+                service.push(b'\n');
+            }
+            if case == "unsupported-secret" {
+                service.extend_from_slice(b"sslpassword=synthetic-private-secret\n");
+            }
+            if case == "unsupported-fallback" {
+                service
+                    .extend_from_slice(b"fallback_application_name=synthetic-private-fallback\n");
+            }
+            let service_path = root.join("service.conf");
+            utility_private_file(&service_path, &service);
+            let mut info = base_uri.clone();
+            if case == "explicit" {
+                info.push_str(&format!(
+                    "&user=e1_auth&password={}&sslrootcert={}&options={}",
+                    uri_value(password.as_bytes()),
+                    uri_value(
+                        root.join(OsString::from_vec(b"root-explicit-\xff".to_vec()))
+                            .as_os_str()
+                            .as_bytes()
+                    ),
+                    uri_value(b"-c statement_timeout=12345")
+                ));
+            }
+            let mut child = utility_child(TEST, case, root);
+            child
+                .env("RPGMIGRATE_TEST_AUTH_BASE", info)
+                .env("PGUSER", "synthetic-wrong-inherited-role")
+                .env("PGSERVICEFILE", &service_path)
+                .env("PGPASSFILE", root.join("wrong-inherited-passfile"))
+                .env("PGSSLROOTCERT", root.join("wrong-inherited-root"))
+                .env("PGSSLKEY", root.join("wrong-inherited-key"))
+                .env(
+                    "PGSSLCERT",
+                    root.join(OsString::from_vec(b"cert-environment-\xfd".to_vec())),
+                )
+                .env("PGOPTIONS", "-c statement_timeout=34567");
+            if case == "explicit" || case == "service-password" {
+                child.env("PGPASSWORD", "synthetic-wrong-password");
+            }
+            utility_child_completed(&mut child);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an owned PostgreSQL schema fixture"]
+    fn live_utility_service_precedence_preserves_validated_database() {
+        const TEST: &str =
+            "schema::tests::live_utility_service_precedence_preserves_validated_database";
+        let io = utility_io();
+        let (context, mut admin) = utility_context(&io);
+        if std::env::var_os("RPGMIGRATE_TEST_UTILITY_CHILD").is_some() {
+            let root = PathBuf::from(std::env::var_os("RPGMIGRATE_TEST_UTILITY_ROOT").unwrap());
+            let config: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join("case.json")).unwrap()).unwrap();
+            let source_info =
+                Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN").unwrap())
+                    .unwrap();
+            let target_info =
+                Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_SCHEMA_TARGET_ADMIN").unwrap())
+                    .unwrap();
+            let mut source = PgConnection::connect(&source_info, &io).unwrap();
+            let mut target = PgConnection::connect(&target_info, &io).unwrap();
+            for (connection, expected) in [
+                (&source, config["source"].as_str().unwrap()),
+                (&target, config["target"].as_str().unwrap()),
+            ] {
+                assert!(
+                    connection_value(connection, "PGDATABASE") == expected,
+                    "native connection selected the decoy"
+                );
+                assert!(
+                    connection_value(connection, "PGHOST").as_bytes()
+                        == context["socket_dir"].as_str().unwrap().as_bytes(),
+                    "selected socket was not pinned"
+                );
+                let settings = connection.utility_environment().unwrap();
+                assert!(settings.remove.iter().any(|name| name == "PGHOSTADDR"));
+                assert!(
+                    !settings
+                        .values
+                        .iter()
+                        .any(|(name, _)| name == "PGHOSTADDR" || name == "PGSERVICE")
+                );
+            }
+            let beta_info = Conninfo::new(config["beta_uri"].as_str().unwrap().into()).unwrap();
+            let mut beta = PgConnection::connect(&beta_info, &io).unwrap();
+            let before_beta = catalog::clone_object_inventory(&mut beta, &io).unwrap();
+            source.query("CREATE SCHEMA utility_route", &io).unwrap();
+            source
+                .query("CREATE TABLE utility_route.empty_item(id integer)", &io)
+                .unwrap();
+            source
+                .query(
+                    "CREATE INDEX utility_route_index ON utility_route.empty_item(id)",
+                    &io,
+                )
+                .unwrap();
+            let mut snapshot = crate::snapshot::CloneSnapshot::export(
+                source,
+                crate::contracts::CopyGeneration(1),
+                &io,
+            )
+            .unwrap();
+            let policy = RestorePolicy {
+                no_owner: true,
+                no_acl: true,
+                ..RestorePolicy::default()
+            };
+            let plan = catalog::plan_clone(
+                snapshot.connection().unwrap(),
+                &mut target,
+                crate::contracts::CopyGeneration(1),
+                policy,
+                &[],
+                &[],
+                &io,
+            )
+            .unwrap();
+            let options = CloneOptions {
+                source: source_info,
+                target: target_info,
+                state: crate::contracts::StateRequest {
+                    path: root.join("state"),
+                    action: crate::contracts::StateAction::Create,
+                },
+                operator: None,
+                table_jobs: 1,
+                post_data_jobs: 1,
+                policy,
+                not_consistent: false,
+            };
+            let mut state = crate::state::open_clone(&options.state, None, &io).unwrap();
+            state.bind_clone(&plan, snapshot.ticket()).unwrap();
+            preflight(snapshot.connection().unwrap(), &target, &plan, &io).unwrap();
+            let archive = dump(&options, snapshot.ticket(), &state, &io).unwrap();
+            let before_target = catalog::clone_object_inventory(&mut target, &io).unwrap();
+            let service = root.join("service.conf");
+            let original_service = fs::read(&service).unwrap();
+            let mut unsupported = original_service.clone();
+            unsupported.extend_from_slice(b"sslpassword=private-fixture-secret\n");
+            fs::write(&service, unsupported).unwrap();
+            let bad_target = PgConnection::connect(&options.target, &io).unwrap();
+            let failure = match preflight(snapshot.connection().unwrap(), &bad_target, &plan, &io) {
+                Err(error) => error,
+                Ok(_) => panic!("unmapped service secret must be refused"),
+            };
+            assert!(
+                failure.message
+                    == "PostgreSQL utility connection settings cannot be represented safely"
+            );
+            assert!(restore_pre(&options, &plan, &archive, &mut state, &io).is_err());
+            assert!(
+                state.checked_clone().unwrap().unwrap().phase == ClonePhase::Fresh,
+                "unsupported settings recorded a restore intent"
+            );
+            assert!(
+                catalog::clone_object_inventory(&mut target, &io).unwrap() == before_target,
+                "unsupported settings mutated target"
+            );
+            fs::write(&service, original_service).unwrap();
+            let objects = restore_pre(&options, &plan, &archive, &mut state, &io).unwrap();
+            assert!(
+                objects.iter().any(|object| object.name == "empty_item"),
+                "pre-data restore omitted its relation"
+            );
+            assert!(
+                compare_pre_data(&options, snapshot.ticket(), &[], &io).unwrap(),
+                "snapshot schema comparison used a different database"
+            );
+            restore_post(&options, &archive, &io).unwrap();
+            assert!(
+                compare(&options, &[], &io).unwrap(),
+                "schema comparison used a different database"
+            );
+            let result = target
+                .query("SELECT count(*) FROM utility_route.empty_item", &io)
+                .unwrap();
+            assert!(
+                result.cell(0, 0).unwrap() == Some(b"0"),
+                "synthetic relation is not empty"
+            );
+            let result = target
+                .query(
+                    "SELECT to_regclass('utility_route.utility_route_index') IS NOT NULL",
+                    &io,
+                )
+                .unwrap();
+            assert!(
+                result.cell(0, 0).unwrap() == Some(b"t"),
+                "post-data restore omitted its index"
+            );
+            let mut captured_dump =
+                utility(&archive.tools.dump, snapshot.connection().unwrap()).unwrap();
+            captured_dump
+                .args([
+                    "--format=custom",
+                    "--schema-only",
+                    "--no-publications",
+                    "--no-subscriptions",
+                ])
+                .arg(format!("--snapshot={}", snapshot.ticket().token))
+                .arg("--file")
+                .arg(root.join("captured.dump"));
+            let mut source_probe = utility_probe(
+                snapshot.connection().unwrap(),
+                &context,
+                config["source"].as_str().unwrap(),
+            );
+            let mut target_probe =
+                utility_probe(&target, &context, config["target"].as_str().unwrap());
+            fs::remove_file(service).unwrap();
+            assert!(
+                run(&mut captured_dump, &io, None).unwrap().success(),
+                "captured snapshot dump reread the service"
+            );
+            assert!(
+                run(&mut source_probe, &io, None).unwrap().success(),
+                "captured source changed database"
+            );
+            assert!(
+                run(&mut target_probe, &io, None).unwrap().success(),
+                "captured target changed database"
+            );
+            assert!(
+                catalog::clone_object_inventory(&mut beta, &io).unwrap() == before_beta,
+                "decoy inventory changed"
+            );
+            snapshot.finish(&io).unwrap();
+            println!("schema-utility-child-complete");
+            return;
+        }
+        for case in ["explicit", "inherited"] {
+            let files = ToolFixtures(PrivateFiles::new().unwrap());
+            let suffix = files
+                .0
+                .directory
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .strip_prefix("rpgmigrate-schema-")
+                .unwrap();
+            let names = [
+                format!("e1_util_s_{suffix}"),
+                format!("e1_util_t_{suffix}"),
+                format!("e1_util_b_{suffix}"),
+            ];
+            for name in &names {
+                let name = admin.quote_identifier(name).unwrap();
+                admin
+                    .query(&format!("CREATE DATABASE {name} TEMPLATE template0"), &io)
+                    .unwrap();
+            }
+            let source_uri = utility_uri(&admin, &names[0]);
+            let target_uri = utility_uri(&admin, &names[1]);
+            let beta_uri = utility_uri(&admin, &names[2]);
+            utility_private_file(&files.0.directory.join("case.json"), &serde_json::to_vec(&serde_json::json!({"source": names[0], "target": names[1], "beta_uri": beta_uri})).unwrap());
+            let service = files.0.directory.join("service.conf");
+            utility_private_file(&service, format!("[decoy]\nhost={}\nport={}\ndbname={}\nuser=e1_admin\nsslmode=disable\noptions=-c statement_timeout=12000\n", context["socket_dir"].as_str().unwrap(), context["port"].as_u64().unwrap(), names[2]).as_bytes());
+            let mut child = utility_child(TEST, case, &files.0.directory);
+            child
+                .env("PGSERVICEFILE", &service)
+                .env("PGDATABASE", &names[2])
+                .env("PGOPTIONS", "-c statement_timeout=9000");
+            let missing = files.0.directory.join("missing-socket");
+            let selected = context["socket_dir"].as_str().unwrap();
+            let source_uri = format!(
+                "{source_uri}&host={}",
+                uri_value(format!("{},{}", missing.display(), selected).as_bytes())
+            );
+            if case == "explicit" {
+                child
+                    .env(
+                        "RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN",
+                        format!("{source_uri}&service=decoy"),
+                    )
+                    .env(
+                        "RPGMIGRATE_TEST_SCHEMA_TARGET_ADMIN",
+                        format!("{target_uri}&service=decoy"),
+                    );
+            } else {
+                child
+                    .env("PGSERVICE", "decoy")
+                    .env("RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN", source_uri)
+                    .env("RPGMIGRATE_TEST_SCHEMA_TARGET_ADMIN", target_uri);
+            }
+            utility_child_completed(&mut child);
+        }
+        utility_selected_peer_loss(&context, &io);
+    }
+
+    #[test]
+    fn utility_discovery_child() {
+        let Some(root) = std::env::var_os("RPGMIGRATE_TEST_TOOL_ROOT") else {
+            return;
+        };
+        let major = std::env::var("RPGMIGRATE_TEST_TOOL_MAJOR")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let io = IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        let result = tools_in(major, &io, Path::new(&root));
+        if let Some(expected) = std::env::var_os("RPGMIGRATE_TEST_TOOL_DIRECTORY") {
+            let selected = result.unwrap();
+            assert_eq!(selected.dump, Path::new(&expected).join("pg_dump"));
+            assert_eq!(selected.restore, Path::new(&expected).join("pg_restore"));
+            assert_eq!(selected.major, major);
+        } else {
+            let error = result
+                .err()
+                .expect("invalid tool selection must be refused");
+            assert_eq!(
+                error.message,
+                std::env::var("RPGMIGRATE_TEST_TOOL_ERROR").unwrap()
+            );
+        }
+        println!("utility-discovery-child-complete");
+    }
+
+    #[test]
+    fn utility_discovery_preserves_overrides_and_selects_packaged_target_major() {
+        let fixtures = ToolFixtures(PrivateFiles::new().unwrap());
+        let root = fixtures.0.directory.join("stock");
+        let stock16 = fixtures.pair("stock/16/bin", 16, 16);
+        let stock18 = fixtures.pair("stock/18/bin", 18, 18);
+        let path16 = fixtures.pair("path16", 16, 16);
+        let path18 = fixtures.pair("path18", 18, 18);
+        let mixed = fixtures.pair("mixed/16/bin", 16, 18);
+        let broken_root = fixtures.0.directory.join("broken");
+        fs::create_dir_all(broken_root.join("16/bin")).unwrap();
+        let absent = fixtures.0.directory.join("absent");
+        let config16 = fixtures.config("config16", path16.to_str().unwrap());
+        let config18 = fixtures.config("config18", path18.to_str().unwrap());
+        let config_empty = fixtures.config("config-empty", "");
+        let mismatch = "pg_dump and pg_restore must match the target major";
+        let missing = "matching target-major pg_dump and pg_restore were not found";
+        let empty = Path::new("");
+        let cases = [
+            (
+                "implicit16-path18",
+                16,
+                &root,
+                &path18,
+                None,
+                None,
+                Ok(stock16.as_path()),
+            ),
+            (
+                "implicit18-path16",
+                18,
+                &root,
+                &path16,
+                None,
+                None,
+                Ok(stock18.as_path()),
+            ),
+            (
+                "absent-stock-path16",
+                16,
+                &absent,
+                &path16,
+                None,
+                None,
+                Ok(path16.as_path()),
+            ),
+            (
+                "absent-stock-path18",
+                18,
+                &absent,
+                &path18,
+                None,
+                None,
+                Ok(path18.as_path()),
+            ),
+            (
+                "absent-stock-wrong-path",
+                16,
+                &absent,
+                &path18,
+                None,
+                None,
+                Err(mismatch),
+            ),
+            (
+                "absent-stock-empty-path",
+                16,
+                &absent,
+                &absent,
+                None,
+                None,
+                Err(missing),
+            ),
+            (
+                "broken-stock-no-fallback",
+                16,
+                &broken_root,
+                &path16,
+                None,
+                None,
+                Err(missing),
+            ),
+            (
+                "mixed-stock-no-fallback",
+                16,
+                &fixtures.0.directory.join("mixed"),
+                &path16,
+                None,
+                None,
+                Err(mismatch),
+            ),
+            (
+                "bindir16-over-config18",
+                16,
+                &root,
+                &path18,
+                Some(path16.as_path()),
+                Some(config18.as_path()),
+                Ok(path16.as_path()),
+            ),
+            (
+                "bindir18",
+                18,
+                &root,
+                &path16,
+                Some(path18.as_path()),
+                None,
+                Ok(path18.as_path()),
+            ),
+            (
+                "bindir-mismatch",
+                16,
+                &root,
+                &path16,
+                Some(path18.as_path()),
+                None,
+                Err(mismatch),
+            ),
+            (
+                "bindir-mixed-tools",
+                16,
+                &root,
+                &path16,
+                Some(mixed.as_path()),
+                None,
+                Err(mismatch),
+            ),
+            (
+                "bindir-missing",
+                16,
+                &root,
+                &path16,
+                Some(absent.as_path()),
+                None,
+                Err(missing),
+            ),
+            (
+                "bindir-empty",
+                16,
+                &root,
+                &path16,
+                Some(empty),
+                Some(config16.as_path()),
+                Err("PG_BINDIR must select an existing tool directory"),
+            ),
+            (
+                "config16",
+                16,
+                &root,
+                &path18,
+                None,
+                Some(config16.as_path()),
+                Ok(path16.as_path()),
+            ),
+            (
+                "config18",
+                18,
+                &root,
+                &path16,
+                None,
+                Some(config18.as_path()),
+                Ok(path18.as_path()),
+            ),
+            (
+                "config-mismatch",
+                16,
+                &root,
+                &path16,
+                None,
+                Some(config18.as_path()),
+                Err(mismatch),
+            ),
+            (
+                "config-empty-output",
+                16,
+                &root,
+                &path16,
+                None,
+                Some(config_empty.as_path()),
+                Err("pg_config returned an invalid tool directory"),
+            ),
+            (
+                "config-empty",
+                16,
+                &root,
+                &path16,
+                None,
+                Some(empty),
+                Err("cannot start PostgreSQL utility"),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, major, stock, path, bindir, config, expected) in cases {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "schema::tests::utility_discovery_child",
+                    "--nocapture",
+                ])
+                .env_remove("PG_BINDIR")
+                .env_remove("PG_CONFIG")
+                .env_remove("RPGMIGRATE_TEST_TOOL_DIRECTORY")
+                .env_remove("RPGMIGRATE_TEST_TOOL_ERROR")
+                .env("PATH", path)
+                .env("RPGMIGRATE_TEST_TOOL_ROOT", stock)
+                .env("RPGMIGRATE_TEST_TOOL_MAJOR", major.to_string());
+            if let Some(path) = bindir {
+                child.env("PG_BINDIR", path);
+            }
+            if let Some(path) = config {
+                child.env("PG_CONFIG", path);
+            }
+            match expected {
+                Ok(directory) => {
+                    child.env("RPGMIGRATE_TEST_TOOL_DIRECTORY", directory);
+                }
+                Err(message) => {
+                    child.env("RPGMIGRATE_TEST_TOOL_ERROR", message);
+                }
+            }
+            let output = child.output().unwrap();
+            if !output.status.success()
+                || !String::from_utf8_lossy(&output.stdout)
+                    .contains("utility-discovery-child-complete")
+            {
+                failures.push(format!(
+                    "{name}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     #[test]
     fn utility_version_requires_the_actual_named_qualified_major() {
         assert_eq!(
@@ -878,7 +2090,7 @@ mod tests {
         )
         .unwrap();
         let (archive, _) = files.file("initial.dump").unwrap();
-        let mut command = utility(&tools.dump, &options.source).unwrap();
+        let mut command = utility(&tools.dump, &source).unwrap();
         command
             .args([
                 "--format=custom",
@@ -890,7 +2102,7 @@ mod tests {
             .arg("--file")
             .arg(&archive);
         assert!(run(&mut command, &io, None).unwrap().success());
-        let mut command = utility(&tools.restore, &options.target).unwrap();
+        let mut command = utility(&tools.restore, &target).unwrap();
         command
             .args([
                 "--dbname=",

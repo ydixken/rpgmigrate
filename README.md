@@ -64,9 +64,16 @@ The executable implements plain clone and pgoutput follow on PostgreSQL 16 to 16
 | `task test-db-self-check` | Check the independent data oracle. |
 | `task test-transport` | Run isolated live transport and authentication checks. |
 | `task test-db` | Run retained live profiles with their existing admission requirements. |
-| `task test-clone` | Run seven isolated native clone component cases. |
-| `task test-schema` | Run the isolated pre-data restart guard case. |
+| `task test-clone` | Run the exact native clone component profile. |
+| `task test-schema` | Run schema utility and pre-data restart guard cases. |
 | `task test-e2e-clone` | Run the three declared container clone pairs. |
+| `task test-follow-source` | Run the exact source snapshot and owned cleanup profile. |
+| `task test-follow-snapshot` | Run the exact snapshot profile and observed faults. |
+| `task test-follow-authority` | Run the exact follow authority profile. |
+| `task test-follow-receive` | Run receiver startup, feedback, and shutdown checks. |
+| `task test-follow-apply` | Run row semantics and catalog identity checks. |
+| `task test-e2e-follow` | Run the three-pair ongoing follow matrix. |
+| `task test-e2e-cutover` | Run the three-pair cutover producer matrix. |
 | `task image:build` | Build the local native runner image. |
 | `task image:smoke` | Inspect the local image and emit a packaging receipt. |
 
@@ -77,6 +84,10 @@ See the [Testing guide](docs/testing.md).
 ## Roadmap
 
 See the [roadmap](docs/roadmap.md).
+
+## Native cutover
+
+See the [Native cutover handoff](docs/native-cutover-handoff.md).
 
 ## Operator compatibility
 

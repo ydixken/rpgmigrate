@@ -29,7 +29,8 @@ No universal CLI or drop-in compatibility claim follows from this scope.
 
 ## Required command paths
 
-The [native dispatch](../src/config.rs) explicitly refuses these paths until their native implementations are qualified; parser acceptance is not implementation.
+The [native dispatch](../src/config.rs) admits implemented native routes and refuses unsupported configurations.
+Qualification remains a separate gate; parser acceptance is not implementation.
 The native adapter must preserve each admitted operation through an explicit, tested native contract.
 `list tables` remains an explicit staged refusal in the revised native profile.
 Accept and record `--origin`, but never create or own a replication origin; cleanup reports it as not owned.
@@ -38,7 +39,7 @@ Accept and record `--origin`, but never create or own a replication origin; clea
 | --- | --- |
 | `clone` | Clone, optional follow, native restart/resume lifecycle. |
 | `stream cleanup` | Idempotent cleanup of exactly owned slot and publication. |
-| `stream sentinel set endpos` | Request cutover at current source position; return a scalar LSN. |
+| `stream sentinel set endpos` | Persist explicit E; observe acknowledgment through JSON retry. |
 | `stream sentinel get` | Read end position or replay LSN after worker exit. |
 | `list progress` | Version-gated JSON progress and completion counters. |
 | `compare data` | Drain fallback, final verification, and rehearsal data comparison. |
@@ -103,7 +104,8 @@ The [CRD and renderers][op-types] also expose these feature groups:
 
 Retain [API combination constraints][op-admission], including all-database exclusions and ownership-handover requirements.
 The M2 plain-clone implementation covers schema, parallel text COPY, post-data, sequences, and ANALYZE.
-Its binary COPY, splitting, large objects, follow, and full operator configuration behavior remain unqualified and explicitly staged.
+Binary COPY, splitting, large objects, and full operator configuration behavior remain unqualified and explicitly staged.
+M3/M4 follow and cutover implementation does not qualify the complete operator workflow; use the task ledger for the exact closing gates.
 The M7 vertical slice explicitly switches off binary COPY, splitting, and large objects; M8 qualifies them before using operator defaults.
 DropIfExists and filters are excluded from the native E2E profile.
 M1 freezes precise native option and environment admission rather than inferring support from the inventory above.
@@ -126,7 +128,7 @@ Use `version --json` capabilities in preflight, `native-report: {json}` stdout f
 Keep the existing per-table comparison JSON array and `"compare progress: "` shapes outside `ParseReport`.
 Discovery is identity-free and advertises an explicit empty capability array until runtime features qualify.
 Supplied operator identity grants no native-state authority; M2 binds all four values to recorded state and refuses mismatches before mutation.
-Only that bound mode emits operational native-report framing; standalone clone/progress emit unframed JSON without synthetic Migration/PVC identity.
+Only that bound mode emits operational native-report framing; standalone clone/progress/stream emit unframed JSON without synthetic Migration/PVC identity.
 Keep JSON error classes in `{error_severity, message}`, and OR both engines' application_name patterns in matching.
 M1 freezes exact DTO fields, environment names, owned schema, workdir, application names, and cleanup inventory.
 Map the consumed [log records][op-logs], progress JSON, comparison results, scalar LSN output, exit status, and independent drain checks explicitly.
@@ -136,6 +138,8 @@ Legacy target-origin SQL stays on the legacy backend; missing native proof block
 Legacy cutover runs inside the live worker container and shares the PVC, `/work/pgcopydb`, writable `/tmp`, URI files, passfile, and TLS mounts through the existing [exec][op-sentinel] and [mount][op-mounts] paths.
 The native adapter reuses these mount and exec boundaries with a native-owned workdir whose exact layout freezes in M1.
 This permits native workdir/control access without reproducing a legacy database layout.
+M6 MUST also provide a standalone helper with those mounts after the worker exits; `Execer.RunningPod` alone cannot obtain the final native acknowledgment.
+The legacy `--current` resampling retry is unsuitable for native cutover.
 The audit found no direct production SQLite or source-sentinel-table queries.
 Do not emulate legacy SQLite files or source-sentinel storage.
 Control must use checked native identity and ownership; requested endpos, a visible checkpoint, or worker exit alone cannot certify durable drain.
@@ -166,11 +170,21 @@ M9 keeps `relaxed` conditional on measured gain and explicit loss reservations, 
 The barrier-proven durable replay frontier authorizes feedback.
 Later-BEGIN drain coverage can exceed that frontier and never raises feedback or reconnect authority.
 Before the follow-copy anchor, resume restarts only the run's recorded owned data phase with a new snapshot and generation; after it, resume uses the checkpoint.
-The operator persists a source `pg_current_wal_insert_lsn()` endpos and requires drain proof bound to it, plus an independent read of the owned target control row.
+The operator MUST stop source writers and outstanding transactions, sample source `pg_current_wal_insert_lsn()`, and persist E once before the first explicit-E command.
+Hold the writer fence through drain, final sequence synchronization, and verification.
+Retry that unchanged E after any error; do not resample `--current`.
+A command can persist E and return nonzero without JSON acknowledgment while the worker holds the target fence.
+After worker exit, use the standalone helper for an identical-E retry and require positive acknowledgment before independent verification.
+The independent reader MUST acquire the same target fence, validate and lock the exact logged row, perform a checked same-value UPDATE, positively commit synchronously, and complete checked closure.
+An asynchronously visible row or polling result is no flush proof.
+The [Native cutover handoff](native-cutover-handoff.md) freezes the layout and helper qualification boundary; no operator activation follows from engine JSON.
 The proof must match the same logged row's work identity, checkpoint token, certified and durable frontiers, persisted endpos, witness, and witness kind.
 Keepalive witnesses are covered by the certified frontier; a later-BEGIN witness is the strictly later `BEGIN.final_lsn`.
 Requested endpos, missing reports, or exit zero alone cannot complete a native migration.
-Cleanup requires the exact caller-declared resource inventory, retains the owned workdir, and leaves recorded origins unowned and unremoved.
+`stream cleanup` requires both `--source` and `--target` before opening native state.
+Cleanup requires the exact caller-declared resource inventory and complete confirmed native receipts, including exactly one confirmed target receipt, before terminal intent or deletion.
+Follow the handoff's [exclusive-administration cleanup boundary](native-cutover-handoff.md#exact-owned-cleanup) through every retry.
+Cleanup retains the owned workdir, target metadata, and comparison state, and leaves recorded origins unowned and unremoved.
 Final sequence sync and, when enabled, large-object re-sync happen under the write freeze after drain.
 
 Golden argument tests must cover defaults and every conditional renderer branch, including explicit refusal of unsupported stage configurations.

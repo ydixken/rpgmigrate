@@ -57,11 +57,11 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
         point = 256 + number
         record = intent if create_loss else {"intent": intent, "consistent_point": point, "snapshot_token": "00000001-00000001-1"}
         native = {
-            "magic": "RPGMIGRATE", "format_version": 7, "run": run, "canonical_path": str(native_dir),
+            "magic": "RPGMIGRATE", "format_version": 8, "run": run, "canonical_path": str(native_dir),
             "directory_device": native_dir.stat().st_dev, "directory_inode": native_dir.stat().st_ino,
             "copy_complete": None, "target_provenance": [], "clone_state": None, "operator": None,
             "source_slot": {"phase": "provisioning" if create_loss else "confirmed", "record": record},
-            "follow_state": {"origin_name": None, "binding": None, "restart": None,
+            "follow_state": {"cleanup": None, "origin_name": None, "binding": None, "restart": None,
                              "preliminary": {"source": {"identity": stream["source"], "timeline": 1, "major": self.context["server_version_num"] // 10000}, "generation": 1, "tables": [{"source_oid": 42, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id", "value"], "all_columns": ["id", "value"], "identity_modes": [97, 0], "partition_identity_modes": None}]},
                              "publication": {"phase": "confirmed", "intent": {"run": run, "name": publication["name"], "nonce": [number + 40] * 16}, "receipt": publication}},
         }
@@ -104,10 +104,10 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             (self.root / f"follow-snapshot-fault-{case}.json").write_text(json.dumps(value))
         return result
 
-    def test_inventory_is_exact_nine_and_separate_from_existing_seven(self):
+    def test_inventory_is_exact_nine_and_separate_from_source_cleanup(self):
         self.assertEqual(fixture.follow_snapshot_cases(), CASES)
         self.assertEqual(module_cases({}, "FollowSnapshot"), CASES)
-        self.assertEqual(len(module_cases({}, "FollowSource")), 7)
+        self.assertEqual(len(module_cases({}, "FollowSource")), 12)
         self.assertTrue(set(CASES).isdisjoint(module_cases({}, "FollowSource")))
         for bad in ([], CASES[:-1], [CASES[0]] * 9, [*CASES[:-1], "unrelated::case"]):
             with self.subTest(bad=bad), patch.object(fixture, "read_json", return_value=bad), self.assertRaises(AssertionError):
@@ -190,17 +190,22 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             path.write_text(json.dumps(bad))
             with self.subTest(missing=field), self.assertRaises(AssertionError):
                 fixture.validate_phase(value, self.context, value["case"], value["phase"])
-        for key, bad_value in (("format_version", 4), ("format_version", 5), ("format_version", 6), ("format_version", 8), ("copy_complete", {}),
+        for key, bad_value in (("format_version", 4), ("format_version", 5), ("format_version", 6), ("format_version", 7), ("format_version", 9), ("copy_complete", {}),
                                ("target_provenance", [{}]), ("clone_state", {}), ("run", [0] * 16)):
             path.write_text(json.dumps({**native, key: bad_value}))
             with self.subTest(key=key), self.assertRaises(AssertionError):
                 fixture.validate_phase(value, self.context, value["case"], value["phase"])
-        for field in ("origin_name", "binding", "restart", "preliminary", "publication"):
+        for field in ("origin_name", "binding", "restart", "preliminary", "publication", "cleanup"):
             bad = copy.deepcopy(native)
             del bad["follow_state"][field]
             path.write_text(json.dumps(bad))
             with self.subTest(missing_follow=field), self.assertRaises(AssertionError):
                 fixture.validate_phase(value, self.context, value["case"], value["phase"])
+        bad = copy.deepcopy(native)
+        bad["follow_state"]["cleanup"] = {"slot_removed": False, "publication_removed": False}
+        path.write_text(json.dumps(bad))
+        with self.assertRaises(AssertionError):
+            fixture.validate_phase(value, self.context, value["case"], value["phase"])
         path.write_text(json.dumps(native))
         outside = self.root.parent / "missing-manifest.json"
         with self.assertRaises((AssertionError, OSError)):

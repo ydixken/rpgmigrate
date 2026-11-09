@@ -63,7 +63,11 @@ def module_cases(manifest, profile):
         assert isinstance(cases, list) and cases and len(cases) == len(set(cases)), "missing or duplicate follow component inventory"
         return cases
     if profile == "Schema":
-        return ["schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"]
+        return [
+            "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation",
+            "schema::tests::live_utility_service_precedence_preserves_validated_database",
+            "schema::tests::live_utility_effective_auth_and_tls_settings_are_private",
+        ]
     if profile == "Clone":
         return [
             "snapshot::clone_tests::live_clone_snapshot_is_shared_and_exporter_lifetime_is_required",

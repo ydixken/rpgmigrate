@@ -570,6 +570,191 @@ fn require_slot_owner(active: Option<i32>, expected: Option<i32>) -> Result<()> 
     Ok(())
 }
 
+fn cleanup_presence(removed: bool, present: bool) -> Result<bool> {
+    if removed && present {
+        return Err(refusal(
+            "cleanup-source: resource reappeared after recorded removal; preserve it for manual inspection",
+        ));
+    }
+    Ok(present)
+}
+
+fn confirm_cleanup_absence(outcome: Result<()>, present: Result<bool>) -> Result<()> {
+    if !present? {
+        return Ok(());
+    }
+    outcome?;
+    Err(refusal(
+        "cleanup-source: removal was not confirmed; preserve it without another DROP",
+    ))
+}
+
+fn cleanup_source(
+    source: &mut PgConnection,
+    plan: &ClonePlan,
+    binding: &FollowBinding,
+    io: &IoControl,
+) -> Result<()> {
+    crate::state::validate_follow_binding(binding)?;
+    if plan.source.identity != binding.stream().source
+        || plan.source.timeline != binding.source_timeline
+        || plan.generation != binding.copy_generation
+        || binding.slot.intent.binding.catalog_epoch() != plan.generation.0
+        || require_follow_source(source, binding, io)? != plan.source
+    {
+        return Err(refusal(
+            "cleanup-source: source identity, timeline, or generation differs from its creation receipts",
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_slot_present(
+    source: &mut PgConnection,
+    binding: &FollowBinding,
+    removed: bool,
+    io: &IoControl,
+) -> Result<bool> {
+    let slot = source.quote_literal(binding.slot.intent.binding.slot_name())?;
+    let result=source.query(&format!("SELECT s.plugin,s.slot_type,s.datoid,s.temporary,s.active,s.active_pid,COALESCE(pg_catalog.to_jsonb(s)->>'failover','false'),COALESCE(pg_catalog.to_jsonb(s)->>'synced','false') FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={slot}"),io)?;
+    if result.columns()? != 8 || result.rows() > 1 {
+        return Err(refusal("cleanup-source: source slot evidence is invalid"));
+    }
+    if !cleanup_presence(removed, result.rows() == 1)? {
+        return Ok(false);
+    }
+    // Slots have no incarnation OID; exact receipts require uninterrupted exclusive administration.
+    if result.cell(0, 0)? != Some(b"pgoutput")
+        || result.cell(0, 1)? != Some(b"logical")
+        || result.cell(0, 2)? != Some(binding.stream().source.database_oid.to_string().as_bytes())
+        || result.cell(0, 3)? != Some(b"f")
+        || result.cell(0, 4)? != Some(b"f")
+        || result.cell(0, 5)?.is_some()
+        || result.cell(0, 6)? != Some(b"false")
+        || result.cell(0, 7)? != Some(b"false")
+    {
+        return Err(refusal(
+            "cleanup-source: slot identity or inactive ownership disagrees; preserve it for manual inspection",
+        ));
+    }
+    Ok(true)
+}
+
+fn cleanup_publication_present(
+    source: &mut PgConnection,
+    plan: &ClonePlan,
+    binding: &FollowBinding,
+    removed: bool,
+    io: &IoControl,
+) -> Result<bool> {
+    let name = source.quote_literal(&binding.publication.name)?;
+    let result = source.query(
+        &format!("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname={name}"),
+        io,
+    )?;
+    if result.columns()? != 1 || result.rows() > 1 {
+        return Err(refusal("cleanup-source: publication evidence is invalid"));
+    }
+    if !cleanup_presence(removed, result.rows() == 1)? {
+        return Ok(false);
+    }
+    if publication_receipt(source, &binding.publication.name, io)? != binding.publication {
+        return Err(refusal(
+            "cleanup-source: publication was replaced; preserve it for manual inspection",
+        ));
+    }
+    publication_membership(source, &binding.publication, &plan.tables, io)?;
+    Ok(true)
+}
+
+pub(crate) fn inspect_follow_cleanup(
+    source: &mut PgConnection,
+    plan: &ClonePlan,
+    binding: &FollowBinding,
+    progress: &crate::state::CleanupProgress,
+    io: &IoControl,
+) -> Result<()> {
+    cleanup_source(source, plan, binding, io)?;
+    cleanup_slot_present(source, binding, progress.slot_removed, io)?;
+    cleanup_publication_present(source, plan, binding, progress.publication_removed, io)?;
+    Ok(())
+}
+
+pub(crate) fn remove_follow_slot(
+    source: &mut PgConnection,
+    plan: &ClonePlan,
+    binding: &FollowBinding,
+    removed: bool,
+    io: &IoControl,
+) -> Result<()> {
+    cleanup_source(source, plan, binding, io)?;
+    if !cleanup_slot_present(source, binding, removed, io)? {
+        return Ok(());
+    }
+    let slot = source.quote_literal(binding.slot.intent.binding.slot_name())?;
+    let outcome = source
+        .query(
+            &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})"),
+            io,
+        )
+        .and_then(|result| {
+            if result.rows() == 1 && result.columns()? == 1 && result.command_tag()? == "SELECT 1" {
+                Ok(())
+            } else {
+                Err(refusal("cleanup-source: slot removal outcome is unknown"))
+            }
+        });
+    confirm_cleanup_absence(outcome, cleanup_slot_present(source, binding, false, io))
+}
+
+pub(crate) fn remove_follow_publication(
+    source: &mut PgConnection,
+    plan: &ClonePlan,
+    binding: &FollowBinding,
+    removed: bool,
+    io: &IoControl,
+) -> Result<()> {
+    cleanup_source(source, plan, binding, io)?;
+    if !cleanup_publication_present(source, plan, binding, removed, io)? {
+        return Ok(());
+    }
+    let required = configure_durability(source, io)?;
+    command(source, "BEGIN", "BEGIN", io)?;
+    let outcome = (|| {
+        let name = source.quote_identifier(&binding.publication.name)?;
+        command(
+            source,
+            &format!("DROP PUBLICATION {name}"),
+            "DROP PUBLICATION",
+            io,
+        )?;
+        command(
+            source,
+            "SET CONSTRAINTS ALL IMMEDIATE",
+            "SET CONSTRAINTS",
+            io,
+        )?;
+        confirm_durability(source, required, io)?;
+        match source.commit_observed(io)? {
+            crate::pg::CommitObservation::Committed => Ok(()),
+            crate::pg::CommitObservation::Unknown | crate::pg::CommitObservation::RolledBack => {
+                Err(refusal(
+                    "cleanup-source: publication removal outcome is unknown",
+                ))
+            }
+        }
+    })();
+    if source.transaction_status()? != TransactionStatus::Idle {
+        return Err(refusal(
+            "cleanup-source: publication removal transaction is unresolved; preserve cleanup intent",
+        ));
+    }
+    confirm_cleanup_absence(
+        outcome,
+        cleanup_publication_present(source, plan, binding, false, io),
+    )
+}
+
 pub(crate) fn preflight_follow_relation(
     target: &mut PgConnection,
     expected: &Event,
@@ -712,6 +897,500 @@ mod tests {
     use super::*;
     use crate::contracts::{CloneTable, CopyGeneration, RunId};
 
+    #[test]
+    fn cleanup_recorded_absence_preserves_every_reappearance() {
+        assert!(cleanup_presence(true, true).is_err());
+        assert!(!cleanup_presence(true, false).unwrap());
+        assert!(!cleanup_presence(false, false).unwrap());
+        assert!(cleanup_presence(false, true).unwrap());
+    }
+
+    #[test]
+    fn cleanup_unknown_drop_requires_positive_absence_and_never_retries() {
+        assert!(confirm_cleanup_absence(Err(refusal("unknown DROP")), Ok(false)).is_ok());
+        assert!(confirm_cleanup_absence(Err(refusal("unknown DROP")), Ok(true)).is_err());
+        assert!(confirm_cleanup_absence(Ok(()), Err(refusal("unknown absence"))).is_err());
+        assert!(confirm_cleanup_absence(Ok(()), Ok(true)).is_err());
+        assert!(confirm_cleanup_absence(Ok(()), Ok(false)).is_ok());
+    }
+
+    struct CleanupFixture {
+        connection: PgConnection,
+        io: IoControl,
+        schema: String,
+        plan: ClonePlan,
+        binding: FollowBinding,
+    }
+
+    impl CleanupFixture {
+        fn new(label: &str) -> Self {
+            let (mut connection, io, schema) =
+                live_fixture_for(label, "RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN");
+            connection
+                .query(
+                    &format!("CREATE TABLE {schema}.items(id integer PRIMARY KEY)"),
+                    &io,
+                )
+                .unwrap();
+            let plan = live_source_plan(&mut connection, &schema, &io);
+            command(&mut connection, "COMMIT", "COMMIT", &io).unwrap();
+            let publication = format!("cleanup_p_{label}_{}", std::process::id());
+            connection
+                .query(
+                    &format!("CREATE PUBLICATION {publication} FOR TABLE {schema}.items"),
+                    &io,
+                )
+                .unwrap();
+            let publication = publication_receipt(&mut connection, &publication, &io).unwrap();
+            let slot = format!("cleanup_s_{label}_{}", std::process::id());
+            let literal = connection.quote_literal(&slot).unwrap();
+            let created = connection.query(&format!("SELECT slot_name,lsn FROM pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')"), &io).unwrap();
+            assert_eq!(created.rows(), 1);
+            assert_eq!(created.columns().unwrap(), 2);
+            assert_eq!(text(&created, 0, 0).unwrap(), slot);
+            let mut binding = live_binding(&plan);
+            binding.slot.intent.binding = crate::state::SourceSlotBinding::new(
+                binding.stream(),
+                slot,
+                crate::cdc::contracts::Plugin::Pgoutput,
+                plan.generation.0,
+            )
+            .unwrap();
+            binding.slot.consistent_point = slot_lsn(text(&created, 0, 1).unwrap()).unwrap();
+            binding.publication = publication;
+            Self {
+                connection,
+                io,
+                schema,
+                plan,
+                binding,
+            }
+        }
+
+        fn progress(
+            slot_removed: bool,
+            publication_removed: bool,
+        ) -> crate::state::CleanupProgress {
+            crate::state::CleanupProgress {
+                slot_removed,
+                publication_removed,
+            }
+        }
+
+        fn inspect(&mut self, slot_removed: bool, publication_removed: bool) -> Result<()> {
+            inspect_follow_cleanup(
+                &mut self.connection,
+                &self.plan,
+                &self.binding,
+                &Self::progress(slot_removed, publication_removed),
+                &self.io,
+            )
+        }
+
+        fn slot_present(&mut self) -> bool {
+            let slot = self
+                .connection
+                .quote_literal(self.binding.slot.intent.binding.slot_name())
+                .unwrap();
+            self.connection
+                .query(
+                    &format!(
+                        "SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={slot}"
+                    ),
+                    &self.io,
+                )
+                .unwrap()
+                .rows()
+                == 1
+        }
+
+        fn publication_present(&mut self) -> bool {
+            let publication = self
+                .connection
+                .quote_literal(&self.binding.publication.name)
+                .unwrap();
+            self.connection
+                .query(
+                    &format!("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname={publication}"),
+                    &self.io,
+                )
+                .unwrap()
+                .rows()
+                == 1
+        }
+    }
+
+    impl Drop for CleanupFixture {
+        fn drop(&mut self) {
+            let io = IoControl {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            };
+            let _ = self.connection.query("ROLLBACK", &io);
+            // All names, including deliberate replacements, were created by this owned fixture.
+            if let Ok(slot) = self
+                .connection
+                .quote_literal(self.binding.slot.intent.binding.slot_name())
+            {
+                let _ = self.connection.query(&format!("SELECT pg_catalog.pg_drop_replication_slot(slot_name) FROM pg_catalog.pg_replication_slots WHERE slot_name={slot} AND NOT active"), &io);
+            }
+            if let Ok(publication) = self
+                .connection
+                .quote_identifier(&self.binding.publication.name)
+            {
+                let _ = self
+                    .connection
+                    .query(&format!("DROP PUBLICATION IF EXISTS {publication}"), &io);
+            }
+            let _ = self
+                .connection
+                .query(&format!("DROP SCHEMA {} CASCADE", self.schema), &io);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires owned PostgreSQL harness"]
+    fn live_cleanup_owned_advanced_slot_and_publication() {
+        let mut fixture = CleanupFixture::new("advanced");
+        let slot = fixture
+            .connection
+            .quote_literal(fixture.binding.slot.intent.binding.slot_name())
+            .unwrap();
+        fixture
+            .connection
+            .query(
+                &format!("INSERT INTO {}.items VALUES (1)", fixture.schema),
+                &fixture.io,
+            )
+            .unwrap();
+        fixture.connection.query(&format!("SELECT pg_catalog.pg_replication_slot_advance({slot},pg_catalog.pg_current_wal_insert_lsn())"), &fixture.io).unwrap();
+        let advanced = fixture.connection.query(&format!("SELECT confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={slot}"), &fixture.io).unwrap();
+        assert!(
+            slot_lsn(text(&advanced, 0, 0).unwrap()).unwrap()
+                > fixture.binding.slot.consistent_point
+        );
+        fixture.inspect(false, false).unwrap();
+        remove_follow_slot(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            false,
+            &fixture.io,
+        )
+        .unwrap();
+        fixture.inspect(true, false).unwrap();
+        assert!(!fixture.slot_present());
+        assert!(fixture.publication_present());
+        remove_follow_publication(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            false,
+            &fixture.io,
+        )
+        .unwrap();
+        fixture.inspect(true, true).unwrap();
+        remove_follow_slot(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            true,
+            &fixture.io,
+        )
+        .unwrap();
+        remove_follow_publication(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            true,
+            &fixture.io,
+        )
+        .unwrap();
+        assert!(!fixture.publication_present());
+    }
+
+    #[test]
+    #[ignore = "requires owned PostgreSQL harness"]
+    fn live_cleanup_publication_identity_options_membership_refuse() {
+        let mut fixture = CleanupFixture::new("pub");
+        let name = fixture.binding.publication.name.clone();
+        for mutation in [
+            format!("ALTER PUBLICATION {name} SET (publish='insert')"),
+            format!(
+                "ALTER PUBLICATION {name} DROP TABLE {}.items",
+                fixture.schema
+            ),
+        ] {
+            fixture.connection.query(&mutation, &fixture.io).unwrap();
+            assert!(fixture.inspect(false, false).is_err());
+            assert!(
+                remove_follow_publication(
+                    &mut fixture.connection,
+                    &fixture.plan,
+                    &fixture.binding,
+                    false,
+                    &fixture.io
+                )
+                .is_err()
+            );
+            assert!(fixture.slot_present());
+            assert!(fixture.publication_present());
+            if mutation.contains("SET (") {
+                fixture.connection.query(&format!("ALTER PUBLICATION {name} SET (publish='insert, update, delete, truncate')"), &fixture.io).unwrap();
+            } else {
+                fixture
+                    .connection
+                    .query(
+                        &format!(
+                            "ALTER PUBLICATION {name} ADD TABLE {}.items",
+                            fixture.schema
+                        ),
+                        &fixture.io,
+                    )
+                    .unwrap();
+            }
+        }
+        let mut wrong_owner = fixture.binding.clone();
+        wrong_owner.publication.owner_oid += 1;
+        assert!(
+            remove_follow_publication(
+                &mut fixture.connection,
+                &fixture.plan,
+                &wrong_owner,
+                false,
+                &fixture.io
+            )
+            .is_err()
+        );
+        fixture
+            .connection
+            .query(&format!("DROP PUBLICATION {name}"), &fixture.io)
+            .unwrap();
+        fixture
+            .connection
+            .query(
+                &format!(
+                    "CREATE PUBLICATION {name} FOR TABLE {}.items",
+                    fixture.schema
+                ),
+                &fixture.io,
+            )
+            .unwrap();
+        let replacement = publication_receipt(&mut fixture.connection, &name, &fixture.io).unwrap();
+        assert_ne!(replacement.oid, fixture.binding.publication.oid);
+        assert!(fixture.inspect(false, false).is_err());
+        assert!(
+            remove_follow_publication(
+                &mut fixture.connection,
+                &fixture.plan,
+                &fixture.binding,
+                false,
+                &fixture.io
+            )
+            .is_err()
+        );
+        assert_eq!(
+            publication_receipt(&mut fixture.connection, &name, &fixture.io).unwrap(),
+            replacement
+        );
+    }
+
+    #[test]
+    #[ignore = "requires owned PostgreSQL harness"]
+    fn live_cleanup_active_or_foreign_slot_survives() {
+        let mut fixture = CleanupFixture::new("active");
+        let conninfo = crate::contracts::Conninfo::new(
+            std::env::var_os("RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN").unwrap(),
+        )
+        .unwrap();
+        let mut receiver = PgConnection::connect_replication(&conninfo, &fixture.io).unwrap();
+        receiver
+            .start_replication(
+                fixture.binding.slot.intent.binding.slot_name(),
+                fixture.binding.slot.consistent_point.0,
+                &[
+                    ("proto_version", Some("1")),
+                    ("publication_names", Some(&fixture.binding.publication.name)),
+                ],
+                &fixture.io,
+            )
+            .unwrap();
+        assert!(fixture.inspect(false, false).is_err());
+        assert!(
+            remove_follow_slot(
+                &mut fixture.connection,
+                &fixture.plan,
+                &fixture.binding,
+                false,
+                &fixture.io
+            )
+            .is_err()
+        );
+        assert!(fixture.slot_present());
+        drop(receiver);
+        let slot = fixture
+            .connection
+            .quote_literal(fixture.binding.slot.intent.binding.slot_name())
+            .unwrap();
+        loop {
+            let active = fixture
+                .connection
+                .query(
+                    &format!(
+                        "SELECT active FROM pg_catalog.pg_replication_slots WHERE slot_name={slot}"
+                    ),
+                    &fixture.io,
+                )
+                .unwrap();
+            if active.cell(0, 0).unwrap() == Some(b"f") {
+                break;
+            }
+            assert!(std::time::Instant::now() < fixture.io.deadline);
+            std::thread::yield_now();
+        }
+        remove_follow_slot(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            false,
+            &fixture.io,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .query(
+                &format!("SELECT pg_catalog.pg_create_physical_replication_slot({slot})"),
+                &fixture.io,
+            )
+            .unwrap();
+        assert!(fixture.inspect(false, false).is_err());
+        assert!(
+            remove_follow_slot(
+                &mut fixture.connection,
+                &fixture.plan,
+                &fixture.binding,
+                false,
+                &fixture.io
+            )
+            .is_err()
+        );
+        assert!(fixture.slot_present());
+        assert!(fixture.publication_present());
+    }
+
+    #[test]
+    #[ignore = "requires owned PostgreSQL harness"]
+    fn live_cleanup_recorded_removal_reappearance_survives() {
+        let mut fixture = CleanupFixture::new("reappear");
+        remove_follow_slot(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            false,
+            &fixture.io,
+        )
+        .unwrap();
+        let slot = fixture
+            .connection
+            .quote_literal(fixture.binding.slot.intent.binding.slot_name())
+            .unwrap();
+        fixture
+            .connection
+            .query(
+                &format!("SELECT pg_catalog.pg_create_logical_replication_slot({slot},'pgoutput')"),
+                &fixture.io,
+            )
+            .unwrap();
+        assert!(fixture.inspect(true, false).is_err());
+        assert!(
+            remove_follow_slot(
+                &mut fixture.connection,
+                &fixture.plan,
+                &fixture.binding,
+                true,
+                &fixture.io
+            )
+            .is_err()
+        );
+        assert!(fixture.slot_present());
+        remove_follow_publication(
+            &mut fixture.connection,
+            &fixture.plan,
+            &fixture.binding,
+            false,
+            &fixture.io,
+        )
+        .unwrap();
+        let name = &fixture.binding.publication.name;
+        fixture
+            .connection
+            .query(
+                &format!(
+                    "CREATE PUBLICATION {name} FOR TABLE {}.items",
+                    fixture.schema
+                ),
+                &fixture.io,
+            )
+            .unwrap();
+        assert!(
+            remove_follow_publication(
+                &mut fixture.connection,
+                &fixture.plan,
+                &fixture.binding,
+                true,
+                &fixture.io
+            )
+            .is_err()
+        );
+        assert!(fixture.publication_present());
+    }
+
+    #[test]
+    #[ignore = "requires owned PostgreSQL harness"]
+    fn live_cleanup_source_binding_mismatch_preserves_resources() {
+        let mut fixture = CleanupFixture::new("binding");
+        for index in 0..3 {
+            let mut plan = fixture.plan.clone();
+            match index {
+                0 => plan.source.identity.database_oid += 1,
+                1 => plan.source.timeline += 1,
+                _ => plan.generation.0 += 1,
+            }
+            assert!(
+                inspect_follow_cleanup(
+                    &mut fixture.connection,
+                    &plan,
+                    &fixture.binding,
+                    &CleanupFixture::progress(false, false),
+                    &fixture.io
+                )
+                .is_err()
+            );
+            assert!(
+                remove_follow_slot(
+                    &mut fixture.connection,
+                    &plan,
+                    &fixture.binding,
+                    false,
+                    &fixture.io
+                )
+                .is_err()
+            );
+            assert!(
+                remove_follow_publication(
+                    &mut fixture.connection,
+                    &plan,
+                    &fixture.binding,
+                    false,
+                    &fixture.io
+                )
+                .is_err()
+            );
+            assert!(fixture.slot_present());
+            assert!(fixture.publication_present());
+        }
+    }
+
     fn table() -> CloneTable {
         CloneTable {
             source_oid: 42,
@@ -727,6 +1406,10 @@ mod tests {
     }
 
     fn live_fixture(label: &str) -> (PgConnection, IoControl, String) {
+        live_fixture_for(label, "RPGMIGRATE_TEST_SOURCE")
+    }
+
+    fn live_fixture_for(label: &str, source_key: &str) -> (PgConnection, IoControl, String) {
         let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
         let context: serde_json::Value =
             serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
@@ -741,9 +1424,7 @@ mod tests {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        let info =
-            crate::contracts::Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_SOURCE").unwrap())
-                .unwrap();
+        let info = crate::contracts::Conninfo::new(std::env::var_os(source_key).unwrap()).unwrap();
         let mut connection = PgConnection::connect(&info, &io).unwrap();
         configure_session(&mut connection, &io).unwrap();
         command(&mut connection, "BEGIN", "BEGIN", &io).unwrap();

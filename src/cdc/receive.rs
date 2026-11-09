@@ -4,13 +4,17 @@ use crate::contracts::{Error, ErrorKind, FollowBinding, FollowOptions, IoControl
 use crate::follow::channel::{FeedbackReceiver, FollowSender};
 use crate::identity::{SourceEndLsn, StreamId};
 use crate::pg::{PgConnection, ReplicationEnvelope, ReplicationPoll, StandbyStatus};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STATUS_INTERVAL: Duration = Duration::from_secs(10);
 const SERVICE_INTERVAL: Duration = Duration::from_millis(50);
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The worker contract keeps signals explicit"
+)]
 pub(crate) fn run(
     options: &FollowOptions,
     binding: &FollowBinding,
@@ -18,6 +22,8 @@ pub(crate) fn run(
     output: &FollowSender,
     feedback: &FeedbackReceiver,
     ready: SyncSender<i32>,
+    request_keepalive: &AtomicBool,
+    stop: &AtomicBool,
     io: &IoControl,
 ) -> Result<()> {
     options.limits.validate()?;
@@ -75,7 +81,11 @@ pub(crate) fn run(
     ready
         .send(pid)
         .map_err(|_| gap("follow receiver readiness was abandoned"))?;
-    let mut lease = ReceiveLease(Status::new(stream, floor, Instant::now(), STATUS_INTERVAL));
+    let mut lease = ReceiveLease {
+        status: Status::new(stream, floor, Instant::now(), STATUS_INTERVAL),
+        request_keepalive,
+        stop,
+    };
     receive(
         &mut source,
         &mut decoder,
@@ -156,22 +166,30 @@ fn require_setting(
     Ok(())
 }
 
-struct ReceiveLease(Status);
+struct ReceiveLease<'a> {
+    status: Status,
+    request_keepalive: &'a AtomicBool,
+    stop: &'a AtomicBool,
+}
 
 fn receive(
     source: &mut PgConnection,
     decoder: &mut super::pgoutput::Decoder,
     output: &FollowSender,
     feedback: &FeedbackReceiver,
-    lease: &mut ReceiveLease,
+    lease: &mut ReceiveLease<'_>,
     max_frame_bytes: usize,
     io: &IoControl,
 ) -> Result<()> {
-    let status = &mut lease.0;
     loop {
         check(io)?;
-        status.service(source, feedback)?;
-        match source.poll_replication(status.wake(), io)? {
+        lease
+            .status
+            .service(source, feedback, lease.request_keepalive)?;
+        if lease.stop.load(Ordering::Acquire) {
+            return stop(source, feedback, lease, io);
+        }
+        match source.poll_replication(lease.status.wake(), io)? {
             ReplicationPoll::Frame(frame) => {
                 if frame.as_bytes().len() > max_frame_bytes {
                     return Err(gap(
@@ -184,7 +202,7 @@ fn receive(
                             frame
                                 .payload()
                                 .ok_or_else(|| gap("follow data payload is missing"))?,
-                            &mut |message| admit(message, source, output, feedback, status, io),
+                            &mut |message| admit(message, source, output, feedback, lease, io),
                         )?;
                     }
                     ReplicationEnvelope::Keepalive {
@@ -193,8 +211,10 @@ fn receive(
                         ..
                     } => {
                         if reply_requested {
-                            status.pending = true;
-                            status.service(source, feedback)?;
+                            lease.status.pending = true;
+                            lease
+                                .status
+                                .service(source, feedback, lease.request_keepalive)?;
                         }
                         admit(
                             FollowMessage::Keepalive {
@@ -204,13 +224,13 @@ fn receive(
                             source,
                             output,
                             feedback,
-                            status,
+                            lease,
                             io,
                         )?;
                     }
                 }
             }
-            ReplicationPoll::FeedbackDrained(observed) => status.check_drained(observed)?,
+            ReplicationPoll::FeedbackDrained(observed) => lease.status.check_drained(observed)?,
             ReplicationPoll::Wake => {}
             ReplicationPoll::End => {
                 return Err(gap(
@@ -226,32 +246,70 @@ fn admit(
     source: &mut PgConnection,
     output: &FollowSender,
     feedback: &FeedbackReceiver,
-    status: &mut Status,
+    lease: &mut ReceiveLease<'_>,
     io: &IoControl,
 ) -> Result<()> {
     output.validate_message(&message)?;
     loop {
         check(io)?;
+        if lease.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         match output.try_send(message) {
             Ok(()) => return Ok(()),
             Err(TrySendError::Disconnected(_)) => return Err(gap("follow apply channel closed")),
             Err(TrySendError::Full(pending)) => message = pending,
         }
-        if !status.backpressure_reported {
+        if !lease.status.backpressure_reported {
             let snapshot = output.full_snapshot()?;
             crate::protocol::follow_backpressure(
                 snapshot.limits,
                 snapshot.queued_messages,
                 snapshot.queued_bytes,
             )?;
-            status.backpressure_reported = true;
+            lease.status.backpressure_reported = true;
         }
-        status.service(source, feedback)?;
-        match source.poll_replication_paused(status.wake(), io)? {
-            ReplicationPoll::FeedbackDrained(observed) => status.check_drained(observed)?,
+        lease
+            .status
+            .service(source, feedback, lease.request_keepalive)?;
+        match source.poll_replication_paused(lease.status.wake(), io)? {
+            ReplicationPoll::FeedbackDrained(observed) => lease.status.check_drained(observed)?,
             ReplicationPoll::Wake => {}
             ReplicationPoll::End => return Err(gap("follow source ended while apply was blocked")),
             ReplicationPoll::Frame(_) => return Err(gap("follow paused transport consumed input")),
+        }
+    }
+}
+
+fn stop(
+    source: &mut PgConnection,
+    feedback: &FeedbackReceiver,
+    lease: &mut ReceiveLease<'_>,
+    io: &IoControl,
+) -> Result<()> {
+    let io = &crate::pg::operation_control(io);
+    let mut ending = false;
+    loop {
+        check(io)?;
+        if !ending {
+            lease
+                .status
+                .service(source, feedback, lease.request_keepalive)?;
+            if !lease.status.pending && !lease.status.reply_pending {
+                source.request_replication_end()?;
+                ending = true;
+            }
+        }
+        match source.poll_replication(lease.status.wake(), io)? {
+            ReplicationPoll::FeedbackDrained(observed) => lease.status.check_drained(observed)?,
+            ReplicationPoll::Frame(_) => {
+                // The source slot retains unapplied input; shutdown grants no feedback authority.
+            }
+            ReplicationPoll::Wake => {}
+            ReplicationPoll::End if ending => return check(io),
+            ReplicationPoll::End => {
+                return Err(gap("follow source ended before requested shutdown"));
+            }
         }
     }
 }
@@ -263,6 +321,7 @@ struct Status {
     next: Instant,
     interval: Duration,
     pending: bool,
+    reply_pending: bool,
     backpressure_reported: bool,
 }
 
@@ -275,8 +334,13 @@ impl Status {
             next: now,
             interval,
             pending: true,
+            reply_pending: false,
             backpressure_reported: false,
         }
+    }
+
+    fn request_keepalive(&mut self, request: &AtomicBool) {
+        self.reply_pending |= request.swap(false, Ordering::AcqRel);
     }
 
     fn accept(&mut self, proof: SafeFeedback) -> Result<()> {
@@ -314,7 +378,13 @@ impl Status {
         }
     }
 
-    fn service(&mut self, source: &mut PgConnection, feedback: &FeedbackReceiver) -> Result<()> {
+    fn service(
+        &mut self,
+        source: &mut PgConnection,
+        feedback: &FeedbackReceiver,
+        request_keepalive: &AtomicBool,
+    ) -> Result<()> {
+        self.request_keepalive(request_keepalive);
         if let Some(proof) = feedback.take() {
             self.accept(proof)?;
         }
@@ -328,16 +398,17 @@ impl Status {
         client_time_micros: i64,
         mut queue: impl FnMut(StandbyStatus) -> Result<bool>,
     ) -> Result<()> {
-        if (self.pending || now >= self.next)
+        if (self.pending || self.reply_pending || now >= self.next)
             && queue(StandbyStatus {
                 write: self.proven.0,
                 flush: self.proven.0,
                 apply: self.proven.0,
                 client_time_micros,
-                request_reply: false,
+                request_reply: self.reply_pending,
             })?
         {
             self.pending = false;
+            self.reply_pending = false;
             self.next = now + self.interval;
         }
         Ok(())
@@ -374,6 +445,7 @@ fn gap(message: &str) -> Error {
 mod tests {
     use super::*;
     use crate::identity::{RunId, SourceId};
+    use std::sync::atomic::AtomicBool;
 
     fn stream() -> StreamId {
         StreamId {
@@ -465,6 +537,309 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn drain_request_retries_and_coalesces_without_advancing_feedback() {
+        let now = Instant::now();
+        let mut status = Status::new(stream(), SourceEndLsn(17), now, STATUS_INTERVAL);
+        status.submit(now, 0, |_| Ok(true)).unwrap();
+        let request = AtomicBool::new(true);
+        status.request_keepalive(&request);
+        assert!(!request.load(Ordering::Acquire));
+        status
+            .submit(now + Duration::from_millis(1), 1, |sent| {
+                assert!(sent.request_reply);
+                assert_eq!((sent.write, sent.flush, sent.apply), (17, 17, 17));
+                Ok(false)
+            })
+            .unwrap();
+        request.store(true, Ordering::Release);
+        status.request_keepalive(&request);
+        status
+            .submit(now + Duration::from_millis(2), 2, |sent| {
+                assert!(sent.request_reply);
+                assert_eq!((sent.write, sent.flush, sent.apply), (17, 17, 17));
+                Ok(true)
+            })
+            .unwrap();
+        status
+            .submit(now + Duration::from_millis(3), 3, |_| {
+                panic!("accepted coalesced request was sent twice")
+            })
+            .unwrap();
+        status
+            .submit(
+                now + STATUS_INTERVAL + Duration::from_millis(2),
+                4,
+                |sent| {
+                    assert!(!sent.request_reply);
+                    assert_eq!((sent.write, sent.flush, sent.apply), (17, 17, 17));
+                    Ok(true)
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn completed_stop_requires_checked_terminal_results() {
+        for case in ["stop_idle", "stop_error", "stop_extra"] {
+            let io = IoControl {
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancelled: std::sync::Arc::new(AtomicBool::new(false)),
+            };
+            let limits = crate::contracts::FollowLimits::default();
+            let (sender, receiver) = crate::follow::channel::bounded(limits).unwrap();
+            let (_proofs, feedback) = crate::follow::channel::feedback();
+            let (peer, mut source) = crate::pg::follow_receive_tests::Peer::start(case, &io);
+            let mut decoder =
+                super::super::pgoutput::Decoder::new(stream(), &binding(), limits).unwrap();
+            let request_keepalive = AtomicBool::new(false);
+            let stop = AtomicBool::new(true);
+            let mut lease = ReceiveLease {
+                status: Status::new(stream(), SourceEndLsn(17), Instant::now(), STATUS_INTERVAL),
+                request_keepalive: &request_keepalive,
+                stop: &stop,
+            };
+            let result = receive(
+                &mut source,
+                &mut decoder,
+                &sender,
+                &feedback,
+                &mut lease,
+                limits.max_message_bytes,
+                &io,
+            );
+            if case == "stop_idle" {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Pgsql);
+            }
+            assert!(!io.cancelled.load(Ordering::Acquire));
+            assert_eq!(lease.status.proven, SourceEndLsn(17));
+            assert_eq!(
+                receiver.recv_timeout(Duration::ZERO),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            drop(source);
+            let receipt = peer.finish_closed();
+            assert_eq!(receipt["copy_done"], true);
+            assert_eq!(receipt["reply_requested_count"], 0);
+        }
+    }
+
+    #[test]
+    fn idle_drain_request_wakes_before_the_status_timer_without_advancing_feedback() {
+        let request = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_request = std::sync::Arc::clone(&request);
+        let worker_stop = std::sync::Arc::clone(&stop);
+        let (ready, readiness) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let io = IoControl {
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancelled: std::sync::Arc::new(AtomicBool::new(false)),
+            };
+            let limits = crate::contracts::FollowLimits::default();
+            let (sender, _receiver) = crate::follow::channel::bounded(limits).unwrap();
+            let (_proofs, feedback) = crate::follow::channel::feedback();
+            let (peer, mut source) = crate::pg::follow_receive_tests::Peer::start("stop_idle", &io);
+            let mut decoder =
+                super::super::pgoutput::Decoder::new(stream(), &binding(), limits).unwrap();
+            let mut lease = ReceiveLease {
+                status: Status::new(stream(), SourceEndLsn(17), Instant::now(), STATUS_INTERVAL),
+                request_keepalive: &worker_request,
+                stop: &worker_stop,
+            };
+            lease
+                .status
+                .service(&mut source, &feedback, &worker_request)
+                .unwrap();
+            loop {
+                if let ReplicationPoll::FeedbackDrained(observed) =
+                    source.poll_replication_paused(io.deadline, &io).unwrap()
+                {
+                    lease.status.check_drained(observed).unwrap();
+                    break;
+                }
+            }
+            ready.send(peer).unwrap();
+            receive(
+                &mut source,
+                &mut decoder,
+                &sender,
+                &feedback,
+                &mut lease,
+                limits.max_message_bytes,
+                &io,
+            )
+            .unwrap();
+            assert!(!io.cancelled.load(Ordering::Acquire));
+            assert_eq!(lease.status.proven, SourceEndLsn(17));
+        });
+        let mut peer = readiness.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before = Instant::now();
+        request.store(true, Ordering::Release);
+        peer.requested();
+        assert!(before.elapsed() < Duration::from_secs(1));
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap();
+        let receipt = peer.finish_closed();
+        assert_eq!(receipt["copy_done"], true);
+        assert_eq!(receipt["reply_requested_count"], 1);
+    }
+
+    #[test]
+    fn completed_stop_during_partial_later_input_checks_end_without_decoding_the_tail() {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_stop = std::sync::Arc::clone(&stop);
+        let limits = crate::contracts::FollowLimits::default();
+        let (sender, receiver) = crate::follow::channel::bounded(limits).unwrap();
+        let (ready, readiness) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let io = IoControl {
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancelled: std::sync::Arc::new(AtomicBool::new(false)),
+            };
+            let (_proofs, feedback) = crate::follow::channel::feedback();
+            let (peer, mut source) =
+                crate::pg::follow_receive_tests::Peer::start("stop_partial", &io);
+            ready.send(peer).unwrap();
+            let mut decoder =
+                super::super::pgoutput::Decoder::new(stream(), &binding(), limits).unwrap();
+            let request = AtomicBool::new(false);
+            let mut lease = ReceiveLease {
+                status: Status::new(stream(), SourceEndLsn(17), Instant::now(), STATUS_INTERVAL),
+                request_keepalive: &request,
+                stop: &worker_stop,
+            };
+            receive(
+                &mut source,
+                &mut decoder,
+                &sender,
+                &feedback,
+                &mut lease,
+                limits.max_message_bytes,
+                &io,
+            )
+            .unwrap();
+            assert!(!decoder.is_idle());
+            assert!(!io.cancelled.load(Ordering::Acquire));
+            assert_eq!(lease.status.proven, SourceEndLsn(17));
+        });
+        let peer = readiness.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            FollowMessage::Begin(begin) if begin.xid == 9
+        ));
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap();
+        assert_eq!(
+            receiver.recv_timeout(Duration::ZERO),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert_eq!(peer.finish_closed()["copy_done"], true);
+    }
+
+    #[test]
+    fn completed_stop_drains_pending_status_before_ending_and_keeps_reply_intent() {
+        let io = IoControl {
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancelled: std::sync::Arc::new(AtomicBool::new(false)),
+        };
+        let limits = crate::contracts::FollowLimits::default();
+        let (sender, _receiver) = crate::follow::channel::bounded(limits).unwrap();
+        let (_proofs, feedback) = crate::follow::channel::feedback();
+        let (peer, mut source) = crate::pg::follow_receive_tests::Peer::start("blocked", &io);
+        crate::pg::follow_receive_tests::pending_feedback(&mut source, &io);
+        let mut decoder =
+            super::super::pgoutput::Decoder::new(stream(), &binding(), limits).unwrap();
+        let request = AtomicBool::new(true);
+        let stop = AtomicBool::new(true);
+        let mut lease = ReceiveLease {
+            status: Status::new(stream(), SourceEndLsn(17), Instant::now(), STATUS_INTERVAL),
+            request_keepalive: &request,
+            stop: &stop,
+        };
+        receive(
+            &mut source,
+            &mut decoder,
+            &sender,
+            &feedback,
+            &mut lease,
+            limits.max_message_bytes,
+            &io,
+        )
+        .unwrap();
+        assert!(!lease.status.reply_pending);
+        assert_eq!(lease.status.proven, SourceEndLsn(17));
+        drop(source);
+        let receipt = peer.finish_closed();
+        assert_eq!(receipt["copy_done"], true);
+        assert_eq!(receipt["reply_requested_count"], 1);
+    }
+
+    #[test]
+    fn completed_stop_waiting_for_terminals_preserves_deadline_and_cancellation() {
+        for cancel in [false, true] {
+            let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+            let worker_cancelled = std::sync::Arc::clone(&cancelled);
+            let (ready, readiness) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let mut io = IoControl {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancelled: worker_cancelled,
+                };
+                let (peer, mut source) =
+                    crate::pg::follow_receive_tests::Peer::start("stop_never", &io);
+                if !cancel {
+                    io.deadline = Instant::now() + Duration::from_millis(200);
+                }
+                ready.send(peer).unwrap();
+                let limits = crate::contracts::FollowLimits::default();
+                let (sender, _receiver) = crate::follow::channel::bounded(limits).unwrap();
+                let (_proofs, feedback) = crate::follow::channel::feedback();
+                let mut decoder =
+                    super::super::pgoutput::Decoder::new(stream(), &binding(), limits).unwrap();
+                let request = AtomicBool::new(false);
+                let stop = AtomicBool::new(true);
+                let mut lease = ReceiveLease {
+                    status: Status::new(
+                        stream(),
+                        SourceEndLsn(17),
+                        Instant::now(),
+                        STATUS_INTERVAL,
+                    ),
+                    request_keepalive: &request,
+                    stop: &stop,
+                };
+                receive(
+                    &mut source,
+                    &mut decoder,
+                    &sender,
+                    &feedback,
+                    &mut lease,
+                    limits.max_message_bytes,
+                    &io,
+                )
+                .unwrap_err()
+            });
+            let mut peer = readiness.recv_timeout(Duration::from_secs(2)).unwrap();
+            peer.ending();
+            let before = Instant::now();
+            if cancel {
+                cancelled.store(true, Ordering::Release);
+            }
+            let failure = worker.join().unwrap();
+            assert!(
+                failure
+                    .message
+                    .contains(if cancel { "cancel" } else { "deadline" })
+            );
+            assert!(before.elapsed() < Duration::from_secs(1));
+            assert_eq!(cancelled.load(Ordering::Acquire), cancel);
+            assert_eq!(peer.finish_closed()["copy_done"], true);
+        }
+    }
+
     fn binding() -> FollowBinding {
         FollowBinding {
             slot: crate::state::SourceSlotReceipt {
@@ -494,21 +869,26 @@ mod tests {
 
     #[test]
     fn full_fifo_keeps_status_alive_and_resumes_each_decoder_emission_once() {
-        backpressure(false, false);
+        backpressure(false, false, false);
     }
 
     #[test]
     fn full_fifo_cancellation_closes_without_acking_or_retrying_a_poisoned_decoder() {
-        backpressure(true, false);
+        backpressure(true, false, false);
     }
 
     #[test]
     #[ignore = "requires seventy seconds of bounded status while apply is blocked"]
     fn full_fifo_status_survives_walsender_timeout() {
-        backpressure(false, true);
+        backpressure(false, true, false);
     }
 
-    fn backpressure(cancel_while_full: bool, real_timeout: bool) {
+    #[test]
+    fn completed_stop_while_fifo_full_preserves_order_and_unapplied_feedback_floor() {
+        backpressure(false, false, true);
+    }
+
+    fn backpressure(cancel_while_full: bool, real_timeout: bool, completed_stop: bool) {
         let limits = crate::contracts::FollowLimits {
             channel_messages: 2,
             ..crate::contracts::FollowLimits::default()
@@ -520,6 +900,10 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(if real_timeout { 90 } else { 5 }),
             cancelled: std::sync::Arc::clone(&cancelled),
         };
+        let request = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_request = std::sync::Arc::clone(&request);
+        let worker_stop = std::sync::Arc::clone(&stop);
         let (ready, ready_receiver) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             let (peer, mut source) = crate::pg::follow_receive_tests::Peer::start(
@@ -534,16 +918,20 @@ mod tests {
             let binding = binding();
             let mut decoder =
                 super::super::pgoutput::Decoder::new(stream(), &binding, limits).unwrap();
-            let mut lease = ReceiveLease(Status::new(
-                stream(),
-                SourceEndLsn(17),
-                Instant::now(),
-                if real_timeout {
-                    STATUS_INTERVAL
-                } else {
-                    Duration::from_millis(10)
-                },
-            ));
+            let mut lease = ReceiveLease {
+                status: Status::new(
+                    stream(),
+                    SourceEndLsn(17),
+                    Instant::now(),
+                    if real_timeout {
+                        STATUS_INTERVAL
+                    } else {
+                        Duration::from_millis(10)
+                    },
+                ),
+                request_keepalive: &worker_request,
+                stop: &worker_stop,
+            };
             let result = receive(
                 &mut source,
                 &mut decoder,
@@ -553,11 +941,15 @@ mod tests {
                 limits.max_message_bytes,
                 &control,
             );
-            (result, decoder.is_idle(), lease.0.backpressure_reported)
+            (
+                result,
+                decoder.is_idle(),
+                lease.status.backpressure_reported,
+            )
         });
         let mut peer = ready_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         peer.blocked(if real_timeout { 8 } else { 3 });
-        if !cancel_while_full {
+        if !cancel_while_full && !completed_stop {
             let messages: Vec<_> = (0..7)
                 .map(|_| receiver.recv_timeout(Duration::from_secs(1)).unwrap())
                 .collect();
@@ -591,12 +983,22 @@ mod tests {
             ));
         }
         let before = Instant::now();
-        cancelled.store(true, Ordering::Release);
+        if completed_stop {
+            request.store(true, Ordering::Release);
+            stop.store(true, Ordering::Release);
+        } else {
+            cancelled.store(true, Ordering::Release);
+        }
         let (result, idle, backpressure_reported) = worker.join().unwrap();
         assert!(backpressure_reported);
-        assert!(result.unwrap_err().message.contains("cancel"));
+        if completed_stop {
+            result.unwrap();
+            assert!(!cancelled.load(Ordering::Acquire));
+        } else {
+            assert!(result.unwrap_err().message.contains("cancel"));
+        }
         assert!(before.elapsed() < Duration::from_millis(500));
-        if cancel_while_full {
+        if cancel_while_full || completed_stop {
             assert!(!idle);
             assert!(matches!(
                 receiver.recv_timeout(Duration::ZERO).unwrap(),
@@ -616,6 +1018,10 @@ mod tests {
         let receipt = peer.finish_closed();
         assert!(receipt["feedback_count"].as_u64().unwrap() >= 3);
         assert_eq!(receipt["positions_unchanged"], true);
+        if completed_stop {
+            assert_eq!(receipt["copy_done"], true);
+            assert_eq!(receipt["reply_requested_count"], 1);
+        }
     }
     #[test]
     fn frame_budget_refuses_before_decode_and_keeps_feedback_at_the_proven_floor() {
@@ -629,12 +1035,13 @@ mod tests {
         let (peer, mut source) = crate::pg::follow_receive_tests::Peer::start("follow", &control);
         let mut decoder =
             super::super::pgoutput::Decoder::new(stream(), &binding(), limits).unwrap();
-        let mut lease = ReceiveLease(Status::new(
-            stream(),
-            SourceEndLsn(17),
-            Instant::now(),
-            STATUS_INTERVAL,
-        ));
+        let request_keepalive = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let mut lease = ReceiveLease {
+            status: Status::new(stream(), SourceEndLsn(17), Instant::now(), STATUS_INTERVAL),
+            request_keepalive: &request_keepalive,
+            stop: &stop,
+        };
         let failure = receive(
             &mut source,
             &mut decoder,
@@ -647,7 +1054,7 @@ mod tests {
         .unwrap_err();
         assert!(failure.message.contains("frame exceeds"));
         assert!(decoder.is_idle());
-        assert_eq!(lease.0.proven, SourceEndLsn(17));
+        assert_eq!(lease.status.proven, SourceEndLsn(17));
         assert_eq!(
             receiver.recv_timeout(Duration::ZERO),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
@@ -837,7 +1244,15 @@ mod tests {
         let (_feedback, feedback) = crate::follow::channel::feedback();
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let failure = run(
-            &options, &binding, start, &output, &feedback, ready, &control,
+            &options,
+            &binding,
+            start,
+            &output,
+            &feedback,
+            ready,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &control,
         )
         .unwrap_err();
         assert_eq!(failure.kind, ErrorKind::BadState);

@@ -38,46 +38,50 @@ pub(crate) fn validate_conninfo(conninfo: &Conninfo) -> Result<()> {
     }
 }
 
-pub(crate) fn utility_environment(conninfo: &Conninfo) -> Result<Vec<(OsString, OsString)>> {
-    let mut diagnostic = ptr::null_mut();
-    // SAFETY: conninfo is terminated and diagnostic is writable; each allocation is freed below.
-    let options = unsafe { pq::PQconninfoParse(conninfo.as_c_str().as_ptr(), &mut diagnostic) };
-    if !diagnostic.is_null() {
-        // SAFETY: libpq allocated this optional diagnostic, whose contents remain private.
-        unsafe { pq::PQfreemem(diagnostic.cast()) };
-    }
-    let options = NonNull::new(options).ok_or_else(|| {
-        error("PostgreSQL utility connection settings are invalid; details redacted")
-    })?;
-    let outcome = (|| {
-        let mut values = Vec::new();
-        let mut current = options.as_ptr();
-        // SAFETY: PQconninfoParse returns a keyword-terminated option array owned until PQconninfoFree.
-        while unsafe { !(*current).keyword.is_null() } {
-            // SAFETY: current points to one entry in the live, terminated option array.
-            let option = unsafe { &*current };
+pub(crate) struct UtilityEnvironment {
+    pub(crate) remove: Vec<OsString>,
+    pub(crate) values: Vec<(OsString, OsString)>,
+}
+
+/// # Safety
+/// Retain the live, keyword-terminated libpq option array throughout this call.
+unsafe fn copy_utility_options(
+    options: NonNull<pq::PQconninfoOption>,
+) -> Result<UtilityEnvironment> {
+    let mut environment = UtilityEnvironment {
+        remove: Vec::new(),
+        values: Vec::new(),
+    };
+    let mut current = options.as_ptr();
+    // SAFETY: the caller retains the complete keyword-terminated option array.
+    while unsafe { !(*current).keyword.is_null() } {
+        // SAFETY: current points to a live entry before the terminator.
+        let option = unsafe { &*current };
+        if option.envvar.is_null() {
             if !option.val.is_null() {
-                if option.envvar.is_null() {
-                    return Err(error(
-                        "PostgreSQL utility connection settings cannot be represented safely",
-                    ));
-                }
-                // SAFETY: non-null option fields are terminated strings owned by the option array.
-                let (key, value) =
-                    unsafe { (CStr::from_ptr(option.envvar), CStr::from_ptr(option.val)) };
-                values.push((
-                    OsString::from_vec(key.to_bytes().to_vec()),
-                    OsString::from_vec(value.to_bytes().to_vec()),
+                return Err(error(
+                    "PostgreSQL utility connection settings cannot be represented safely",
                 ));
             }
-            // SAFETY: the current entry has a non-null keyword, so its successor exists.
-            current = unsafe { current.add(1) };
+        } else {
+            // SAFETY: each non-null field is a terminated string owned by the option array.
+            let name = unsafe { CStr::from_ptr(option.envvar) };
+            let name = OsString::from_vec(name.to_bytes().to_vec());
+            environment.remove.push(name.clone());
+            // SAFETY: every visited entry has a non-null, terminated keyword.
+            let service = unsafe { CStr::from_ptr(option.keyword) }.to_bytes() == b"service";
+            if !service && !option.val.is_null() {
+                // SAFETY: this non-null value remains live until the caller releases the array.
+                let value = unsafe { CStr::from_ptr(option.val) };
+                environment
+                    .values
+                    .push((name, OsString::from_vec(value.to_bytes().to_vec())));
+            }
         }
-        Ok(values)
-    })();
-    // SAFETY: this is the single release of PQconninfoParse's owned array.
-    unsafe { pq::PQconninfoFree(options.as_ptr()) };
-    outcome
+        // SAFETY: a non-null keyword guarantees a following entry, possibly the terminator.
+        current = unsafe { current.add(1) };
+    }
+    Ok(environment)
 }
 
 pub(crate) struct PgConnection {
@@ -205,6 +209,80 @@ fn is_data_command(sql: &str) -> bool {
 }
 
 impl PgConnection {
+    pub(crate) fn utility_environment(&self) -> Result<UtilityEnvironment> {
+        if self.mode != Mode::Sql || self.phase != Phase::Idle {
+            return Err(error(
+                "PostgreSQL utility requires an idle regular SQL connection",
+            ));
+        }
+        let raw = self
+            .raw
+            .as_ref()
+            .ok_or_else(|| error("PostgreSQL utility connection is unavailable"))?
+            .raw
+            .as_ptr();
+        // SAFETY: self retains the sole live connection allocation throughout metadata capture.
+        if unsafe { pq::PQstatus(raw) } != pq::ConnStatusType::CONNECTION_OK {
+            return Err(error("PostgreSQL utility connection is unavailable"));
+        }
+        // SAFETY: PQconninfo copies this owned connection's effective options into a new array.
+        let options = NonNull::new(unsafe { pq::PQconninfo(raw) })
+            .ok_or_else(|| error("PostgreSQL utility connection settings are unavailable"))?;
+        // SAFETY: options is a live libpq array and no pointer escapes this copy.
+        let outcome = unsafe { copy_utility_options(options) };
+        // SAFETY: this is the single release of PQconninfo's array, including refusal paths.
+        unsafe { pq::PQconninfoFree(options.as_ptr()) };
+        let mut environment = outcome?;
+        // Pin the validated peer while keeping its hostname for TLS and passfile matching.
+        // SAFETY: all accessors read strings retained by this owned connection allocation.
+        let selected = unsafe {
+            [
+                ("PGHOST", pq::PQhost(raw), false),
+                ("PGHOSTADDR", pq::PQhostaddr(raw), true),
+                ("PGPORT", pq::PQport(raw), false),
+                ("PGDATABASE", pq::PQdb(raw), false),
+                ("PGUSER", pq::PQuser(raw), false),
+            ]
+        };
+        for (name, value, optional) in selected {
+            if value.is_null() {
+                return Err(error(
+                    "PostgreSQL utility selected peer metadata is unavailable",
+                ));
+            }
+            // SAFETY: libpq accessor strings remain live while self owns the connection.
+            let value = unsafe { CStr::from_ptr(value) }.to_bytes();
+            environment.values.retain(|(key, _)| key != name);
+            if value.is_empty() {
+                if optional {
+                    continue;
+                }
+                return Err(error(
+                    "PostgreSQL utility selected peer metadata is unavailable",
+                ));
+            }
+            environment
+                .values
+                .push((name.into(), OsString::from_vec(value.to_vec())));
+        }
+        let socket = environment.values.iter().any(|(name, value)| {
+            name == "PGHOST"
+                && (value.as_encoded_bytes().starts_with(b"/")
+                    || value.as_encoded_bytes().starts_with(b"@"))
+        });
+        if !socket
+            && !environment
+                .values
+                .iter()
+                .any(|(name, _)| name == "PGHOSTADDR")
+        {
+            return Err(error(
+                "PostgreSQL utility selected peer metadata is unavailable",
+            ));
+        }
+        Ok(environment)
+    }
+
     pub(crate) fn connect(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
         Self::connect_mode(conninfo, Mode::Sql, io)
     }
@@ -802,13 +880,6 @@ impl PgConnection {
     }
 
     /// Begins graceful shutdown; continue polling until End or an error.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Graceful logical termination belongs to the requested-end boundary"
-        )
-    )]
     pub(crate) fn request_replication_end(&mut self) -> Result<()> {
         self.require_mode(Mode::Logical)?;
         self.require(Phase::CopyBoth)?;
@@ -1699,29 +1770,96 @@ mod tests {
     }
 
     #[test]
-    fn utility_environment_uses_libpq_explicit_values_without_diagnostics() {
-        let conninfo = Conninfo::new(
-            "postgresql://a%20user:private-secret@example.invalid:5433/a%20db?sslmode=require"
-                .into(),
-        )
-        .unwrap();
-        let environment = utility_environment(&conninfo).unwrap();
+    fn utility_environment_does_not_replay_a_service_reference() {
+        let settings = parsed_utility_options(b"service=private-fixture").unwrap();
+        assert!(
+            !settings.values.iter().any(|(name, _)| name == "PGSERVICE"),
+            "utility must not resolve a service again"
+        );
+    }
+
+    fn parsed_utility_options(bytes: &[u8]) -> Result<UtilityEnvironment> {
+        let input = CString::new(bytes).unwrap();
+        let mut diagnostic = ptr::null_mut();
+        // SAFETY: input and diagnostic are live; both returned allocations are freed below.
+        let options = unsafe { pq::PQconninfoParse(input.as_ptr(), &mut diagnostic) };
+        if !diagnostic.is_null() {
+            // SAFETY: this optional allocation was returned by libpq exactly once.
+            unsafe { pq::PQfreemem(diagnostic.cast()) };
+        }
+        let options = NonNull::new(options).expect("synthetic settings must parse");
+        // SAFETY: libpq returned a complete live option array.
+        let result = unsafe { copy_utility_options(options) };
+        // SAFETY: release the array once, including expected refusal cases.
+        unsafe { pq::PQconninfoFree(options.as_ptr()) };
+        result
+    }
+
+    #[test]
+    fn utility_environment_copies_native_bytes_and_removes_null_defaults() {
+        let environment = parsed_utility_options(b"password='private-\xff' sslmode=disable options='-c search_path=' sslrootcert='private-\xfe'").unwrap();
         for (key, value) in [
-            ("PGUSER", "a user"),
-            ("PGPASSWORD", "private-secret"),
-            ("PGHOST", "example.invalid"),
-            ("PGPORT", "5433"),
-            ("PGDATABASE", "a db"),
-            ("PGSSLMODE", "require"),
+            ("PGPASSWORD", b"private-\xff".as_slice()),
+            ("PGSSLMODE", b"disable"),
+            ("PGOPTIONS", b"-c search_path="),
+            ("PGSSLROOTCERT", b"private-\xfe"),
         ] {
-            assert!(environment.contains(&(key.into(), value.into())));
+            assert!(
+                environment
+                    .values
+                    .iter()
+                    .any(|(name, actual)| name == key && actual.as_encoded_bytes() == value),
+                "effective bytes changed"
+            );
         }
-        assert!(!environment.iter().any(|(key, _)| key == "PGPASSFILE"));
-        for value in ["invalid=private-secret", "replication=database"] {
-            let failure = utility_environment(&Conninfo::new(value.into()).unwrap()).unwrap_err();
-            assert!(!failure.message.contains("private-secret"));
-            assert!(!failure.message.contains("replication"));
+        for name in [
+            "PGSERVICE",
+            "PGHOSTADDR",
+            "PGPASSFILE",
+            "PGSSLCERT",
+            "PGSSLKEY",
+        ] {
+            assert!(
+                environment.remove.iter().any(|actual| actual == name),
+                "null mapped default was not removed"
+            );
         }
+        for input in [
+            b"replication=database".as_slice(),
+            b"sslpassword='private-secret'",
+            b"fallback_application_name='private-value'",
+            b"keepalives=0",
+        ] {
+            let failure = parsed_utility_options(input)
+                .err()
+                .expect("unmapped settings must be refused");
+            assert_eq!(
+                failure.message,
+                "PostgreSQL utility connection settings cannot be represented safely"
+            );
+        }
+    }
+
+    #[test]
+    fn utility_environment_refuses_closed_failed_logical_and_busy_owners() {
+        let mut connection = unconnected();
+        assert!(connection.utility_environment().is_err());
+        connection.mode = Mode::Sql;
+        assert!(connection.utility_environment().is_err());
+        for phase in [
+            Phase::SnapshotExport,
+            Phase::Query,
+            Phase::CopyIn,
+            Phase::CopyOut,
+            Phase::CopyBoth,
+            Phase::Pipeline,
+        ] {
+            connection.phase = phase;
+            assert!(connection.utility_environment().is_err());
+        }
+        connection.phase = Phase::Idle;
+        connection.raw.take();
+        assert!(connection.utility_environment().is_err());
     }
 
     #[test]

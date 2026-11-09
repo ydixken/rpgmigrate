@@ -26,7 +26,8 @@ def exact(connection, size):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("paused", "notice", "eof", "blocked", "follow", "follow_long"), required=True)
+    parser.add_argument("--case", choices=("paused", "notice", "eof", "blocked", "follow", "follow_long",
+                                                     "stop_idle", "stop_partial", "stop_error", "stop_extra", "stop_never"), required=True)
     args = parser.parse_args()
     with socket.socket() as listener:
         if args.case == "blocked":
@@ -55,12 +56,15 @@ def main():
                 print(json.dumps({"status": "observed", "closed": True}), flush=True)
                 return
             feedback_count = 0
+            reply_requested_count = 0
+            copy_done = False
             if args.case == "notice":
                 kind = exact(connection, 1)
                 payload = exact(connection, struct.unpack("!I", exact(connection, 4))[0] - 4)
                 assert kind == b"d" and len(payload) == 34 and payload[:1] == b"r"
                 assert struct.unpack("!QQQ", payload[1:25]) == (17, 17, 17)
                 feedback_count += 1
+                reply_requested_count += payload[33] == 1
                 connection.sendall(message(b"N", b"SNOTICE\x00VNOTICE\x00C00000\x00Mprivate-peer-value\x00\x00"))
             if args.case.startswith("follow"):
                 payloads = [b"B" + struct.pack("!QqI", 100, 123, 9),
@@ -73,12 +77,20 @@ def main():
                 frames.insert(3, message(b"d", b"k" + struct.pack("!QqB", 500, 0, 1)))
                 frames.append(message(b"d", b"k" + struct.pack("!QqB", 777, 0, 1)))
                 frame = b"".join(frames)
+            elif args.case == "stop_partial":
+                begin = b"B" + struct.pack("!QqI", 100, 123, 9)
+                later = message(b"d", b"w" + struct.pack("!QQq", 500, 900, 0) + b"invalid-later-pgoutput")
+                frame = message(b"d", b"w" + struct.pack("!QQq", 500, 900, 0) + begin) + later[:17]
+            elif args.case.startswith("stop_"):
+                frame = b""
             else:
                 frame = message(b"d", b"w" + struct.pack("!QQq", 500, 900, 0) + b"partial-frame-body")
             try:
-                for part in (frame[:2], frame[2:17], frame[17:]):
+                parts = (frame,) if args.case.startswith("stop_") else (frame[:2], frame[2:17], frame[17:])
+                for part in parts:
                     connection.sendall(part)
-                    time.sleep(0.005)
+                    if not args.case.startswith("stop_"):
+                        time.sleep(0.005)
             except (BrokenPipeError, ConnectionResetError):
                 pass
             if args.case == "blocked":
@@ -89,16 +101,39 @@ def main():
                     payload = exact(connection, struct.unpack("!I", exact(connection, 4))[0] - 4)
                     if kind == b"X":
                         break
+                    if kind == b"c":
+                        assert not payload and not copy_done
+                        assert args.case in ("follow", "blocked", "paused", "stop_idle", "stop_partial", "stop_error", "stop_extra", "stop_never")
+                        copy_done = True
+                        if args.case == "stop_never":
+                            print(json.dumps({"copy_done_waiting": True, "positions_unchanged": True}), flush=True)
+                            continue
+                        if args.case == "stop_partial":
+                            connection.sendall(later[17:])
+                        if args.case == "stop_error":
+                            terminal = message(b"E", b"SERROR\x00VERROR\x00CXX000\x00Mreceiver stop failed\x00\x00")
+                        else:
+                            terminal = (message(b"c", b"") + message(b"C", b"COPY 0\x00")
+                                        + message(b"C", b"START_REPLICATION\x00"))
+                            if args.case == "stop_extra":
+                                terminal += message(b"C", b"COPY 0\x00")
+                        connection.sendall(terminal + message(b"Z", b"I"))
+                        continue
+                    assert not copy_done
                     assert kind == b"d" and len(payload) == 34 and payload[:1] == b"r"
                     assert struct.unpack("!QQQ", payload[1:25]) == (17, 17, 17)
                     feedback_count += 1
+                    reply_requested_count += payload[33] == 1
+                    if args.case == "stop_idle" and payload[33] == 1 and reply_requested_count == 1:
+                        print(json.dumps({"reply_requested": True, "positions_unchanged": True}), flush=True)
                     minimum = 8 if args.case == "follow_long" else 3
                     if args.case.startswith("follow") and feedback_count == minimum:
                         print(json.dumps({"blocked_status_count": minimum, "positions_unchanged": True}), flush=True)
             except (EOFError, ConnectionResetError):
                 pass
             print(json.dumps({"status": "observed", "feedback_count": feedback_count,
-                              "positions_unchanged": True, "closed": True}), flush=True)
+                              "positions_unchanged": True, "closed": True, "copy_done": copy_done,
+                              "reply_requested_count": reply_requested_count}), flush=True)
 
 
 if __name__ == "__main__":

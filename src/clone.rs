@@ -120,7 +120,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
         native.bind_clone(&plan, snapshot.ticket())?;
         plan
     };
-    crate::schema::preflight(&options, &plan, io)?;
+    crate::schema::preflight(snapshot.connection()?, &target, &plan, io)?;
     let coordinator = PgConnection::connect(&options.target, io)
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Target))?;
     let mut authority = CloneAuthority::acquire(coordinator, &mut native, &plan, io)?;

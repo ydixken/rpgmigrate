@@ -75,12 +75,15 @@ def authority_fixture(cluster):
     psql(context, "postgres", f"COMMENT ON DATABASE e3_authority IS {quote(context['token'])};")
     psql(context, "e3_authority", "REVOKE CREATE ON DATABASE e3_authority FROM PUBLIC; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE, CREATE ON SCHEMA public TO e1_target;")
     psql(context, "e3_authority", "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC, e3_restricted;")
+    psql(context, "postgres", "CREATE DATABASE e3_authority_source OWNER e1_target TEMPLATE template0 ENCODING 'UTF8';")
+    psql(context, "postgres", f"COMMENT ON DATABASE e3_authority_source IS {quote(context['token'])};")
     target = conninfo(context, "e3_authority", "e1_target")
     with owned_standby(cluster) as standby, OwnedCluster(cluster.manifest, fsync=False) as unsafe:
         psql(unsafe.context, "postgres", "CREATE DATABASE e3_authority OWNER e1_target TEMPLATE template0 ENCODING 'UTF8';")
         psql(unsafe.context, "postgres", f"COMMENT ON DATABASE e3_authority IS {quote(unsafe.token)};")
         yield {
             "RPGMIGRATE_TEST_AUTHORITY_TARGET": target,
+            "RPGMIGRATE_TEST_AUTHORITY_SOURCE": conninfo(context, "e3_authority_source", ADMIN),
             "RPGMIGRATE_TEST_AUTHORITY_ADMIN": conninfo(context, "e3_authority", ADMIN),
             "RPGMIGRATE_TEST_AUTHORITY_RESTRICTED": conninfo(context, "e3_authority", "e3_restricted"),
             "RPGMIGRATE_TEST_AUTHORITY_READONLY": target + " options='-c default_transaction_read_only=on'",
@@ -90,13 +93,15 @@ def authority_fixture(cluster):
         }
 
 
-def validate_authority_faults(context):
-    from authority_fault import FAULT_CASES
+def validate_authority_faults(context, *, follow=False):
+    from authority_fault import FAULT_CASES, FOLLOW_FAULT_CASES
+
+    cases = FOLLOW_FAULT_CASES if follow else FAULT_CASES
 
     root = Path(context["root"])
     assert sorted(path.name for path in root.glob("authority-fault-*.json")) == sorted(
-        f"authority-fault-{case}.json" for case in FAULT_CASES), "missing or unexpected authority fault receipts"
-    for case in FAULT_CASES:
+        f"authority-fault-{case}.json" for case in cases), "missing or unexpected authority fault receipts"
+    for case in cases:
         value = json.loads((root / f"authority-fault-{case}.json").read_text())
         assert value.get("status") == "observed", "pending or ignored authority fault receipt"
         assert value["owner"] == context["token"] and value["case"] == case

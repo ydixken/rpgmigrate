@@ -2,5 +2,12 @@
   "cdc::receive::tests::live_configuration_and_logical_query_preserve_export_lifetime",
   "pg::follow_receive_tests::live_pipeline_commands_counts_dispatched_commands",
   "cdc::receive::tests::live_startup_refuses_slot_advanced_beyond_recovery_before_readiness",
-  "cdc::receive::tests::full_fifo_status_survives_walsender_timeout"
+  "cdc::receive::tests::full_fifo_status_survives_walsender_timeout",
+  "cdc::receive::tests::drain_request_retries_and_coalesces_without_advancing_feedback",
+  "cdc::receive::tests::idle_drain_request_wakes_before_the_status_timer_without_advancing_feedback",
+  "cdc::receive::tests::completed_stop_requires_checked_terminal_results",
+  "cdc::receive::tests::completed_stop_during_partial_later_input_checks_end_without_decoding_the_tail",
+  "cdc::receive::tests::completed_stop_drains_pending_status_before_ending_and_keeps_reply_intent",
+  "cdc::receive::tests::completed_stop_while_fifo_full_preserves_order_and_unapplied_feedback_floor",
+  "cdc::receive::tests::completed_stop_waiting_for_terminals_preserves_deadline_and_cancellation"
 ]

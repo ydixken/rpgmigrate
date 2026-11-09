@@ -33,6 +33,8 @@ def validate_module_receipt(profile, expected, output, context):
     if profile == "FollowSnapshot":
         assert expected == module_cases({}, profile), "wrong current source snapshot inventory"
         validate_follow_snapshot_faults(context)
+    if profile == "FollowAuthority":
+        validate_authority_faults(context, follow=True)
     if profile in ("Authority", "Engine"):
         validate_authority_faults(context)
     if profile in ("Replication", "Engine"):
@@ -131,12 +133,12 @@ def protocol_self_check(cluster, manifest):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--follow-authority", action="store_true", help="require eleven exact native pgoutput target authority cases")
-    modes.add_argument("--follow-receive", action="store_true", help="require four exact native pgoutput receiver cases")
+    modes.add_argument("--follow-authority", action="store_true", help="require seventeen exact native pgoutput target authority and cutover cases")
+    modes.add_argument("--follow-receive", action="store_true", help="require eleven exact native pgoutput receiver and checked cutover cases")
     modes.add_argument("--follow-apply", action="store_true", help="require eleven exact native pgoutput row semantics and catalog identity cases")
     modes.add_argument("--follow-snapshot", action="store_true", help="require nine exact pgoutput snapshot cases and five independent fault receipts")
-    modes.add_argument("--follow-source", action="store_true", help="require seven exact native pgoutput source snapshot cases")
-    modes.add_argument("--schema", action="store_true", help="require the exact native pre-data drift guard case")
+    modes.add_argument("--follow-source", action="store_true", help="require twelve exact native pgoutput source snapshot and owned cleanup cases")
+    modes.add_argument("--schema", action="store_true", help="require three exact native schema utility and pre-data drift cases")
     modes.add_argument("--clone", action="store_true", help="require all seven exact native clone component cases")
     modes.add_argument("--self-check", action="store_true")
     modes.add_argument("--transport", action="store_true", help="require the exact transport unit-test inventory")
@@ -156,7 +158,7 @@ def main():
     if module_suite:
         profile = "FollowSnapshot" if args.follow_snapshot else "FollowAuthority" if args.follow_authority else "FollowReceive" if args.follow_receive else "FollowApply" if args.follow_apply else "FollowSource" if args.follow_source else "Schema" if args.schema else "Clone" if args.clone else "SourceCatalog" if args.source_catalog else "Catalog" if args.catalog else "Replication" if args.replication else "Authority" if args.authority else "Prepared" if args.prepared else "Engine" if args.engine else "Transport"
         expected = module_cases(manifest, profile)
-    with money_locales(args.catalog), (OwnedCluster(manifest, logical=True, logical_slots=32) if args.follow_source or args.follow_snapshot or args.follow_receive else OwnedCluster(manifest)) as cluster, ExitStack() as fixtures:
+    with money_locales(args.catalog), (OwnedCluster(manifest, logical=True, logical_slots=32) if args.follow_source or args.follow_snapshot or args.follow_receive else OwnedCluster(manifest, tcp=True) if args.schema else OwnedCluster(manifest)) as cluster, ExitStack() as fixtures:
         if args.self_check:
             self_check(cluster, manifest)
             return 0

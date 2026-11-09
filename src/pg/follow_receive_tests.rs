@@ -50,6 +50,22 @@ impl Peer {
         self.finish_closed()
     }
 
+    pub(crate) fn ending(&mut self) {
+        let mut line = String::new();
+        assert!(self.output.read_line(&mut line).unwrap() > 0);
+        let receipt: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(receipt["copy_done_waiting"], true);
+        assert_eq!(receipt["positions_unchanged"], true);
+    }
+
+    pub(crate) fn requested(&mut self) {
+        let mut line = String::new();
+        assert!(self.output.read_line(&mut line).unwrap() > 0);
+        let receipt: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(receipt["reply_requested"], true);
+        assert_eq!(receipt["positions_unchanged"], true);
+    }
+
     pub(crate) fn blocked(&mut self, minimum: u64) {
         let mut line = String::new();
         assert!(self.output.read_line(&mut line).unwrap() > 0);
@@ -76,6 +92,25 @@ impl Drop for Peer {
             let _ = self.child.wait();
         }
     }
+}
+
+pub(crate) fn pending_feedback(source: &mut PgConnection, io: &IoControl) {
+    super::ffi::replication_testing::small_send_buffer(source).unwrap();
+    for _ in 0..200_000 {
+        source.queue_feedback(status()).unwrap();
+        assert!(matches!(
+            source
+                .poll_replication_paused(Instant::now() + Duration::from_millis(1), io)
+                .unwrap(),
+            ReplicationPoll::Wake | ReplicationPoll::FeedbackDrained(_)
+        ));
+        if super::ffi::replication_testing::flush_pending(source) > 0
+            && super::ffi::replication_testing::feedback_waiting_for_drain(source)
+        {
+            return;
+        }
+    }
+    panic!("owned peer did not block actual PQflush");
 }
 
 fn control() -> IoControl {
@@ -192,25 +227,8 @@ fn sender_eof_is_an_error() {
 fn paused_status_write_backpressure_retains_the_pending_status() {
     let io = control();
     let (peer, mut source) = Peer::start("blocked", &io);
-    super::ffi::replication_testing::small_send_buffer(&source).unwrap();
-    let mut observed = false;
-    for _ in 0..200_000 {
-        source.queue_feedback(status()).unwrap();
-        assert!(matches!(
-            source
-                .poll_replication_paused(Instant::now() + Duration::from_millis(1), &io)
-                .unwrap(),
-            ReplicationPoll::Wake | ReplicationPoll::FeedbackDrained(_)
-        ));
-        if super::ffi::replication_testing::flush_pending(&source) > 0
-            && super::ffi::replication_testing::feedback_waiting_for_drain(&source)
-        {
-            observed = true;
-            assert!(!source.queue_feedback(status()).unwrap());
-            break;
-        }
-    }
-    assert!(observed, "owned peer did not block actual PQflush");
+    pending_feedback(&mut source, &io);
+    assert!(!source.queue_feedback(status()).unwrap());
     loop {
         match source.poll_replication_paused(io.deadline, &io).unwrap() {
             ReplicationPoll::FeedbackDrained(observed) => {

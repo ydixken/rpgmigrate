@@ -7,8 +7,9 @@ use clap::parser::ValueSource;
 
 use crate::cli::{CommandPath, Environment, Parser};
 use crate::contracts::{
-    CloneOptions, Conninfo, Error, ErrorKind, FollowLimits, FollowOptions, Invocation,
-    RestorePolicy, Result, StateAction, StateRequest,
+    CloneOptions, Conninfo, EndposSource, Error, ErrorKind, FollowLimits, FollowOptions,
+    Invocation, RestorePolicy, Result, SentinelField, StateAction, StateRequest, StreamCommand,
+    StreamOptions,
 };
 
 const COMMON_ENV: &[(&str, &str, bool)] = &[
@@ -348,7 +349,18 @@ impl Settings {
         let progress = path.0 == ["list", "progress"];
         let compare_schema = path.0 == ["compare", "schema"];
         let compare_data = path.0 == ["compare", "data"];
-        let native_route = follow || clone_route || progress || compare_schema || compare_data;
+        let stream = matches!(
+            path.0
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["stream", "sentinel", "get"]
+                | ["stream", "sentinel", "set", "endpos"]
+                | ["stream", "cleanup"]
+        );
+        let native_route =
+            follow || clone_route || progress || compare_schema || compare_data || stream;
         if operator.is_some() && !native_route {
             return Err(Error::new(
                 ErrorKind::BadConfig,
@@ -361,6 +373,9 @@ impl Settings {
                 ErrorKind::BadConfig,
                 "unimplemented PGCOPYDB_APPLY_GROUP_TXNS; no database or state action was started",
             ));
+        }
+        if stream {
+            return self.stream_options(path, env, operator);
         }
         self.validate_connections(parser)?;
         if native_route {
@@ -385,6 +400,101 @@ impl Settings {
             });
         }
         self.runtime_invocation(path, env)
+    }
+
+    fn stream_options(
+        &self,
+        path: CommandPath,
+        env: &Environment,
+        operator: Option<crate::contracts::OperatorIdentity>,
+    ) -> Result<Invocation> {
+        for (name, setting) in &self.options {
+            if setting.active()
+                && !matches!(
+                    name.as_str(),
+                    "source"
+                        | "target"
+                        | "dir"
+                        | "json"
+                        | "endpos"
+                        | "replay-lsn"
+                        | "current"
+                        | "verbose"
+                        | "debug"
+                        | "trace"
+                        | "quiet"
+                        | "log-json"
+                )
+            {
+                return Err(unsupported_option(name));
+            }
+        }
+        let command = if path.0 == ["stream", "cleanup"] {
+            StreamCommand::Cleanup
+        } else if path.0 == ["stream", "sentinel", "get"] {
+            if self.enabled("current") {
+                return Err(self.invalid_combination(&[], "--current requires sentinel set endpos"));
+            }
+            StreamCommand::Get(if self.enabled("endpos") {
+                SentinelField::Endpos
+            } else if self.enabled("replay-lsn") {
+                SentinelField::ReplayLsn
+            } else {
+                SentinelField::All
+            })
+        } else {
+            if self.enabled("endpos") || self.enabled("replay-lsn") {
+                return Err(self.invalid_combination(&[], "selectors require sentinel get"));
+            }
+            StreamCommand::SetEndpos(if self.enabled("current") {
+                EndposSource::Current
+            } else {
+                let value = self
+                    .operands
+                    .first()
+                    .and_then(|value| value.to_str())
+                    .and_then(parse_endpos)
+                    .ok_or_else(|| self.invalid_combination(&[], "endpos must be a nonzero LSN"))?;
+                EndposSource::Explicit(value)
+            })
+        };
+        let connection = |name| -> Result<Option<Conninfo>> {
+            if let Some(setting) = self.options.get(name) {
+                validate_value(name, setting, self.parser)?;
+            }
+            self.text(name)
+                .map(|text| Conninfo::new(text.to_owned()))
+                .transpose()
+        };
+        let source = connection("source")?;
+        let target = connection("target")?;
+        if (command == StreamCommand::Cleanup
+            || command == StreamCommand::SetEndpos(EndposSource::Current))
+            && source.is_none()
+        {
+            return Err(
+                self.invalid_combination(&[], "--source is required for this stream command")
+            );
+        }
+        if command != StreamCommand::Cleanup
+            && (command != StreamCommand::Get(SentinelField::Endpos) || self.enabled("json"))
+            && target.is_none()
+        {
+            return Err(
+                self.invalid_combination(&[], "--target is required for measured stream state")
+            );
+        }
+        Ok(Invocation::Stream(StreamOptions {
+            state: StateRequest {
+                path: self.state_path(env)?,
+                action: StateAction::Resume,
+            },
+            operator,
+            source,
+            target,
+            command,
+            json: self.enabled("json"),
+        }))
     }
 
     fn clone_options(
@@ -671,6 +781,16 @@ impl Settings {
             };
         Ok(base.join("rpgmigrate"))
     }
+}
+
+pub(crate) fn parse_endpos(value: &str) -> Option<crate::identity::SourceEndLsn> {
+    if !valid_lsn(value) {
+        return None;
+    }
+    let (high, low) = value.split_once('/')?;
+    let value = (u64::from(u32::from_str_radix(high, 16).ok()?) << 32)
+        | u64::from(u32::from_str_radix(low, 16).ok()?);
+    (value != 0).then_some(crate::identity::SourceEndLsn(value))
 }
 
 fn validate_apply_group(env: &Environment) -> Result<Option<u64>> {

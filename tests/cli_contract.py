@@ -191,6 +191,10 @@ class CliContract(unittest.TestCase):
                     self.assertEqual(result.returncode, 6, result.stderr)
                     self.assertEqual(json.loads(result.stderr)["category"], "Source")
                     self.assertIn("connection failed", result.stderr)
+                elif args == ("stream", "sentinel", "get", "-e"):
+                    self.assertEqual(result.returncode, 3, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(json.loads(result.stderr)["category"], "BadState")
                 else:
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn("unimplemented", result.stderr.lower())
@@ -223,6 +227,54 @@ class CliContract(unittest.TestCase):
             with self.subTest(args=args):
                 result = self.invoke("stream", "sentinel", *args)
                 self.assertEqual(result.returncode, 1, result.stderr)
+
+    def test_m4_stream_commands_refuse_missing_state_without_success_output(self):
+        commands = [
+            ("stream", "sentinel", "get", "--endpos"),
+            ("stream", "sentinel", "get", "--target", self.offline_conninfo, "--json"),
+            ("stream", "sentinel", "get", "--target", self.offline_conninfo, "--endpos", "--json"),
+            ("stream", "sentinel", "get", "--target", self.offline_conninfo, "--replay-lsn", "--json"),
+            ("stream", "sentinel", "get", "--target", self.offline_conninfo, "--replay-lsn"),
+            ("stream", "sentinel", "set", "endpos", "--target", self.offline_conninfo, "--json", "0/20"),
+            ("stream", "sentinel", "set", "endpos", "--target", self.offline_conninfo,
+             "--source", self.offline_conninfo, "--current", "--json"),
+            ("stream", "cleanup", "--source", self.offline_conninfo,
+             "--target", self.offline_conninfo, "--json"),
+        ]
+        for args in commands:
+            with self.subTest(args=args), tempfile.TemporaryDirectory(prefix="rpgmigrate-m4-missing-") as directory:
+                state = Path(directory) / "missing"
+                result = self.invoke(*args, "--dir", str(state))
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(json.loads(result.stderr)["category"], "BadState")
+                self.assertFalse(state.exists())
+                self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_m4_stream_argument_refusals_do_not_create_state(self):
+        for args in [
+            ("stream", "sentinel", "get", "--json"),
+            ("stream", "sentinel", "get", "--endpos", "--json"),
+            ("stream", "sentinel", "get", "--replay-lsn"),
+            ("stream", "sentinel", "set", "endpos", "--target", self.offline_conninfo, "0/0"),
+            ("stream", "sentinel", "set", "endpos", "--target", self.offline_conninfo, "100000000/1"),
+            ("stream", "sentinel", "get", "--target", "not conninfo", "--json"),
+        ]:
+            with self.subTest(args=args), tempfile.TemporaryDirectory(prefix="rpgmigrate-m4-refuse-") as directory:
+                state = Path(directory) / "missing"
+                result = self.invoke(*args, "--dir", str(state))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(json.loads(result.stderr)["category"], "BadArgs")
+                self.assertFalse(state.exists())
+
+    def test_m4_other_sentinel_mutations_remain_unimplemented(self):
+        for args in [("set", "startpos", "0/20"), ("set", "apply"), ("setup", "0/10", "0/20")]:
+            with self.subTest(args=args):
+                result = self.invoke("stream", "sentinel", *args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(json.loads(result.stderr)["category"], "BadConfig")
 
     def test_valid_additive_controls_are_still_explicitly_unimplemented(self):
         result = self.invoke(
@@ -344,14 +396,19 @@ class CliContract(unittest.TestCase):
                         }
                         missing_clone = parser == "cli_copy_db_getopts" and name == "resume"
                         missing_compare = parser == "cli_compare_getopts" and name in {"source", "target", "dir", "json"}
+                        missing_sentinel = parser == "cli_sentinel_getopts" and name in {
+                            "source", "dir", "endpos", "replay-lsn", "json",
+                            "verbose", "notice", "debug", "trace", "quiet",
+                        }
                         inconsistent = parser == "cli_copy_db_getopts" and name == "not-consistent"
+                        invalid_current = parser == "cli_sentinel_getopts" and name == "current"
                         if name in {"help", "version"} or json_version:
                             expected = 0
                         elif admitted_clone:
                             expected = 6
-                        elif missing_clone or missing_compare:
+                        elif missing_clone or missing_compare or missing_sentinel:
                             expected = 3
-                        elif inconsistent:
+                        elif inconsistent or invalid_current:
                             expected = 1
                         else:
                             expected = 2
@@ -362,10 +419,19 @@ class CliContract(unittest.TestCase):
                             self.assertTrue((state / "manifest.json").is_file())
                         elif expected == 3:
                             self.assertEqual(json.loads(result.stderr)["category"], "BadState")
-                            self.assertIn("state-missing", result.stderr)
+                            if missing_sentinel:
+                                self.assertIn("state-control: existing native state is unavailable", result.stderr)
+                                self.assertEqual(result.stdout, "")
+                            else:
+                                self.assertIn("state-missing", result.stderr)
                             self.assertFalse(state.exists())
                         elif inconsistent:
                             self.assertIn("--not-consistent requires --resume", result.stderr)
+                            self.assertFalse(state.exists())
+                        elif invalid_current:
+                            self.assertEqual(json.loads(result.stderr)["category"], "BadArgs")
+                            self.assertIn("--current requires sentinel set endpos", result.stderr)
+                            self.assertEqual(result.stdout, "")
                             self.assertFalse(state.exists())
                         elif expected == 2:
                             if parser == "cli_copy_db_getopts" and name == "follow":

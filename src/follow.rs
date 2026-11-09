@@ -1,10 +1,11 @@
 use std::io::Write;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 use crate::apply::CloneAuthority;
-use crate::apply::checkpoint::TargetAuthority;
+use crate::apply::checkpoint::{CompletedFollow, TargetAuthority};
 use crate::catalog;
 use crate::contracts::{
     ClonePlan, CopyGeneration, Error, ErrorKind, FollowBinding, FollowOptions, IoControl,
@@ -12,6 +13,7 @@ use crate::contracts::{
 };
 use crate::pg::{PgConnection, operation_control};
 use crate::snapshot::{CloneSnapshot, FollowSnapshot};
+use crate::state::ControlHandle;
 use crate::state::{self, ClonePhase, CloneState, NativeState, SourceSlotProvenance};
 
 pub(crate) mod channel;
@@ -67,6 +69,7 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
     if let Some(binding) = &binding {
         require_resource_names(&options, binding)?;
     }
+    let mut completed = None;
     let anchored = if saved
         .as_ref()
         .is_some_and(|s| s.phase == ClonePhase::Analyzing)
@@ -75,7 +78,22 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
             .as_ref()
             .ok_or_else(|| refusal("follow: native binding is absent"))?;
         let connection = target(&options, io)?;
-        TargetAuthority::acquire_follow(connection, &mut native, binding, io)?.has_follow_anchor()
+        let mut authority = TargetAuthority::acquire_follow(connection, &mut native, binding, io)?;
+        let anchored = authority.has_follow_anchor();
+        if anchored {
+            let control = ControlHandle::for_worker(&native, io)?;
+            if authority.observe_follow(io)?.follow_completed() {
+                let request = control
+                    .read(io)?
+                    .filter(|request| request.is_sealed())
+                    .ok_or_else(|| {
+                        refusal("follow: completed row lacks its sealed end position")
+                    })?;
+                completed = Some(authority.observe_completed(&control.seal(&request, io)?, io)?);
+            }
+        }
+        authority.close(io)?;
+        anchored
     } else {
         false
     };
@@ -84,6 +102,9 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
         anchored,
         options.clone.state.action,
     )?;
+    if let Some(completed) = completed {
+        return completed_report(&options, &completed, io);
+    }
     let (plan, binding) = match mode {
         Entry::Fresh => fresh(&options, &mut native, io)?,
         Entry::Recopy => recopy(&options, &mut native, io)?,
@@ -95,10 +116,8 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
         ),
     };
     crate::protocol::follow_startup(&options)?;
-    stream(&options, &plan, &binding, &mut native, io)?;
-    Err(refusal(
-        "follow suspended: streaming stopped without a drain proof",
-    ))
+    let completed = stream(&options, &plan, &binding, &mut native, io)?;
+    completed_report(&options, &completed, io)
 }
 
 fn fresh(
@@ -134,7 +153,7 @@ fn fresh(
         ));
     }
     catalog::follow::reject_generated(&plan.tables)?;
-    crate::schema::preflight(&options.clone, &plan, io)?;
+    crate::schema::preflight(&source, &target_sql, &plan, io)?;
     let mut snapshot = FollowSnapshot::create(options, &plan, native, io)?;
     let binding = snapshot.binding().clone();
     native.bind_follow(&plan, snapshot.snapshot_mut().ticket(), &binding)?;
@@ -355,54 +374,116 @@ fn with_source_health<T>(
     })
 }
 
+#[derive(Debug)]
+enum WorkerOutcome {
+    ApplyCompleted(Box<CompletedFollow>),
+    ReceiveStopped,
+    Failed(Error),
+}
+
+#[derive(Debug)]
+enum WaitReady<T> {
+    Ready(T),
+    Completed(Box<CompletedFollow>),
+}
+
 fn stream(
     options: &FollowOptions,
     plan: &ClonePlan,
     binding: &FollowBinding,
     native: &mut NativeState,
     io: &IoControl,
-) -> Result<()> {
+) -> Result<CompletedFollow> {
+    let control = ControlHandle::for_worker(native, io)?;
     let mut source = source(options, io)?;
     let confirmed = catalog::follow_confirmed_flush(&mut source, plan, binding, None, io)?;
     let (send, input) = channel::bounded(options.limits)?;
     let (feedback, proofs) = channel::feedback();
+    let request_keepalive = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
     std::thread::scope(|scope| {
-        let (failed, failure) = mpsc::sync_channel(2);
+        let (outcomes, outcome) = mpsc::sync_channel(2);
         let (ready, recovery) = mpsc::sync_channel(1);
-        let apply_failed = failed.clone();
-        scope.spawn(move || {
-            worker(apply_failed, ready, io, |ready| {
-                crate::apply::follow::run(
-                    options, binding, native, confirmed, ready, &input, &feedback, io,
-                )
-            })
+        let apply_outcomes = outcomes.clone();
+        let apply_input = &input;
+        let apply_feedback = &feedback;
+        let apply_request = &request_keepalive;
+        let apply_control = &control;
+        let apply = scope.spawn(move || {
+            worker(
+                apply_outcomes,
+                io,
+                || {
+                    crate::apply::follow::run(
+                        options,
+                        binding,
+                        native,
+                        confirmed,
+                        ready.clone(),
+                        apply_input,
+                        apply_feedback,
+                        apply_control,
+                        apply_request,
+                        io,
+                    )
+                },
+                |completed| WorkerOutcome::ApplyCompleted(Box::new(completed)),
+            );
+            drop(ready);
         });
+        let mut receive = None;
         let result = (|| {
-            let start = wait_ready(&recovery, &failure, io)?;
+            let start = match wait_ready(&recovery, &outcome, io)? {
+                WaitReady::Ready(start) => start,
+                WaitReady::Completed(completed) => return Ok(*completed),
+            };
             let (ready, receiver) = mpsc::sync_channel(1);
-            scope.spawn(move || {
-                worker(failed, ready, io, |ready| {
-                    crate::cdc::receive::run(options, binding, start, &send, &proofs, ready, io)
-                })
-            });
-            let pid = wait_ready(&receiver, &failure, io)?;
+            let receive_send = &send;
+            let receive_proofs = &proofs;
+            let receive_request = &request_keepalive;
+            let receive_stop = &stop;
+            receive = Some(scope.spawn(move || {
+                worker(
+                    outcomes,
+                    io,
+                    || {
+                        crate::cdc::receive::run(
+                            options,
+                            binding,
+                            start,
+                            receive_send,
+                            receive_proofs,
+                            ready.clone(),
+                            receive_request,
+                            receive_stop,
+                            io,
+                        )
+                    },
+                    |()| WorkerOutcome::ReceiveStopped,
+                );
+                drop(ready);
+            }));
+            let pid = match wait_ready(&receiver, &outcome, io)? {
+                WaitReady::Ready(pid) => pid,
+                WaitReady::Completed(completed) => return Ok(*completed),
+            };
             if pid <= 0 {
                 return Err(refusal("follow: receiver returned an invalid backend PID"));
             }
-            emit_streaming(options, io).map_err(|error| coordinator_error(error, &failure))?;
+            emit_streaming(options, io).map_err(|error| coordinator_error(error, &outcome))?;
             let mut next_health = Instant::now();
             loop {
-                if let Ok(error) = failure.try_recv() {
-                    return Err(error);
+                if let Ok(result) = outcome.try_recv() {
+                    return outcome_completion(result).map(|completed| *completed);
                 }
-                check(io).map_err(|error| coordinator_error(error, &failure))?;
+                check(io).map_err(|error| coordinator_error(error, &outcome))?;
                 if Instant::now() >= next_health {
                     catalog::check_follow_health(&mut source, plan, binding, Some(pid), io)
-                        .map_err(|error| coordinator_error(error, &failure))?;
+                        .map_err(|error| coordinator_error(error, &outcome))?;
                     next_health = Instant::now() + HEALTH_INTERVAL;
                 }
-                match failure.recv_timeout(POLL) {
-                    Ok(error) => return Err(error),
+                match outcome.recv_timeout(POLL) {
+                    Ok(result) => return outcome_completion(result).map(|completed| *completed),
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => {
                         return Err(refusal("follow: all streaming workers stopped"));
@@ -410,54 +491,141 @@ fn stream(
                 }
             }
         })();
-        io.cancelled.store(true, Ordering::Release);
-        result
+        if result.is_ok() {
+            stop.store(true, Ordering::Release);
+        } else {
+            io.cancelled.store(true, Ordering::Release);
+        }
+        let receiver_started = receive.is_some();
+        let apply_joined = apply.join();
+        let receive_joined = receive.map(|receive| receive.join());
+        let joined =
+            if apply_joined.is_err() || receive_joined.is_some_and(|result| result.is_err()) {
+                Err(refusal("follow: streaming worker panicked while joining"))
+            } else {
+                Ok(())
+            };
+        completed_join(result, &outcome, receiver_started, joined, io)
     })
 }
 
-fn wait_ready<T>(ready: &Receiver<T>, failure: &Receiver<Error>, io: &IoControl) -> Result<T> {
+fn outcome_completion(outcome: WorkerOutcome) -> Result<Box<CompletedFollow>> {
+    match outcome {
+        WorkerOutcome::ApplyCompleted(completed) => Ok(completed),
+        WorkerOutcome::ReceiveStopped => Err(refusal(
+            "follow: receiver stopped before durable apply completion",
+        )),
+        WorkerOutcome::Failed(error) => Err(error),
+    }
+}
+
+fn wait_ready<T>(
+    ready: &Receiver<T>,
+    outcomes: &Receiver<WorkerOutcome>,
+    io: &IoControl,
+) -> Result<WaitReady<T>> {
     let bounded = operation_control(io);
     loop {
-        if let Ok(error) = failure.try_recv() {
-            return Err(error);
+        if let Ok(outcome) = outcomes.try_recv() {
+            return outcome_completion(outcome).map(WaitReady::Completed);
         }
-        check(&bounded).map_err(|error| coordinator_error(error, failure))?;
+        check(&bounded).map_err(|error| coordinator_error(error, outcomes))?;
         match ready.recv_timeout(POLL) {
-            Ok(value) => return Ok(value),
+            Ok(value) => return Ok(WaitReady::Ready(value)),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(failure.try_recv().unwrap_or_else(|_| {
-                    refusal("follow: readiness channel closed before positive startup")
-                }));
+                return outcomes
+                    .try_recv()
+                    .map_err(|_| {
+                        refusal("follow: readiness channel closed before positive startup")
+                    })
+                    .and_then(outcome_completion)
+                    .map(WaitReady::Completed);
             }
         }
     }
 }
 
-fn coordinator_error(error: Error, failure: &Receiver<Error>) -> Error {
-    // Workers enqueue their causal error before publishing cancellation.
+fn coordinator_error(mut error: Error, outcomes: &Receiver<WorkerOutcome>) -> Error {
     if error.is_cancelled() {
-        return failure.try_recv().unwrap_or(error);
+        // Workers publish their causal error before publishing cancellation.
+        for outcome in outcomes.try_iter() {
+            if let WorkerOutcome::Failed(worker_error) = outcome {
+                if !worker_error.is_cancelled() {
+                    return worker_error;
+                }
+                error = worker_error;
+            }
+        }
     }
     error
 }
 
-fn worker<T>(
-    failed: SyncSender<Error>,
-    ready: SyncSender<T>,
+fn prefer_error<T>(result: Result<T>, error: Error) -> Result<T> {
+    match result {
+        Err(primary) if !primary.is_cancelled() || error.is_cancelled() => Err(primary),
+        _ => Err(error),
+    }
+}
+
+fn completed_join(
+    mut result: Result<CompletedFollow>,
+    outcomes: &Receiver<WorkerOutcome>,
+    receiver_started: bool,
+    joined: Result<()>,
     io: &IoControl,
-    run: impl FnOnce(SyncSender<T>) -> Result<()>,
+) -> Result<CompletedFollow> {
+    let mut receive_stops = 0;
+    for outcome in outcomes.try_iter() {
+        match outcome {
+            WorkerOutcome::ApplyCompleted(_) => {
+                result = prefer_error(result, refusal("follow: duplicate apply completion"));
+            }
+            WorkerOutcome::ReceiveStopped => receive_stops += 1,
+            WorkerOutcome::Failed(error) => result = prefer_error(result, error),
+        }
+    }
+    if let Err(error) = joined {
+        result = prefer_error(result, error);
+    }
+    let completed = result?;
+    check(io)?;
+    if receive_stops != usize::from(receiver_started) {
+        return Err(refusal(
+            "follow: missing or duplicate checked receiver shutdown",
+        ));
+    }
+    Ok(completed)
+}
+
+fn worker<T>(
+    outcomes: SyncSender<WorkerOutcome>,
+    io: &IoControl,
+    run: impl FnOnce() -> Result<T>,
+    success: impl FnOnce(T) -> WorkerOutcome,
 ) {
-    let error = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(ready.clone())))
-    {
-        Ok(Err(error)) => error,
-        Ok(Ok(())) => refusal("follow: streaming worker stopped without a drain proof"),
-        Err(_) => refusal("follow: streaming worker panicked"),
-    };
-    let _ = failed.send(error);
-    io.cancelled.store(true, Ordering::Release);
-    // Closing readiness earlier can hide the worker's causal error.
-    drop(ready);
+    let outcome =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run().map(success))) {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => WorkerOutcome::Failed(error),
+            Err(_) => WorkerOutcome::Failed(refusal("follow: streaming worker panicked")),
+        };
+    let failed = matches!(outcome, WorkerOutcome::Failed(_));
+    let _ = outcomes.send(outcome);
+    if failed {
+        io.cancelled.store(true, Ordering::Release);
+    }
+}
+
+fn completed_report(
+    options: &FollowOptions,
+    completed: &CompletedFollow,
+    io: &IoControl,
+) -> Result<String> {
+    check(io)?;
+    let progress = crate::progress::completed_follow(&options.clone, completed, io)?;
+    check(io)?;
+    crate::protocol::completed_follow_report(progress.work.as_ref(), &progress.copy, completed)
 }
 
 fn emit_streaming(options: &FollowOptions, io: &IoControl) -> Result<()> {
@@ -561,9 +729,18 @@ mod tests {
             scope.spawn(move || {
                 inflight.recv_timeout(Duration::from_secs(5)).unwrap();
                 let peer = failed.clone();
-                let (ready, _recovery) = mpsc::sync_channel::<()>(1);
-                worker(failed, ready.clone(), worker_io, |_| Err(primary));
-                worker(peer, ready, worker_io, |_| check(worker_io));
+                worker(
+                    failed,
+                    worker_io,
+                    || Err(primary),
+                    |()| WorkerOutcome::ReceiveStopped,
+                );
+                worker(
+                    peer,
+                    worker_io,
+                    || check(worker_io),
+                    |()| WorkerOutcome::ReceiveStopped,
+                );
                 queued.send(()).unwrap();
             });
             let mut source = PgConnection::connect(&health_conninfo(port), &io).unwrap();
@@ -574,7 +751,11 @@ mod tests {
             assert_eq!(error.kind, ErrorKind::Target);
             assert_eq!(error.message, "target apply refused");
             assert!(std::ptr::eq(error.origin, origin));
-            assert!(failure.try_recv().unwrap().message.contains("cancelled"));
+            assert!(
+                failed_error(failure.try_recv().unwrap())
+                    .message
+                    .contains("cancelled")
+            );
         });
     }
 
@@ -590,7 +771,10 @@ mod tests {
             scope.spawn(move || {
                 let mut stream = accept_health_query(listener);
                 failed
-                    .send(Error::new(ErrorKind::Target, "apply failed"))
+                    .send(WorkerOutcome::Failed(Error::new(
+                        ErrorKind::Target,
+                        "apply failed",
+                    )))
                     .unwrap();
                 let payload = b"SERROR\0VERROR\0CXX000\0Mhealth query refused\0\0";
                 stream.write_all(b"E").unwrap();
@@ -610,7 +794,10 @@ mod tests {
             assert_eq!(error.message, "PostgreSQL command failed (SQLSTATE XX000)");
             assert!(std::ptr::eq(error.origin, origin));
             assert!(!error.is_cancelled());
-            assert_eq!(failure.try_recv().unwrap().message, "apply failed");
+            assert_eq!(
+                failed_error(failure.try_recv().unwrap()).message,
+                "apply failed"
+            );
         });
     }
 
@@ -622,7 +809,10 @@ mod tests {
         ] {
             let (failed, failure) = mpsc::sync_channel(2);
             failed
-                .send(Error::new(ErrorKind::Target, "apply failed"))
+                .send(WorkerOutcome::Failed(Error::new(
+                    ErrorKind::Target,
+                    "apply failed",
+                )))
                 .unwrap();
             let error = Error::new(kind, message);
             let origin = error.origin;
@@ -630,7 +820,10 @@ mod tests {
             assert_eq!(error.kind, kind);
             assert_eq!(error.message, message);
             assert!(std::ptr::eq(error.origin, origin));
-            assert_eq!(failure.try_recv().unwrap().message, "apply failed");
+            assert_eq!(
+                failed_error(failure.try_recv().unwrap()).message,
+                "apply failed"
+            );
         }
     }
 
@@ -640,7 +833,10 @@ mod tests {
         io.deadline = Instant::now();
         let (failed, failure) = mpsc::sync_channel(2);
         failed
-            .send(Error::new(ErrorKind::Target, "apply failed"))
+            .send(WorkerOutcome::Failed(Error::new(
+                ErrorKind::Target,
+                "apply failed",
+            )))
             .unwrap();
         let error = check(&io).unwrap_err();
         let origin = error.origin;
@@ -652,7 +848,10 @@ mod tests {
         );
         assert!(std::ptr::eq(error.origin, origin));
         assert!(!error.is_cancelled());
-        assert_eq!(failure.try_recv().unwrap().message, "apply failed");
+        assert_eq!(
+            failed_error(failure.try_recv().unwrap()).message,
+            "apply failed"
+        );
     }
 
     #[test]
@@ -680,221 +879,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_keeps_readiness_alive_until_terminal_publication() {
-        let io = control();
-        let (ready, recovery) = mpsc::sync_channel::<i32>(1);
-        let (failed, failure) = mpsc::sync_channel(2);
-        let (dropped, observed) = mpsc::sync_channel(1);
-        let (release, released) = mpsc::sync_channel(1);
-        let primary = Error::new(ErrorKind::Target, "startup authority refused");
-        let origin = primary.origin;
-        std::thread::scope(|scope| {
-            let worker_io = &io;
-            let apply = scope.spawn(move || {
-                worker(failed, ready, worker_io, |ready| {
-                    drop(ready);
-                    dropped.send(()).unwrap();
-                    released.recv_timeout(Duration::from_secs(1)).unwrap();
-                    Err(primary)
-                });
-            });
-            observed.recv_timeout(Duration::from_secs(1)).unwrap();
-            let before_publication = recovery.try_recv();
-            release.send(()).unwrap();
-            apply.join().unwrap();
-            assert!(matches!(before_publication, Err(mpsc::TryRecvError::Empty)));
-            let error = wait_ready(&recovery, &failure, &io).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Target);
-            assert_eq!(error.message, "startup authority refused");
-            assert!(std::ptr::eq(error.origin, origin));
-        });
-    }
-
-    #[test]
-    fn concurrent_startup_failure_preserves_original_kind_message_and_origin() {
-        for kind in [ErrorKind::Source, ErrorKind::Target, ErrorKind::Pgsql] {
-            let io = control();
-            let (ready, recovery) = mpsc::sync_channel::<i32>(1);
-            let (failed, failure) = mpsc::sync_channel(2);
-            let publication = std::sync::Barrier::new(2);
-            let primary = Error::new(kind, "original startup refusal");
-            let origin = primary.origin;
-            std::thread::scope(|scope| {
-                let worker_io = &io;
-                let publication = &publication;
-                let apply = scope.spawn(move || {
-                    worker(failed, ready, worker_io, |ready| {
-                        drop(ready);
-                        publication.wait();
-                        Err(primary)
-                    });
-                });
-                publication.wait();
-                let error = wait_ready(&recovery, &failure, &io).unwrap_err();
-                apply.join().unwrap();
-                assert_eq!(error.kind, kind);
-                assert_eq!(error.message, "original startup refusal");
-                assert!(std::ptr::eq(error.origin, origin));
-                assert!(!error.is_cancelled());
-            });
-        }
-    }
-
-    #[test]
-    fn receiver_startup_failure_precedes_secondary_apply_cancellation() {
-        let io = control();
-        let (ready, receiver) = mpsc::sync_channel::<i32>(1);
-        let (apply_ready, _recovery) = mpsc::sync_channel::<()>(1);
-        let (failed, failure) = mpsc::sync_channel(2);
-        let (release, released) = mpsc::sync_channel(1);
-        let primary = Error::new(ErrorKind::Source, "receiver startup refused");
-        let origin = primary.origin;
-        std::thread::scope(|scope| {
-            let apply_failed = failed.clone();
-            let worker_io = &io;
-            let apply = scope.spawn(move || {
-                worker(apply_failed, apply_ready, worker_io, |_| {
-                    released.recv_timeout(Duration::from_secs(1)).unwrap();
-                    check(worker_io)
-                });
-            });
-            let receive = scope.spawn(move || worker(failed, ready, worker_io, |_| Err(primary)));
-            receive.join().unwrap();
-            release.send(()).unwrap();
-            apply.join().unwrap();
-            let error = wait_ready(&receiver, &failure, &io).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Source);
-            assert_eq!(error.message, "receiver startup refused");
-            assert!(std::ptr::eq(error.origin, origin));
-            assert!(!error.is_cancelled());
-            assert!(failure.try_recv().unwrap().is_cancelled());
-        });
-    }
-
-    #[test]
-    fn startup_sql_failure_preserves_actual_sqlstate_and_origin() {
-        let mut io = control();
-        io.deadline = Instant::now() + Duration::from_secs(5);
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (ready, recovery) = mpsc::sync_channel::<i32>(1);
-        let (failed, failure) = mpsc::sync_channel(2);
-        let (observed, origin) = mpsc::sync_channel(1);
-        let (stop, stopped) = mpsc::sync_channel(1);
-        std::thread::scope(|scope| {
-            let peer = scope.spawn(move || {
-                let mut stream = accept_health_query(listener);
-                let payload = b"SERROR\0VERROR\0C55000\0Mstartup refused\0\0";
-                stream.write_all(b"E").unwrap();
-                stream
-                    .write_all(&(payload.len() as u32 + 4).to_be_bytes())
-                    .unwrap();
-                stream.write_all(payload).unwrap();
-                stream.write_all(b"Z\0\0\0\x05I").unwrap();
-                stopped.recv_timeout(Duration::from_secs(5)).unwrap();
-            });
-            let worker_io = &io;
-            let apply = scope.spawn(move || {
-                worker(failed, ready, worker_io, |ready| {
-                    drop(ready);
-                    let mut source = PgConnection::connect(&health_conninfo(port), worker_io)?;
-                    let error = source.query("SELECT 1", worker_io).err().unwrap();
-                    observed.send(error.origin).unwrap();
-                    Err(error)
-                });
-            });
-            let error = wait_ready(&recovery, &failure, &io).unwrap_err();
-            apply.join().unwrap();
-            stop.send(()).unwrap();
-            peer.join().unwrap();
-            assert_eq!(error.kind, ErrorKind::Pgsql);
-            assert_eq!(error.message, "PostgreSQL command failed (SQLSTATE 55000)");
-            assert!(std::ptr::eq(error.origin, origin.recv().unwrap()));
-            assert!(!error.is_cancelled());
-        });
-    }
-
-    #[test]
-    fn startup_panic_publishes_failure_before_readiness_disconnects() {
-        let io = control();
-        let (ready, recovery) = mpsc::sync_channel::<i32>(1);
-        let (failed, failure) = mpsc::sync_channel(2);
-        std::thread::scope(|scope| {
-            let worker_io = &io;
-            let apply = scope.spawn(move || {
-                worker(failed, ready, worker_io, |ready| {
-                    drop(ready);
-                    panic!("startup worker panic");
-                });
-            });
-            let error = wait_ready(&recovery, &failure, &io).unwrap_err();
-            apply.join().unwrap();
-            assert_eq!(error.kind, ErrorKind::BadState);
-            assert_eq!(error.message, "follow: streaming worker panicked");
-            assert!(io.cancelled.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn absent_terminal_publication_refuses_after_all_senders_close() {
-        let io = control();
-        let (ready, recovery) = mpsc::sync_channel::<i32>(1);
-        let (failed, failure) = mpsc::sync_channel::<Error>(2);
-        drop(ready);
-        drop(failed);
-        let error = wait_ready(&recovery, &failure, &io).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::BadState);
-        assert_eq!(
-            error.message,
-            "follow: readiness channel closed before positive startup"
-        );
-        assert!(!error.is_cancelled());
-    }
-
-    #[test]
-    fn startup_failure_keeps_fifo_until_terminal_publication() {
-        use crate::cdc::contracts::FollowMessage;
-        use crate::contracts::FollowLimits;
-        use crate::identity::SourceEndLsn;
-        use std::sync::mpsc::TrySendError;
-
-        let io = control();
-        let (ready, _recovery) = mpsc::sync_channel::<i32>(1);
-        let (failed, failure) = mpsc::sync_channel(0);
-        let (returned, observed) = mpsc::sync_channel(1);
-        let limits = FollowLimits {
-            channel_messages: 1,
-            ..FollowLimits::default()
-        };
-        let (send, input) = channel::bounded(limits).unwrap();
-        let message = || FollowMessage::Keepalive {
-            wal_end: SourceEndLsn(32),
-            decoder_idle: true,
-        };
-        send.try_send(message()).unwrap();
-        std::thread::scope(|scope| {
-            let worker_io = &io;
-            let apply = scope.spawn(move || {
-                worker(failed, ready, worker_io, |_| {
-                    let _input = &input;
-                    returned.send(()).unwrap();
-                    Err(Error::new(ErrorKind::Target, "apply startup refused"))
-                });
-            });
-            observed.recv_timeout(Duration::from_secs(1)).unwrap();
-            let before_publication = send.try_send(message());
-            let error = failure.recv_timeout(Duration::from_secs(1)).unwrap();
-            apply.join().unwrap();
-            assert!(matches!(before_publication, Err(TrySendError::Full(_))));
-            assert_eq!(error.message, "apply startup refused");
-            assert!(matches!(
-                send.try_send(message()),
-                Err(TrySendError::Disconnected(_))
-            ));
-        });
-    }
-
-    #[test]
     fn closed_readiness_cannot_authorize_replication_start() {
         let (send, ready) = mpsc::sync_channel::<i32>(1);
         let (_failed, failure) = mpsc::sync_channel(2);
@@ -910,15 +894,21 @@ mod tests {
         send.send(123).unwrap();
         let primary = Error::new(ErrorKind::Source, "source lease refused");
         let origin = primary.origin;
-        failed.send(primary).unwrap();
+        failed.send(WorkerOutcome::Failed(primary)).unwrap();
         failed
-            .send(Error::new(ErrorKind::Target, "peer stopped"))
+            .send(WorkerOutcome::Failed(Error::new(
+                ErrorKind::Target,
+                "peer stopped",
+            )))
             .unwrap();
         let error = wait_ready(&ready, &failure, &control()).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Source);
         assert_eq!(error.message, "source lease refused");
         assert!(std::ptr::eq(error.origin, origin));
-        assert_eq!(failure.try_recv().unwrap().message, "peer stopped");
+        assert_eq!(
+            failed_error(failure.try_recv().unwrap()).message,
+            "peer stopped"
+        );
     }
 
     #[test]
@@ -932,19 +922,250 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_successful_worker_stop_is_non_successful_and_cancels_peers() {
+    fn successful_receiver_shutdown_does_not_set_error_cancellation() {
         let io = control();
-        let (failed, failure) = mpsc::sync_channel(2);
-        let (ready, _recovery) = mpsc::sync_channel::<()>(1);
-        worker(failed, ready, &io, |_| Ok(()));
-        assert!(io.cancelled.load(Ordering::Acquire));
-        assert!(
-            failure
-                .recv()
-                .unwrap()
-                .message
-                .contains("without a drain proof")
+        let (outcomes, _outcome) = mpsc::sync_channel(2);
+        worker(outcomes, &io, || Ok(()), |()| WorkerOutcome::ReceiveStopped);
+        assert!(!io.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn receiver_stop_without_apply_completion_is_not_success() {
+        let io = control();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        worker(outcomes, &io, || Ok(()), |()| WorkerOutcome::ReceiveStopped);
+        assert!(outcome_completion(outcome.recv().unwrap()).is_err());
+    }
+
+    fn failed_error(outcome: WorkerOutcome) -> Error {
+        match outcome {
+            WorkerOutcome::Failed(error) => error,
+            _ => panic!("expected worker failure"),
+        }
+    }
+
+    fn completed() -> CompletedFollow {
+        crate::apply::checkpoint::completed_for_test()
+    }
+
+    #[test]
+    fn completion_is_published_before_receive_stop() {
+        let io = control();
+        let stop = AtomicBool::new(false);
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        worker(
+            outcomes,
+            &io,
+            || Ok(completed()),
+            |completed| WorkerOutcome::ApplyCompleted(Box::new(completed)),
         );
+        assert!(!stop.load(Ordering::Acquire));
+        let completed = *outcome_completion(outcome.recv().unwrap()).unwrap();
+        stop.store(true, Ordering::Release);
+        assert!(completed_join(Ok(completed), &outcome, false, Ok(()), &io).is_ok());
+        assert!(!io.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn completion_does_not_drop_fifo_before_stop() {
+        use crate::cdc::contracts::FollowMessage;
+        use crate::contracts::FollowLimits;
+        use crate::identity::SourceEndLsn;
+        use std::sync::mpsc::TrySendError;
+
+        let io = control();
+        let limits = FollowLimits {
+            channel_messages: 1,
+            ..FollowLimits::default()
+        };
+        let (send, input) = channel::bounded(limits).unwrap();
+        let message = || FollowMessage::Keepalive {
+            wal_end: SourceEndLsn(32),
+            decoder_idle: true,
+        };
+        send.try_send(message()).unwrap();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        std::thread::scope(|scope| {
+            let input = &input;
+            let worker_io = &io;
+            let apply = scope.spawn(move || {
+                worker(
+                    outcomes,
+                    worker_io,
+                    || {
+                        let _held_input = input;
+                        Ok(completed())
+                    },
+                    |completed| WorkerOutcome::ApplyCompleted(Box::new(completed)),
+                );
+            });
+            let completed = *outcome_completion(outcome.recv_timeout(POLL).unwrap()).unwrap();
+            apply.join().unwrap();
+            assert!(matches!(
+                send.try_send(message()),
+                Err(TrySendError::Full(_))
+            ));
+            assert!(completed_join(Ok(completed), &outcome, false, Ok(()), &io).is_ok());
+        });
+    }
+
+    #[test]
+    fn completion_during_readiness() {
+        let io = control();
+        let (ready, recovery) = mpsc::sync_channel::<i32>(1);
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        let (release, released) = mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let worker_io = &io;
+            let apply = scope.spawn(move || {
+                worker(
+                    outcomes,
+                    worker_io,
+                    || Ok(completed()),
+                    |completed| WorkerOutcome::ApplyCompleted(Box::new(completed)),
+                );
+                released.recv_timeout(Duration::from_secs(1)).unwrap();
+                drop(ready);
+            });
+            assert!(matches!(
+                wait_ready(&recovery, &outcome, &io).unwrap(),
+                WaitReady::Completed(_)
+            ));
+            assert!(matches!(
+                recovery.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            release.send(()).unwrap();
+            apply.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn completion_after_readiness_sender_teardown_is_retained() {
+        let io = control();
+        let (ready, recovery) = mpsc::sync_channel::<i32>(1);
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        worker(
+            outcomes,
+            &io,
+            || Ok(completed()),
+            |completed| WorkerOutcome::ApplyCompleted(Box::new(completed)),
+        );
+        drop(ready);
+        assert!(matches!(
+            wait_ready(&recovery, &outcome, &io).unwrap(),
+            WaitReady::Completed(_)
+        ));
+    }
+
+    #[test]
+    fn completed_join_preserves_real_failure() {
+        let io = control();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        let primary = Error::new(ErrorKind::Source, "source terminal result refused");
+        let origin = primary.origin;
+        outcomes.send(WorkerOutcome::Failed(primary)).unwrap();
+        io.cancelled.store(true, Ordering::Release);
+        let error = completed_join(Ok(completed()), &outcome, true, Ok(()), &io).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Source);
+        assert_eq!(error.message, "source terminal result refused");
+        assert!(std::ptr::eq(error.origin, origin));
+        assert!(!error.is_cancelled());
+    }
+
+    #[test]
+    fn completed_join_preserves_external_cancellation() {
+        let io = control();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        outcomes.send(WorkerOutcome::ReceiveStopped).unwrap();
+        io.cancelled.store(true, Ordering::Release);
+        let error = completed_join(Ok(completed()), &outcome, true, Ok(()), &io).unwrap_err();
+        assert!(error.is_cancelled());
+    }
+
+    #[test]
+    fn readiness_completion_cannot_hide_later_real_failure() {
+        let io = control();
+        let (_ready, recovery) = mpsc::sync_channel::<i32>(1);
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        outcomes
+            .send(WorkerOutcome::ApplyCompleted(Box::new(completed())))
+            .unwrap();
+        outcomes
+            .send(WorkerOutcome::Failed(Error::new(
+                ErrorKind::Target,
+                "late apply failure",
+            )))
+            .unwrap();
+        let WaitReady::Completed(completed) = wait_ready(&recovery, &outcome, &io).unwrap() else {
+            panic!("expected early completion");
+        };
+        let error = completed_join(Ok(*completed), &outcome, true, Ok(()), &io).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Target);
+        assert_eq!(error.message, "late apply failure");
+    }
+
+    #[test]
+    fn completed_join_requires_exactly_one_checked_receiver_shutdown() {
+        for stops in [0, 2] {
+            let io = control();
+            let (outcomes, outcome) = mpsc::sync_channel(2);
+            for _ in 0..stops {
+                outcomes.send(WorkerOutcome::ReceiveStopped).unwrap();
+            }
+            assert!(completed_join(Ok(completed()), &outcome, true, Ok(()), &io).is_err());
+        }
+        let io = control();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        outcomes.send(WorkerOutcome::ReceiveStopped).unwrap();
+        assert!(completed_join(Ok(completed()), &outcome, true, Ok(()), &io).is_ok());
+    }
+
+    #[test]
+    fn completed_join_rejects_duplicate_completion_and_join_panic() {
+        let io = control();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        outcomes
+            .send(WorkerOutcome::ApplyCompleted(Box::new(completed())))
+            .unwrap();
+        assert!(completed_join(Ok(completed()), &outcome, false, Ok(()), &io).is_err());
+        let (_outcomes, outcome) = mpsc::sync_channel(2);
+        assert!(
+            completed_join(
+                Ok(completed()),
+                &outcome,
+                false,
+                Err(refusal("worker join panic")),
+                &io
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn completed_join_rechecks_deadline() {
+        let mut io = control();
+        io.deadline = Instant::now();
+        let (_outcomes, outcome) = mpsc::sync_channel(2);
+        assert!(completed_join(Ok(completed()), &outcome, false, Ok(()), &io).is_err());
+    }
+
+    #[test]
+    fn worker_panic_is_a_failure_and_cancels_peers() {
+        let io = control();
+        let (outcomes, outcome) = mpsc::sync_channel(2);
+        worker(
+            outcomes,
+            &io,
+            || -> Result<()> { panic!("worker panic") },
+            |()| WorkerOutcome::ReceiveStopped,
+        );
+        assert!(
+            failed_error(outcome.recv().unwrap())
+                .message
+                .contains("panicked")
+        );
+        assert!(io.cancelled.load(Ordering::Acquire));
     }
 
     #[test]

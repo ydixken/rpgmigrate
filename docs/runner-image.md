@@ -55,6 +55,10 @@ Check out these **examples**:
 - `/usr/share/rpgmigrate/dependency-notices/<name-version>` retains Cargo dependency license and notice files, preserving their relative paths and bytes.
 - `/usr/share/rpgmigrate/build-inputs.sha256` records each source, manifest, build script, notice, and image-definition input by content hash.
 
+Schema utility discovery preserves explicit `PG_BINDIR` precedence over `PG_CONFIG` and validates both selected tools against the target major.
+With neither override set, we select `/usr/lib/postgresql/<target-major>/bin` before searching `PATH`, so PostgreSQL 16 targets use the packaged 16 tools while default `psql` remains 18.
+We search `PATH` only when that packaged path is absent; an existing packaged path with missing, invalid, or mismatched tools fails discovery.
+
 We exclude Git metadata, tests, local configuration, credentials, and unrelated repository files from the build context with an allowlist.
 The build-input manifest describes the working-tree bytes copied into the builder, including uncommitted edits.
 Its digest in the smoke receipt identifies those inputs without claiming that they match a Git commit.

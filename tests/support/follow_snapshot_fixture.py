@@ -97,7 +97,7 @@ def validate_native(value, context, case):
     assert path.name == "manifest.json" and path.parent.parent == root, "native evidence is outside the owned fixture"
     native = read_json(path)
     assert isinstance(native, dict) and set(native) == NATIVE_FIELDS, "native follow snapshot fields differ"
-    assert native["magic"] == "RPGMIGRATE" and type(native["format_version"]) is int and native["format_version"] == 7, "wrong native follow snapshot format"
+    assert native["magic"] == "RPGMIGRATE" and type(native["format_version"]) is int and native["format_version"] == 8, "wrong native follow snapshot format"
     assert native["canonical_path"] == str(path.parent), "native follow snapshot path binding differs"
     assert native["copy_complete"] is None and native["target_provenance"] == [] and native["clone_state"] is None and native["operator"] is None, "direct source lifecycle evidence fabricated target or completion state"
     assert positive(native["directory_device"]) and positive(native["directory_inode"]), "native directory identity is missing"
@@ -108,8 +108,8 @@ def validate_native(value, context, case):
     assert isinstance(source, dict) and set(source) == {"system_identifier", "database_oid"}, "invalid source identity fields"
     assert positive(source["system_identifier"]) and positive(source["database_oid"], 0xffffffff), "invalid source identity"
     follow = native["follow_state"]
-    assert isinstance(follow, dict) and set(follow) == {"origin_name", "publication", "binding", "restart", "preliminary"}, "follow source state fields differ"
-    assert follow["origin_name"] is None and follow["restart"] is None, "unexpected source origin or restart authority"
+    assert isinstance(follow, dict) and set(follow) == {"origin_name", "publication", "binding", "restart", "preliminary", "cleanup"}, "follow source state fields differ"
+    assert follow["cleanup"] is None and follow["origin_name"] is None and follow["restart"] is None, "unexpected source origin or restart authority"
     publication = follow["publication"]
     assert isinstance(publication, dict) and set(publication) == {"phase", "intent", "receipt"} and publication["phase"] == "confirmed", "publication creation is not positively confirmed"
     receipt = value["publication"]

@@ -63,6 +63,22 @@ def lsn(value):
     return high * 2**32 + low
 
 
+def validate_drain_row(row):
+    names = ("drain_end_lsn", "drain_witness_lsn", "drain_kind", "follow_completed")
+    if not set(names) <= row.keys() or type(row["follow_completed"]) is not bool:
+        raise RuntimeError("checkpoint drain fields are absent or invalid")
+    values = [row[name] for name in names[:3]]
+    if all(value is None for value in values):
+        if row["follow_completed"]:
+            raise RuntimeError("completed checkpoint lacks drain coverage")
+        return
+    if any(value is None for value in values) or row["drain_kind"] not in ("keepalive", "later_begin"):
+        raise RuntimeError("checkpoint drain coverage is partial or unsupported")
+    end, witness = lsn(row["drain_end_lsn"]), lsn(row["drain_witness_lsn"])
+    if not end or witness < end or row["drain_kind"] == "later_begin" and witness == end:
+        raise RuntimeError("checkpoint drain witness does not cover endpos")
+
+
 def authority_frontier(row):
     applied = lsn(row["source_end_lsn"]) if row.get("source_end_lsn") is not None else 0
     certified = lsn(row["certified_lsn"]) if row.get("certified_lsn") is not None else 0
@@ -96,7 +112,8 @@ def checkpoint_observation(row):
     if not {"source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "last_xid", "begin_ordinal"} <= row.keys():
         raise RuntimeError("checkpoint observation nullable fields are absent")
     authority_frontier(row)
-    result = {"status": "observed"}
+    validate_drain_row(row)
+    result = {"status": "observed", "drain_kind": row["drain_kind"], "follow_completed": row["follow_completed"]}
     for key in ("version", "source_system", "source_database", "generation", "target_system", "target_database",
                 "owner_oid", "schema_oid", "table_oid", "applied_order", "last_xid", "begin_ordinal", "barrier_epoch", "barrier_counter"):
         value = row.get(key)
@@ -108,9 +125,9 @@ def checkpoint_observation(row):
         if type(value) is not int or not minimum <= value < bound:
             raise RuntimeError("checkpoint observation numeric identity or counter is invalid")
         result[key] = value
-    if result["version"] != 5:
+    if result["version"] != 6:
         raise RuntimeError("checkpoint observation metadata version differs")
-    for key in ("source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point"):
+    for key in ("source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "drain_end_lsn", "drain_witness_lsn"):
         result[key] = lsn(row[key]) if row.get(key) is not None else None
         if result[key] == 0:
             raise RuntimeError("checkpoint observation has a zero authority LSN")
@@ -133,7 +150,7 @@ def failure_feedback_consistency(evidence, observation, initial):
         if value["status"] != "observed":
             raise ValueError
         row = dict(value)
-        for key in ("source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point"):
+        for key in ("source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "drain_end_lsn", "drain_witness_lsn"):
             number = row[key]
             if number is not None:
                 integer(number)
@@ -692,7 +709,7 @@ class Database(clone.Database):
         binding = native.get("follow_state", {}).get("binding")
         if not records or not binding or records[0].get("phase") != "confirmed":
             return None
-        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != 7:
+        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != 8:
             raise RuntimeError("independent follow native identity/version differs")
         try:
             validate_identity_modes(native["clone_state"]["plan"])
@@ -711,13 +728,23 @@ class Database(clone.Database):
                       "t.generation,t.target_system,t.target_database::bigint AS target_database,t.owner_oid::bigint AS owner_oid,"
                       "t.schema_oid::bigint AS schema_oid,t.table_oid::bigint AS table_oid,t.applied_order,t.last_xid::bigint AS last_xid,"
                       "t.begin_ordinal,t.source_commit_lsn,t.source_end_lsn,t.barrier_epoch,t.barrier_counter,t.copy_snapshot_token,"
-                      "t.copy_consistent_point,t.copy_plan_nonce,t.clone_state,t.certified_lsn,t.follow_binding")
+                      "t.copy_consistent_point,t.copy_plan_nonce,t.clone_state,t.certified_lsn,t.follow_binding,"
+                      "t.drain_end_lsn,t.drain_witness_lsn,t.drain_kind,t.follow_completed")
         rows = self.sql(name, f"SELECT row_to_json(t) FROM (SELECT {projection} FROM ONLY {table} t) t;").splitlines()
         if len(rows) != 1:
             raise RuntimeError("independent target authority cardinality differs")
         row = json.loads(rows[0])
+        if len(row) != 29:
+            raise RuntimeError("independent target authority column inventory differs")
+        validate_drain_row(row)
+        if "cleanup" not in native["follow_state"]:
+            raise RuntimeError("independent native follow cleanup field is absent")
+        cleanup = native["follow_state"]["cleanup"]
+        if cleanup is not None and (not isinstance(cleanup, dict) or set(cleanup) != {"slot_removed", "publication_removed"}
+                                    or any(type(value) is not bool for value in cleanup.values())):
+            raise RuntimeError("independent native follow cleanup receipt differs")
         stream = expected["stream"]
-        same = {"magic": "rpgmigrate", "version": 5, "run_id": "\\x" + bytes(stream["run"]).hex(),
+        same = {"magic": "rpgmigrate", "version": 6, "run_id": "\\x" + bytes(stream["run"]).hex(),
                 "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(), "source_system": stream["source"]["system_identifier"],
                 "source_database": stream["source"]["database_oid"], "generation": stream["generation"],
                 "target_system": expected["target_system_identifier"], "target_database": expected["target_database_oid"],
@@ -945,7 +972,10 @@ class Driver(clone.Driver):
 
 def inner(args):
     diagnostic_case = getattr(args, "diagnostic_case", None)
-    manifest = load_manifest()
+    cutover_mode = getattr(args, "cutover", False)
+    if cutover_mode:
+        import cutover
+    manifest = cutover.load_manifest() if cutover_mode else load_manifest()
     bindir = Path("/usr/lib/postgresql") / args.pair.split("-")[1] / "bin"
     environment = {key: value for key, value in os.environ.items() if not key.startswith(("PG", "RPGMIGRATE_"))}
     environment.update(PGPASSWORD=os.environ["PGPASSWORD"], PG_BINDIR=str(bindir), PATH=str(bindir) + os.pathsep + os.environ["PATH"], LC_ALL="C.UTF-8")
@@ -960,24 +990,30 @@ def inner(args):
                "successful_follow_exit": False, "power_loss_tested": False, "receipt_scope": "diagnostic" if diagnostic_case else "smoke" if args.smoke else "full", "cases": {}}
     if diagnostic_case:
         receipt["diagnostic_case"] = diagnostic_case
-    clone.validate_receipt({**receipt, "cases": dict.fromkeys(CASES, {"observed": True})}, manifest, require_reports=False)
+    clone.validate_receipt({**receipt, "cases": dict.fromkeys(manifest["cases"], {"observed": True})}, manifest, require_reports=False)
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-m3-") as temporary, ExitStack() as cleanup:
         root = Path(temporary)
         driver = Driver(binary, environment, root, mode="operator", report_probe=args.report_probe)
         def case(name):
             srcname, dstname = "src_" + name, "dst_" + name
             return srcname, dstname, source.create(srcname, True), target.create(dstname), root / name
-        def launch(src, dst, state, *arguments, gate=None, wire=None):
+        def launch(src, dst, state, *arguments, gate=None, wire=None, source_name=None, target_name=None):
+            source_name = srcname if source_name is None else source_name
+            target_name = dstname if target_name is None else target_name
             if "--resume" in arguments:
                 native = json.loads((state / "manifest.json").read_text())
                 binding = native.get("follow_state", {}).get("binding")
                 if binding:
                     name = binding["slot"]["intent"]["binding"]["slot_name"].replace("'", "''")
-                    clone.wait_for(lambda: source.sql(srcname, f"SELECT NOT active FROM pg_replication_slots WHERE slot_name='{name}';").strip() == b"t", "old owned source walsender closed")
+                    removed = native["follow_state"].get("cleanup")
+                    query = (f"SELECT NOT EXISTS(SELECT FROM pg_replication_slots WHERE slot_name='{name}');"
+                             if isinstance(removed, dict) and removed.get("slot_removed") is True
+                             else f"SELECT NOT active FROM pg_replication_slots WHERE slot_name='{name}';")
+                    clone.wait_for(lambda: source.sql(source_name, query).strip() == b"t", "old owned source walsender closed or confirmed removed")
             process = driver.start(src, dst, state, *arguments, gate=gate)
             if wire is not None:
                 process.follow_wire = wire
-            def observe(srcname=srcname, dstname=dstname):
+            def observe(srcname=source_name, dstname=target_name):
                 deadline = getattr(process, "follow_capture_deadline", None)
                 previous = {database: getattr(database, "_observation_deadline", None) for database in (source, target)}
                 try:
@@ -994,7 +1030,7 @@ def inner(args):
                         else:
                             database._observation_deadline = value
             process.follow_observe = observe
-            process.follow_startup_capture = lambda deadline, srcname=srcname, dstname=dstname: startup_capture(process, source, target, srcname, dstname, deadline)
+            process.follow_startup_capture = lambda deadline, srcname=source_name, dstname=target_name: startup_capture(process, source, target, srcname, dstname, deadline)
             driver.watch(process, cleanup)
             return process
         def finish_receipt():
@@ -1024,6 +1060,15 @@ def inner(args):
             expected = source.fingerprint(srcname, manifest)
             clone.require_equal(expected, target.fingerprint(dstname, manifest))
             return {"observed": True, "frontier": authority_frontier(row), "feedback_observed": True, "fingerprints": expected}
+        if cutover_mode:
+            receipt["cases"] = cutover.run(args, source, target, manifest, case, launch, driver)
+            receipt.update(mode="cutover", successful_follow_exit=True, receipt_scope="engine_producer", probe_checked=False,
+                           independent_go_evidence="pending_qualified_m6_reader", source_tree=cutover.source_inventory(clone.ROOT))
+            receipt["report_validation"] = {"mode": "local_m4_producer", "reports": driver.reports}
+            cutover.validate_receipt(receipt, manifest)
+            Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            print(json.dumps({"follow_e2e": "engine_producer_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
+            return
         if not diagnostic_case:
             srcname, dstname, src, dst, state = case("dml")
             check_workload(source, srcname, manifest)
@@ -1296,6 +1341,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pair", required=True, choices=clone.PAIRS)
     selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--cutover", action="store_true", help="check M4 engine producer cases; independent M6/Go evidence remains required")
     selection.add_argument("--smoke", action="store_true", help="run only the separately scoped initial copy and DML smoke case")
     selection.add_argument("--diagnostic-case", choices=("before_commit_rollback",), help="run one separately scoped fault diagnostic; requires a new explicit receipt path")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
@@ -1303,6 +1349,8 @@ def main():
     parser.add_argument("--receipt")
     parser.add_argument("--report-probe", default=os.environ.get("RPGMIGRATE_E2E_REPORT_PROBE"))
     args = parser.parse_args()
+    if args.cutover and args.report_probe is not None:
+        parser.error("--cutover requires the qualified independent M6 reader; omit the clone-only --report-probe")
     if args.diagnostic_case and not args.receipt:
         parser.error("--diagnostic-case requires --receipt")
     if sys.flags.optimize:
@@ -1313,8 +1361,15 @@ def main():
             raise RuntimeError("inside qualification requires a receipt destination")
         inner(args)
     else:
-        clone.outer(args, program="follow", manifest=load_manifest(),
-                    receipt_validator=lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case),
+        if args.cutover:
+            import cutover
+            manifest = cutover.load_manifest()
+            validator = lambda report, manifest: cutover.validate_receipt(report, manifest, require_images=True)
+        else:
+            manifest = load_manifest()
+            validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case)
+        clone.outer(args, program="follow", manifest=manifest,
+                    receipt_validator=validator,
                     server_arguments=("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s"))
     return 0
 

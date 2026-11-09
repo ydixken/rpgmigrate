@@ -24,7 +24,6 @@ pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
 pub(crate) use ffi::CommitObservation;
 pub(crate) use ffi::PgParam;
 pub(crate) use ffi::Pipeline;
-pub(crate) use ffi::utility_environment;
 pub(crate) use io::operation_control;
 
 pub(crate) use ffi::TransactionStatus;

@@ -1,6 +1,7 @@
 mod apply;
 mod catalog;
 mod cdc;
+mod cleanup;
 mod cli;
 mod clone;
 mod compare;
@@ -15,6 +16,7 @@ mod protocol;
 mod schema;
 mod snapshot;
 mod state;
+mod stream;
 
 #[cfg(test)]
 #[path = "../build.rs"]
@@ -109,6 +111,7 @@ fn execute(invocation: Invocation) -> Result<String> {
         })(),
         Invocation::Clone(options) => clone::run(options, &io),
         Invocation::Follow(options) => follow::run(options, &io),
+        Invocation::Stream(options) => stream::run(options, &io),
         Invocation::Progress { options, json } => {
             let progress = progress::read(&options, &io)?;
             if json {

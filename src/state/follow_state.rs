@@ -64,6 +64,8 @@ impl PublicationProvenance {
 #[serde(deny_unknown_fields)]
 pub(crate) struct FollowState {
     #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) cleanup: Option<CleanupProgress>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) origin_name: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) publication: Option<PublicationProvenance>,
@@ -73,6 +75,13 @@ pub(crate) struct FollowState {
     pub(crate) restart: Option<FollowRestart>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) preliminary: Option<ClonePlan>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CleanupProgress {
+    pub(crate) slot_removed: bool,
+    pub(crate) publication_removed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -236,6 +245,7 @@ pub(crate) fn open_follow(
             ));
         }
         next.follow_state = Some(FollowState {
+            cleanup: None,
             origin_name: origin_name.map(str::to_owned),
             publication: None,
             binding: None,
@@ -256,6 +266,83 @@ pub(crate) fn open_follow(
 }
 
 impl NativeState {
+    pub(crate) fn begin_follow_cleanup(&mut self) -> Result<CleanupProgress> {
+        control::with_native_lock(self, |native| {
+            let mut next = native.checked_manifest()?;
+            let follow = next
+                .follow_state
+                .as_mut()
+                .ok_or_else(|| bad_state("state-cleanup: native follow inventory is absent"))?;
+            let binding = follow
+                .binding
+                .as_ref()
+                .ok_or_else(|| bad_state("state-cleanup: confirmed follow binding is absent"))?;
+            if follow.restart.is_some()
+                || follow
+                    .publication
+                    .as_ref()
+                    .and_then(PublicationProvenance::confirmed)
+                    != Some(&binding.publication)
+                || next.source_slot != Some(SourceSlotProvenance::Confirmed(binding.slot.clone()))
+                || !matches!(
+                    next.target_provenance.as_slice(),
+                    [TargetProvenance::Confirmed(_)]
+                )
+            {
+                return Err(bad_state(
+                    "state-cleanup: complete confirmed native resource inventory is required",
+                ));
+            }
+            if let Some(progress) = follow.cleanup {
+                native.synchronize_manifest()?;
+                return Ok(progress);
+            }
+            let progress = CleanupProgress {
+                slot_removed: false,
+                publication_removed: false,
+            };
+            follow.cleanup = Some(progress);
+            native.replace_manifest(next)?;
+            Ok(progress)
+        })
+    }
+
+    pub(crate) fn confirm_follow_slot_removed(&mut self) -> Result<CleanupProgress> {
+        self.confirm_follow_cleanup(true)
+    }
+
+    pub(crate) fn confirm_follow_publication_removed(&mut self) -> Result<CleanupProgress> {
+        self.confirm_follow_cleanup(false)
+    }
+
+    fn confirm_follow_cleanup(&mut self, slot: bool) -> Result<CleanupProgress> {
+        control::with_native_lock(self, |native| {
+            let mut next = native.checked_manifest()?;
+            let progress = next
+                .follow_state
+                .as_mut()
+                .and_then(|follow| follow.cleanup.as_mut())
+                .ok_or_else(|| bad_state("state-cleanup: durable cleanup intent is absent"))?;
+            let already = if slot {
+                progress.slot_removed
+            } else {
+                progress.publication_removed
+            };
+            if slot {
+                progress.slot_removed = true;
+            } else {
+                progress.publication_removed = true;
+            }
+            let progress = *progress;
+            if already {
+                native.synchronize_manifest()?;
+            } else {
+                native.replace_manifest(next)?;
+            }
+            Ok(progress)
+        })
+    }
+
     pub(crate) fn follow_control(&self) -> Result<Option<FollowControl>> {
         let manifest = self.checked_manifest()?;
         let Some(follow) = manifest.follow_state else {
@@ -334,6 +421,13 @@ impl NativeState {
         Ok(self.checked_manifest()?.source_slot)
     }
 
+    pub(crate) fn checked_follow_cleanup(&self) -> Result<Option<CleanupProgress>> {
+        Ok(self
+            .checked_manifest()?
+            .follow_state
+            .and_then(|f| f.cleanup))
+    }
+
     pub(crate) fn checked_follow_restart(&self) -> Result<Option<FollowRestart>> {
         Ok(self
             .checked_manifest()?
@@ -342,6 +436,16 @@ impl NativeState {
     }
 
     pub(crate) fn begin_follow_restart(
+        &mut self,
+        expected: &FollowBinding,
+        plan: &ClonePlan,
+    ) -> Result<FollowRestart> {
+        control::with_native_lock(self, |native| {
+            native.begin_follow_restart_locked(expected, plan)
+        })
+    }
+
+    fn begin_follow_restart_locked(
         &mut self,
         expected: &FollowBinding,
         plan: &ClonePlan,
@@ -684,6 +788,28 @@ impl FollowState {
             .is_some_and(|name| !valid_name(name))
         {
             return Err(bad_state("state-follow: invalid unowned origin name"));
+        }
+        if self.cleanup.is_some() {
+            let binding = self.binding.as_ref().ok_or_else(|| {
+                bad_state("state-cleanup: cleanup lacks confirmed follow inventory")
+            })?;
+            if self.restart.is_some()
+                || self
+                    .publication
+                    .as_ref()
+                    .and_then(PublicationProvenance::confirmed)
+                    != Some(&binding.publication)
+                || manifest.source_slot
+                    != Some(SourceSlotProvenance::Confirmed(binding.slot.clone()))
+                || !matches!(
+                    manifest.target_provenance.as_slice(),
+                    [TargetProvenance::Confirmed(_)]
+                )
+            {
+                return Err(bad_state(
+                    "state-cleanup: cleanup inventory is incomplete or uncertain",
+                ));
+            }
         }
         if let Some(plan) = &self.preliminary {
             clone_state::validate_plan(plan)?;
@@ -1040,6 +1166,163 @@ mod tests {
             copy_generation: plan.generation,
             source_types: Vec::new(),
         }
+    }
+
+    fn cleanup_target_binding(plan: &ClonePlan, binding: &FollowBinding) -> TargetBinding {
+        TargetBinding {
+            stream: binding.stream(),
+            target_system_identifier: Some(plan.target.identity.system_identifier),
+            target_database_oid: plan.target.identity.database_oid,
+            schema_name: "rpgmigrate_cleanup".into(),
+            table_name: "checkpoint".into(),
+            owner_oid: 7,
+            metadata_version: TARGET_METADATA_VERSION,
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_exact_confirmed_target_receipt_before_terminal_intent() {
+        for pending in [false, true] {
+            let (tmp, mut native, plan, binding) = bound_follow();
+            if pending {
+                native
+                    .begin_target_provisioning(cleanup_target_binding(&plan, &binding))
+                    .unwrap();
+            }
+            let before = std::fs::read(tmp.path().join("manifest.json")).unwrap();
+            let error = native.begin_follow_cleanup().unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadState);
+            assert!(native.checked_follow_cleanup().unwrap().is_none());
+            assert_eq!(
+                std::fs::read(tmp.path().join("manifest.json")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_persisted_intent_refuses_empty_target_inventory() {
+        let (tmp, mut native, _, _) = bound_follow();
+        let before = std::fs::read(tmp.path().join("manifest.json")).unwrap();
+        let mut next = native.checked_manifest().unwrap();
+        next.follow_state.as_mut().unwrap().cleanup = Some(CleanupProgress {
+            slot_removed: false,
+            publication_removed: false,
+        });
+        assert!(native.replace_manifest(next).is_err());
+        assert_eq!(
+            std::fs::read(tmp.path().join("manifest.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn cleanup_progress_is_terminal_monotone_and_reopenable() {
+        let (tmp, mut native, plan, binding) = bound_follow();
+        let intent = native
+            .begin_target_provisioning(cleanup_target_binding(&plan, &binding))
+            .unwrap();
+        native
+            .confirm_target_provisioning(ConfirmedProvenance {
+                intent,
+                schema_oid: 11,
+                table_oid: 12,
+                marker_table_oid: 13,
+                marker_index_oid: 14,
+            })
+            .unwrap();
+        let mut wrong_target = native.checked_manifest().unwrap();
+        let TargetProvenance::Confirmed(receipt) = &mut wrong_target.target_provenance[0] else {
+            unreachable!()
+        };
+        receipt.intent.binding.target_database_oid += 1;
+        assert!(native.replace_manifest(wrong_target).is_err());
+        assert!(native.checked_follow_cleanup().unwrap().is_none());
+        assert!(native.confirm_follow_slot_removed().is_err());
+        assert_eq!(
+            native.begin_follow_cleanup().unwrap(),
+            CleanupProgress {
+                slot_removed: false,
+                publication_removed: false
+            }
+        );
+        assert!(native.begin_follow_restart(&binding, &plan).is_err());
+        assert_eq!(
+            native.confirm_follow_slot_removed().unwrap(),
+            CleanupProgress {
+                slot_removed: true,
+                publication_removed: false
+            }
+        );
+        assert_eq!(
+            native.confirm_follow_slot_removed().unwrap(),
+            CleanupProgress {
+                slot_removed: true,
+                publication_removed: false
+            }
+        );
+        assert_eq!(
+            native.confirm_follow_publication_removed().unwrap(),
+            CleanupProgress {
+                slot_removed: true,
+                publication_removed: true
+            }
+        );
+        let saved = native.checked_manifest().unwrap();
+        let mut regress = saved.clone();
+        regress
+            .follow_state
+            .as_mut()
+            .unwrap()
+            .cleanup
+            .as_mut()
+            .unwrap()
+            .slot_removed = false;
+        assert!(native.replace_manifest(regress).is_err());
+        let mut restart = saved;
+        restart.follow_state.as_mut().unwrap().cleanup = None;
+        assert!(native.replace_manifest(restart).is_err());
+        drop(native);
+        let mut reopened = open_for_provenance_recovery(&tmp.path()).unwrap();
+        assert_eq!(reopened.checked_follow().unwrap(), Some(binding));
+        assert_eq!(
+            reopened.begin_follow_cleanup().unwrap(),
+            CleanupProgress {
+                slot_removed: true,
+                publication_removed: true
+            }
+        );
+    }
+
+    #[test]
+    fn cleanup_refuses_unconfirmed_and_restart_inventory_before_intent() {
+        let (tmp, mut native, plan, binding) = bound_follow();
+        native.begin_follow_restart(&binding, &plan).unwrap();
+        let before = std::fs::read(tmp.path().join("manifest.json")).unwrap();
+        assert!(native.begin_follow_cleanup().is_err());
+        assert_eq!(
+            std::fs::read(tmp.path().join("manifest.json")).unwrap(),
+            before
+        );
+        let tmp = super::super::tests::TempDir::new();
+        let mut native = open_follow(
+            &StateRequest {
+                path: tmp.path(),
+                action: StateAction::Create,
+            },
+            None,
+            None,
+            &control(),
+        )
+        .unwrap();
+        native.prepare_follow_source(&empty_plan()).unwrap();
+        native.begin_publication("rpgmigrate_uncertain").unwrap();
+        let before = std::fs::read(tmp.path().join("manifest.json")).unwrap();
+        assert!(native.begin_follow_cleanup().is_err());
+        assert_eq!(
+            std::fs::read(tmp.path().join("manifest.json")).unwrap(),
+            before
+        );
     }
 
     #[test]

@@ -145,21 +145,51 @@ impl Phase {
 }
 
 #[derive(Serialize)]
-struct CopyDocument<'a, C> {
+struct ReportDocument<'a, P> {
     protocol_version: u32,
     engine_version: &'static str,
     command: &'static str,
     capabilities: [&'static str; 1],
     work: serde_json::Value,
     phase: Phase,
-    copy: &'a C,
+    #[serde(flatten)]
+    payload: &'a P,
 }
 
 #[derive(Serialize)]
-struct StandaloneCopyDocument<'a, C> {
+struct StandaloneDocument<'a, P> {
     command: &'static str,
     phase: Phase,
-    copy: &'a C,
+    #[serde(flatten)]
+    payload: &'a P,
+}
+
+fn report(
+    command: &'static str,
+    capability: &'static str,
+    operator: Option<&OperatorIdentity>,
+    phase: Phase,
+    payload: &impl Serialize,
+) -> Result<String> {
+    let encoded = match work(operator) {
+        Some(work) => serde_json::to_string(&ReportDocument {
+            protocol_version: 1,
+            engine_version: env!("CARGO_PKG_VERSION"),
+            command,
+            capabilities: [capability],
+            work,
+            phase,
+            payload,
+        })
+        .map(|document| format!("native-report: {document}\n")),
+        None => serde_json::to_string(&StandaloneDocument {
+            command,
+            phase,
+            payload,
+        })
+        .map(|document| format!("{document}\n")),
+    };
+    encoded.map_err(|_| Error::new(ErrorKind::Internal, "cannot encode native report"))
 }
 
 pub(crate) fn copy_report(
@@ -168,30 +198,223 @@ pub(crate) fn copy_report(
     phase: &str,
     copy: &impl Serialize,
 ) -> Result<String> {
+    #[derive(Serialize)]
+    struct Payload<'a, C> {
+        copy: &'a C,
+    }
     let (command, capability) = match command {
         CopyCommand::Clone => ("clone", "clone.single_db"),
         CopyCommand::Progress => ("list progress", "progress.v1"),
     };
-    let phase = Phase::parse(phase)?;
-    let encoded = match work(operator) {
-        Some(work) => serde_json::to_string(&CopyDocument {
-            protocol_version: 1,
-            engine_version: env!("CARGO_PKG_VERSION"),
-            command,
-            capabilities: [capability],
-            work,
-            phase,
-            copy,
+    report(
+        command,
+        capability,
+        operator,
+        Phase::parse(phase)?,
+        &Payload { copy },
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum StreamReportCommand {
+    Get,
+    SetEndpos,
+}
+
+#[derive(Serialize)]
+struct Replication {
+    certified_lsn: String,
+    durable_replay_lsn: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_lsn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_persisted: Option<bool>,
+    drained: bool,
+    checkpoint_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drain_proof: Option<DrainProof>,
+}
+
+#[derive(Serialize)]
+struct DrainProof {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work: Option<serde_json::Value>,
+    checkpoint_id: String,
+    committed: bool,
+    end_lsn: String,
+    replay_lsn: String,
+    kind: &'static str,
+}
+
+pub(crate) fn lsn(value: crate::identity::SourceEndLsn) -> String {
+    format!("{:X}/{:X}", value.0 >> 32, value.0 as u32)
+}
+
+pub(crate) fn replication_report(
+    command: StreamReportCommand,
+    operator: Option<&OperatorIdentity>,
+    request: Option<&crate::state::EndposRequest>,
+    snapshot: &crate::apply::checkpoint::DurableFollowSnapshot,
+    completed: Option<&crate::apply::checkpoint::CompletedFollow>,
+) -> Result<String> {
+    use crate::apply::checkpoint::DrainKind;
+    if operator.is_some_and(|operator| operator.run != snapshot.stream().run)
+        || request.is_some_and(|request| request.stream() != snapshot.stream())
+        || snapshot.follow_completed() != completed.is_some()
+        || snapshot.certified_lsn() > snapshot.durable_replay_lsn()
+        || matches!(command, StreamReportCommand::SetEndpos) && request.is_none()
+    {
+        return Err(report_refusal("replication report binding is inconsistent"));
+    }
+    let drain_proof = completed
+        .map(|completed| {
+            if request
+                .is_none_or(|request| !request.is_sealed() || request.end() != completed.end())
+                || completed.target() != snapshot.target()
+                || completed.checkpoint_id() != snapshot.checkpoint_id()
+                || completed.certified_lsn() != snapshot.certified_lsn()
+                || completed.durable_replay_lsn() != snapshot.durable_replay_lsn()
+            {
+                return Err(report_refusal(
+                    "completed report differs from its observed authority",
+                ));
+            }
+            Ok(DrainProof {
+                work: work(operator),
+                checkpoint_id: completed.checkpoint_id(),
+                committed: true,
+                end_lsn: lsn(completed.end()),
+                replay_lsn: lsn(completed.witness()),
+                kind: match completed.kind() {
+                    DrainKind::Keepalive => "keepalive",
+                    DrainKind::LaterBegin => "later_begin",
+                },
+            })
         })
-        .map(|document| format!("native-report: {document}\n")),
-        None => serde_json::to_string(&StandaloneCopyDocument {
-            command,
-            phase,
-            copy,
-        })
-        .map(|document| format!("{document}\n")),
-    };
-    encoded.map_err(|_| Error::new(ErrorKind::Internal, "cannot encode native copy report"))
+        .transpose()?;
+    #[derive(Serialize)]
+    struct Payload {
+        replication: Replication,
+    }
+    report(
+        match command {
+            StreamReportCommand::Get => "stream sentinel get",
+            StreamReportCommand::SetEndpos => "stream sentinel set endpos",
+        },
+        "cutover.v1",
+        operator,
+        if completed.is_some() {
+            Phase::Completed
+        } else if request.is_some() {
+            Phase::Draining
+        } else {
+            Phase::Streaming
+        },
+        &Payload {
+            replication: Replication {
+                certified_lsn: lsn(snapshot.certified_lsn()),
+                durable_replay_lsn: lsn(snapshot.durable_replay_lsn()),
+                end_lsn: request.map(|request| lsn(request.end())),
+                end_persisted: request.map(|_| true),
+                drained: completed.is_some(),
+                checkpoint_id: snapshot.checkpoint_id(),
+                drain_proof,
+            },
+        },
+    )
+}
+
+pub(crate) fn completed_follow_report(
+    operator: Option<&OperatorIdentity>,
+    copy: &impl Serialize,
+    completed: &crate::apply::checkpoint::CompletedFollow,
+) -> Result<String> {
+    if operator.is_some_and(|operator| operator.run != completed.target().intent.binding.stream.run)
+    {
+        return Err(report_refusal(
+            "completed clone report has a different operator binding",
+        ));
+    }
+    copy_report(CopyCommand::Clone, operator, "completed", copy)
+}
+
+pub(crate) fn cleanup_report(
+    control: &crate::state::FollowControl,
+    canonical_workdir: &std::path::Path,
+    progress: &crate::state::CleanupProgress,
+) -> Result<String> {
+    control.validate()?;
+    let name = canonical_workdir
+        .to_str()
+        .filter(|name| !name.is_empty())
+        .filter(|_| canonical_workdir.is_absolute())
+        .ok_or_else(|| report_refusal("cleanup workdir is not a canonical absolute path"))?;
+    #[derive(Serialize)]
+    struct Resource<'a> {
+        kind: &'static str,
+        name: &'a str,
+        owned: bool,
+        removed: bool,
+    }
+    #[derive(Serialize)]
+    struct Cleanup<'a> {
+        complete: bool,
+        resources: Vec<Resource<'a>>,
+    }
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        cleanup: Cleanup<'a>,
+    }
+    let mut resources = vec![
+        Resource {
+            kind: "replication_slot",
+            name: control.binding.slot.intent.binding.slot_name(),
+            owned: true,
+            removed: progress.slot_removed,
+        },
+        Resource {
+            kind: "publication",
+            name: &control.binding.publication.name,
+            owned: true,
+            removed: progress.publication_removed,
+        },
+        Resource {
+            kind: "workdir",
+            name,
+            owned: true,
+            removed: false,
+        },
+    ];
+    if let Some(name) = control.origin_name.as_deref() {
+        resources.push(Resource {
+            kind: "replication_origin",
+            name,
+            owned: false,
+            removed: false,
+        });
+    }
+    let complete = progress.slot_removed && progress.publication_removed;
+    report(
+        "stream cleanup",
+        "cleanup.v1",
+        control.operator.as_ref(),
+        if complete {
+            Phase::Completed
+        } else {
+            Phase::Suspended
+        },
+        &Payload {
+            cleanup: Cleanup {
+                complete,
+                resources,
+            },
+        },
+    )
+}
+
+#[track_caller]
+fn report_refusal(message: &str) -> Error {
+    Error::new(ErrorKind::BadState, message)
 }
 
 enum FollowLog {
@@ -266,6 +489,77 @@ pub(crate) fn follow_backpressure(
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn replication_serialization_retains_measured_zero_and_omits_unknowns() {
+        let value = serde_json::to_value(Replication {
+            certified_lsn: lsn(crate::identity::SourceEndLsn(0)),
+            durable_replay_lsn: lsn(crate::identity::SourceEndLsn(0x1_ffffffff)),
+            end_lsn: None,
+            end_persisted: None,
+            drained: false,
+            checkpoint_id: "1:2:3".into(),
+            drain_proof: None,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "certified_lsn":"0/0", "durable_replay_lsn":"1/FFFFFFFF",
+                "drained":false, "checkpoint_id":"1:2:3",
+            })
+        );
+    }
+
+    #[test]
+    fn standalone_replication_framing_cannot_supply_operator_evidence() {
+        #[derive(Serialize)]
+        struct Payload {
+            replication: Replication,
+        }
+        let payload = Payload {
+            replication: Replication {
+                certified_lsn: "0/10".into(),
+                durable_replay_lsn: "0/10".into(),
+                end_lsn: Some("0/20".into()),
+                end_persisted: Some(true),
+                drained: false,
+                checkpoint_id: "1:2:3".into(),
+                drain_proof: None,
+            },
+        };
+        let output = report(
+            "stream sentinel get",
+            "cutover.v1",
+            None,
+            Phase::Draining,
+            &payload,
+        )
+        .unwrap();
+        assert!(!output.starts_with("native-report: "));
+        let standalone: serde_json::Value = serde_json::from_str(&output).unwrap();
+        for required in ["protocol_version", "engine_version", "work", "capabilities"] {
+            assert!(standalone.get(required).is_none());
+        }
+        let operator = operator_identity(&environment()).unwrap().unwrap();
+        let output = report(
+            "stream sentinel get",
+            "cutover.v1",
+            Some(&operator),
+            Phase::Draining,
+            &payload,
+        )
+        .unwrap();
+        let bound: serde_json::Value =
+            serde_json::from_str(output.strip_prefix("native-report: ").unwrap()).unwrap();
+        assert_eq!(bound["capabilities"], serde_json::json!(["cutover.v1"]));
+        assert_eq!(bound["work"], work(Some(&operator)).unwrap());
+        assert_eq!(bound["replication"], standalone["replication"]);
+        assert_eq!(
+            serde_json::to_value(Version::current()).unwrap()["capabilities"],
+            serde_json::json!([])
+        );
+    }
 
     #[test]
     fn shared_fixtures_bind_discovery_and_configuration_to_real_parser() {

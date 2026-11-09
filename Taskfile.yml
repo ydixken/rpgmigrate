@@ -143,10 +143,11 @@ tasks:
         --skip catalog::tests::live_cdc_ --skip catalog::tests::live_clone_admission_
         --skip catalog::tests::live_source_identity_
         --skip catalog::clone::tests::live_identity_ --skip catalog::follow::tests::live_identity_
+        --skip catalog::follow::tests::live_cleanup_
         --skip catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales
         --skip snapshot::follow_tests::live_ --skip snapshot::follow_fault_tests::live_ --skip cdc::receive::tests::live_ --skip pg::follow_receive_tests::live_ --skip apply::plan::tests::live_ --skip apply::checkpoint::live_tests::follow_
         --skip cdc::receive::tests::full_fifo_status_survives_walsender_timeout
-        --skip snapshot::clone_tests:: --skip copy::live_tests:: --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation
+        --skip snapshot::clone_tests:: --skip copy::live_tests:: --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_
 
   test-catalog:
     desc: Run the live CDC catalog profile
@@ -176,9 +177,18 @@ tasks:
     cmds:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-receive -- {{.CARGO_COMMAND}}
-        test --locked --lib -- --ignored --test-threads=1
-        cdc::receive::tests::live_ pg::follow_receive_tests::live_
+        test --locked --lib -- --include-ignored --exact --test-threads=1
+        cdc::receive::tests::live_configuration_and_logical_query_preserve_export_lifetime
+        pg::follow_receive_tests::live_pipeline_commands_counts_dispatched_commands
+        cdc::receive::tests::live_startup_refuses_slot_advanced_beyond_recovery_before_readiness
         cdc::receive::tests::full_fifo_status_survives_walsender_timeout
+        cdc::receive::tests::drain_request_retries_and_coalesces_without_advancing_feedback
+        cdc::receive::tests::idle_drain_request_wakes_before_the_status_timer_without_advancing_feedback
+        cdc::receive::tests::completed_stop_requires_checked_terminal_results
+        cdc::receive::tests::completed_stop_during_partial_later_input_checks_end_without_decoding_the_tail
+        cdc::receive::tests::completed_stop_drains_pending_status_before_ending_and_keeps_reply_intent
+        cdc::receive::tests::completed_stop_while_fifo_full_preserves_order_and_unapplied_feedback_floor
+        cdc::receive::tests::completed_stop_waiting_for_terminals_preserves_deadline_and_cancellation
 
   test-follow-apply:
     desc: Run the exact pgoutput row semantics and differential profile
@@ -196,19 +206,19 @@ tasks:
         test --locked --lib snapshot::follow_fault_tests::live_follow_ -- --ignored --test-threads=1
 
   test-follow-source:
-    desc: Run the exact pgoutput source snapshot admission profile
+    desc: Run twelve exact pgoutput source snapshot and owned cleanup cases
     cmds:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-source -- {{.CARGO_COMMAND}}
-        test --locked --lib snapshot::follow_tests::live_follow_ -- --ignored --test-threads=1
+        test --locked --lib -- --ignored --test-threads=1
+        snapshot::follow_tests::live_follow_ catalog::follow::tests::live_cleanup_
 
   test-schema:
-    desc: Run the exact isolated schema restart guard case
+    desc: Run three exact isolated schema utility and restart guard cases
     cmds:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --schema -- {{.CARGO_COMMAND}}
-        test --locked --lib schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation
-        -- --ignored --test-threads=1
+        test --locked --lib -- --ignored --test-threads=1 schema::tests::live_
 
   test-source-catalog:
     desc: Run the live source identity probe profile
@@ -299,6 +309,7 @@ tasks:
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_follow.py'
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_follow_wire_protocol.py'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_cutover.py'
 
   test-e2e-follow-16-16:
     desc: Qualify ongoing follow and recovery boundaries on PostgreSQL 16 to 16
@@ -321,6 +332,28 @@ tasks:
       - task: test-e2e-follow-16-16
       - task: test-e2e-follow-18-18
       - task: test-e2e-follow-16-18
+
+  test-e2e-cutover-16-16:
+    desc: Check M4 engine producer cases on PostgreSQL 16-16; independent M6/Go evidence remains required
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --cutover --pair 16-16'
+
+  test-e2e-cutover-18-18:
+    desc: Check M4 engine producer cases on PostgreSQL 18-18; independent M6/Go evidence remains required
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --cutover --pair 18-18'
+
+  test-e2e-cutover-16-18:
+    desc: Check M4 engine producer cases on PostgreSQL 16-18; independent M6/Go evidence remains required
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --cutover --pair 16-18'
+
+  test-e2e-cutover:
+    desc: Check all three M4 engine producer pairs without claiming M6/Go qualification
+    cmds:
+      - task: test-e2e-cutover-16-16
+      - task: test-e2e-cutover-18-18
+      - task: test-e2e-cutover-16-18
 
   image:build:
     desc: Build the local native runner image

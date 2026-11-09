@@ -1,5 +1,7 @@
 """Run with python3 tests/support/test_harness.py."""
 
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -858,10 +860,10 @@ copy_request(relay)
         self.assertNotIn("passfile=", result)
 
     def test_success_output_cannot_disagree_with_native_receipt_or_expose_path(self):
-        state = {"format_version": 7, "run": list(range(16)), "target_provenance": [],
+        state = {"format_version": 8, "run": list(range(16)), "target_provenance": [],
                  "copy_complete": {"tables": 2, "rows": 10003, "bytes": 12345678}}
         valid = {"command": "copy table-data", "status": "complete", "run": list(range(16)),
-                 "state_format_version": 7, "tables": 2, "rows": 10003, "bytes": 12345678}
+                 "state_format_version": 8, "tables": 2, "rows": 10003, "bytes": 12345678}
         validate_success_output(json.dumps(valid), state)
         for changes in ({"run": [0] * 16}, {"state_format_version": 1}, {"state_format_version": 3}, {"tables": 0},
                         {"rows": 0}, {"bytes": 0}, {"canonical_path": "/private/fixture"},
@@ -869,25 +871,25 @@ copy_request(relay)
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
                 validate_success_output(json.dumps({**valid, **changes}), state)
 
-    def test_copy_receipts_require_bound_native7_and_explicit_unused_state(self):
+    def test_copy_receipts_require_bound_native8_and_explicit_unused_state(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             case = SimpleNamespace(state=state)
             identity = state.stat()
             for complete in (None, {"tables": 1, "rows": 1, "bytes": 8}):
-                value = {"magic": "RPGMIGRATE", "format_version": 7, "target_provenance": [], "source_slot": None,
+                value = {"magic": "RPGMIGRATE", "format_version": 8, "target_provenance": [], "source_slot": None,
                          "clone_state": None, "follow_state": None, "operator": None,
                          "run": list(range(16)), "canonical_path": str(state.resolve()),
                          "directory_device": identity.st_dev, "directory_inode": identity.st_ino,
                          "copy_complete": complete}
                 output = json.dumps({"command": "copy table-data", "status": "complete", "run": value["run"],
-                                     "state_format_version": 7, "tables": 1, "rows": 1, "bytes": 8})
+                                     "state_format_version": 8, "tables": 1, "rows": 1, "bytes": 8})
                 check = (lambda: Cases.no_completion(case)) if complete is None else (
                     lambda: Cases.completed(case, 1, 1, output))
                 path = state / "manifest.json"
                 path.write_text(json.dumps(value))
                 check()
-                invalid = [{"format_version": version} for version in (1, 2, 3, 4, 5, 6, 8, 999, 7.0, True)]
+                invalid = [{"format_version": version} for version in (1, 2, 3, 4, 5, 6, 7, 9, 999, 8.0, True)]
                 invalid += [{"magic": "foreign"}, {"target_provenance": None}, {"source_slot": {}},
                             {"copy_snapshot": None}, {"clone_state": {}}, {"follow_state": {}}, {"operator": {}},
                             {"source_slot": {"phase": "provisioning", "record": {}}},
@@ -908,7 +910,7 @@ copy_request(relay)
                     path.write_text(json.dumps(missing))
                     with self.subTest(complete=complete, missing=field), self.assertRaises((AssertionError, KeyError)):
                         check()
-                for raw in ("null", "[]", json.dumps(value)[:-1] + ', "format_version": 7}'):
+                for raw in ("null", "[]", json.dumps(value)[:-1] + ', "format_version": 8}'):
                     path.write_text(raw)
                     with self.subTest(complete=complete, raw=raw[:8]), self.assertRaises(AssertionError):
                         check()
@@ -926,7 +928,7 @@ copy_request(relay)
             state = Path(directory)
             case = SimpleNamespace(state=state)
             identity = state.stat()
-            value = {"magic": "RPGMIGRATE", "format_version": 7, "run": list(range(16)),
+            value = {"magic": "RPGMIGRATE", "format_version": 8, "run": list(range(16)),
                      "canonical_path": str(state.resolve()), "directory_device": identity.st_dev,
                      "directory_inode": identity.st_ino, "target_provenance": [], "source_slot": None,
                      "clone_state": None, "follow_state": None, "operator": None}
@@ -934,7 +936,7 @@ copy_request(relay)
             for tables, rows, size in ((1, 1, 8), (2, 0, 0), (0, 0, 0)):
                 complete = {"tables": tables, "rows": rows, "bytes": size}
                 output = {"command": "copy table-data", "status": "complete", "run": value["run"],
-                          "state_format_version": 7, **complete}
+                          "state_format_version": 8, **complete}
                 path.write_text(json.dumps({**value, "copy_complete": complete}))
                 Cases.completed(case, tables, rows, json.dumps(output))
                 with self.assertRaises(AssertionError):
@@ -951,7 +953,7 @@ copy_request(relay)
                         Cases.completed(case, tables, rows, json.dumps(output))
                 path.write_text(json.dumps({**value, "copy_complete": complete}))
                 for changes in ({"run": [1] * 16}, {"run": [float(byte) for byte in value["run"]]},
-                                {"state_format_version": 6}, {"state_format_version": 7.0},
+                                {"state_format_version": 7}, {"state_format_version": 8.0},
                                 {"tables": tables + 1}, {"rows": rows + 1}, {"bytes": size + 1},
                                 {"tables": float(tables)}, {"rows": bool(rows)},
                                 {"status": "running"}, {"command": "ping"}, {"canonical_path": str(state)}):
@@ -1024,19 +1026,69 @@ copy_request(relay)
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate_libtest_output(cases, output)
 
-    def test_schema_guard_inventory_requires_one_exact_case_and_summary(self):
+    def test_schema_inventory_requires_three_exact_cases_and_summary(self):
         cases = module_cases(load_manifest(), "Schema")
-        self.assertEqual(cases, ["schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"])
+        self.assertEqual(cases, [
+            "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation",
+            "schema::tests::live_utility_service_precedence_preserves_validated_database",
+            "schema::tests::live_utility_effective_auth_and_tls_settings_are_private",
+        ])
         validate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "tools/test-db.py"))["validate_module_receipt"]
-        record = f"test {cases[0]} ... ok\n"
-        summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
-        validate("Schema", cases, record + summary, {})
-        for output in ("", summary, record, record + record + summary,
-                       record.replace(cases[0], "unrelated") + summary,
-                       record.replace(" ... ok", " ... ignored") + summary,
-                       record + summary.replace("1 passed", "0 passed")):
+        records = "".join(f"test {name} ... ok\n" for name in cases)
+        summary = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
+        validate("Schema", cases, records + summary, {})
+        for omitted in cases:
+            with self.subTest(omitted=omitted), self.assertRaises(AssertionError):
+                validate("Schema", cases, records.replace(f"test {omitted} ... ok\n", "") + summary, {})
+        for output in ("", summary, records, records + summary + summary,
+                       records + f"test {cases[0]} ... ok\n" + summary,
+                       records.replace(cases[0], "unrelated") + summary,
+                       records.replace(" ... ok", " ... ignored", 1) + summary,
+                       records.replace(" ... ok", " ... FAILED", 1) + summary,
+                       records + summary.replace("3 passed", "0 passed"),
+                       records + summary.replace("0 ignored", "1 ignored")):
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate("Schema", cases, output, {})
+
+    def test_schema_acquires_existing_scram_tcp_fixture_without_changing_other_profiles(self):
+        wrapper = Path(__file__).resolve().parents[2] / "tools/test-db.py"
+        for profile, mode in (("Schema", "schema"), ("Transport", "transport"),
+                              ("Prepared", "prepared"), ("Clone", "clone")):
+            with self.subTest(profile=profile):
+                main = runpy.run_path(str(wrapper))["main"]
+                context = {"root": "/owned/schema", "socket_dir": "/owned/socket", "port": 24567}
+                cluster = SimpleNamespace(context=context, context_path=Path("/owned/schema/context.json"),
+                                          root=Path(context["root"]), bindir=Path("/owned/pg/bin"),
+                                          environment={"PATH": "/usr/bin"}, auth_password="synthetic-secret")
+                cases = module_cases(load_manifest(), profile)
+                output = "".join(f"test {name} ... ok\n" for name in cases)
+                output += f"test result: ok. {len(cases)} passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
+                manager = mock.MagicMock()
+                manager.__enter__.return_value = cluster
+                factory = mock.Mock(return_value=manager)
+                run = mock.Mock(return_value=subprocess.CompletedProcess(["fixture-command"], 0, output, ""))
+                databases = mock.Mock(return_value=("owned_source", "owned_target"))
+                with patch.dict(main.__globals__, {"OwnedCluster": factory, "databases": databases,
+                                                   "run_command": run}), \
+                        patch.object(sys, "argv", [str(wrapper), "--" + mode, "--", "fixture-command"]), \
+                        redirect_stdout(io.StringIO()) as stdout:
+                    self.assertEqual(main(), 0)
+                self.assertEqual(factory.call_args.kwargs, {"tcp": True} if mode == "schema" else {})
+                self.assertEqual(databases.call_args.kwargs, {"empty": mode in ("schema", "clone")})
+                environment = run.call_args.kwargs["environment"]
+                self.assertEqual(environment["RPGMIGRATE_TEST_AUTH_BASE"],
+                                 conninfo(context, "owned_source", "e1_auth", include_passfile=False))
+                self.assertEqual(environment["RPGMIGRATE_TEST_AUTH_PASSWORD"], cluster.auth_password)
+                self.assertEqual(environment["RPGMIGRATE_TEST_CONTEXT"], str(cluster.context_path))
+                if mode == "schema":
+                    for side in ("SOURCE", "TARGET"):
+                        self.assertEqual(environment[f"RPGMIGRATE_TEST_SCHEMA_{side}_ADMIN"],
+                                         conninfo(context, "owned_" + side.lower(), "e1_admin"))
+                else:
+                    self.assertFalse(any(key.startswith("RPGMIGRATE_TEST_SCHEMA_") for key in environment))
+                self.assertNotIn(cluster.auth_password, " ".join(run.call_args.args[0]))
+                self.assertNotIn(cluster.auth_password, stdout.getvalue())
+                self.assertIn(f"{profile} verified {len(cases)} exact cases", stdout.getvalue())
 
     def test_child_environment_drops_database_context(self):
         environment = {

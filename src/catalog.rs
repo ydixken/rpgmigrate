@@ -2855,7 +2855,7 @@ mod tests {
         };
         let mut state = crate::state::open_clone(&options.state, None, &io).unwrap();
         state.bind_clone(&plan, snapshot.ticket()).unwrap();
-        crate::schema::preflight(&options, &plan, &io).unwrap();
+        crate::schema::preflight(snapshot.connection().unwrap(), &target, &plan, &io).unwrap();
         let archive = crate::schema::dump(&options, snapshot.ticket(), &state, &io).unwrap();
         let mut authority = crate::apply::CloneAuthority::acquire(
             PgConnection::connect(&options.target, &io).unwrap(),

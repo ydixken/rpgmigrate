@@ -1,6 +1,7 @@
-"""Relay ordinary COPY opaquely and observe confirmed pgoutput without row payloads."""
+"""Private follow-wire observations and bounded SQL completion fault controls."""
 
 import re
+import select
 import hashlib
 import socket
 import struct
@@ -348,7 +349,7 @@ class PgoutputObservation:
 
 class WireGate:
     def __init__(self, host, mode):
-        if mode not in ("observe", "before_commit", "after_commit", "after_begin"):
+        if mode not in ("observe", "before_commit", "after_commit", "after_begin", "later_begin_only", "completed_resume_close"):
             raise ValueError("unknown follow wire gate")
         self.host, self.mode = host, mode
         self.listener = socket.socket()
@@ -363,7 +364,9 @@ class WireGate:
         self.statuses = []
         self.observers, self.observer_overflow = [], False
         self.data_bytes = self.begins = self.commits = self.hits = 0
+        self.dropped_keepalives = 0
         self.fault_record = self.fault_observer = None
+        self.close_deadline = self.close_candidate = None
         self.thread = threading.Thread(target=self.accept, daemon=True)
 
     def __enter__(self):
@@ -376,6 +379,8 @@ class WireGate:
     def arm(self):
         if self.armed.is_set() or self.mode == "observe":
             raise RuntimeError("wire gate cannot be armed twice or without a fault")
+        if self.mode == "completed_resume_close":
+            self.close_deadline = time.monotonic() + 10
         self.armed.set()
 
     def hold(self, observation=None, boundary=None, protocol=None):
@@ -389,10 +394,120 @@ class WireGate:
                                      "connection": observation.connection, "backend_pid": observation.backend_pid,
                                      **observation.commit_protocol.observation(boundary, protocol)}
         self.held.set()
+        deadline = time.monotonic() + 30 if self.mode == "later_begin_only" else None
         while not self.release.wait(0.1):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError("controlled later-BEGIN gate deadline expired")
             if self.stopping.is_set():
                 break
         return True
+
+    def close_remaining(self):
+        remaining = (self.close_deadline or time.monotonic() + 10) - time.monotonic()
+        if remaining <= 0 or self.stopping.is_set():
+            raise TimeoutError("completed-resume close fixture deadline expired")
+        return remaining
+
+    def close_packet(self, stream, observation, terminal=False, typed=True):
+        def read(length):
+            data = bytearray()
+            while len(data) < length:
+                stream.settimeout(self.close_remaining())
+                chunk = stream.recv(length - len(data))
+                if not chunk:
+                    raise EOFError
+                data.extend(chunk)
+            return bytes(data)
+        kind = read(1) if typed else b''
+        size = read(4)
+        length = struct.unpack("!I", size)[0]
+        limit = 1024 if terminal or kind == b'C' and observation.close_commits == 1 else 64 * 1024 * 1024
+        if length < 4 or length + len(kind) > limit:
+            observation.commit_protocol.overflow |= length + len(kind) > limit
+            observation.commit_protocol.fail()
+        payload = read(length - 4)
+        return kind, kind + size + payload, payload
+
+    def close_backend(self, observation, kind, frame, payload):
+        if not self.armed.is_set() or self.close_candidate not in (None, observation):
+            return False
+        protocol = observation.commit_protocol
+        if observation.close_pending:
+            if kind != b'Z' or payload != b'I':
+                protocol.fail()
+            observation.close_pending = False
+            observation.close_commits += 1
+            if observation.close_commits == 2:
+                observation.close_terminal += frame
+                if len(observation.close_terminal) > 1024:
+                    protocol.fail(overflow=True)
+                self.fault_record["terminal_idle"] = True
+                return True
+        elif kind == b'C' and payload == b'COMMIT\0':
+            active, _, classification = protocol.completed
+            if classification not in ("simple", "extended") or protocol.invalid or protocol.overflow:
+                protocol.fail()
+            observation.close_pending = True
+            if observation.close_commits == 1:
+                if not active or observation.backend_pid is None or observation.wire_unknown or self.observer_overflow:
+                    protocol.fail()
+                self.close_candidate = self.fault_observer = observation
+                observation.close_terminal = frame
+                self.fault_record = {
+                    "scope": "completed_resume_close_fault", "connection": observation.connection,
+                    "backend_pid": observation.backend_pid, "commit_ordinal": 2, "protocol": classification,
+                    "begin_observed": active, "terminal_idle": False, "upstream_disconnected": False,
+                    "terminal_delivered": False, "next_frontend_kind": None, "old_drop_terminate": None,
+                    "overflow": False, "classification_invalid": False,
+                }
+        return False
+
+    def close_frontend(self, observation, kind, payload):
+        if self.close_candidate is not None and self.close_candidate is not observation:
+            return False
+        if self.close_candidate is not observation:
+            observation.commit_protocol.frontend(kind, payload)
+            return False
+        self.close_remaining()
+        if not self.fault_record["terminal_delivered"]:
+            if kind == b'S' and not self.fault_record["terminal_idle"]:
+                observation.commit_protocol.frontend(kind, payload)
+                return False
+            observation.commit_protocol.fail()
+        if kind == b'X':
+            if payload:
+                observation.commit_protocol.fail()
+        elif kind in (b'Q', b'P', b'B', b'E', b'D', b'C', b'S', b'H'):
+            observation.commit_protocol.frontend(kind, payload)
+        else:
+            observation.commit_protocol.fail()
+        self.fault_record.update(next_frontend_kind=kind.decode("ascii"), old_drop_terminate=kind == b'X')
+        observation.close_next.set()
+        return True
+
+    def close_hold(self, client, server, observation):
+        self.close_remaining()
+        if select.select((server,), (), (), 0)[0]:
+            raise ValueError("unexpected completed-resume terminal continuation")
+        server.shutdown(socket.SHUT_RDWR)
+        with self.lock:
+            self.fault_record["upstream_disconnected"] = True
+            self.hits += 1
+        self.held.set()
+        self.trace(observation, "server", "gate_wait")
+        if not self.release.wait(self.close_remaining()):
+            raise TimeoutError("completed-resume close release deadline expired")
+        self.close_remaining()
+        with self.lock:
+            client.settimeout(self.close_remaining())
+            client.sendall(observation.close_terminal)
+            self.fault_record["terminal_delivered"] = True
+            observation.close_terminal = b''
+        if not observation.close_next.wait(self.close_remaining()):
+            raise TimeoutError("completed-resume close request deadline expired")
+        self.close_remaining()
+        if self.fault_record["next_frontend_kind"] is None:
+            raise ValueError("completed-resume close request witness missing")
 
     def abort_hold(self):
         with self.lock:
@@ -403,8 +518,22 @@ class WireGate:
 
     def fault_observation(self):
         if not self.lock.acquire(timeout=0.02):
-            return {"status": "unavailable", "scope": "wire_fault_observation"}
+            scope = "completed_resume_close_fault" if self.mode == "completed_resume_close" else "wire_fault_observation"
+            return {"status": "unavailable", "scope": scope}
         try:
+            if self.mode == "completed_resume_close":
+                if self.fault_record is None:
+                    return {"status": "unavailable", "scope": "completed_resume_close_fault"}
+                record = dict(self.fault_record)
+                state = self.fault_observer.commit_protocol
+                record["overflow"] |= self.observer_overflow or state.overflow
+                record["classification_invalid"] |= state.invalid or bool(self.errors)
+                pending = (not record["terminal_delivered"] and not self.release.is_set() and not self.stopping.is_set()
+                           and self.close_deadline is not None and time.monotonic() < self.close_deadline)
+                complete = record["terminal_delivered"] and record["next_frontend_kind"] is not None
+                record["status"] = "observed" if (record["terminal_idle"] and record["upstream_disconnected"]
+                    and (pending or complete) and not record["overflow"] and not record["classification_invalid"]) else "unavailable"
+                return record
             if self.fault_record is None:
                 return {"status": "unavailable", "scope": "wire_fault_observation"}
             record = {**self.fault_record, "command_tags": dict(self.fault_record["command_tags"])}
@@ -421,6 +550,11 @@ class WireGate:
     def new_observation(self):
         with self.lock:
             observation = PgoutputObservation(len(self.observers) + 1)
+            if self.mode == "completed_resume_close":
+                observation.close_commits = 0
+                observation.close_pending = False
+                observation.close_terminal = b''
+                observation.close_next = threading.Event()
             if len(self.observers) == 64:
                 self.observer_overflow = True
             else:
@@ -447,7 +581,7 @@ class WireGate:
     def upstream(self, client, server, observation=None):
         try:
             self.trace(observation, "client", "startup_wait")
-            _, frame, payload = packet(client, typed=False)
+            _, frame, payload = self.close_packet(client, observation, typed=False) if self.mode == "completed_resume_close" else packet(client, typed=False)
             self.trace(observation, "client", "received")
             if observation is not None:
                 with self.lock:
@@ -457,7 +591,7 @@ class WireGate:
             self.trace(observation, "client", "forwarded")
             while not self.stopping.is_set():
                 self.trace(observation, "client", "frame_wait")
-                kind, frame, payload = packet(client)
+                kind, frame, payload = self.close_packet(client, observation) if self.mode == "completed_resume_close" else packet(client)
                 self.trace(observation, "client", "received", kind)
                 status = commit = False
                 if observation is not None:
@@ -465,6 +599,8 @@ class WireGate:
                         if kind == b'Q':
                             observation.query(payload)
                         status = observation.copy_active and kind == b'd' and payload[:1] == b'r'
+                        if self.mode == "completed_resume_close" and self.close_frontend(observation, kind, payload):
+                            return
                         if self.mode in ("before_commit", "after_commit"):
                             commit = observation.commit_protocol.frontend(kind, payload)
                 if status:
@@ -488,11 +624,15 @@ class WireGate:
                         if len(self.statuses) > 10000:
                             raise ValueError("standby status observation bound exceeded")
         except (EOFError, OSError) as error:
+            if self.mode == "completed_resume_close" and isinstance(error, TimeoutError) and not self.stopping.is_set():
+                self.errors.append(type(error).__name__)
             self.trace(observation, "client", "closed", closure="eof" if isinstance(error, EOFError) else "socket_error")
         except Exception as error:
             self.errors.append(type(error).__name__)
             self.trace(observation, "client", "closed", closure="protocol_error")
         finally:
+            if self.mode == "completed_resume_close":
+                observation.close_next.set()
             self.trace(observation, "client", "closed", closure="proxy_shutdown")
             try:
                 server.shutdown(socket.SHUT_RDWR)
@@ -508,10 +648,10 @@ class WireGate:
         try:
             while not self.stopping.is_set():
                 self.trace(observation, "server", "frame_wait")
-                if not server.recv(1, socket.MSG_PEEK):
+                if self.mode != "completed_resume_close" and not server.recv(1, socket.MSG_PEEK):
                     raise EOFError
                 try:
-                    kind, frame, payload = packet(server)
+                    kind, frame, payload = self.close_packet(server, observation, terminal=bool(observation.close_terminal)) if self.mode == "completed_resume_close" else packet(server)
                 except (EOFError, OSError, ValueError):
                     with self.lock:
                         observation.invalid |= observation.copy_active
@@ -519,9 +659,29 @@ class WireGate:
                 with self.lock:
                     token = observation.received(kind, payload)
                     observation.wire_event("server", "received", kind, payload)
-                    if self.mode in ("before_commit", "after_commit"):
+                    if self.mode in ("before_commit", "after_commit", "completed_resume_close"):
                         observation.commit_protocol.backend(kind, payload)
+                    close_ready = self.close_backend(observation, kind, frame, payload) if self.mode == "completed_resume_close" else False
                     logical_wal = observation.copy_active and kind == b'd' and payload[:1] == b'w'
+                if close_ready:
+                    self.close_hold(client, server, observation)
+                    return
+                if self.mode == "completed_resume_close" and observation.close_terminal:
+                    continue
+                if self.mode == "later_begin_only" and observation.copy_active:
+                    if not self.armed.is_set() or observation.invalid or observation.overflow:
+                        raise RuntimeError("controlled later-BEGIN fixture was not armed before logical startup")
+                    if kind == b'd' and payload[:1] == b'k':
+                        with self.lock:
+                            self.dropped_keepalives += 1
+                            if self.dropped_keepalives > PgoutputObservation.LIMIT:
+                                raise RuntimeError("controlled keepalive loss exceeded its observation bound")
+                        continue
+                    if logical_wal and payload[25:26] == b'B':
+                        if self.hits:
+                            raise RuntimeError("controlled later-BEGIN fixture received an unexpected extra transaction")
+                        self.trace(observation, "server", "gate_wait")
+                        self.hold()
                 if gate_next:
                     self.trace(observation, "server", "gate_wait")
                     self.hold()
@@ -543,6 +703,8 @@ class WireGate:
                 with self.lock:
                     observation.forwarded(token)
         except (EOFError, OSError) as error:
+            if self.mode == "completed_resume_close" and isinstance(error, TimeoutError) and not self.stopping.is_set():
+                self.errors.append(type(error).__name__)
             self.trace(observation, "server", "closed", closure="eof" if isinstance(error, EOFError) else "socket_error")
         except Exception as error:
             self.errors.append(type(error).__name__)
@@ -554,7 +716,15 @@ class WireGate:
                     stream.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
-                stream.close()
+                if self.mode != "completed_resume_close":
+                    stream.close()
+            if self.mode == "completed_resume_close":
+                # Shutdown wakes the reader; closing its descriptor first can strand it in poll.
+                upstream.join(timeout=3)
+                if upstream.is_alive():
+                    self.errors.append("upstream did not stop")
+                for stream in (client, server):
+                    stream.close()
 
     def accept(self):
         while not self.stopping.is_set():
@@ -593,23 +763,38 @@ class WireGate:
                 raise RuntimeError("follow wire observer failed")
             return {"hits": self.hits, "data_bytes": self.data_bytes, "begins": self.begins,
                     "commits": self.commits, "statuses": list(self.statuses),
+                    **({"dropped_keepalives": self.dropped_keepalives} if self.mode == "later_begin_only" else {}),
                     "logical": {"overflow": self.observer_overflow,
                                 "streams": [observer.evidence() for observer in self.observers if observer.start_lsn is not None]}}
         finally:
             self.lock.release()
 
     def __exit__(self, *_args):
-        self.stopping.set()
-        self.release.set()
-        self.listener.close()
-        for stream in self.sockets:
-            try:
-                stream.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            stream.close()
-        self.thread.join(timeout=3)
-        for worker in self.threads:
-            worker.join(timeout=3)
-        if self.thread.is_alive() or any(worker.is_alive() for worker in self.threads):
-            raise RuntimeError("follow wire observer did not stop")
+        try:
+            self.stopping.set()
+            self.release.set()
+            self.listener.close()
+            if self.mode == "completed_resume_close":
+                for observation in self.observers:
+                    observation.close_next.set()
+            for stream in self.sockets:
+                try:
+                    stream.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                if self.mode != "completed_resume_close":
+                    stream.close()
+            cleanup_deadline = time.monotonic() + 3
+            self.thread.join(timeout=3)
+            for worker in self.threads:
+                timeout = max(0, cleanup_deadline - time.monotonic()) if self.mode == "completed_resume_close" else 3
+                worker.join(timeout=timeout)
+            if self.mode == "completed_resume_close":
+                for stream in self.sockets:
+                    stream.close()
+            if self.thread.is_alive() or any(worker.is_alive() for worker in self.threads):
+                raise RuntimeError("follow wire observer did not stop")
+        except Exception as error:
+            if self.mode == "completed_resume_close":
+                self.errors.append(type(error).__name__)
+            raise

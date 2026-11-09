@@ -418,7 +418,7 @@ fn clone_rejects_old_formats_unknown_fields_and_inventory_overflow() {
     drop(state);
     let path = tmp.path().join("manifest.json");
     let bytes = fs::read(&path).unwrap();
-    for version in [1, 2, 3, 4, 5, 6, 8] {
+    for version in [1, 2, 3, 4, 5, 6, 7, 9] {
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         value["format_version"] = version.into();
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();

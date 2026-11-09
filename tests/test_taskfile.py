@@ -34,7 +34,7 @@ TARGETS = {"check", "fmt-check", "lint", "build", "test", "test-unit", "test-cli
            "test-db-self-check", "default", "help", "test-catalog", "test-source-catalog", "test-clone", "test-schema", "image:build", "image:smoke", "test-e2e-clone-unit", "test-e2e-clone",
            "test-e2e-clone-16-16", "test-e2e-clone-18-18", "test-e2e-clone-16-18",
            "test-e2e-follow-smoke-16-16", "test-e2e-follow-smoke-18-18", "test-e2e-follow-smoke-16-18",
-           "test-follow-source", "test-follow-snapshot", "test-follow-authority", "test-follow-receive", "test-follow-apply", "test-e2e-follow-unit", "test-e2e-follow", "test-e2e-follow-16-16", "test-e2e-follow-18-18", "test-e2e-follow-16-18"}
+           "test-follow-source", "test-follow-snapshot", "test-follow-authority", "test-follow-receive", "test-follow-apply", "test-e2e-follow-unit", "test-e2e-follow", "test-e2e-follow-16-16", "test-e2e-follow-18-18", "test-e2e-follow-16-18", "test-e2e-cutover", "test-e2e-cutover-16-16", "test-e2e-cutover-18-18", "test-e2e-cutover-16-18"}
 FORWARDED = ("RPGMIGRATE_E2E_REPORT_PROBE", "CONTAINER_RUNTIME", "CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG_PATH", "PG_BINDIR", "PG_CONFIG",
              "CARGO_TARGET_DIR", "RPGMIGRATE_BIN", "RPGMIGRATE_TEST_EXPECTED_PG_VERSION",
              "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM")
@@ -126,6 +126,7 @@ class BootstrapTests(unittest.TestCase):
                 self.install()
 
 
+
 class TaskfileTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -197,6 +198,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.assertEqual(self.calls(), [])
 
     def test_retired_targets_fail_without_executing_children(self):
+        self.assertFalse((ROOT / "tests/support/test_source_snapshot_harness.py").exists())
         for target in ("native", "native-check", "test-native", "test-storage-format",
                        "test-storage-recovery", "test-storage-publication", "storage-pilot",
                        "test-journal-serial", "ci:linux", "test-source-snapshot"):
@@ -262,9 +264,10 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                           "--skip", "catalog::tests::live_clone_admission_",
                           "--skip", "catalog::tests::live_source_identity_",
                           "--skip", "catalog::clone::tests::live_identity_", "--skip", "catalog::follow::tests::live_identity_",
+                                  "--skip", "catalog::follow::tests::live_cleanup_",
                           "--skip", "catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales",
                           *FOLLOW_FILTERS,
-                                  "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"])
+                                  "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_"])
         self.assertEqual(self.calls()[-1]["env"]["PG_BINDIR"], "/cli pg")
 
     def test_defined_empty_never_uses_default(self):
@@ -334,6 +337,10 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                 self.passed(self.run_task("test-" + profile))
                 expected = ["tools/test-db.py", "--" + profile, "--", "cargo", "test", "--locked",
                             "--lib", namespace, "--", "--ignored", "--test-threads=1"]
+                if profile == "follow-source":
+                    expected = ["tools/test-db.py", "--follow-source", "--", "cargo", "test", "--locked",
+                                "--lib", "--", "--ignored", "--test-threads=1", namespace,
+                                "catalog::follow::tests::live_cleanup_"]
                 if profile == "follow-apply":
                     expected = ["tools/test-db.py", "--follow-apply", "--", "cargo", "test", "--locked",
                                 "--lib", "--", "--ignored", "--test-threads=1", namespace,
@@ -348,6 +355,46 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
 
 
 
+    def test_follow_source_filters_select_snapshot_and_cleanup_without_other_profiles(self):
+        self.passed(self.run_task("test-follow-source"))
+        command = self.calls()[-1]["argv"][3:]
+        separator = command.index("--")
+        filters = [argument for argument in command[command.index("--lib") + 1:separator]
+                   + command[separator + 1:] if not argument.startswith("--")]
+        with patch.object(sys, "path", [str(ROOT / "tests/support"), *sys.path]):
+            from db_harness import load_manifest, module_cases
+            manifest = load_manifest()
+            expected = set(module_cases(manifest, "FollowSource"))
+            self.assertEqual(len(expected), 12)
+            self.assertEqual(sum(name.startswith("snapshot::follow_tests::") for name in expected), 7)
+            self.assertEqual(sum(name.startswith("catalog::follow::tests::live_cleanup_") for name in expected), 5)
+            universe = {name for profile in ("Transport", "Prepared", "Authority", "Replication", "Engine",
+                                            "Catalog", "SourceCatalog", "Clone", "Schema", "FollowSource",
+                                            "FollowSnapshot", "FollowAuthority", "FollowReceive", "FollowApply")
+                        for name in module_cases(manifest, profile)}
+            selected = {name for name in universe if any(value in name for value in filters)}
+            self.assertEqual(selected, expected)
+
+    def test_schema_task_selects_exact_current_inventory(self):
+        self.passed(self.run_task("test-schema"))
+        command = self.calls()[-1]["argv"]
+        self.assertEqual(command, ["tools/test-db.py", "--schema", "--", "cargo", "test", "--locked",
+                                   "--lib", "--", "--ignored", "--test-threads=1", "schema::tests::live_"])
+        cargo = command[command.index("cargo") + 1:]
+        separator = cargo.index("--")
+        self.assertEqual(cargo[:separator], ["test", "--locked", "--lib"])
+        filters = [value for value in cargo[separator + 1:] if not value.startswith("--")]
+        with patch.object(sys, "path", [str(ROOT / "tests/support"), *sys.path]):
+            from db_harness import load_manifest, module_cases
+            manifest = load_manifest()
+            expected = set(module_cases(manifest, "Schema"))
+            self.assertEqual(len(expected), 3)
+            universe = {name for profile in ("Transport", "Prepared", "Authority", "Replication", "Engine",
+                                            "Catalog", "SourceCatalog", "Clone", "Schema", "FollowSource",
+                                            "FollowSnapshot", "FollowAuthority", "FollowReceive", "FollowApply")
+                        for name in module_cases(manifest, profile)}
+            selected = {name for name in universe if any(value in name for value in filters)}
+            self.assertEqual(selected, expected)
 
     def test_image_tasks_preserve_runtime_image_and_python_overrides(self):
         self.passed(self.run_task("image:build"))
@@ -380,6 +427,9 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.assertEqual([row["argv"][-1] for row in self.calls()], ["16-16", "18-18"])
 
     def test_database_gate_runs_retained_and_follow_profiles_once_in_order(self):
+        with patch.object(sys, "path", [str(ROOT / "tests/support"), *sys.path]):
+            from db_harness import load_manifest, module_cases
+            receive_cases = module_cases(load_manifest(), "FollowReceive")
         self.passed(self.run_task("test-db"))
         calls = [row["argv"] for row in self.calls()]
         self.assertEqual(calls, [["build", "--locked"],
@@ -388,8 +438,9 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                                   "--skip", "catalog::tests::live_clone_admission_",
                                   "--skip", "catalog::tests::live_source_identity_",
                                   "--skip", "catalog::clone::tests::live_identity_", "--skip", "catalog::follow::tests::live_identity_",
+                                  "--skip", "catalog::follow::tests::live_cleanup_",
                                   "--skip", "catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales", *FOLLOW_FILTERS,
-                                  "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation"],
+                                  "--skip", "snapshot::clone_tests::", "--skip", "copy::live_tests::", "--skip", "apply::checkpoint::clone_marker_tests::", "--skip", "schema::tests::live_"],
                                  ["tools/test-db.py", "--catalog", "--", "cargo", "test", "--locked", "--lib",
                                   "catalog::tests::live_", "--", "--ignored", "--test-threads=1",
                               "--skip", "catalog::tests::live_source_identity_", "--skip", "catalog::tests::live_preflight_"],
@@ -398,17 +449,16 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                                  ["tools/test-db.py", "--clone", "--", "cargo", "test", "--locked", "--lib",
                               "--", "--ignored", "--test-threads=1", "snapshot::clone_tests::", "copy::live_tests::", "apply::checkpoint::clone_marker_tests::"],
                              ["tools/test-db.py", "--schema", "--", "cargo", "test", "--locked", "--lib",
-                              "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation",
-                              "--", "--ignored", "--test-threads=1"],
+                              "--", "--ignored", "--test-threads=1", "schema::tests::live_"],
                              ["tools/test-db.py", "--follow-source", "--", "cargo", "test", "--locked", "--lib",
-                              "snapshot::follow_tests::live_follow_", "--", "--ignored", "--test-threads=1"],
+                              "--", "--ignored", "--test-threads=1", "snapshot::follow_tests::live_follow_",
+                              "catalog::follow::tests::live_cleanup_"],
                              ["tools/test-db.py", "--follow-snapshot", "--", "cargo", "test", "--locked", "--lib",
                               "snapshot::follow_fault_tests::live_follow_", "--", "--ignored", "--test-threads=1"],
                              ["tools/test-db.py", "--follow-authority", "--", "cargo", "test", "--locked", "--lib",
                               "apply::checkpoint::live_tests::follow_", "--", "--ignored", "--test-threads=1"],
                              ["tools/test-db.py", "--follow-receive", "--", "cargo", "test", "--locked", "--lib",
-                              "--", "--ignored", "--test-threads=1", "cdc::receive::tests::live_", "pg::follow_receive_tests::live_",
-                              "cdc::receive::tests::full_fifo_status_survives_walsender_timeout"],
+                              "--", "--include-ignored", "--exact", "--test-threads=1", *receive_cases],
                              ["tools/test-db.py", "--follow-apply", "--", "cargo", "test", "--locked", "--lib",
                               "--", "--ignored", "--test-threads=1", "apply::plan::tests::live_",
                               "catalog::clone::tests::live_identity_", "catalog::follow::tests::live_identity_"],
@@ -421,6 +471,54 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         (self.root / "tools/ci/unit.py").unlink()
         self.assertNotEqual(self.run_task("test-harness").returncode, 0)
 
+    def test_live_profiles_select_exact_required_inventories(self):
+        profiles = {
+            "Engine": "engine", "Catalog": "catalog", "SourceCatalog": "source-catalog",
+            "FollowSource": "follow-source", "FollowSnapshot": "follow-snapshot",
+            "FollowAuthority": "follow-authority", "FollowReceive": "follow-receive",
+            "FollowApply": "follow-apply", "Schema": "schema", "Clone": "clone",
+            "Transport": "transport", "Prepared": "prepared", "Authority": "authority",
+            "Replication": "replication",
+        }
+        with patch.object(sys, "path", [str(ROOT / "tests/support"), *sys.path]):
+            from db_harness import load_manifest, module_cases
+            from test_follow_m4_harness import RECEIVE_ADDITIONS
+            manifest = load_manifest()
+            inventories = {profile: set(module_cases(manifest, profile)) for profile in profiles}
+        universe = set().union(*inventories.values())
+        normal_cases = set(RECEIVE_ADDITIONS)
+        for profile, target in profiles.items():
+            with self.subTest(profile=profile):
+                self.passed(self.run_task("test-" + target))
+                command = self.calls()[-1]["argv"]
+                cargo = command[command.index("cargo") + 1:]
+                separator = cargo.index("--")
+                args = cargo[cargo.index("--lib") + 1:separator] + cargo[separator + 1:]
+                skips = [args[index + 1] for index, value in enumerate(args) if value == "--skip"]
+                filters = [value for index, value in enumerate(args)
+                           if not value.startswith("--") and (index == 0 or args[index - 1] != "--skip")]
+                candidates = universe - normal_cases if "--ignored" in args else universe
+                selected = {name for name in candidates
+                            if (not filters or any(name == value if "--exact" in args else value in name
+                                                   for value in filters))
+                            and not any(value in name for value in skips)}
+                self.assertEqual(selected, inventories[profile])
+                if profile == "FollowReceive":
+                    self.assertIn("--include-ignored", args)
+                    self.assertNotIn("--ignored", args)
+                    self.assertIn("--exact", args)
+                    self.assertEqual(set(filters), inventories[profile])
+                    self.assertTrue(normal_cases.issubset(selected))
+        closing = [profile for profile in profiles if profile not in
+                   ("Transport", "Prepared", "Authority", "Replication")]
+        for index, profile in enumerate(closing):
+            for other in closing[index + 1:]:
+                with self.subTest(profile=profile, other=other):
+                    self.assertTrue(inventories[profile].isdisjoint(inventories[other]))
+        for profile in ("Transport", "Prepared", "Authority", "Replication"):
+            with self.subTest(profile=profile):
+                self.assertTrue(inventories[profile].issubset(inventories["Engine"]))
+
     def test_engine_skips_preserve_its_required_cases(self):
         self.passed(self.run_task("test-engine"))
         args = self.calls()[-1]["argv"]
@@ -432,7 +530,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             self.assertEqual(len(engine), 50)
             retained = [name for name in engine if not any(skip in name for skip in skips)]
             self.assertEqual(retained, engine)
-            for profile in ("Catalog", "SourceCatalog"):
+            for profile in ("Catalog", "SourceCatalog", "Schema", "FollowSource"):
                 cases = module_cases(manifest, profile)
                 self.assertTrue(cases)
                 self.assertEqual([name for name in cases if not any(skip in name for skip in skips)], [])
@@ -458,6 +556,19 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
                 self.assertFalse(any("copy_integration" in row["argv"] for row in self.calls()))
                 path.write_text(original)
 
+    def test_follow_unit_target_keeps_m3_protocol_controls_and_adds_cutover(self):
+        self.passed(self.run_task("test-e2e-follow-unit"))
+        self.assertEqual([row["argv"] for row in self.calls()],
+                         [["-W", "error", "tools/e2e/" + name] for name in
+                          ("test_follow.py", "test_follow_wire_protocol.py", "test_cutover.py")])
+
+    def test_cutover_matrix_is_separate_and_preserves_exact_pairs_and_failures(self):
+        self.passed(self.run_task("test-e2e-cutover"))
+        self.assertEqual([row["argv"] for row in self.calls()],
+                         [["tools/e2e/follow.py", "--cutover", "--pair", pair] for pair in ("16-16", "18-18", "16-18")])
+        self.log.unlink()
+        self.assertNotEqual(self.run_task("test-e2e-cutover", env={"FAIL_MATCH": "18-18"}).returncode, 0)
+        self.assertEqual([row["argv"][-1] for row in self.calls()], ["16-16", "18-18"])
 
 
 

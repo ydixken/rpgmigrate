@@ -7,7 +7,8 @@ use crate::contracts::{
 use crate::identity::{SourceEndLsn, StreamId};
 use crate::pg::{CommitObservation, PgConnection, PgParam, PgResult, TransactionStatus};
 use crate::state::{
-    ConfirmedProvenance, NativeState, TARGET_METADATA_VERSION, TargetBinding, TargetProvenance,
+    ConfirmedProvenance, ControlHandle, NativeState, SealedEndpos, TARGET_METADATA_VERSION,
+    TargetBinding, TargetProvenance,
 };
 use std::collections::BTreeSet;
 
@@ -45,6 +46,7 @@ pub(crate) struct TargetAuthority {
     provenance: ConfirmedProvenance,
     row: ControlRow,
     prepared: BTreeSet<String>,
+    control: Option<ControlHandle>,
 }
 
 pub(crate) struct TargetTxn<'a> {
@@ -71,6 +73,86 @@ struct ProofEvidence {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DrainKind {
+    Keepalive,
+    LaterBegin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DrainWitness {
+    Keepalive(SourceEndLsn),
+    LaterBegin(crate::identity::CommitLsn),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DrainRecord {
+    pub(super) end: SourceEndLsn,
+    pub(super) witness: SourceEndLsn,
+    pub(super) kind: DrainKind,
+}
+
+#[derive(Debug)]
+pub(crate) struct DurableFollowSnapshot {
+    stream: StreamId,
+    durable_replay_lsn: SourceEndLsn,
+    certified_lsn: SourceEndLsn,
+    checkpoint_id: String,
+    follow_completed: bool,
+    target: ConfirmedProvenance,
+}
+
+impl DurableFollowSnapshot {
+    pub(crate) fn stream(&self) -> StreamId {
+        self.stream
+    }
+    pub(crate) fn durable_replay_lsn(&self) -> SourceEndLsn {
+        self.durable_replay_lsn
+    }
+    pub(crate) fn certified_lsn(&self) -> SourceEndLsn {
+        self.certified_lsn
+    }
+    pub(crate) fn checkpoint_id(&self) -> String {
+        self.checkpoint_id.clone()
+    }
+    pub(crate) fn follow_completed(&self) -> bool {
+        self.follow_completed
+    }
+    pub(crate) fn target(&self) -> &ConfirmedProvenance {
+        &self.target
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompletedFollow {
+    snapshot: DurableFollowSnapshot,
+    drain: DrainRecord,
+}
+
+impl CompletedFollow {
+    pub(crate) fn end(&self) -> SourceEndLsn {
+        self.drain.end
+    }
+    pub(crate) fn witness(&self) -> SourceEndLsn {
+        self.drain.witness
+    }
+    pub(crate) fn kind(&self) -> DrainKind {
+        self.drain.kind
+    }
+    pub(crate) fn durable_replay_lsn(&self) -> SourceEndLsn {
+        self.snapshot.durable_replay_lsn()
+    }
+    pub(crate) fn certified_lsn(&self) -> SourceEndLsn {
+        self.snapshot.certified_lsn()
+    }
+    pub(crate) fn checkpoint_id(&self) -> String {
+        self.snapshot.checkpoint_id()
+    }
+    pub(crate) fn target(&self) -> &ConfirmedProvenance {
+        self.snapshot.target()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SafeFeedback {
     stream: StreamId,
     end: SourceEndLsn,
@@ -82,6 +164,26 @@ impl SafeFeedback {
     }
     pub(crate) fn end(&self) -> SourceEndLsn {
         self.end
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn completed_for_test() -> CompletedFollow {
+    let (authority, _) = tests::disconnected_authority();
+    CompletedFollow {
+        snapshot: DurableFollowSnapshot {
+            stream: authority.provenance.intent.binding.stream,
+            durable_replay_lsn: SourceEndLsn(0x10),
+            certified_lsn: SourceEndLsn(0x10),
+            checkpoint_id: "1:0:3".into(),
+            follow_completed: true,
+            target: authority.provenance,
+        },
+        drain: DrainRecord {
+            end: SourceEndLsn(0x20),
+            witness: SourceEndLsn(0x30),
+            kind: DrainKind::LaterBegin,
+        },
     }
 }
 
@@ -265,6 +367,7 @@ impl TargetAuthority {
             provenance,
             row: row.clone(),
             prepared: BTreeSet::new(),
+            control: None,
         };
         if pending {
             validate_pending_row(&row)?;
@@ -302,6 +405,7 @@ impl TargetAuthority {
 
     #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn begin(&mut self, next: Frontier, io: &IoControl) -> Result<TargetTxn<'_>> {
+        self.require_mutable(io)?;
         if self.row.follow_binding.is_some() {
             validate_follow_next(
                 self.provenance.intent.binding.stream,
@@ -360,7 +464,7 @@ impl TargetAuthority {
                 "target-follow: requested follow binding differs from native state",
             ));
         }
-        let authority = Self::acquire_inner(
+        let mut authority = Self::acquire_inner(
             connection,
             binding.stream(),
             native,
@@ -372,7 +476,312 @@ impl TargetAuthority {
                 "target-follow: logged follow binding differs from native state",
             ));
         }
+        authority.control = Some(ControlHandle::for_worker(native, io)?);
         Ok(authority)
+    }
+
+    pub(crate) fn try_acquire_follow(
+        connection: PgConnection,
+        control: &ControlHandle,
+        io: &IoControl,
+    ) -> Result<Self> {
+        control.validate(io)?;
+        let checked = control.try_clone(io)?;
+        let provenance = control.target().clone();
+        let mut session = Session::acquire_mode(
+            connection,
+            "on",
+            fence_slot(control.follow().binding.stream().run),
+            true,
+            io,
+        )?;
+        control.validate(io)?;
+        session.validate_binding(&provenance.intent.binding)?;
+        session.begin(io)?;
+        if metadata::probe(session.connection()?, &provenance.intent, io)?.as_ref()
+            != Some(&provenance)
+        {
+            return Err(refusal(
+                "target-follow: existing confirmed metadata is absent or replaced",
+            ));
+        }
+        metadata::prepare(session.connection()?, &provenance, io)?;
+        let row = metadata::lock_validate(session.connection()?, &provenance, io)?;
+        admitted_follow(&row, control.follow(), control.plan())?;
+        session.rollback(io)?;
+        Ok(Self {
+            session,
+            provenance,
+            row,
+            prepared: BTreeSet::new(),
+            control: Some(checked),
+        })
+    }
+
+    pub(crate) fn observe_follow(&mut self, io: &IoControl) -> Result<DurableFollowSnapshot> {
+        let outcome = (|| {
+            self.control
+                .as_ref()
+                .ok_or_else(|| refusal("target-follow: bound native control is absent"))?
+                .validate(io)?;
+            self.session.begin(io)?;
+            self.row = self.read_row(io)?;
+            self.validate_admission()?;
+            let next = self.row.clone();
+            self.write_row(&next, io)?;
+            match self.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(proof)) => self.follow_snapshot(proof),
+                _ => Err(refusal("target-follow: observation COMMIT outcome unknown")),
+            }
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn record_drain(
+        &mut self,
+        request: &SealedEndpos,
+        witness: DrainWitness,
+        io: &IoControl,
+    ) -> Result<DurableProof> {
+        let outcome = (|| {
+            self.require_mutable(io)?;
+            self.validate_sealed(request, io, true)?;
+            self.session.begin(io)?;
+            if self.read_row(io)? != self.row {
+                return Err(refusal("target-follow: drain predecessor changed"));
+            }
+            self.validate_sealed(request, io, true)?;
+            let next = drained_row(&self.row, request.end(), witness)?;
+            self.write_row(&next, io)?;
+            match self.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(proof)) => Ok(proof),
+                _ => Err(refusal("target-follow: drain COMMIT outcome unknown")),
+            }
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn complete_follow(
+        &mut self,
+        source: &mut PgConnection,
+        native: &NativeState,
+        plan: &ClonePlan,
+        request: &SealedEndpos,
+        io: &IoControl,
+    ) -> Result<CompletedFollow> {
+        if self.row.follow_completed {
+            return self.observe_completed(request, io);
+        }
+        let outcome = (|| {
+            self.require_mutable(io)?;
+            self.validate_sealed(request, io, true)?;
+            let saved = native
+                .checked_clone()?
+                .ok_or_else(|| refusal("target-follow: final owned inventory is absent"))?;
+            if native.checked_follow_cleanup()?.is_some()
+                || native.checked_follow_restart()?.is_some()
+                || saved.plan != *plan
+                || saved.phase != ClonePhase::Analyzing
+                || native.follow_control()?.as_ref() != self.row.follow_binding.as_ref()
+                || native.target_provenance(&request.request().stream())
+                    != Some(&TargetProvenance::Confirmed(self.provenance.clone()))
+            {
+                return Err(refusal(
+                    "target-follow: final native admission or inventory changed",
+                ));
+            }
+            self.session.begin(io)?;
+            if self.read_row(io)? != self.row {
+                return Err(refusal("target-follow: completion predecessor changed"));
+            }
+            self.validate_sealed(request, io, true)?;
+            if self
+                .row
+                .drain
+                .is_none_or(|drain| drain.end != request.end())
+            {
+                return Err(refusal(
+                    "target-follow: completion lacks the exact durable drain",
+                ));
+            }
+            let markers = metadata::read_markers(self.session.connection()?, &self.provenance, io)?;
+            validate_markers(&markers, &saved)?;
+            aggregate_markers(&markers, saved.owned_tables.len())?;
+            crate::catalog::sync_clone_sequences(
+                source,
+                self.session.connection()?,
+                plan,
+                &saved.owned_objects,
+                io,
+            )?;
+            self.validate_sealed(request, io, true)?;
+            if native.checked_clone()?.as_ref() != Some(&saved)
+                || native.checked_follow_cleanup()?.is_some()
+            {
+                return Err(refusal(
+                    "target-follow: native final inventory changed during sequence synchronization",
+                ));
+            }
+            let mut next = self.row.clone();
+            let epoch = next.barrier_epoch;
+            next = increment_barrier(next, epoch)?;
+            next.follow_completed = true;
+            self.write_row(&next, io)?;
+            match self.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(proof)) => self.completed_snapshot(proof),
+                _ => Err(refusal("target-follow: completion COMMIT outcome unknown")),
+            }
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn observe_completed(
+        &mut self,
+        request: &SealedEndpos,
+        io: &IoControl,
+    ) -> Result<CompletedFollow> {
+        let outcome = (|| {
+            self.session.begin(io)?;
+            self.row = self.read_row(io)?;
+            self.validate_sealed(request, io, false)?;
+            if !self.row.follow_completed
+                || self
+                    .row
+                    .drain
+                    .is_none_or(|drain| drain.end != request.end())
+            {
+                return Err(refusal(
+                    "target-follow: completed row does not match sealed endpos",
+                ));
+            }
+            let next = self.row.clone();
+            self.write_row(&next, io)?;
+            match self.finish(next, TargetCommit::Synchronous, io)? {
+                CommitReceipt::Acknowledged(Some(proof)) => self.completed_snapshot(proof),
+                _ => Err(refusal(
+                    "target-follow: completed observation COMMIT outcome unknown",
+                )),
+            }
+        })();
+        if outcome.is_err() {
+            self.session.close();
+        }
+        outcome
+    }
+
+    pub(crate) fn close(mut self, io: &IoControl) -> Result<()> {
+        self.session.require_idle()?;
+        self.session.verify(io)?;
+        let slot = self.session.fence_slot;
+        let result = self.session.connection()?.query(
+            &format!("SELECT pg_catalog.pg_advisory_unlock({FENCE_CLASS}, {slot})"),
+            io,
+        )?;
+        if result.rows() != 1 || result.columns()? != 1 || result.cell(0, 0)? != Some(b"t") {
+            return Err(refusal(
+                "target-follow: owned writer fence release was not confirmed",
+            ));
+        }
+        self.session.require_idle()?;
+        self.session.close();
+        Ok(())
+    }
+
+    fn require_mutable(&self, io: &IoControl) -> Result<()> {
+        if self.row.follow_completed {
+            return Err(refusal("target-follow: completed authority is immutable"));
+        }
+        if let Some(control) = &self.control {
+            control.validate_active(io)?;
+        }
+        Ok(())
+    }
+
+    fn validate_admission(&self) -> Result<SourceEndLsn> {
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| refusal("target-follow: bound native control is absent"))?;
+        if control.target() != &self.provenance {
+            return Err(refusal("target-follow: target provenance binding changed"));
+        }
+        admitted_follow(&self.row, control.follow(), control.plan())
+    }
+
+    fn validate_sealed(&self, request: &SealedEndpos, io: &IoControl, active: bool) -> Result<()> {
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| refusal("target-follow: bound native control is absent"))?;
+        if active {
+            control.validate_active(io)?;
+        } else {
+            control.validate(io)?;
+        }
+        let expected = request.request();
+        if !expected.is_sealed()
+            || expected.stream() != control.follow().binding.stream()
+            || expected.copy_generation() != control.follow().binding.copy_generation
+            || expected.slot_nonce() != control.follow().binding.slot.intent.nonce
+            || expected.target_nonce() != self.provenance.intent.nonce
+            || control.read(io)?.as_ref() != Some(expected)
+        {
+            return Err(refusal(
+                "target-follow: sealed request or admission changed",
+            ));
+        }
+        self.validate_admission()?;
+        Ok(())
+    }
+
+    fn follow_snapshot(&self, proof: DurableProof) -> Result<DurableFollowSnapshot> {
+        self.validate_admission()?;
+        if proof.evidence.stream != self.provenance.intent.binding.stream
+            || proof.evidence.through != self.row.applied
+            || proof.evidence.certified_lsn != self.row.certified_lsn
+            || proof.evidence.barrier_epoch != self.row.barrier_epoch
+            || proof.evidence.barrier_counter != self.row.barrier_counter
+            || proof.evidence.target != self.provenance
+        {
+            return Err(refusal(
+                "target-follow: positive proof differs from observed row",
+            ));
+        }
+        Ok(DurableFollowSnapshot {
+            stream: proof.evidence.stream,
+            durable_replay_lsn: durable_start(&self.row)
+                .ok_or_else(|| refusal("target-follow: anchored replay frontier is absent"))?,
+            certified_lsn: self.row.certified_lsn.unwrap_or(SourceEndLsn(0)),
+            checkpoint_id: format!(
+                "{}:{}:{}",
+                proof.evidence.stream.generation, self.row.barrier_epoch, self.row.barrier_counter
+            ),
+            follow_completed: self.row.follow_completed,
+            target: self.provenance.clone(),
+        })
+    }
+
+    fn completed_snapshot(&self, proof: DurableProof) -> Result<CompletedFollow> {
+        if !self.row.follow_completed {
+            return Err(refusal("target-follow: final completion is not recorded"));
+        }
+        let drain = self
+            .row
+            .drain
+            .ok_or_else(|| refusal("target-follow: final drain is absent"))?;
+        Ok(CompletedFollow {
+            snapshot: self.follow_snapshot(proof)?,
+            drain,
+        })
     }
 
     pub(crate) fn has_follow_anchor(&self) -> bool {
@@ -385,6 +794,7 @@ impl TargetAuthority {
         confirmed_flush_lsn: SourceEndLsn,
         io: &IoControl,
     ) -> Result<RecoveryStart> {
+        self.require_mutable(io)?;
         let outcome = (|| {
             if self
                 .row
@@ -420,6 +830,7 @@ impl TargetAuthority {
         candidate: SourceEndLsn,
         io: &IoControl,
     ) -> Result<DurableProof> {
+        self.require_mutable(io)?;
         let outcome = (|| {
             if self.row.follow_binding.is_none()
                 || self.row.anchor.is_none()
@@ -531,7 +942,8 @@ impl TargetAuthority {
         Ok(duplicate)
     }
 
-    pub(crate) fn begin_group(&mut self, _io: &IoControl) -> Result<TargetTxn<'_>> {
+    pub(crate) fn begin_group(&mut self, io: &IoControl) -> Result<TargetTxn<'_>> {
+        self.require_mutable(io)?;
         if self.session.phase != Phase::Idle
             || self.session.connection()?.transaction_status()? != TransactionStatus::Idle
         {
@@ -591,6 +1003,7 @@ impl TargetAuthority {
         epoch: u64,
         io: &IoControl,
     ) -> Result<DurableProof> {
+        self.require_mutable(io)?;
         let outcome = (|| {
             self.session.begin(io)?;
             self.row = self.read_row(io)?;
@@ -1010,7 +1423,10 @@ impl TargetTxn<'_> {
         self.failed |= outcome.is_err();
         outcome
     }
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "direct authority commits are retained for tests")
+    )]
     pub(crate) fn commit(self, io: &IoControl) -> Result<CommitOutcome> {
         self.commit_with_mode(TargetCommit::Synchronous, io)
     }
@@ -1030,6 +1446,7 @@ impl TargetTxn<'_> {
             let epoch = next.barrier_epoch;
             next = increment_barrier(next, epoch)?;
         }
+        self.ensure_transaction(io)?;
         self.authority.write_row(&next, io)?;
         let result = self.authority.finish(next, mode, io)?;
         self.finished = true;
@@ -1071,9 +1488,19 @@ impl Drop for TargetTxn<'_> {
 
 impl Session {
     fn acquire(
+        connection: PgConnection,
+        minimum: &'static str,
+        slot: i32,
+        io: &IoControl,
+    ) -> Result<Self> {
+        Self::acquire_mode(connection, minimum, slot, false, io)
+    }
+
+    fn acquire_mode(
         mut connection: PgConnection,
         minimum: &'static str,
         slot: i32,
+        try_fence: bool,
         io: &IoControl,
     ) -> Result<Self> {
         if connection.transaction_status()? != TransactionStatus::Idle {
@@ -1103,12 +1530,35 @@ impl Session {
             captured
         };
         command(&mut connection, "SET search_path = pg_catalog", "SET", io)?;
+        let function = if try_fence {
+            "pg_try_advisory_lock"
+        } else {
+            "pg_advisory_lock"
+        };
         let locked = connection.query(
-            &format!("SELECT pg_catalog.pg_advisory_lock({FENCE_CLASS}, {slot})"),
+            &format!("SELECT pg_catalog.{function}({FENCE_CLASS}, {slot})"),
             io,
         )?;
-        if locked.rows() != 1 {
-            return Err(refusal("target-authority: writer fence returned no result"));
+        if locked.rows() != 1 || locked.columns()? != 1 {
+            return Err(refusal(
+                "target-authority: writer fence returned an invalid result",
+            ));
+        }
+        if try_fence {
+            match locked.cell(0, 0)? {
+                Some(b"t") => (),
+                Some(b"f") => {
+                    return Err(Error::new(
+                        ErrorKind::BadState,
+                        "target-follow: writer fence is held by an active owner",
+                    ));
+                }
+                _ => {
+                    return Err(refusal(
+                        "target-follow: writer try-fence returned an invalid result",
+                    ));
+                }
+            }
         }
         let slot_oid = slot as u32;
         connection.prepare("rpgmigrate_authority_guard", &format!(
@@ -1178,6 +1628,15 @@ impl Session {
             return Err(refusal(
                 "target-authority: backend, primary, durability settings, or writer fence changed",
             ));
+        }
+        Ok(())
+    }
+
+    fn require_idle(&mut self) -> Result<()> {
+        if self.phase != Phase::Idle
+            || self.connection()?.transaction_status()? != TransactionStatus::Idle
+        {
+            return Err(refusal("target-authority: transaction is not idle"));
         }
         Ok(())
     }
@@ -1260,6 +1719,11 @@ fn validate_pending_row(row: &ControlRow) -> Result<()> {
 }
 
 fn increment_barrier(row: ControlRow, epoch: u64) -> Result<ControlRow> {
+    if row.follow_completed {
+        return Err(refusal(
+            "target-follow: completed authority token is immutable",
+        ));
+    }
     if epoch < row.barrier_epoch {
         return Err(refusal("target-authority: barrier epoch regressed"));
     }
@@ -1342,6 +1806,116 @@ fn validate_next(stream: StreamId, previous: Option<Frontier>, next: Frontier) -
         ));
     }
     Ok(())
+}
+
+pub(crate) fn read_endpos_floor(
+    connection: &mut PgConnection,
+    control: &ControlHandle,
+    io: &IoControl,
+) -> Result<SourceEndLsn> {
+    control.validate(io)?;
+    if connection.transaction_status()? != TransactionStatus::Idle {
+        return Err(refusal(
+            "target-follow: admission read requires an idle connection",
+        ));
+    }
+    let identity = connection.query("SELECT oid, NOT pg_catalog.pg_is_in_recovery() AND pg_catalog.current_setting('transaction_read_only') = 'off' FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()", io)?;
+    let binding = &control.target().intent.binding;
+    let system = optional_system_identifier(connection, io)?;
+    if identity.rows() != 1
+        || number(&identity, 0)? != binding.target_database_oid
+        || identity.cell(0, 1)? != Some(b"t")
+        || binding
+            .target_system_identifier
+            .is_some_and(|expected| system != Some(expected))
+    {
+        return Err(refusal(
+            "target-follow: admission endpoint identity changed",
+        ));
+    }
+    let row = metadata::read_only(connection, control.target(), io)?;
+    control.validate(io)?;
+    admitted_follow(&row, control.follow(), control.plan())
+}
+
+fn admitted_follow(
+    row: &ControlRow,
+    follow: &crate::state::FollowControl,
+    plan: &ClonePlan,
+) -> Result<SourceEndLsn> {
+    let binding = &follow.binding;
+    let expected = CloneControl {
+        generation: plan.generation,
+        phase: ClonePhase::Analyzing,
+        snapshot_token: binding.slot.snapshot_token.clone(),
+        source_timeline: plan.source.timeline,
+        table_count: plan.tables.len() as u64,
+    };
+    let anchor = row
+        .anchor
+        .as_ref()
+        .ok_or_else(|| refusal("target-follow: cutover requires a complete copy anchor"))?;
+    if row.follow_binding.as_ref() != Some(follow)
+        || row.clone.as_ref() != Some(&expected)
+        || binding.copy_generation != plan.generation
+        || binding.stream().source != plan.source.identity
+        || binding.source_timeline != plan.source.timeline
+        || anchor.stream != binding.stream()
+        || anchor.snapshot_token != binding.slot.snapshot_token
+        || anchor.consistent_point != binding.slot.consistent_point
+        || anchor.plan_nonce != binding.slot.intent.nonce
+        || anchor.consistent_point.0 == 0
+    {
+        return Err(refusal(
+            "target-follow: cutover generation, binding, stage, or copy anchor differs",
+        ));
+    }
+    Ok(row
+        .applied
+        .map(|f| f.end)
+        .unwrap_or(SourceEndLsn(0))
+        .max(anchor.consistent_point))
+}
+
+fn drained_row(row: &ControlRow, end: SourceEndLsn, witness: DrainWitness) -> Result<ControlRow> {
+    if row.follow_completed {
+        return Err(refusal("target-follow: completed authority is immutable"));
+    }
+    let record = drain_record(end, witness)?;
+    let mut next = row.clone();
+    // A sealed restart re-proves its original witness without minting new feedback.
+    if let Some(existing) = next.drain {
+        if existing.end != end {
+            return Err(refusal("target-follow: retained sealed endpos differs"));
+        }
+        return Ok(next);
+    }
+    next.drain = Some(record);
+    if record.kind == DrainKind::Keepalive {
+        next.certified_lsn = Some(
+            next.certified_lsn
+                .unwrap_or(SourceEndLsn(0))
+                .max(record.witness),
+        );
+    }
+    increment_barrier(next, row.barrier_epoch)
+}
+
+fn drain_record(end: SourceEndLsn, witness: DrainWitness) -> Result<DrainRecord> {
+    let (position, kind) = match witness {
+        DrainWitness::Keepalive(position) => (position, DrainKind::Keepalive),
+        DrainWitness::LaterBegin(position) => (SourceEndLsn(position.0), DrainKind::LaterBegin),
+    };
+    if end.0 == 0 || position < end || kind == DrainKind::LaterBegin && position <= end {
+        return Err(refusal(
+            "target-follow: drain witness does not cover the sealed endpos",
+        ));
+    }
+    Ok(DrainRecord {
+        end,
+        witness: position,
+        kind,
+    })
 }
 
 fn durable_start(row: &ControlRow) -> Option<SourceEndLsn> {
@@ -1490,6 +2064,8 @@ mod tests {
                 marker_index_oid: 16_387,
             },
             row: ControlRow {
+                drain: None,
+                follow_completed: false,
                 applied: None,
                 barrier_epoch: 0,
                 barrier_counter: 0,
@@ -1499,6 +2075,7 @@ mod tests {
                 follow_binding: None,
             },
             prepared: BTreeSet::from(["keep".into()]),
+            control: None,
         };
         let io = IoControl {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
@@ -1746,6 +2323,8 @@ mod tests {
     #[test]
     fn barriers_reject_counter_overflow_and_epoch_regression() {
         let row = ControlRow {
+            drain: None,
+            follow_completed: false,
             applied: None,
             barrier_epoch: 7,
             barrier_counter: u64::MAX,
@@ -1775,6 +2354,8 @@ mod tests {
             )
             .unwrap(),
             ControlRow {
+                drain: None,
+                follow_completed: false,
                 applied: None,
                 barrier_epoch: 7,
                 barrier_counter: 1,
@@ -1945,6 +2526,11 @@ impl CloneAuthority {
         plan: &ClonePlan,
         io: &IoControl,
     ) -> Result<Self> {
+        if state.checked_follow_cleanup()?.is_some() {
+            return Err(refusal(
+                "target-clone: terminal cleanup forbids copy or restart",
+            ));
+        }
         let saved = state
             .checked_clone()?
             .ok_or_else(|| refusal("target-clone: native clone binding is absent"))?;
@@ -2880,7 +3466,7 @@ mod clone_marker_tests {
         assert_send::<CopyPermit>();
     }
 
-    fn cancel_sync_replication_wait(
+    pub(super) fn cancel_sync_replication_wait(
         target: &crate::contracts::Conninfo,
         pid: u32,
         io: &IoControl,
@@ -2912,7 +3498,11 @@ mod clone_marker_tests {
         })
     }
 
-    fn set_missing_sync_standby(target: &mut PgConnection, missing: bool, io: &IoControl) {
+    pub(super) fn set_missing_sync_standby(
+        target: &mut PgConnection,
+        missing: bool,
+        io: &IoControl,
+    ) {
         let value = if missing {
             "FIRST 1 (rpgmigrate_absent)"
         } else {
@@ -3623,6 +4213,8 @@ mod follow_authority_tests {
             snapshot_token: "snapshot".into(),
         };
         ControlRow {
+            drain: None,
+            follow_completed: false,
             applied: None,
             barrier_epoch: 0,
             barrier_counter: 1,
@@ -3650,6 +4242,236 @@ mod follow_authority_tests {
                 origin_name: None,
             }),
         }
+    }
+
+    fn admitted_fixture() -> (ControlRow, crate::state::FollowControl, ClonePlan) {
+        let mut row = row();
+        row.applied = Some(frontier(1, 0x10));
+        row.certified_lsn = Some(SourceEndLsn(0x10));
+        row.anchor.as_mut().unwrap().consistent_point = SourceEndLsn(8);
+        let follow = row.follow_binding.as_mut().unwrap();
+        follow.binding.slot.consistent_point = SourceEndLsn(8);
+        let plan = ClonePlan {
+            source: crate::contracts::CloneSource {
+                identity: follow.binding.stream().source,
+                timeline: 1,
+                major: 16,
+            },
+            target: crate::contracts::CloneTarget {
+                identity: crate::identity::SourceId {
+                    system_identifier: 4,
+                    database_oid: 5,
+                },
+                major: 18,
+            },
+            generation: CopyGeneration(1),
+            tables: Vec::new(),
+            sequences: Vec::new(),
+            policy: crate::contracts::RestorePolicy::default(),
+        };
+        let follow = follow.clone();
+        row.clone = Some(CloneControl {
+            generation: plan.generation,
+            phase: ClonePhase::Analyzing,
+            snapshot_token: follow.binding.slot.snapshot_token.clone(),
+            source_timeline: 1,
+            table_count: 0,
+        });
+        (row, follow, plan)
+    }
+
+    #[test]
+    fn follow_request_floor_excludes_certification() {
+        let (mut row, follow, plan) = admitted_fixture();
+        assert_eq!(
+            admitted_follow(&row, &follow, &plan).unwrap(),
+            SourceEndLsn(0x10)
+        );
+        row.certified_lsn = Some(SourceEndLsn(0x30));
+        assert_eq!(
+            admitted_follow(&row, &follow, &plan).unwrap(),
+            SourceEndLsn(0x10)
+        );
+        row.applied = Some(frontier(2, 0x18));
+        assert_eq!(
+            admitted_follow(&row, &follow, &plan).unwrap(),
+            SourceEndLsn(0x18)
+        );
+        row.applied = Some(frontier(1, 0x10));
+        let mut follow = follow;
+        follow.binding.slot.consistent_point = SourceEndLsn(0x28);
+        row.anchor.as_mut().unwrap().consistent_point = SourceEndLsn(0x28);
+        row.follow_binding = Some(follow.clone());
+        assert_eq!(
+            admitted_follow(&row, &follow, &plan).unwrap(),
+            SourceEndLsn(0x28)
+        );
+    }
+
+    #[test]
+    fn follow_request_floor_requires_exact_anchor() {
+        let (valid, follow, plan) = admitted_fixture();
+        for field in 0..9 {
+            let mut row = valid.clone();
+            match field {
+                0 => row.anchor = None,
+                1 => row.anchor.as_mut().unwrap().plan_nonce[0] ^= 1,
+                2 => row.anchor.as_mut().unwrap().snapshot_token.push('x'),
+                3 => row.anchor.as_mut().unwrap().stream.generation += 1,
+                4 => row.clone.as_mut().unwrap().generation.0 += 1,
+                5 => row.clone.as_mut().unwrap().phase = ClonePhase::Copying,
+                6 => row.clone.as_mut().unwrap().source_timeline += 1,
+                7 => {
+                    row.follow_binding
+                        .as_mut()
+                        .unwrap()
+                        .binding
+                        .copy_generation
+                        .0 += 1
+                }
+                _ => row.follow_binding = None,
+            }
+            assert!(
+                admitted_follow(&row, &follow, &plan).is_err(),
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn follow_later_begin_is_not_feedback() {
+        let (row, _, _) = admitted_fixture();
+        let next = drained_row(
+            &row,
+            SourceEndLsn(0x20),
+            DrainWitness::LaterBegin(CommitLsn(0x30)),
+        )
+        .unwrap();
+        assert_eq!(next.applied, row.applied);
+        assert_eq!(next.certified_lsn, Some(SourceEndLsn(0x10)));
+        assert_eq!(durable_start(&next), Some(SourceEndLsn(0x10)));
+        assert_eq!(next.barrier_counter, row.barrier_counter + 1);
+        let (authority, _) = tests::disconnected_authority();
+        let proof = DurableProof {
+            evidence: Box::new(ProofEvidence {
+                stream: row.follow_binding.as_ref().unwrap().binding.stream(),
+                through: next.applied,
+                barrier_epoch: next.barrier_epoch,
+                barrier_counter: next.barrier_counter,
+                target: authority.provenance,
+                certified_lsn: next.certified_lsn,
+                follow: true,
+            }),
+        };
+        assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(0x10));
+    }
+
+    #[test]
+    fn follow_equal_certified_keepalive_records_drain() {
+        let (mut row, _, _) = admitted_fixture();
+        row.certified_lsn = Some(SourceEndLsn(0x30));
+        let next = drained_row(
+            &row,
+            SourceEndLsn(0x20),
+            DrainWitness::Keepalive(SourceEndLsn(0x30)),
+        )
+        .unwrap();
+        assert_eq!(
+            next.drain.unwrap(),
+            DrainRecord {
+                end: SourceEndLsn(0x20),
+                witness: SourceEndLsn(0x30),
+                kind: DrainKind::Keepalive
+            }
+        );
+        assert_eq!(next.certified_lsn, Some(SourceEndLsn(0x30)));
+        assert_eq!(next.applied, row.applied);
+        assert_eq!(next.barrier_counter, row.barrier_counter + 1);
+    }
+
+    #[test]
+    fn sealed_drain_recovery_preserves_witness_token_and_crossing_commit() {
+        let (mut row, _, _) = admitted_fixture();
+        row.applied = Some(frontier(2, 0x28));
+        let original = drained_row(
+            &row,
+            SourceEndLsn(0x20),
+            DrainWitness::LaterBegin(CommitLsn(0x30)),
+        )
+        .unwrap();
+        let recovered = drained_row(
+            &original,
+            SourceEndLsn(0x20),
+            DrainWitness::Keepalive(SourceEndLsn(0x40)),
+        )
+        .unwrap();
+        assert_eq!(recovered, original);
+        assert_eq!(recovered.drain.unwrap().witness, SourceEndLsn(0x30));
+        assert_eq!(recovered.applied.unwrap().end, SourceEndLsn(0x28));
+        assert_eq!(recovered.certified_lsn, Some(SourceEndLsn(0x10)));
+        assert!(
+            drained_row(
+                &original,
+                SourceEndLsn(0x21),
+                DrainWitness::LaterBegin(CommitLsn(0x40))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn drain_boundaries_and_completed_tokens_fail_closed() {
+        let (row, _, _) = admitted_fixture();
+        assert!(
+            drained_row(
+                &row,
+                SourceEndLsn(0),
+                DrainWitness::Keepalive(SourceEndLsn(0x30))
+            )
+            .is_err()
+        );
+        assert!(
+            drained_row(
+                &row,
+                SourceEndLsn(0x20),
+                DrainWitness::Keepalive(SourceEndLsn(0x1f))
+            )
+            .is_err()
+        );
+        assert!(
+            drained_row(
+                &row,
+                SourceEndLsn(0x20),
+                DrainWitness::LaterBegin(CommitLsn(0x20))
+            )
+            .is_err()
+        );
+        let mut completed = drained_row(
+            &row,
+            SourceEndLsn(0x20),
+            DrainWitness::Keepalive(SourceEndLsn(0x20)),
+        )
+        .unwrap();
+        completed.follow_completed = true;
+        assert!(increment_barrier(completed.clone(), completed.barrier_epoch).is_err());
+        assert!(
+            drained_row(
+                &completed,
+                SourceEndLsn(0x20),
+                DrainWitness::Keepalive(SourceEndLsn(0x20))
+            )
+            .is_err()
+        );
+        let mut exhausted = row;
+        exhausted.barrier_counter = u64::MAX;
+        assert!(
+            drained_row(
+                &exhausted,
+                SourceEndLsn(0x20),
+                DrainWitness::Keepalive(SourceEndLsn(0x20))
+            )
+            .is_err()
+        );
     }
 
     #[test]

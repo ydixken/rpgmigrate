@@ -1,6 +1,7 @@
 //! The authority owns the transaction, writer fence, and durability proof.
 //! Namespace DDL must remain paused while these owned relations are in use.
 
+use super::checkpoint::{DrainKind, DrainRecord};
 use super::{ControlRow, Frontier};
 use crate::contracts::{
     Error, ErrorKind, IoControl, MAX_SNAPSHOT_TOKEN_BYTES, Result, SnapshotAnchor,
@@ -13,7 +14,7 @@ const CATALOG: &str = "rpgmigrate_metadata_catalog";
 const READ: &str = "rpgmigrate_metadata_read";
 const UPDATE: &str = "rpgmigrate_metadata_update";
 const NUMERIC_U64: i32 = (20 << 16) + 4;
-const COLUMNS: [(&str, &str, u32, i32, bool); 25] = [
+const COLUMNS: [(&str, &str, u32, i32, bool); 29] = [
     ("magic", "text", 25, -1, true),
     ("version", "int4", 23, -1, true),
     ("run_id", "bytea", 17, -1, true),
@@ -39,6 +40,10 @@ const COLUMNS: [(&str, &str, u32, i32, bool); 25] = [
     ("clone_state", "text", 25, -1, false),
     ("certified_lsn", "pg_lsn", 3220, -1, false),
     ("follow_binding", "text", 25, -1, false),
+    ("drain_end_lsn", "pg_lsn", 3220, -1, false),
+    ("drain_witness_lsn", "pg_lsn", 3220, -1, false),
+    ("drain_kind", "text", 25, -1, false),
+    ("follow_completed", "bool", 16, -1, true),
 ];
 
 pub(super) fn probe(
@@ -283,6 +288,12 @@ fn update_values(
     old: &ControlRow,
     next: &ControlRow,
 ) -> Result<Vec<Option<String>>> {
+    if old.follow_completed && old != next {
+        return Err(refusal("target-metadata: completed follow is immutable"));
+    }
+    if old.drain.is_some() && old.drain != next.drain {
+        return Err(refusal("target-metadata: sealed drain cannot change"));
+    }
     if old.anchor.is_some() && old.anchor != next.anchor {
         return Err(refusal(
             "target-metadata: snapshot anchor cannot be replaced or removed",
@@ -529,8 +540,10 @@ fn catalog_values(confirmed: &ConfirmedProvenance) -> Vec<Option<String>> {
 }
 
 fn read_row(result: &PgResult, confirmed: &ConfirmedProvenance) -> Result<ControlRow> {
-    if result.rows() != 1 {
-        return Err(refusal("target-metadata: expected exactly one control row"));
+    if result.rows() != 1 || result.columns()? != COLUMNS.len() {
+        return Err(refusal(
+            "target-metadata: expected exactly one complete control row",
+        ));
     }
     let cells = (0..COLUMNS.len())
         .map(|column| result.cell(0, column))
@@ -544,6 +557,7 @@ fn read_sql(table: &str) -> String {
         "run_id" | "nonce" => format!("CASE WHEN pg_catalog.octet_length({0}) = 16 THEN pg_catalog.encode({0}, 'hex') END", column.0),
         // Invalid present optional fields must not become an absent anchor.
         "follow_binding" => "CASE WHEN follow_binding IS NULL THEN NULL WHEN pg_catalog.octet_length(follow_binding) <= 262144 THEN follow_binding ELSE '' END".into(),
+        "drain_kind" => "CASE WHEN drain_kind IS NULL THEN NULL WHEN pg_catalog.octet_length(drain_kind) <= 11 THEN drain_kind ELSE '' END".into(),
         "clone_state" => "CASE WHEN clone_state IS NULL THEN NULL WHEN pg_catalog.octet_length(clone_state) <= 4096 THEN clone_state ELSE '' END".into(),
         "copy_snapshot_token" => format!("CASE WHEN copy_snapshot_token IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_snapshot_token) <= {MAX_SNAPSHOT_TOKEN_BYTES} THEN copy_snapshot_token ELSE '' END"),
         "copy_plan_nonce" => "CASE WHEN copy_plan_nonce IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_plan_nonce) = 16 THEN pg_catalog.encode(copy_plan_nonce, 'hex') ELSE '' END".into(),
@@ -648,6 +662,12 @@ fn decode_row(cells: &[Option<&[u8]>], confirmed: &ConfirmedProvenance) -> Resul
         })
     };
     let row = ControlRow {
+        drain: decode_drain(&cells[25..28])?,
+        follow_completed: match required(cells[28])? {
+            b"t" => true,
+            b"f" => false,
+            _ => return Err(refusal("target-metadata: invalid follow completion flag")),
+        },
         applied,
         barrier_epoch: decimal(required(cells[17])?)?,
         barrier_counter: decimal(required(cells[18])?)?,
@@ -678,6 +698,25 @@ fn decode_row(cells: &[Option<&[u8]>], confirmed: &ConfirmedProvenance) -> Resul
     };
     row_values(confirmed, &row)?;
     Ok(row)
+}
+
+fn decode_drain(cells: &[Option<&[u8]>]) -> Result<Option<DrainRecord>> {
+    match cells {
+        [None, None, None] => Ok(None),
+        [Some(end), Some(witness), Some(kind)] => {
+            let kind = match *kind {
+                b"keepalive" => DrainKind::Keepalive,
+                b"later_begin" => DrainKind::LaterBegin,
+                _ => return Err(refusal("target-metadata: invalid drain kind")),
+            };
+            Ok(Some(DrainRecord {
+                end: SourceEndLsn(lsn(end)?),
+                witness: SourceEndLsn(lsn(witness)?),
+                kind,
+            }))
+        }
+        _ => Err(refusal("target-metadata: partial drain record")),
+    }
 }
 
 fn decode_anchor(cells: &[Option<&[u8]>], stream: StreamId) -> Result<Option<SnapshotAnchor>> {
@@ -804,6 +843,36 @@ fn row_values(confirmed: &ConfirmedProvenance, row: &ControlRow) -> Result<Vec<O
     if row.certified_lsn == Some(SourceEndLsn(0)) {
         return Err(refusal("target-metadata: zero certified frontier"));
     }
+    if row.drain.is_some() || row.follow_completed {
+        let Some(drain) = row.drain else {
+            return Err(refusal(
+                "target-metadata: completed follow lacks drain record",
+            ));
+        };
+        let valid_phase = row.clone.as_ref().is_some_and(|clone| {
+            clone.phase == crate::state::ClonePhase::Analyzing
+                && row.follow_binding.as_ref().is_some_and(|follow| {
+                    clone.generation == follow.binding.copy_generation
+                        && clone.source_timeline == follow.binding.source_timeline
+                })
+        });
+        if row.follow_binding.is_none()
+            || row.anchor.is_none()
+            || !valid_phase
+            || drain.end.0 == 0
+            || drain.witness.0 == 0
+            || drain.witness < drain.end
+            || drain.kind == DrainKind::LaterBegin && drain.witness <= drain.end
+            || row
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.consistent_point > drain.end)
+            || drain.kind == DrainKind::Keepalive
+                && row.certified_lsn.is_none_or(|lsn| lsn < drain.witness)
+        {
+            return Err(refusal("target-metadata: invalid anchored follow drain"));
+        }
+    }
     let mut values = vec![
         Some("rpgmigrate".into()),
         Some(binding.metadata_version.to_string()),
@@ -866,6 +935,17 @@ fn row_values(confirmed: &ConfirmedProvenance, row: &ControlRow) -> Result<Vec<O
             })
             .transpose()?,
     );
+    values.extend([
+        row.drain
+            .map(|drain| format!("{:X}/{:X}", drain.end.0 >> 32, drain.end.0 as u32)),
+        row.drain
+            .map(|drain| format!("{:X}/{:X}", drain.witness.0 >> 32, drain.witness.0 as u32)),
+        row.drain.map(|drain| match drain.kind {
+            DrainKind::Keepalive => "keepalive".into(),
+            DrainKind::LaterBegin => "later_begin".into(),
+        }),
+        Some(if row.follow_completed { "t" } else { "f" }.into()),
+    ]);
     Ok(values)
 }
 
@@ -922,6 +1002,8 @@ fn validate_intent(intent: &ProvisioningIntent) -> Result<()> {
 
 fn empty_row() -> ControlRow {
     ControlRow {
+        drain: None,
+        follow_completed: false,
         applied: None,
         barrier_epoch: 0,
         barrier_counter: 0,
@@ -1319,6 +1401,15 @@ mod tests {
     use crate::identity::{RunId, SourceId, StreamId};
     use crate::state::TargetBinding;
 
+    #[test]
+    fn metadata6_accepts_new_empty_row_and_refuses_previous_width() {
+        let mut cells = empty_cells()[..25].to_vec();
+        cells[1] = Some(b"6");
+        cells.extend([None, None, None, Some(b"f".as_slice())]);
+        assert!(decode_row(&cells, &provenance()).is_ok());
+        assert!(decode_row(&cells[..25], &provenance()).is_err());
+    }
+
     fn provenance() -> ConfirmedProvenance {
         ConfirmedProvenance {
             intent: ProvisioningIntent {
@@ -1347,10 +1438,10 @@ mod tests {
         }
     }
 
-    fn empty_cells() -> [Option<&'static [u8]>; 25] {
+    fn empty_cells() -> [Option<&'static [u8]>; 29] {
         [
             Some(b"rpgmigrate"),
-            Some(b"5"),
+            Some(b"6"),
             Some(b"11111111111111111111111111111111"),
             Some(b"22222222222222222222222222222222"),
             Some(b"7"),
@@ -1374,17 +1465,22 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            Some(b"f"),
         ]
     }
 
-    fn snapshot_cells() -> [Option<&'static [u8]>; 25] {
-        let mut cells = [None; 25];
+    fn snapshot_cells() -> [Option<&'static [u8]>; 29] {
+        let mut cells = [None; 29];
         cells[..19].copy_from_slice(&empty_cells()[..19]);
+        cells[28] = Some(b"f");
         cells
     }
 
     #[test]
-    fn metadata5_accepts_empty_and_complete_snapshot_rows() {
+    fn metadata6_accepts_empty_and_complete_snapshot_rows() {
         let mut cells = snapshot_cells();
         assert_eq!(decode_row(&cells, &provenance()).unwrap().applied, None);
         cells[19] = Some(b"owned snapshot 'token'");
@@ -1394,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata5_partial_snapshot_fields_have_a_specific_refusal() {
+    fn metadata6_partial_snapshot_fields_have_a_specific_refusal() {
         let values: [&[u8]; 3] = [
             b"owned snapshot token",
             b"0/1",
@@ -1416,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata5_bounded_projection_preserves_null_and_invalid_presence() {
+    fn metadata6_bounded_projection_preserves_null_and_invalid_presence() {
         let sql = read_sql("\"s\".\"checkpoint\"");
         assert!(sql.contains("CASE WHEN copy_snapshot_token IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_snapshot_token) <= 1024 THEN copy_snapshot_token ELSE '' END"));
         assert!(sql.contains("CASE WHEN copy_plan_nonce IS NULL THEN NULL WHEN pg_catalog.octet_length(copy_plan_nonce) = 16 THEN pg_catalog.encode(copy_plan_nonce, 'hex') ELSE '' END"));
@@ -1424,16 +1520,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata5_fresh_catalog_requires_all_25_columns() {
-        assert_eq!(COLUMNS.len(), 25);
+    fn metadata6_fresh_catalog_requires_all_29_columns() {
+        assert_eq!(COLUMNS.len(), 29);
         let ddl = create_table_sql("\"s\".\"checkpoint\"", 170000);
         assert!(ddl.contains("copy_snapshot_token pg_catalog.text COLLATE pg_catalog.\"C\""));
         assert!(ddl.contains("copy_consistent_point pg_catalog.pg_lsn"));
         assert!(ddl.contains("copy_plan_nonce pg_catalog.bytea"));
         for version in [90600, 110000, 170000, 180000] {
             let sql = catalog_sql(version).unwrap();
-            assert!(sql.contains("c.relnatts = 25"));
-            assert!(sql.contains("a.attnum > 0) = 25"));
+            assert!(sql.contains("c.relnatts = 29"));
+            assert!(sql.contains("a.attnum > 0) = 29"));
             assert!(sql.contains("(20, 'copy_snapshot_token', 25, -1, false)"));
             assert!(sql.contains("(21, 'copy_consistent_point', 3220, -1, false)"));
             assert!(sql.contains("(22, 'copy_plan_nonce', 17, -1, false)"));
@@ -1443,13 +1539,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata5_cas_compares_all_fields_through_parameter_38() {
+    fn metadata6_cas_compares_all_fields_through_parameter_46() {
         let sql = update_sql("\"s\".\"checkpoint\"");
-        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 25);
-        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $26::pg_catalog.numeric"));
-        assert!(sql.contains("copy_snapshot_token IS NOT DISTINCT FROM $33::pg_catalog.text"));
-        assert!(sql.contains("copy_consistent_point IS NOT DISTINCT FROM $34::pg_catalog.pg_lsn"));
-        assert!(sql.contains("copy_plan_nonce IS NOT DISTINCT FROM $35::pg_catalog.bytea"));
+        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 29);
+        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $30::pg_catalog.numeric"));
+        assert!(sql.contains("copy_snapshot_token IS NOT DISTINCT FROM $37::pg_catalog.text"));
+        assert!(sql.contains("copy_consistent_point IS NOT DISTINCT FROM $38::pg_catalog.pg_lsn"));
+        assert!(sql.contains("copy_plan_nonce IS NOT DISTINCT FROM $39::pg_catalog.bytea"));
     }
 
     fn anchor() -> SnapshotAnchor {
@@ -1479,7 +1575,7 @@ mod tests {
             })
         );
         let values = row_values(&provenance(), &row).unwrap();
-        assert_eq!(values.len(), 25);
+        assert_eq!(values.len(), 29);
         assert_eq!(values[19].as_deref(), Some("owned snapshot 'token'"));
         assert_eq!(values[20].as_deref(), Some("FFFFFFFF/FFFFFFFF"));
         assert_eq!(
@@ -1613,8 +1709,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata5_refuses_version2_and_legacy_row_width() {
-        assert_eq!(TARGET_METADATA_VERSION, 5);
+    fn metadata6_refuses_version2_and_legacy_row_width() {
+        assert_eq!(TARGET_METADATA_VERSION, 6);
         let mut cells = snapshot_cells();
         cells[1] = Some(b"2");
         assert_eq!(
@@ -1641,12 +1737,12 @@ mod tests {
             ..empty_row()
         };
         let values = update_values(&confirmed, &empty_row(), &installed).unwrap();
-        assert_eq!(values.len(), 38);
+        assert_eq!(values.len(), 46);
         assert_eq!(
             &values[19..22],
             &row_values(&confirmed, &installed).unwrap()[19..22]
         );
-        assert_eq!(&values[32..35], &[None, None, None]);
+        assert_eq!(&values[36..39], &[None, None, None]);
         let cdc = ControlRow {
             applied: Some(Frontier {
                 tx: TxId {
@@ -1662,7 +1758,7 @@ mod tests {
             ..installed.clone()
         };
         let values = update_values(&confirmed, &installed, &cdc).unwrap();
-        assert_eq!(&values[19..22], &values[32..35]);
+        assert_eq!(&values[19..22], &values[36..39]);
         let barrier = ControlRow {
             barrier_counter: 2,
             ..cdc.clone()
@@ -1778,6 +1874,8 @@ mod tests {
         assert_eq!(
             decode_row(&empty_cells(), &provenance()).unwrap(),
             ControlRow {
+                drain: None,
+                follow_completed: false,
                 applied: None,
                 barrier_epoch: 0,
                 barrier_counter: 0,
@@ -1808,6 +1906,8 @@ mod tests {
         assert_eq!(
             decode_row(&cells, &confirmed).unwrap(),
             ControlRow {
+                drain: None,
+                follow_completed: false,
                 applied: Some(Frontier {
                     tx: TxId {
                         stream: confirmed.intent.binding.stream,
@@ -1895,6 +1995,8 @@ mod tests {
     fn row_parameters_preserve_nulls_unsigned_limits_and_stream_identity() {
         let confirmed = provenance();
         let mut row = ControlRow {
+            drain: None,
+            follow_completed: false,
             applied: None,
             barrier_epoch: u64::MAX,
             barrier_counter: 2,
@@ -1904,7 +2006,7 @@ mod tests {
             follow_binding: None,
         };
         let values = row_values(&confirmed, &row).unwrap();
-        assert_eq!(values.len(), 25);
+        assert_eq!(values.len(), 29);
         assert_eq!(
             values[2].as_deref(),
             Some("\\x11111111111111111111111111111111")
@@ -2009,18 +2111,150 @@ mod tests {
         assert!(row_values(&confirmed, &row).is_err());
     }
 
+    fn drain_fixture() -> (ConfirmedProvenance, ControlRow) {
+        let mut confirmed = provenance();
+        confirmed.intent.binding.stream.generation = 1;
+        let stream = confirmed.intent.binding.stream;
+        let slot = crate::state::SourceSlotReceipt {
+            intent: crate::state::SourceSlotIntent {
+                binding: crate::state::SourceSlotBinding::new(
+                    stream,
+                    "rpgmigrate_drain".into(),
+                    crate::cdc::contracts::Plugin::Pgoutput,
+                    1,
+                )
+                .unwrap(),
+                nonce: [3; 16],
+            },
+            consistent_point: SourceEndLsn(8),
+            snapshot_token: "snapshot".into(),
+        };
+        let mut row = empty_row();
+        row.anchor = Some(SnapshotAnchor {
+            stream,
+            snapshot_token: slot.snapshot_token.clone(),
+            consistent_point: slot.consistent_point,
+            plan_nonce: slot.intent.nonce,
+        });
+        row.follow_binding = Some(crate::state::FollowControl {
+            binding: crate::contracts::FollowBinding {
+                slot,
+                publication: crate::contracts::PublicationReceipt {
+                    name: "rpgmigrate_drain".into(),
+                    oid: 31,
+                    owner_oid: 37,
+                },
+                source_timeline: 1,
+                copy_generation: crate::contracts::CopyGeneration(1),
+                source_types: Vec::new(),
+            },
+            operator: None,
+            origin_name: None,
+        });
+        row.clone = Some(crate::apply::checkpoint::CloneControl {
+            generation: crate::contracts::CopyGeneration(1),
+            phase: crate::state::ClonePhase::Analyzing,
+            snapshot_token: "snapshot".into(),
+            source_timeline: 1,
+            table_count: 0,
+        });
+        row.certified_lsn = Some(SourceEndLsn(0x30));
+        row.drain = Some(DrainRecord {
+            end: SourceEndLsn(0x20),
+            witness: SourceEndLsn(0x30),
+            kind: DrainKind::Keepalive,
+        });
+        (confirmed, row)
+    }
+
+    #[test]
+    fn drain_codec_rejects_partial_records_invalid_kinds_and_legacy_rows() {
+        let (confirmed, row) = drain_fixture();
+        let mut values = row_values(&confirmed, &row).unwrap();
+        values[2] = Some(hex(&confirmed.intent.binding.stream.run.0));
+        values[3] = Some(hex(&confirmed.intent.nonce));
+        values[21] = Some(hex(&row.anchor.as_ref().unwrap().plan_nonce));
+        let cells = values
+            .iter()
+            .map(|v| v.as_ref().map(|s| s.as_bytes()))
+            .collect::<Vec<_>>();
+        assert_eq!(decode_row(&cells, &confirmed).unwrap(), row);
+        for mask in 1..7 {
+            let mut partial = cells.clone();
+            for field in 0..3 {
+                if mask & (1 << field) == 0 {
+                    partial[25 + field] = None;
+                }
+            }
+            assert!(decode_row(&partial, &confirmed).is_err(), "mask {mask}");
+        }
+        for (index, invalid) in [
+            (25, b"0/0".as_slice()),
+            (26, b"0/1"),
+            (27, b"foreign"),
+            (28, b"true"),
+            (1, b"5"),
+        ] {
+            let mut invalid_cells = cells.clone();
+            invalid_cells[index] = Some(invalid);
+            assert!(
+                decode_row(&invalid_cells, &confirmed).is_err(),
+                "field {index}"
+            );
+        }
+        assert!(decode_row(&cells[..25], &confirmed).is_err());
+        let mut old = confirmed;
+        old.intent.binding.metadata_version = 5;
+        assert!(row_values(&old, &row).is_err());
+    }
+
+    #[test]
+    fn completed_row_allows_only_same_value_reproof_and_retains_crossing_commit() {
+        let (confirmed, mut row) = drain_fixture();
+        let stream = confirmed.intent.binding.stream;
+        row.applied = Some(Frontier {
+            tx: TxId {
+                stream,
+                xid: 9,
+                begin_ordinal: 0x18,
+            },
+            order: TxSeq(1),
+            commit: Some(CommitLsn(0x18)),
+            end: SourceEndLsn(0x28),
+        });
+        row.follow_completed = true;
+        assert!(update_values(&confirmed, &row, &row).is_ok());
+        for field in 0..6 {
+            let mut changed = row.clone();
+            match field {
+                0 => changed.follow_completed = false,
+                1 => changed.barrier_counter += 1,
+                2 => changed.barrier_epoch += 1,
+                3 => changed.certified_lsn = Some(SourceEndLsn(0x40)),
+                4 => changed.drain.as_mut().unwrap().witness = SourceEndLsn(0x40),
+                _ => changed.applied.as_mut().unwrap().end = SourceEndLsn(0x29),
+            }
+            assert!(
+                update_values(&confirmed, &row, &changed).is_err(),
+                "field {field}"
+            );
+        }
+        row.drain = None;
+        assert!(row_values(&confirmed, &row).is_err());
+    }
+
     #[test]
     fn compare_and_swap_sql_matches_entire_receipt_and_nullable_predecessor() {
         let sql = update_sql("\"s\".\"checkpoint\"");
         assert!(sql.starts_with("UPDATE ONLY \"s\".\"checkpoint\" SET "));
         assert!(sql.contains("nonce IS NOT DISTINCT FROM $4::pg_catalog.bytea"));
         assert!(sql.contains("table_oid IS NOT DISTINCT FROM $12::pg_catalog.oid"));
-        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $26::pg_catalog.numeric"));
-        assert!(sql.contains("last_xid IS NOT DISTINCT FROM $27::pg_catalog.oid"));
-        assert!(sql.contains("source_commit_lsn IS NOT DISTINCT FROM $29::pg_catalog.pg_lsn"));
-        assert!(sql.contains("source_end_lsn IS NOT DISTINCT FROM $30::pg_catalog.pg_lsn"));
-        assert!(sql.contains("barrier_counter IS NOT DISTINCT FROM $32::pg_catalog.numeric"));
-        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 25);
+        assert!(sql.contains("applied_order IS NOT DISTINCT FROM $30::pg_catalog.numeric"));
+        assert!(sql.contains("last_xid IS NOT DISTINCT FROM $31::pg_catalog.oid"));
+        assert!(sql.contains("source_commit_lsn IS NOT DISTINCT FROM $33::pg_catalog.pg_lsn"));
+        assert!(sql.contains("source_end_lsn IS NOT DISTINCT FROM $34::pg_catalog.pg_lsn"));
+        assert!(sql.contains("barrier_counter IS NOT DISTINCT FROM $36::pg_catalog.numeric"));
+        assert_eq!(sql.matches(" IS NOT DISTINCT FROM ").count(), 29);
     }
 
     #[test]

@@ -632,6 +632,12 @@ def copy_restart(source, target, driver, root, bindir, manifest, receipt, case):
 def outer(args, *, program="clone", manifest=None, receipt_validator=validate_receipt, server_arguments=()):
     manifest = load_manifest() if manifest is None else manifest
     diagnostic_case = getattr(args, "diagnostic_case", None)
+    cutover_mode = getattr(args, "cutover", False)
+    if cutover_mode:
+        if program != "follow" or args.report_probe is not None or diagnostic_case or getattr(args, "smoke", False):
+            raise RuntimeError("cutover producer mode requires its distinct follow route without the clone-only probe")
+        import cutover
+        source_tree = cutover.source_inventory(ROOT)
     if diagnostic_case and (program != "follow" or diagnostic_case != "before_commit_rollback" or getattr(args, "smoke", False) or not args.receipt):
         raise RuntimeError("follow diagnostic requires one supported case and an explicit receipt")
     if not args.pair or args.pair not in PAIRS:
@@ -644,7 +650,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     token = "rpgmigrate-" + ("m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex[:12]
     label = "io.rpgmigrate.e2e=" + token
     image = "localhost/rpgmigrate-m2-dev:stock"
-    output = Path(args.receipt).resolve() if args.receipt else ROOT / "target/e2e" / (("" if program == "clone" else program + ("-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
+    output = Path(args.receipt).resolve() if args.receipt else ROOT / "target/e2e" / (("" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
     if diagnostic_case and output.exists():
         raise RuntimeError("follow diagnostic receipt already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -751,10 +757,13 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                       "--binary", "/build/debug/rpgmigrate", "--receipt", "/receipt/result.json",
                       *(["--report-probe", "/report-probe"] if args.report_probe is not None else []),
                       *(["--smoke"] if getattr(args, "smoke", False) else []),
+                      *(["--cutover"] if cutover_mode else []),
                       *(["--diagnostic-case", diagnostic_case] if diagnostic_case else [])], timeout=1200, role="runner")
         report = json.loads((receipt_dir / "result.json").read_text())
-        receipt_validator(report, manifest)
         report.update(runner_image_id=image_id, server_image_ids=server_images)
+        if cutover_mode and (report.get("source_tree") != source_tree or cutover.source_inventory(ROOT) != source_tree):
+            raise RuntimeError("cutover producer receipt differs from the actual unchanged runner source tree")
+        receipt_validator(report, manifest)
         with output.open("x" if diagnostic_case else "w") as stream:
             stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
         print(result.decode(), end="")

@@ -375,10 +375,41 @@ impl FollowBinding {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct StreamOptions {
+    pub(crate) state: StateRequest,
+    pub(crate) operator: Option<OperatorIdentity>,
+    pub(crate) source: Option<Conninfo>,
+    pub(crate) target: Option<Conninfo>,
+    pub(crate) command: StreamCommand,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StreamCommand {
+    Get(SentinelField),
+    SetEndpos(EndposSource),
+    Cleanup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SentinelField {
+    All,
+    Endpos,
+    ReplayLsn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EndposSource {
+    Explicit(SourceEndLsn),
+    Current,
+}
+
 #[derive(Debug)]
 pub(crate) enum Invocation {
     Clone(CloneOptions),
     Follow(FollowOptions),
+    Stream(StreamOptions),
     Progress {
         options: CloneOptions,
         json: bool,

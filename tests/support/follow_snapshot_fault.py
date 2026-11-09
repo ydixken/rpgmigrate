@@ -113,13 +113,13 @@ class Relay:
     def native(self):
         assert self.native_path.stat().st_size <= 2 * 1024 * 1024
         value = json.loads(self.native_path.read_text(), object_pairs_hook=unique_fields)
-        assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] == 7
+        assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] == 8
         assert value["canonical_path"] == str(self.native_path.parent)
         assert value["copy_complete"] is None and value["clone_state"] is None
         assert value["target_provenance"] == [] and value["operator"] is None
         follow = value["follow_state"]
         validate_identity_modes(follow["preliminary"])
-        assert follow["binding"] is None and follow["restart"] is None
+        assert follow["cleanup"] is None and follow["binding"] is None and follow["restart"] is None
         source = follow["preliminary"]["source"]
         assert source["major"] == self.context["server_version_num"] // 10000
         assert source["identity"] == self.source_identity and source["timeline"] == self.source_timeline

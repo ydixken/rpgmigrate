@@ -25,6 +25,16 @@ import follow as harness
 from follow_wire import WireGate, PgoutputObservation
 
 
+def authority_fault_receipts(root, token):
+    from authority_fault import FOLLOW_FAULT_CASES
+    for case in FOLLOW_FAULT_CASES:
+        value = {"owner": token, "case": case, "status": "observed", "fault_hits": 1,
+                 "backend_pid": 42, "commit_tag": "COMMIT", "holding_backend": False,
+                 "backend_connection_closed": True, "held_fence_observed": True, "released_fence_observed": True}
+        (Path(root) / f"authority-fault-{case}.json").write_text(json.dumps(value))
+
+
+
 class FollowHarnessTests(unittest.TestCase):
     @staticmethod
     def logical_observer():
@@ -201,11 +211,12 @@ class FollowHarnessTests(unittest.TestCase):
 
     @staticmethod
     def checkpoint_row(**changes):
-        return {"version": 5, "source_system": 1, "source_database": 2, "generation": 1,
+        return {"version": 6, "source_system": 1, "source_database": 2, "generation": 1,
                 "target_system": 3, "target_database": 4, "owner_oid": 5, "schema_oid": 6, "table_oid": 7,
                 "applied_order": 1, "last_xid": 3, "begin_ordinal": 16,
                 "source_commit_lsn": "0/10", "source_end_lsn": "0/18", "certified_lsn": None,
-                "copy_consistent_point": "0/8", "barrier_epoch": 0, "barrier_counter": 1, **changes}
+                "copy_consistent_point": "0/8", "barrier_epoch": 0, "barrier_counter": 1,
+                "drain_end_lsn": None, "drain_witness_lsn": None, "drain_kind": None, "follow_completed": False, **changes}
 
     def test_checkpoint_observation_whitelists_numeric_fields_and_refuses_bad_bounds(self):
         row = self.checkpoint_row(password="fixture-password", payload="fixture-sensitive-row-private")
@@ -213,7 +224,7 @@ class FollowHarnessTests(unittest.TestCase):
         self.assertEqual(observation["status"], "observed")
         self.assertEqual(observation["source_end_lsn"], 24)
         self.assertNotIn("fixture-", json.dumps(observation))
-        self.assertTrue(all(type(value) is int or value is None for key, value in observation.items() if key != "status"))
+        self.assertTrue(all(type(value) is int or value is None for key, value in observation.items() if key not in ("status", "drain_kind", "follow_completed")))
         self.assertEqual(harness.checkpoint_observation(None), {"status": "missing"})
         for changes in ({"source_system": 2**64}, {"applied_order": 2**64}, {"last_xid": True},
                         {"schema_oid": 0}, {"barrier_counter": 0}, {"source_end_lsn": "0/F"},
@@ -558,7 +569,7 @@ class FollowHarnessTests(unittest.TestCase):
         # PG16.15/18.6 SQL probes emit oid as strings and numeric(20,0) as JSON numbers.
         columns = re.findall(r'\("([a-z_]+)", "([a-z0-9_]+)", \d+, [A-Z0-9_-]+, (?:true|false)\)',
                              (harness.clone.ROOT / "src/apply/metadata.rs").read_text().split("];", 1)[0])
-        self.assertEqual(len(columns), 25)
+        self.assertEqual(len(columns), 29)
         oid_columns = {name for name, kind in columns if kind == "oid"}
         self.assertEqual(oid_columns, {"source_database", "target_database", "owner_oid", "schema_oid", "table_oid", "last_xid"})
         maximum = 2**64 - 1
@@ -572,14 +583,15 @@ class FollowHarnessTests(unittest.TestCase):
                     "schema_name": "owned", "table_name": "control", "owner_oid": 10}
         record = {"intent": {"binding": expected, "nonce": list(range(33, 49))}, "schema_oid": 16386, "table_oid": 16387,
                   "marker_table_oid": 16388, "marker_index_oid": 16389}
-        native = {"format_version": 7, "clone_state": {"plan": {"tables": [{"source_oid": 1, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id"], "all_columns": ["id"], "identity_modes": [97], "partition_identity_modes": None}]}, "owned_tables": []}, "target_provenance": [{"phase": "confirmed", "record": record}], "follow_state": {"binding": binding}}
+        native = {"format_version": 8, "clone_state": {"plan": {"tables": [{"source_oid": 1, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id"], "all_columns": ["id"], "identity_modes": [97], "partition_identity_modes": None}]}, "owned_tables": []}, "target_provenance": [{"phase": "confirmed", "record": record}], "follow_state": {"binding": binding, "cleanup": None}}
         catalog = {"oid": "16387", "relnamespace": "16386", "relowner": "10", "relpersistence": "p", "relkind": "r"}
-        row = {"magic": "rpgmigrate", "version": 5, "run_id": "\\x" + work["run_id"], "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(),
+        row = {"magic": "rpgmigrate", "version": 6, "run_id": "\\x" + work["run_id"], "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(),
                "source_system": maximum, "source_database": "16384", "generation": maximum, "target_system": maximum,
                "target_database": "16385", "owner_oid": "10", "schema_oid": "16386", "table_oid": "16387", "applied_order": maximum,
                "last_xid": "4294967295", "begin_ordinal": maximum, "source_commit_lsn": "FFFFFFFF/FFFFFFFF", "source_end_lsn": "FFFFFFFF/FFFFFFFF",
                "barrier_epoch": maximum, "barrier_counter": maximum, "copy_snapshot_token": "00000001-00000001-1",
                "copy_consistent_point": "0/10", "copy_plan_nonce": "\\x" + "01" * 16, "clone_state": None, "certified_lsn": None,
+               "drain_end_lsn": None, "drain_witness_lsn": None, "drain_kind": None, "follow_completed": False,
                "follow_binding": json.dumps({"binding": binding, "operator": {"migration_uid": work["migration_uid"], "run": stream["run"],
                                             "workdir_id": work["workdir_id"], "checkpoint_generation": maximum}, "origin_name": None})}
         self.assertEqual(set(row), {name for name, _kind in columns})
@@ -618,7 +630,7 @@ class FollowHarnessTests(unittest.TestCase):
             observed = database.authority("owned_target", state, work)
             self.assertEqual(harness.authority_frontier(observed), maximum)
             self.assertTrue(harness.require_feedback({"statuses": [(maximum, maximum, maximum)]}, observed, maximum))
-            for version in (6, 8, True):
+            for version in (6, 7, 9, True):
                 (state / "manifest.json").write_text(json.dumps({**native, "format_version": version}))
                 with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "identity/version"):
                     database.authority("owned_target", state, work)
@@ -1370,7 +1382,10 @@ class FollowHarnessTests(unittest.TestCase):
     def test_component_modes_select_private_cluster_and_role_contracts(self):
         from db_harness import module_cases
         wrapper = harness.clone.ROOT / "tools/test-db.py"
-        context = {"root": "/owned/follow", "socket_dir": "/owned/socket", "port": 24567}
+        directory = tempfile.TemporaryDirectory(prefix="follow-component-receipts-")
+        self.addCleanup(directory.cleanup)
+        context = {"root": directory.name, "token": "owned", "socket_dir": "/owned/socket", "port": 24567}
+        authority_fault_receipts(context["root"], context["token"])
         cluster = SimpleNamespace(context=context, context_path=Path("/owned/follow/context.json"),
                                   root=Path(context["root"]), bindir=Path("/owned/pg/bin"),
                                   environment={"PATH": "/usr/bin"}, auth_password="synthetic")
@@ -1420,18 +1435,22 @@ class FollowHarnessTests(unittest.TestCase):
     def test_component_receipts_require_exact_new_profiles_and_zero_ignored_summary(self):
         from db_harness import module_cases
         validate = runpy.run_path(str(harness.clone.ROOT / "tools/test-db.py"))["validate_module_receipt"]
-        for profile, count in (("FollowSource", 7), ("FollowAuthority", 11), ("FollowReceive", 4), ("FollowApply", 11)):
+        directory = tempfile.TemporaryDirectory(prefix="follow-component-receipts-")
+        self.addCleanup(directory.cleanup)
+        context = {"root": directory.name, "token": "owned"}
+        authority_fault_receipts(context["root"], context["token"])
+        for profile, count in (("FollowSource", 12), ("FollowAuthority", 17), ("FollowReceive", 11), ("FollowApply", 11)):
             cases = module_cases({}, profile)
             self.assertEqual(len(cases), count)
             records = "".join(f"test {name} ... ok\n" for name in cases)
             output = records + f"test result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 600 filtered out; finished in 0.01s\n"
-            validate(profile, cases, output, {})
+            validate(profile, cases, output, context)
             for bad in ("", output.replace(cases[0], "unrelated::case"), output + records,
                         output.replace("0 ignored", "1 ignored"), output.replace(f"{count} passed", "0 passed"),
                         records, output.replace(" ... ok", " ... ignored", 1),
                         *(output.replace(f"test {case} ... ok\n", "") for case in cases)):
                 with self.subTest(profile=profile, output=bad), self.assertRaises(AssertionError):
-                    validate(profile, cases, bad, {})
+                    validate(profile, cases, bad, context)
 
     def test_wire_gate_connection_scope_and_arming_are_exact(self):
         with WireGate("source", "before_commit") as gate:
@@ -1523,6 +1542,81 @@ class FollowHarnessTests(unittest.TestCase):
             evidence = gate.evidence()
             self.assertEqual(evidence["statuses"], [(10, 10, 10)])
             self.assertEqual(evidence["logical"]["streams"][0]["statuses"], [(10, 10, 10)])
+
+    def test_cutover_mode_keeps_ongoing_and_diagnostic_routes_separate(self):
+        with patch.object(sys, "argv", ["follow.py", "--pair", "16-16", "--cutover"]), \
+                patch.object(harness.clone, "outer") as outer:
+            self.assertEqual(harness.main(), 0)
+            self.assertTrue(outer.call_args.args[0].cutover)
+            self.assertNotEqual(tuple(outer.call_args.kwargs["manifest"]["cases"]), harness.CASES)
+            self.assertEqual(len(harness.CASES), 21)
+        for extra in (("--smoke",), ("--diagnostic-case", "before_commit_rollback", "--receipt", "owned.json"),
+                      ("--report-probe", "/unqualified/old-probe")):
+            with self.subTest(extra=extra), patch.object(sys, "argv", ["follow.py", "--pair", "16-16", "--cutover", *extra]), \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit), patch.object(harness.clone, "outer") as outer:
+                harness.main()
+            outer.assert_not_called()
+
+    def test_drain_row_requires_all_nullable_fields_and_a_valid_completion_witness(self):
+        valid = self.checkpoint_row(drain_end_lsn="0/20", drain_witness_lsn="0/30", drain_kind="later_begin", follow_completed=True)
+        harness.validate_drain_row(valid)
+        for fields in ({"drain_kind": None}, {"drain_end_lsn": None}, {"drain_witness_lsn": None},
+                       {"drain_end_lsn": "0/0"}, {"drain_witness_lsn": "0/20"}, {"drain_kind": "outer_wal"},
+                       {"follow_completed": 1}):
+            with self.subTest(fields=fields), self.assertRaises(RuntimeError):
+                harness.validate_drain_row({**valid, **fields})
+        for missing in ("drain_end_lsn", "drain_witness_lsn", "drain_kind", "follow_completed"):
+            bad = dict(valid)
+            del bad[missing]
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                harness.validate_drain_row(bad)
+        with self.assertRaises(RuntimeError):
+            harness.validate_drain_row(self.checkpoint_row(follow_completed=True))
+        harness.validate_drain_row({**valid, "source_end_lsn": "0/28"})
+
+    def test_later_begin_only_gate_counts_real_keepalive_loss_and_holds_before_begin_forward(self):
+        from protocol_fault import receive
+        def frame(kind, payload):
+            return kind + struct.pack("!I", len(payload) + 4) + payload
+        startup_payload = struct.pack("!I", 196608) + b"user\0fixture\0replication\0database\0\0"
+        startup = struct.pack("!I", len(startup_payload) + 4) + startup_payload
+        query = frame(b'Q', b"START_REPLICATION SLOT \"owned\" LOGICAL 0/10 (\"proto_version\" '1', \"publication_names\" '\"owned\"')\0")
+        response = frame(b'W', b'\0\0\0')
+        keepalive = frame(b'd', b'k' + struct.pack("!QqB", 16, 0, 1))
+        begin = frame(b'd', self.wal(b'B' + struct.pack("!QqI", 48, 0, 3)))
+        commit = frame(b'd', self.wal(b'C' + struct.pack("!BQQq", 0, 48, 64, 0)))
+        with WireGate("fixture", "later_begin_only") as gate:
+            gate.arm()
+            client, producer = socket.socketpair()
+            server, backend = socket.socketpair()
+            gate.sockets.extend((client, server))
+            producer.settimeout(2)
+            backend.settimeout(2)
+            worker = threading.Thread(target=gate.downstream, args=(client, server), daemon=True)
+            gate.threads.append(worker)
+            worker.start()
+            try:
+                producer.sendall(startup + query)
+                self.assertEqual(receive(backend, len(startup + query)), startup + query)
+                backend.sendall(response + keepalive + begin + commit)
+                self.assertEqual(receive(producer, len(response)), response)
+                self.assertTrue(gate.held.wait(timeout=2))
+                evidence = gate.evidence()
+                self.assertEqual(evidence["dropped_keepalives"], 1)
+                self.assertFalse(evidence["logical"]["streams"][0]["keepalives"][0]["forwarded"])
+                self.assertFalse(evidence["logical"]["streams"][0]["transactions"][0]["begin_forwarded"])
+                producer.settimeout(0.05)
+                with self.assertRaises(socket.timeout):
+                    producer.recv(1)
+                producer.settimeout(2)
+                gate.release.set()
+                self.assertEqual(receive(producer, len(begin + commit)), begin + commit)
+                clone = harness.clone
+                clone.wait_for(lambda: gate.evidence()["logical"]["streams"][0]["transactions"][0]["commit_forwarded"], "actual tail forwarding", timeout=2)
+                self.assertTrue(gate.evidence()["logical"]["streams"][0]["transactions"][0]["begin_forwarded"])
+            finally:
+                producer.close()
+                backend.close()
 
 
 if __name__ == "__main__":

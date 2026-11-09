@@ -1,8 +1,10 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
-use super::checkpoint::{DurableProof, RecoveryStart, SafeFeedback, TargetAuthority};
+use super::checkpoint::{
+    CompletedFollow, DrainWitness, DurableProof, RecoveryStart, SafeFeedback, TargetAuthority,
+};
 use super::serial::{Caches, event_bytes, refusal};
 use super::{CommitOutcome, Frontier};
 use crate::catalog;
@@ -11,14 +13,14 @@ use crate::contracts::{FollowBinding, FollowOptions, IoControl, OwnedCopyTable, 
 use crate::follow::channel::{FeedbackSender, FollowReceiver};
 use crate::identity::{SourceEndLsn, TxId, TxSeq};
 use crate::pg::{PgConnection, operation_control};
-use crate::state::NativeState;
+use crate::state::{ControlHandle, EndposRequest, NativeState};
 
 const POLL: Duration = Duration::from_millis(100);
 const CERTIFY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "M3 freezes this thread boundary with separate opaque handles"
+    reason = "M4 freezes this thread boundary with separate opaque handles"
 )]
 pub(crate) fn run(
     options: &FollowOptions,
@@ -28,11 +30,19 @@ pub(crate) fn run(
     ready: SyncSender<RecoveryStart>,
     input: &FollowReceiver,
     feedback: &FeedbackSender,
+    control: &ControlHandle,
+    request_keepalive: &AtomicBool,
     io: &IoControl,
-) -> Result<()> {
+) -> Result<CompletedFollow> {
     options.limits.validate()?;
     if options.apply_group_txns == 0 {
         return Err(refusal("follow apply: group transaction limit is zero"));
+    }
+    control.validate_active(io)?;
+    if control.follow().binding != *binding {
+        return Err(refusal(
+            "follow apply: control differs from the active follow binding",
+        ));
     }
     let operation = operation_control(io);
     let mut connection = PgConnection::connect(&options.clone.target, &operation)?;
@@ -55,8 +65,10 @@ pub(crate) fn run(
     let mut replay_relations = Vec::new();
     let mut pending = None;
     let mut last_certification = None;
+    let mut requested = None;
     loop {
         check(io)?;
+        read_request(control, &mut requested, request_keepalive, io)?;
         let message = match pending.take() {
             Some(message) => message,
             None => match input.recv_timeout(POLL) {
@@ -67,6 +79,7 @@ pub(crate) fn run(
                 }
             },
         };
+        let request = read_request(control, &mut requested, request_keepalive, io)?;
         match message {
             FollowMessage::Begin(begin) => {
                 let previous = authority.applied();
@@ -79,8 +92,32 @@ pub(crate) fn run(
                         binding,
                         input,
                         &mut replay_relations,
+                        control,
+                        &mut requested,
+                        request_keepalive,
                         io,
                     )?;
+                    continue;
+                }
+                if let Some(witness) = ordered_drain_witness(
+                    request.as_ref().map(EndposRequest::end),
+                    &FollowMessage::Begin(begin),
+                    false,
+                ) {
+                    if let Some(completed) = try_complete(
+                        &mut authority,
+                        request.as_ref().expect("witness requires request"),
+                        witness,
+                        native,
+                        options,
+                        control,
+                        feedback,
+                        io,
+                    )? {
+                        authority.close(&operation_control(io))?;
+                        return Ok(completed);
+                    }
+                    pending = Some(FollowMessage::Begin(begin));
                     continue;
                 }
                 pending = apply_group(
@@ -94,6 +131,9 @@ pub(crate) fn run(
                     &owned,
                     input,
                     feedback,
+                    control,
+                    &mut requested,
+                    request_keepalive,
                     io,
                 )?;
             }
@@ -101,8 +141,9 @@ pub(crate) fn run(
                 wal_end,
                 decoder_idle: true,
             } => {
-                if let Some(safe) = certify_keepalive(
+                match certify_keepalive(
                     wal_end,
+                    request.as_ref().map(EndposRequest::end),
                     authority.applied(),
                     &mut durable_floor,
                     &mut last_certification,
@@ -115,7 +156,23 @@ pub(crate) fn run(
                             })
                     },
                 )? {
-                    feedback.publish(safe)?;
+                    KeepaliveAction::Drain(witness) => {
+                        if let Some(completed) = try_complete(
+                            &mut authority,
+                            request.as_ref().expect("witness requires request"),
+                            witness,
+                            native,
+                            options,
+                            control,
+                            feedback,
+                            io,
+                        )? {
+                            authority.close(&operation_control(io))?;
+                            return Ok(completed);
+                        }
+                    }
+                    KeepaliveAction::Feedback(safe) => feedback.publish(safe)?,
+                    KeepaliveAction::Wait => {}
                 }
             }
             FollowMessage::Keepalive {
@@ -139,8 +196,21 @@ fn apply_group(
     owned: &[OwnedCopyTable],
     input: &FollowReceiver,
     feedback: &FeedbackSender,
+    control: &ControlHandle,
+    requested: &mut Option<SourceEndLsn>,
+    request_keepalive: &AtomicBool,
     io: &IoControl,
 ) -> Result<Option<FollowMessage>> {
+    let request = read_request(control, requested, request_keepalive, io)?;
+    if ordered_drain_witness(
+        request.as_ref().map(EndposRequest::end),
+        &FollowMessage::Begin(first),
+        false,
+    )
+    .is_some()
+    {
+        return Ok(Some(FollowMessage::Begin(first)));
+    }
     let mut target = authority.begin_group(&operation_control(io))?;
     for relation in replay_relations.drain(..) {
         caches.event(
@@ -160,16 +230,31 @@ fn apply_group(
         check(io)?;
         let message = match input.recv_timeout(POLL) {
             Ok(message) => message,
-            Err(RecvTimeoutError::Timeout) if active.is_none() => break None,
-            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Timeout) => {
+                read_request(control, requested, request_keepalive, io)?;
+                if active.is_none() {
+                    break None;
+                }
+                continue;
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(refusal("follow apply: receiver closed with open group"));
             }
         };
         match message {
             FollowMessage::Begin(begin) => {
+                let request = read_request(control, requested, request_keepalive, io)?;
                 if active.is_some() || is_replay(begin, last, binding)? {
                     return Err(refusal("follow apply: unexpected source BEGIN"));
+                }
+                if ordered_drain_witness(
+                    request.as_ref().map(EndposRequest::end),
+                    &FollowMessage::Begin(begin),
+                    false,
+                )
+                .is_some()
+                {
+                    break Some(FollowMessage::Begin(begin));
                 }
                 active = Some(begin);
             }
@@ -189,6 +274,7 @@ fn apply_group(
                 )?);
             }
             FollowMessage::Commit(commit) => {
+                let request = read_request(control, requested, request_keepalive, io)?;
                 let begin = active
                     .take()
                     .ok_or_else(|| refusal("follow apply: COMMIT without BEGIN"))?;
@@ -202,7 +288,8 @@ fn apply_group(
                 target.advance(next)?;
                 last = Some(next);
                 count += 1;
-                if count >= options.apply_group_txns
+                if request.is_some()
+                    || count >= options.apply_group_txns
                     || rows >= options.limits.group_rows
                     || bytes >= options.limits.group_bytes
                 {
@@ -234,24 +321,132 @@ fn apply_group(
             "follow apply: cannot commit unsealed source transaction",
         ));
     }
-    match caches.commit(target, &operation_control(io))? {
+    read_request(control, requested, request_keepalive, io)?;
+    let proof = committed_group(caches.commit(target, &operation_control(io))?, last)?;
+    publish(proof, feedback)?;
+    Ok(pending)
+}
+
+fn read_request(
+    control: &ControlHandle,
+    requested: &mut Option<SourceEndLsn>,
+    request_keepalive: &AtomicBool,
+    io: &IoControl,
+) -> Result<Option<EndposRequest>> {
+    check(io)?;
+    control.validate_active(io)?;
+    let current = control.read(io)?;
+    note_request(
+        current.as_ref().map(EndposRequest::end),
+        requested,
+        request_keepalive,
+    )?;
+    Ok(current)
+}
+
+fn note_request(
+    current: Option<SourceEndLsn>,
+    previous: &mut Option<SourceEndLsn>,
+    request_keepalive: &AtomicBool,
+) -> Result<()> {
+    if previous.is_some_and(|old| current.is_none_or(|end| end < old)) {
+        return Err(refusal(
+            "follow apply: persisted end position disappeared or moved backwards",
+        ));
+    }
+    if current != *previous {
+        *previous = current;
+        request_keepalive.store(true, Ordering::Release);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_complete(
+    authority: &mut TargetAuthority,
+    request: &EndposRequest,
+    witness: DrainWitness,
+    native: &NativeState,
+    options: &FollowOptions,
+    control: &ControlHandle,
+    feedback: &FeedbackSender,
+    io: &IoControl,
+) -> Result<Option<CompletedFollow>> {
+    check(io)?;
+    control.validate_active(io)?;
+    if control.read(io)?.as_ref().map(EndposRequest::end) != Some(request.end()) {
+        return Ok(None);
+    }
+    authority.observe_follow(&operation_control(io))?;
+    if control.read(io)?.as_ref().map(EndposRequest::end) != Some(request.end()) {
+        return Ok(None);
+    }
+    let sealed = match control.seal(request, io) {
+        Ok(sealed) => sealed,
+        Err(error) => {
+            check(io)?;
+            if control.read(io)?.as_ref().map(EndposRequest::end) != Some(request.end()) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
+    check(io)?;
+    let proof = authority.record_drain(&sealed, witness, &operation_control(io))?;
+    if let Some(safe) = proof.feedback() {
+        feedback.publish(safe)?;
+    }
+    let mut source = PgConnection::connect(&options.clone.source, &operation_control(io))
+        .map_err(|error| crate::endpoint_error(error, crate::contracts::ErrorKind::Source))?;
+    catalog::configure_session(&mut source, &operation_control(io))?;
+    let completed = authority.complete_follow(
+        &mut source,
+        native,
+        control.plan(),
+        &sealed,
+        &operation_control(io),
+    )?;
+    check(io)?;
+    Ok(Some(completed))
+}
+
+fn committed_group(outcome: CommitOutcome, last: Option<Frontier>) -> Result<DurableProof> {
+    match outcome {
         CommitOutcome::Acknowledged {
             checkpoint,
             durable: Some(proof),
         } => {
             check_group_checkpoint(&checkpoint, last)?;
-            publish(proof, feedback)?;
+            Ok(proof)
         }
         CommitOutcome::Acknowledged { durable: None, .. } => {
-            return Err(refusal("follow apply: group lacks durable proof"));
+            Err(refusal("follow apply: group lacks durable proof"))
         }
-        CommitOutcome::Unknown => {
-            return Err(refusal(
-                "follow apply: target COMMIT outcome unknown; recovery required",
-            ));
-        }
+        CommitOutcome::Unknown => Err(refusal(
+            "follow apply: target COMMIT outcome unknown; recovery required",
+        )),
     }
-    Ok(pending)
+}
+
+fn ordered_drain_witness(
+    end: Option<SourceEndLsn>,
+    message: &FollowMessage,
+    transaction_open: bool,
+) -> Option<DrainWitness> {
+    if transaction_open {
+        return None;
+    }
+    let end = end?;
+    match message {
+        FollowMessage::Begin(begin) if begin.final_lsn.0 > end.0 => {
+            Some(DrainWitness::LaterBegin(begin.final_lsn))
+        }
+        FollowMessage::Keepalive {
+            wal_end,
+            decoder_idle: true,
+        } if *wal_end >= end => Some(DrainWitness::Keepalive(*wal_end)),
+        _ => None,
+    }
 }
 
 fn is_replay(begin: Begin, previous: Option<Frontier>, binding: &FollowBinding) -> Result<bool> {
@@ -311,6 +506,7 @@ fn frontier(
         end: commit.end,
     })
 }
+#[allow(clippy::too_many_arguments)]
 fn validate_replay(
     begin: Begin,
     previous: Frontier,
@@ -318,6 +514,9 @@ fn validate_replay(
     binding: &FollowBinding,
     input: &FollowReceiver,
     relations: &mut Vec<Event>,
+    control: &ControlHandle,
+    requested: &mut Option<SourceEndLsn>,
+    request_keepalive: &AtomicBool,
     io: &IoControl,
 ) -> Result<()> {
     loop {
@@ -339,7 +538,9 @@ fn validate_replay(
                 ..
             }) => {}
             Ok(_) => return Err(refusal("follow apply: invalid checkpoint replay ordering")),
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                read_request(control, requested, request_keepalive, io)?;
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(refusal("follow apply: receiver closed during replay"));
             }
@@ -380,24 +581,43 @@ fn check_group_checkpoint(checkpoint: &super::Checkpoint, last: Option<Frontier>
     }
     Ok(())
 }
+#[derive(Debug, Eq, PartialEq)]
+enum KeepaliveAction {
+    Drain(DrainWitness),
+    Feedback(SafeFeedback),
+    Wait,
+}
+
 fn certify_keepalive(
     candidate: SourceEndLsn,
+    requested: Option<SourceEndLsn>,
     applied: Option<Frontier>,
     floor: &mut SourceEndLsn,
     last: &mut Option<Instant>,
     certify: impl FnOnce(SourceEndLsn) -> Result<SafeFeedback>,
-) -> Result<Option<SafeFeedback>> {
+) -> Result<KeepaliveAction> {
+    if let Some(witness) = ordered_drain_witness(
+        requested,
+        &FollowMessage::Keepalive {
+            wal_end: candidate,
+            decoder_idle: true,
+        },
+        false,
+    ) {
+        return Ok(KeepaliveAction::Drain(witness));
+    }
     // A queued idle marker can trail the COMMIT that was just made durable.
     if candidate <= (*floor).max(applied.map_or(SourceEndLsn(0), |frontier| frontier.end))
         || last.is_some_and(|last| last.elapsed() < CERTIFY_INTERVAL)
     {
-        return Ok(None);
+        return Ok(KeepaliveAction::Wait);
     }
     let safe = certify(candidate)?;
     *floor = (*floor).max(safe.end());
     *last = Some(Instant::now());
-    Ok(Some(safe))
+    Ok(KeepaliveAction::Feedback(safe))
 }
+
 fn publish(proof: DurableProof, feedback: &FeedbackSender) -> Result<()> {
     let safe = proof
         .feedback()
@@ -430,7 +650,10 @@ fn configure(connection: &mut PgConnection, io: &IoControl) -> Result<()> {
 }
 fn check(io: &IoControl) -> Result<()> {
     if io.cancelled.load(Ordering::Acquire) || io.is_expired() {
-        return Err(refusal("follow apply: interrupted"));
+        return Err(crate::contracts::Error::cancelled(
+            crate::contracts::ErrorKind::Target,
+            "follow apply: interrupted",
+        ));
     }
     Ok(())
 }

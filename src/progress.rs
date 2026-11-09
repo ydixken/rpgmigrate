@@ -27,7 +27,30 @@ impl CopyProgress {
 }
 
 pub(crate) fn read(options: &CloneOptions, io: &IoControl) -> Result<ProgressSnapshot> {
+    read_measured(options, None, io)
+}
+
+pub(crate) fn completed_follow(
+    options: &CloneOptions,
+    completed: &crate::apply::checkpoint::CompletedFollow,
+    io: &IoControl,
+) -> Result<ProgressSnapshot> {
+    read_measured(options, Some(completed), io)
+}
+
+fn read_measured(
+    options: &CloneOptions,
+    completed: Option<&crate::apply::checkpoint::CompletedFollow>,
+    io: &IoControl,
+) -> Result<ProgressSnapshot> {
     let (mut source, mut target, inspection, metadata) = crate::compare::peers(options, io)?;
+    if completed.is_some_and(|proof| {
+        proof.target() != &inspection.provenance || inspection.follow.is_none()
+    }) {
+        return Err(refusal(
+            "completed progress differs from its native authority binding",
+        ));
+    }
     let progress = crate::apply::checkpoint::read_clone_progress(&mut target, &inspection, io)?;
     if progress.generation != inspection.clone_state.plan.generation {
         return Err(refusal(
@@ -61,7 +84,11 @@ pub(crate) fn read(options: &CloneOptions, io: &IoControl) -> Result<ProgressSna
     );
     let result = ProgressSnapshot {
         work: options.operator.clone(),
-        phase: current_phase,
+        phase: if completed.is_some() {
+            "completed"
+        } else {
+            current_phase
+        },
         copy: CopyProgress {
             tables: Counter::new(
                 Some(inspection.clone_state.plan.tables.len() as u64),
@@ -78,6 +105,11 @@ pub(crate) fn read(options: &CloneOptions, io: &IoControl) -> Result<ProgressSna
             )?,
         },
     };
+    if completed.is_some() && !result.copy.is_complete() {
+        return Err(refusal(
+            "completed follow lacks complete measured COPY counters",
+        ));
+    }
     catalog::command(&mut source, "COMMIT", "COMMIT", io)?;
     catalog::command(&mut target, "COMMIT", "COMMIT", io)?;
     Ok(result)

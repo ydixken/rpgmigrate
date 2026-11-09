@@ -79,6 +79,7 @@ fn options(parser: Parser) -> Vec<Arg> {
             | Parser::Restore
             | Parser::Stream
             | Parser::Ping
+            | Parser::Sentinel
     ) {
         args.push(value("target", Some('T')));
     }
@@ -210,6 +211,7 @@ fn options(parser: Parser) -> Vec<Arg> {
             flag("dry-run", None),
             flag("to-stdout", Some('O')),
             flag("from-stdin", Some('I')),
+            flag("json", Some('J')),
         ]),
         Parser::Sentinel => args.extend([
             value("host", Some('H')),
@@ -241,11 +243,13 @@ fn leaf(name: &'static str, parser: Parser) -> Command {
     let command = base(name, parser).arg(
         Arg::new("operands")
             .num_args(0..)
-            .trailing_var_arg(parser != Parser::Version)
+            .trailing_var_arg(
+                parser != Parser::Version && !(parser == Parser::Sentinel && name == "endpos"),
+            )
             .value_parser(OsStringValueParser::new()),
     );
     if matches!(name, "clone" | "follow") {
-        command.after_help("Native follow requires --skip-large-objects and admits only pgoutput v1 with durable commits. Limits: 1024 queued messages, 8 MiB queued capacity plus one message up to 16 MiB when empty; apply groups default to 100 transactions, 10000 rows or 8 MiB, closing only at a source COMMIT. M3 follow remains streaming until interrupted; successful drain is unavailable.")
+        command.after_help("Native follow requires --skip-large-objects and admits only pgoutput v1 with durable commits. Limits: 1024 queued messages, 8 MiB queued capacity plus one message up to 16 MiB when empty; apply groups default to 100 transactions, 10000 rows or 8 MiB, closing only at a source COMMIT. Cutover requires a persisted endpos and a caller write freeze through final sequence synchronization.")
     } else {
         command
     }
@@ -437,6 +441,229 @@ mod tests {
         ("PGCOPYDB_SOURCE_PGURI", "dbname=source"),
         ("PGCOPYDB_TARGET_PGURI", "dbname=target"),
     ];
+
+    #[test]
+    fn m4_routes_admit_only_cutover_and_cleanup_commands() {
+        for args in [
+            vec!["stream", "sentinel", "get", "--endpos"],
+            vec![
+                "stream", "sentinel", "get", "--target", "dbname=t", "--json",
+            ],
+            vec![
+                "stream",
+                "sentinel",
+                "get",
+                "--target",
+                "dbname=t",
+                "--replay-lsn",
+                "--json",
+            ],
+            vec![
+                "stream", "sentinel", "set", "endpos", "--target", "dbname=t", "0/20",
+            ],
+            vec![
+                "stream",
+                "sentinel",
+                "set",
+                "endpos",
+                "--source",
+                "dbname=s",
+                "--target",
+                "dbname=t",
+                "--current",
+            ],
+            vec!["stream", "cleanup", "--source", "dbname=s"],
+        ] {
+            assert!(
+                !matches!(invoke(&args, &[]).unwrap(), Invocation::Unsupported(_)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn m4_measured_commands_require_target_but_local_endpos_does_not() {
+        for args in [
+            vec!["stream", "sentinel", "get"],
+            vec!["stream", "sentinel", "get", "--json", "--endpos"],
+            vec!["stream", "sentinel", "get", "--replay-lsn"],
+            vec!["stream", "sentinel", "set", "endpos", "0/20"],
+        ] {
+            assert_eq!(
+                invoke(&args, &[]).unwrap_err().kind,
+                ErrorKind::BadArgs,
+                "{args:?}"
+            );
+        }
+        assert!(!matches!(
+            invoke(&["stream", "sentinel", "get", "--endpos"], &[]).unwrap(),
+            Invocation::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn m4_explicit_endpos_and_selectors_keep_exact_resume_options() {
+        use crate::contracts::{EndposSource, SentinelField, StreamCommand};
+        for (args, expected) in [
+            (
+                vec!["stream", "sentinel", "get", "--endpos"],
+                StreamCommand::Get(SentinelField::Endpos),
+            ),
+            (
+                vec![
+                    "stream",
+                    "sentinel",
+                    "get",
+                    "--target",
+                    "dbname=t",
+                    "--json",
+                    "--replay-lsn",
+                ],
+                StreamCommand::Get(SentinelField::ReplayLsn),
+            ),
+            (
+                vec![
+                    "stream", "sentinel", "set", "endpos", "--target", "dbname=t", "--json", "a/b",
+                ],
+                StreamCommand::SetEndpos(EndposSource::Explicit(crate::identity::SourceEndLsn(
+                    0xa_0000000b,
+                ))),
+            ),
+            (
+                vec![
+                    "stream", "sentinel", "set", "endpos", "a/b", "--json", "--target", "dbname=t",
+                ],
+                StreamCommand::SetEndpos(EndposSource::Explicit(crate::identity::SourceEndLsn(
+                    0xa_0000000b,
+                ))),
+            ),
+            (
+                vec![
+                    "stream",
+                    "sentinel",
+                    "set",
+                    "endpos",
+                    "--dir",
+                    "/rpgmigrate-parser-absent",
+                    "--target",
+                    "dbname=t",
+                    "a/b",
+                    "--json",
+                ],
+                StreamCommand::SetEndpos(EndposSource::Explicit(crate::identity::SourceEndLsn(
+                    0xa_0000000b,
+                ))),
+            ),
+            (
+                vec![
+                    "stream",
+                    "sentinel",
+                    "set",
+                    "endpos",
+                    "--source",
+                    "dbname=s",
+                    "--target",
+                    "dbname=t",
+                    "--current",
+                ],
+                StreamCommand::SetEndpos(EndposSource::Current),
+            ),
+        ] {
+            let Invocation::Stream(options) = invoke(&args, &[]).unwrap() else {
+                panic!("expected stream")
+            };
+            assert_eq!(options.command, expected);
+            assert_eq!(options.state.action, StateAction::Resume);
+            assert_eq!(options.json, args.contains(&"--json"));
+            if args.contains(&"--target") {
+                assert_eq!(options.target.unwrap().as_c_str().to_bytes(), b"dbname=t");
+            }
+            if args.contains(&"--dir") {
+                assert_eq!(
+                    options.state.path,
+                    std::path::Path::new("/rpgmigrate-parser-absent")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m4_refuses_zero_bad_endpoints_and_other_sentinel_mutations() {
+        for args in [
+            vec![
+                "stream", "sentinel", "set", "endpos", "--target", "dbname=t", "0/0",
+            ],
+            vec![
+                "stream",
+                "sentinel",
+                "set",
+                "endpos",
+                "--target",
+                "dbname=t",
+                "100000000/1",
+                "--json",
+            ],
+            vec![
+                "stream", "sentinel", "set", "endpos", "--target", "dbname=t", "0/20", "0/30",
+                "--json",
+            ],
+            vec![
+                "stream",
+                "sentinel",
+                "set",
+                "endpos",
+                "--source",
+                "dbname=s",
+                "--target",
+                "dbname=t",
+                "--current",
+                "0/20",
+                "--json",
+            ],
+            vec!["stream", "sentinel", "set", "startpos", "0/1", "--json"],
+            vec![
+                "stream",
+                "sentinel",
+                "get",
+                "--target",
+                "not conninfo",
+                "--json",
+            ],
+            vec![
+                "stream",
+                "sentinel",
+                "get",
+                "--target",
+                "dbname=t",
+                "--current",
+            ],
+            vec![
+                "stream", "sentinel", "set", "endpos", "--target", "dbname=t", "--endpos", "0/20",
+            ],
+        ] {
+            assert_eq!(
+                invoke(&args, &[]).unwrap_err().kind,
+                ErrorKind::BadArgs,
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["stream", "sentinel", "get", "--startpos"],
+            vec!["stream", "sentinel", "get", "--flush-lsn"],
+        ] {
+            assert_eq!(invoke(&args, &[]).unwrap_err().kind, ErrorKind::BadConfig);
+        }
+        for args in [
+            vec!["stream", "sentinel", "set", "startpos", "0/20"],
+            vec!["stream", "sentinel", "set", "apply"],
+            vec!["stream", "sentinel", "setup", "0/10", "0/20"],
+        ] {
+            assert!(matches!(
+                invoke(&args, &[]).unwrap(),
+                Invocation::Unsupported(_)
+            ));
+        }
+    }
 
     #[test]
     fn follow_defaults_to_pgoutput_with_bounded_durable_groups() {
@@ -862,8 +1089,8 @@ mod tests {
     fn sentinel_does_not_use_coordinator_environment() {
         let env = [("PGCOPYDB_HOST", ""), ("PGCOPYDB_PORT", "invalid")];
         assert!(matches!(
-            invoke(&["stream", "sentinel", "get"], &env).unwrap(),
-            Invocation::Unsupported(_)
+            invoke(&["stream", "sentinel", "get", "--endpos"], &env).unwrap(),
+            Invocation::Stream(_)
         ));
         assert_eq!(
             invoke(&["stream", "prune"], &env).unwrap_err().kind,

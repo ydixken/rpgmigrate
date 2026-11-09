@@ -5,5 +5,10 @@
   "snapshot::follow_tests::live_follow_colliding_names_and_wrong_resource_oids_are_refused",
   "snapshot::follow_tests::live_follow_relation_uses_target_type_oids_and_exact_owned_identity",
   "snapshot::follow_tests::live_follow_executed_expressions_refuse_before_resource_creation",
-  "snapshot::follow_tests::live_follow_positive_publication_retry_requires_the_persisted_source_plan"
+  "snapshot::follow_tests::live_follow_positive_publication_retry_requires_the_persisted_source_plan",
+  "catalog::follow::tests::live_cleanup_owned_advanced_slot_and_publication",
+  "catalog::follow::tests::live_cleanup_publication_identity_options_membership_refuse",
+  "catalog::follow::tests::live_cleanup_active_or_foreign_slot_survives",
+  "catalog::follow::tests::live_cleanup_recorded_removal_reappearance_survives",
+  "catalog::follow::tests::live_cleanup_source_binding_mismatch_preserves_resources"
 ]

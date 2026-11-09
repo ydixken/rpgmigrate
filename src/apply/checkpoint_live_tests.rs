@@ -1097,16 +1097,16 @@ fn installed_snapshot_anchor(observer: &mut PgConnection, io: &IoControl) {
             parameter_types[20]::pg_catalog.oid, parameter_types[21]::pg_catalog.oid,
             parameter_types[22]::pg_catalog.oid, parameter_types[23]::pg_catalog.oid,
             parameter_types[24]::pg_catalog.oid, parameter_types[25]::pg_catalog.oid,
-            parameter_types[33]::pg_catalog.oid, parameter_types[34]::pg_catalog.oid,
-            parameter_types[35]::pg_catalog.oid, parameter_types[36]::pg_catalog.oid,
-            parameter_types[37]::pg_catalog.oid, parameter_types[38]::pg_catalog.oid
+            parameter_types[37]::pg_catalog.oid, parameter_types[38]::pg_catalog.oid,
+            parameter_types[39]::pg_catalog.oid, parameter_types[40]::pg_catalog.oid,
+            parameter_types[41]::pg_catalog.oid, parameter_types[42]::pg_catalog.oid
             FROM pg_catalog.pg_prepared_statements WHERE name = 'rpgmigrate_metadata_update'",
             io,
         )
         .unwrap();
     assert_eq!(types.rows(), 1);
     for (column, expected) in [
-        "38", "25", "3220", "17", "25", "3220", "25", "25", "3220", "17", "25", "3220", "25",
+        "46", "25", "3220", "17", "25", "3220", "25", "25", "3220", "17", "25", "3220", "25",
     ]
     .iter()
     .enumerate()
@@ -2728,6 +2728,79 @@ fn follow_streamed_group_is_atomic_and_checkpointed_once() {
             .unwrap(),
         Some(b"2".as_slice())
     );
+
+    for (order, end, pipelined) in [(3, 300, false), (4, 400, true)] {
+        let frontier = follow_frontier(stream, order, end);
+        let mut expected = authority.row.clone();
+        expected.applied = Some(frontier);
+        expected.barrier_counter += 1;
+        let mut tx = authority.begin_group(&io).unwrap();
+        assert!(matches!(tx.authority.session.phase, Phase::BeginPending));
+        assert_eq!(
+            tx.authority
+                .session
+                .connection()
+                .unwrap()
+                .transaction_status()
+                .unwrap(),
+            TransactionStatus::Idle
+        );
+        tx.advance(frontier).unwrap();
+        assert!(matches!(tx.authority.session.phase, Phase::BeginPending));
+        assert_eq!(
+            tx.authority
+                .session
+                .connection()
+                .unwrap()
+                .transaction_status()
+                .unwrap(),
+            TransactionStatus::Idle
+        );
+        let outcome = if pipelined {
+            tx.commit_pipeline(
+                &io,
+                |_| Ok(()),
+                |_, _| panic!("checkpoint-only group returned a data result"),
+            )
+        } else {
+            tx.commit(&io)
+        };
+        let CommitOutcome::Acknowledged {
+            checkpoint,
+            durable: Some(proof),
+        } = outcome.unwrap()
+        else {
+            panic!("checkpoint-only group has no positive durable COMMIT")
+        };
+        assert_eq!(checkpoint.applied, frontier);
+        assert_eq!(checkpoint.barrier_counter, expected.barrier_counter);
+        assert_eq!(proof.frontier(), Some(&frontier));
+        assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(end));
+        assert_eq!(authority.row, expected);
+        assert!(matches!(authority.session.phase, Phase::Idle));
+        assert_eq!(
+            authority
+                .session
+                .connection()
+                .unwrap()
+                .transaction_status()
+                .unwrap(),
+            TransactionStatus::Idle
+        );
+        assert_eq!(
+            metadata::read_only(&mut observer, &authority.provenance, &io).unwrap(),
+            expected
+        );
+        let rows = observer
+            .query(
+                "SELECT value FROM public.authority_follow_group ORDER BY value",
+                &io,
+            )
+            .unwrap();
+        assert_eq!(rows.rows(), 2);
+        assert_eq!(rows.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+        assert_eq!(rows.cell(1, 0).unwrap(), Some(b"2".as_slice()));
+    }
 }
 
 #[test]
@@ -3395,5 +3468,634 @@ fn follow_restart_refuses_foreign_replacement_and_fk_without_mutating_rows() {
                 .unwrap(),
             Some(cached.barrier_counter.to_string().as_bytes())
         );
+    }
+}
+
+struct CutoverFixture {
+    native: NativeState,
+    authority: TargetAuthority,
+    plan: ClonePlan,
+    control: ControlHandle,
+    source: PgConnection,
+    sequence: String,
+}
+
+fn cutover_fixture(io: &IoControl) -> CutoverFixture {
+    let initial = state();
+    let path = initial.identity().canonical_path.clone();
+    drop(initial);
+    let mut native = crate::state::open_follow(
+        &StateRequest {
+            path,
+            action: StateAction::Resume,
+        },
+        None,
+        None,
+        io,
+    )
+    .unwrap();
+    let mut source = named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", io);
+    let mut target = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io);
+    let schema = format!(
+        "m4_{}",
+        native
+            .identity()
+            .run
+            .0
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    let sequence = format!("{schema}.final_sequence");
+    let plan = ClonePlan {
+        source: crate::catalog::read_clone_source(&mut source, io).unwrap(),
+        target: crate::catalog::read_clone_target(&mut target, io).unwrap(),
+        generation: CopyGeneration(1),
+        tables: Vec::new(),
+        sequences: vec![crate::contracts::QualifiedTable {
+            schema: schema.clone(),
+            table: "final_sequence".into(),
+        }],
+        policy: crate::contracts::RestorePolicy::default(),
+    };
+    let binding = follow_reset_resources(&mut native, &plan, 8);
+    native
+        .bind_follow(
+            &plan,
+            &crate::contracts::SnapshotTicket {
+                token: binding.slot.snapshot_token.clone(),
+                source: plan.source.clone(),
+                generation: plan.generation,
+            },
+            &binding,
+        )
+        .unwrap();
+    let mut copy = CloneAuthority::acquire(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io),
+        &mut native,
+        &plan,
+        io,
+    )
+    .unwrap();
+    native.begin_pre_data().unwrap();
+    copy.mark_stage(ClonePhase::PreDataPending, io).unwrap();
+    let before = crate::catalog::clone_object_inventory(&mut target, io).unwrap();
+    for connection in [&mut source, &mut target] {
+        command(
+            connection,
+            &format!("CREATE SCHEMA {schema}"),
+            "CREATE SCHEMA",
+            io,
+        )
+        .unwrap();
+        command(
+            connection,
+            &format!("CREATE SEQUENCE {sequence}"),
+            "CREATE SEQUENCE",
+            io,
+        )
+        .unwrap();
+    }
+    target
+        .query(
+            &format!("SELECT pg_catalog.setval('{sequence}',7,true)"),
+            io,
+        )
+        .unwrap();
+    source
+        .query(
+            &format!("SELECT pg_catalog.setval('{sequence}',42,false)"),
+            io,
+        )
+        .unwrap();
+    let objects = crate::catalog::clone_object_inventory(&mut target, io)
+        .unwrap()
+        .into_iter()
+        .filter(|o| !before.contains(o))
+        .collect();
+    native.confirm_pre_data(objects, Vec::new()).unwrap();
+    copy.bind_tables(&native, io).unwrap();
+    for phase in [
+        ClonePhase::PostDataPending,
+        ClonePhase::PostDataComplete,
+        ClonePhase::SequencesPending,
+        ClonePhase::SequencesComplete,
+        ClonePhase::Analyzing,
+    ] {
+        native.mark_stage(phase).unwrap();
+        copy.mark_stage(phase, io).unwrap();
+    }
+    copy.install_follow_anchor(&native, &binding.slot, io)
+        .unwrap();
+    drop(copy);
+    let mut authority = TargetAuthority::acquire_follow(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io),
+        &mut native,
+        &binding,
+        io,
+    )
+    .unwrap();
+    let mut tx = authority.begin_group(io).unwrap();
+    tx.advance(follow_frontier(binding.stream(), 1, 0x10))
+        .unwrap();
+    assert!(matches!(
+        tx.commit(io).unwrap(),
+        CommitOutcome::Acknowledged {
+            durable: Some(_),
+            ..
+        }
+    ));
+    let control = ControlHandle::for_worker(&native, io).unwrap();
+    CutoverFixture {
+        native,
+        authority,
+        plan,
+        control,
+        source,
+        sequence,
+    }
+}
+
+fn sealed_cutover(fixture: &CutoverFixture, io: &IoControl) -> SealedEndpos {
+    let request = fixture
+        .control
+        .set(SourceEndLsn(0x20), SourceEndLsn(0x10), io)
+        .unwrap();
+    fixture.control.seal(&request, io).unwrap()
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_endpos_floor_is_unfenced_and_certification_independent() {
+    let io = control();
+    let mut fixture = cutover_fixture(&io);
+    let before = fixture.authority.row.clone();
+    let manifest = std::fs::read(
+        fixture
+            .native
+            .identity()
+            .canonical_path
+            .join("manifest.json"),
+    )
+    .unwrap();
+    let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    assert_eq!(
+        read_endpos_floor(&mut observer, &fixture.control, &io).unwrap(),
+        SourceEndLsn(0x10)
+    );
+    assert_eq!(fixture.authority.row, before);
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .native
+                .identity()
+                .canonical_path
+                .join("manifest.json")
+        )
+        .unwrap(),
+        manifest
+    );
+    let request = fixture
+        .control
+        .set(SourceEndLsn(0x20), SourceEndLsn(0x10), &io)
+        .unwrap();
+    fixture.authority.certify(SourceEndLsn(0x30), &io).unwrap();
+    assert_eq!(
+        read_endpos_floor(&mut observer, &fixture.control, &io).unwrap(),
+        SourceEndLsn(0x10)
+    );
+    assert_eq!(
+        fixture
+            .control
+            .set(SourceEndLsn(0x20), SourceEndLsn(0x30), &io)
+            .unwrap(),
+        request
+    );
+    let observed = metadata::read_only(&mut observer, &fixture.authority.provenance, &io).unwrap();
+    assert_eq!(observed, fixture.authority.row);
+    assert_eq!(
+        TargetAuthority::try_acquire_follow(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+            &fixture.control,
+            &io
+        )
+        .err()
+        .unwrap()
+        .kind,
+        ErrorKind::BadState
+    );
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_command_observation_is_existing_only_and_same_value() {
+    let io = control();
+    let fixture = cutover_fixture(&io);
+    let before = fixture.authority.row.clone();
+    let provenance = fixture.authority.provenance.clone();
+    let native_bytes = std::fs::read(
+        fixture
+            .native
+            .identity()
+            .canonical_path
+            .join("manifest.json"),
+    )
+    .unwrap();
+    fixture.authority.close(&io).unwrap();
+    let mut command = TargetAuthority::try_acquire_follow(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+        &fixture.control,
+        &io,
+    )
+    .unwrap();
+    assert_eq!(command.row, before);
+    let snapshot = command.observe_follow(&io).unwrap();
+    assert_eq!(snapshot.stream(), provenance.intent.binding.stream);
+    assert_eq!(snapshot.durable_replay_lsn(), SourceEndLsn(0x10));
+    assert_eq!(snapshot.certified_lsn(), SourceEndLsn(0));
+    assert!(!snapshot.follow_completed());
+    assert_eq!(snapshot.target(), &provenance);
+    assert_eq!(command.row, before);
+    command.close(&io).unwrap();
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .native
+                .identity()
+                .canonical_path
+                .join("manifest.json")
+        )
+        .unwrap(),
+        native_bytes
+    );
+    let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    assert_eq!(
+        metadata::read_only(&mut observer, &provenance, &io).unwrap(),
+        before
+    );
+    observer
+        .query(
+            &format!(
+                "ALTER TABLE {}.checkpoint SET UNLOGGED",
+                provenance.intent.binding.schema_name
+            ),
+            &io,
+        )
+        .unwrap();
+    assert!(
+        TargetAuthority::try_acquire_follow(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+            &fixture.control,
+            &io
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .native
+                .identity()
+                .canonical_path
+                .join("manifest.json")
+        )
+        .unwrap(),
+        native_bytes
+    );
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_drain_completion_syncs_final_sequences_and_is_immutable() {
+    let io = control();
+    let mut fixture = cutover_fixture(&io);
+    let request = sealed_cutover(&fixture, &io);
+    let proof = fixture
+        .authority
+        .record_drain(&request, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+        .unwrap();
+    assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(0x10));
+    let counter = fixture.authority.row.barrier_counter;
+    let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    let before = observer
+        .query(
+            &format!("SELECT last_value,is_called FROM {}", fixture.sequence),
+            &io,
+        )
+        .unwrap();
+    assert_eq!(before.cell(0, 0).unwrap(), Some(b"7".as_slice()));
+    assert_eq!(before.cell(0, 1).unwrap(), Some(b"t".as_slice()));
+    let mut wrong_source = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    assert!(
+        fixture
+            .authority
+            .complete_follow(
+                &mut wrong_source,
+                &fixture.native,
+                &fixture.plan,
+                &request,
+                &io
+            )
+            .is_err()
+    );
+    fixture
+        .authority
+        .reacquire(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+            &io,
+        )
+        .unwrap();
+    assert!(!fixture.authority.row.follow_completed);
+    let completed = fixture
+        .authority
+        .complete_follow(
+            &mut fixture.source,
+            &fixture.native,
+            &fixture.plan,
+            &request,
+            &io,
+        )
+        .unwrap();
+    assert_eq!(completed.end(), SourceEndLsn(0x20));
+    assert_eq!(completed.witness(), SourceEndLsn(0x30));
+    assert_eq!(completed.kind(), DrainKind::LaterBegin);
+    assert_eq!(completed.durable_replay_lsn(), SourceEndLsn(0x10));
+    assert_eq!(completed.certified_lsn(), SourceEndLsn(0));
+    assert_eq!(fixture.authority.row.barrier_counter, counter + 1);
+    let after = observer
+        .query(
+            &format!("SELECT last_value,is_called FROM {}", fixture.sequence),
+            &io,
+        )
+        .unwrap();
+    assert_eq!(after.cell(0, 0).unwrap(), Some(b"42".as_slice()));
+    assert_eq!(after.cell(0, 1).unwrap(), Some(b"f".as_slice()));
+    let frozen = fixture.authority.row.clone();
+    assert!(fixture.authority.certify(SourceEndLsn(0x40), &io).is_err());
+    assert!(fixture.authority.begin_group(&io).is_err());
+    fixture.native.begin_follow_cleanup().unwrap();
+    fixture.native.confirm_follow_slot_removed().unwrap();
+    fixture.native.confirm_follow_publication_removed().unwrap();
+    let reproved = fixture.authority.observe_completed(&request, &io).unwrap();
+    assert_eq!(reproved.checkpoint_id(), completed.checkpoint_id());
+    assert_eq!(fixture.authority.row, frozen);
+    fixture.authority.close(&io).unwrap();
+    let mut command = TargetAuthority::try_acquire_follow(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+        &fixture.control,
+        &io,
+    )
+    .unwrap();
+    assert_eq!(
+        command
+            .observe_completed(&request, &io)
+            .unwrap()
+            .checkpoint_id(),
+        completed.checkpoint_id()
+    );
+    command.close(&io).unwrap();
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_drain_recovery_reproves_original_witness() {
+    let io = control();
+    let mut fixture = cutover_fixture(&io);
+    let pending = fixture
+        .control
+        .set(SourceEndLsn(0x20), SourceEndLsn(0x10), &io)
+        .unwrap();
+    let stream = fixture.control.follow().binding.stream();
+    let mut crossing = fixture.authority.begin_group(&io).unwrap();
+    crossing.advance(follow_frontier(stream, 2, 0x28)).unwrap();
+    assert!(matches!(
+        crossing.commit(&io).unwrap(),
+        CommitOutcome::Acknowledged {
+            durable: Some(_),
+            ..
+        }
+    ));
+    let sealed = fixture.control.seal(&pending, &io).unwrap();
+    fixture
+        .authority
+        .record_drain(&sealed, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+        .unwrap();
+    let persisted = fixture.authority.row.clone();
+    fixture
+        .authority
+        .reacquire(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+            &io,
+        )
+        .unwrap();
+    fixture
+        .authority
+        .record_drain(&sealed, DrainWitness::Keepalive(SourceEndLsn(0x40)), &io)
+        .unwrap();
+    assert_eq!(fixture.authority.row, persisted);
+    let completed = fixture
+        .authority
+        .complete_follow(
+            &mut fixture.source,
+            &fixture.native,
+            &fixture.plan,
+            &sealed,
+            &io,
+        )
+        .unwrap();
+    assert_eq!(completed.witness(), SourceEndLsn(0x30));
+    assert_eq!(completed.kind(), DrainKind::LaterBegin);
+    assert_eq!(completed.durable_replay_lsn(), SourceEndLsn(0x28));
+}
+
+impl Fault {
+    fn connect_cutover(&self, io: &IoControl) -> PgConnection {
+        use std::os::unix::ffi::OsStringExt;
+        let mut value = self.conninfo.as_c_str().to_bytes().to_vec();
+        value.extend_from_slice(b" user=e1_admin");
+        PgConnection::connect(
+            &Conninfo::new(std::ffi::OsString::from_vec(value)).unwrap(),
+            io,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_observation_unknown_commit_needs_new_barrier() {
+    let io = control();
+    for stage in ["follow_drain", "follow_completion", "follow_observation"] {
+        let mut fixture = cutover_fixture(&io);
+        let request = sealed_cutover(&fixture, &io);
+        if stage == "follow_completion" {
+            fixture
+                .authority
+                .record_drain(&request, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+                .unwrap();
+        }
+        let mut fault = Fault::start(stage);
+        fixture
+            .authority
+            .reacquire(fault.connect_cutover(&io), &io)
+            .unwrap();
+        let old = fixture.authority.row.clone();
+        fault.request("arm");
+        let failure = match stage {
+            "follow_drain" => fixture
+                .authority
+                .record_drain(&request, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+                .err()
+                .unwrap(),
+            "follow_completion" => fixture
+                .authority
+                .complete_follow(
+                    &mut fixture.source,
+                    &fixture.native,
+                    &fixture.plan,
+                    &request,
+                    &io,
+                )
+                .err()
+                .unwrap(),
+            _ => fixture.authority.observe_follow(&io).err().unwrap(),
+        };
+        assert_eq!(failure.kind, ErrorKind::Target);
+        assert!(matches!(fixture.authority.session.phase, Phase::Poisoned));
+        assert_eq!(fixture.authority.row, old);
+        fault.require_held();
+        let refused = TargetAuthority::try_acquire_follow(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+            &fixture.control,
+            &io,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.kind, ErrorKind::BadState);
+        let mut reader = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+        assert_eq!(
+            read_endpos_floor(&mut reader, &fixture.control, &io).unwrap(),
+            SourceEndLsn(0x10)
+        );
+        let visible = metadata::read_only(&mut reader, &fixture.authority.provenance, &io).unwrap();
+        assert_eq!(visible.follow_completed, stage == "follow_completion");
+        fault.require_held();
+        fault.release();
+        fixture
+            .authority
+            .reacquire(
+                named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+                &io,
+            )
+            .unwrap();
+        let before_barrier = fixture.authority.row.clone();
+        let snapshot = fixture.authority.observe_follow(&io).unwrap();
+        assert_eq!(fixture.authority.row, before_barrier);
+        assert_eq!(snapshot.follow_completed(), stage == "follow_completion");
+        if stage == "follow_drain" {
+            fixture
+                .authority
+                .record_drain(&request, DrainWitness::Keepalive(SourceEndLsn(0x40)), &io)
+                .unwrap();
+            assert_eq!(fixture.authority.row, before_barrier);
+            assert_eq!(
+                fixture.authority.row.drain.unwrap().witness,
+                SourceEndLsn(0x30)
+            );
+        }
+        if stage == "follow_completion" {
+            let completed = fixture.authority.observe_completed(&request, &io).unwrap();
+            assert_eq!(completed.checkpoint_id(), snapshot.checkpoint_id());
+        }
+        fixture.authority.close(&io).unwrap();
+        fault.finish();
+    }
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness with exclusive SyncRep settings"]
+fn follow_cancelled_sync_wait_never_proves_drain_completion_or_observation() {
+    let io = control();
+    let context_path = PathBuf::from(std::env::var_os("RPGMIGRATE_TEST_CONTEXT").unwrap());
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(context_path).unwrap()).unwrap();
+    let token = context["token"].as_str().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(PathBuf::from(context["root"].as_str().unwrap()).join(".e1-owner"))
+            .unwrap(),
+        token
+    );
+    let admin_info =
+        Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").unwrap()).unwrap();
+    let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+    assert_eq!(
+        admin
+            .query("SELECT pg_catalog.current_setting('cluster_name')", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap(),
+        Some(token.as_bytes())
+    );
+    command(&mut admin, "SET synchronous_commit=off", "SET", &io).unwrap();
+    for stage in ["drain", "completion", "observation"] {
+        let mut fixture = cutover_fixture(&io);
+        let request = sealed_cutover(&fixture, &io);
+        if stage == "completion" {
+            fixture
+                .authority
+                .record_drain(&request, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+                .unwrap();
+        }
+        let previous = fixture.authority.row.clone();
+        let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            clone_marker_tests::set_missing_sync_standby(&mut admin, true, &io);
+            let cancel = clone_marker_tests::cancel_sync_replication_wait(
+                &admin_info,
+                fixture.authority.session.pid,
+                &io,
+            );
+            let failure = match stage {
+                "drain" => fixture
+                    .authority
+                    .record_drain(&request, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+                    .err()
+                    .unwrap(),
+                "completion" => fixture
+                    .authority
+                    .complete_follow(
+                        &mut fixture.source,
+                        &fixture.native,
+                        &fixture.plan,
+                        &request,
+                        &io,
+                    )
+                    .err()
+                    .unwrap(),
+                _ => fixture.authority.observe_follow(&io).err().unwrap(),
+            };
+            cancel
+                .join()
+                .expect("M4 COMMIT cancellation was not observed");
+            assert_eq!(failure.kind, ErrorKind::Target);
+            assert!(matches!(fixture.authority.session.phase, Phase::Poisoned));
+            assert_eq!(fixture.authority.row, previous);
+        }));
+        clone_marker_tests::set_missing_sync_standby(&mut admin, false, &io);
+        if let Err(panic) = check {
+            std::panic::resume_unwind(panic);
+        }
+        fixture
+            .authority
+            .reacquire(
+                named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+                &io,
+            )
+            .unwrap();
+        let visible = fixture.authority.row.clone();
+        let snapshot = fixture.authority.observe_follow(&io).unwrap();
+        assert_eq!(fixture.authority.row, visible);
+        assert_eq!(snapshot.follow_completed(), stage == "completion");
+        if stage == "completion" {
+            fixture.authority.observe_completed(&request, &io).unwrap();
+        }
     }
 }

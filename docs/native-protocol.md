@@ -2,9 +2,10 @@
 
 We freeze the engine/operator boundary here and in the shared [contract fixtures](../tests/fixtures/native/v1/contract.json).
 The [M1 plan](superpowers/plans/2026-11-08-m1-native-contract.md) defines the implementation boundary.
-M1 implements discovery and pure contract validation; it advertises no migration capabilities.
-Operational examples are synthetic future-producer contracts.
-They do not qualify clone, follow, recovery, cutover, cleanup, PostgreSQL version support, or durability.
+M1 defines discovery and pure contract validation; discovery advertises no migration capabilities until runtime qualification passes.
+Shared fixture payloads remain synthetic contracts, separate from actual producer checks.
+Use the [Native cutover handoff](native-cutover-handoff.md) for M4 command behavior, native format 8, metadata version 6, and the M6 observation procedure.
+Neither fixtures nor parser acceptance qualify follow, recovery, cutover, cleanup, PostgreSQL version support, or durability.
 
 ## Discovery
 
@@ -30,7 +31,8 @@ A reserved name does not mean that the runtime implements that capability.
 ## Operational transport and document rules
 
 Operational framing requires the validated four-field operator identity bound to stored native state.
-Standalone clone and progress commands emit unframed JSON without a synthetic `work` object.
+Standalone clone, progress, and stream commands emit unframed JSON without a synthetic `work` object.
+Unbound standalone output cannot satisfy an operator Report requiring independently supplied work identity.
 The M2 container harness can select the actual Go `ParseReport` probe for cross-repository producer qualification; this does not qualify an operator controller workflow.
 
 An operator-bound producer emits each operational record on stdout as `"native-report: "` followed by one JSON object on the same line.
@@ -87,13 +89,22 @@ Its values MUST exactly match caller-owned state.
 Partial, malformed, noncanonical, or mismatched identity MUST fail.
 Standalone runs retain random native run IDs without fabricating Migration/PVC identity.
 M2 binds the four validated caller identity values to recorded native state before granting any mutation authority.
-Mismatched caller identity and older native formats are explicit refusals; the clone state uses native format 5.
+Mismatched caller identity and older native formats are explicit refusals.
+M4 uses native format 8 and target metadata version 6, with no old-state conversion.
+Every table records required `identity_modes` and explicitly present nullable `partition_identity_modes`, with one byte per `all_columns` entry: `0`, `97` (ALWAYS), or `100` (BY DEFAULT).
+The root vector is null for an ordinary table or ordinary inheritance child; a declarative partition leaf records its root modes by column name.
+Native formats through 7 are refused before database side effects, without conversion.
+Follow preserves identity-changing UPDATEs with an atomic DELETE RETURNING and INSERT OVERRIDING SYSTEM VALUE in one statement when the old image cannot prove every ALWAYS identity unchanged.
+Unchanged TOAST values come from the deleted row; replay does not use target defaults or consume target sequences.
+The target uses replica mode, so ordinary origin-only deferred UNIQUE rechecks are suppressed and are not part of the checkpoint proof.
+Immediate UNIQUE and NOT NULL failures roll back the data and checkpoint together, and any ALWAYS/REPLICA callback, including an internal callback, is refused before DML.
 COPY generations are separate from the immutable checkpoint generation.
 
 The owned metadata identity is `_rpgmigrate_<run_id>.checkpoint` with recorded schema/table OIDs and existing provenance checks.
 Exclude target bookkeeping only by its exact owned object identity.
 The operator workdir remains `/work/pgcopydb`; its native marker prevents adoption of legacy state.
-The reserved control layout is `control/lock`, `control/endpos.json`, and `control/.endpos.tmp`.
+The control layout is `control/lock`, `control/endpos.json`, and `control/.endpos.tmp`.
+Its strict request binds version, stream, copy generation, slot nonce, target nonce, end LSN, and sealed state.
 Never adopt, convert, resume, restart, or clean pgcopydb state or resources.
 
 Application names are `rpgmigrate[<pid>] <role>` with exactly `copy`, `apply`, `receive`, and `compare` roles.
@@ -131,15 +142,33 @@ The source field definitions are in the [PG16 logical replication format](https:
 The producer computes durable replay as the barrier-proven maximum of actual durable applied end, keepalive-only certified LSN, and copy anchor.
 A visible asynchronous row with an older barrier token does not prove that maximum.
 The runtime MUST order the witness after all transactions through E, positively prove those transactions durable, and synchronously commit the witness and token in the same logged authority row before emitting drained.
-M6 independently reads that exact row.
+M6 independently proves that exact row through the same fence and a checked synchronous same-value writing barrier.
+A plain SELECT, asynchronous visibility, or polling the row/token cannot set `BarrierConfirmed=true`.
 M2/M4 own these runtime ordering and persistence checks; pure JSON acceptance does not test them.
 
 The checkpoint token is `<generation>:<barrier_epoch>:<barrier_counter>` with canonical decimal components.
 Generation is positive signed int64 and equals `1` in this profile; epoch is uint64 and may be zero; counter is positive uint64.
 A transition keeps the epoch at least as large as its stored value and increments the stored counter by exactly one, refusing overflow.
 Restart continues that pair; it does not reset the counter or reuse a pair for different checkpoint/drain contents.
-After unknown COMMIT, reacquire the fence, read back the same row, and establish a positive synchronous barrier before emitting proof.
+An exact same-value observation UPDATE preserves the existing token.
+After completion, the checkpoint, drain record, completion flag, and token are immutable.
+After unknown COMMIT, reacquire the fence, validate and lock the same row, and establish a positive synchronous writing barrier before emitting proof.
 Token syntax fixtures do not qualify runtime token transitions or unknown-COMMIT recovery.
+
+## Cutover command acknowledgment
+
+The operator MUST stop source writers and outstanding transactions, sample `pg_current_wal_insert_lsn()`, and persist E once before invoking `stream sentinel set endpos` with that explicit E.
+Retain E through failures and retries, and hold the writer fence through final sequence synchronization and verification.
+The first or changed request is checked against `max(applied.end, copy_anchor.consistent_point)`, excluding certification.
+A previously admitted identical E remains valid after a whole crossing transaction advances applied past E.
+
+A scalar endpos response proves local request persistence only.
+JSON replication reports and measured replay require positive fenced target observation and checked authority closure.
+The explicit-E JSON command may persist E and then return nonzero, with no success JSON, while the worker retains the target fence.
+The worker processes E independently of that acknowledgment.
+After worker exit, the standalone helper retries the identical E to obtain positive observation and acknowledgment.
+Do not resample `--current` on retry or treat exit 3 as acknowledgment.
+M6 activation remains gated on qualification of this helper and independent reader; the legacy live-worker exec route alone does not implement it.
 
 ## Cleanup
 
@@ -152,6 +181,9 @@ The owned workdir is retained with `removed=false`.
 A recorded replication origin is unowned and unremoved; `--origin` never creates or grants ownership of an origin.
 An incomplete cleanup observation can parse successfully while retaining `complete=false`.
 Exit zero and an empty or truncated resource inventory cannot prove cleanup completion.
+Cleanup first durably records terminal intent from complete confirmed receipts, including exactly one confirmed target receipt; it refuses active workers and uncertain inventories before deletion.
+Follow the handoff's [exclusive-administration cleanup boundary](native-cutover-handoff.md#exact-owned-cleanup) through every retry.
+Retain target bookkeeping and comparison state as well as the workdir and unowned origin.
 
 ## CLI, environment, and failures
 
@@ -166,13 +198,20 @@ Resolve CLI connection overrides before validating effective conninfo.
 Existing numeric environment validation still precedes numeric CLI overrides.
 JSON logging uses the existing boolean grammar; invalid values fail.
 Delegate passfile, service, and TLS behavior to stock libpq.
-The future apply-group default is 100; M1 validates a supplied positive uint64 setting and refuses execution rather than pretending to apply groups.
+
+Schema utilities inherit the effective settings from the validated SQL connection and stay on its selected peer, database, and role.
+They preserve the selected hostname for TLS and passfile matching, do not re-resolve service selection, and keep credentials in the private child environment rather than argv or diagnostics.
+Effective options that cannot be represented in that environment fail before pre-data phase intent is recorded.
+
+The follow apply-group default is 100; a supplied value must be positive uint64 and belongs only to follow.
 Keep `durable` as the default.
+M4 does not qualify replay-safe cadence or enable `relaxed`; see the handoff for the admitted durability boundary.
 
 Exit codes are `BadArgs=1`, `BadConfig=2`, `BadState=3`, `Pgsql=4`, `Pgctl=5`, `Source=6`, `Target=7`, `Reload=9`, `Internal=12`, and `Fatal=122`.
 A recovery gap is `BadState`, exit 3.
 JSON diagnostics retain existing fields and include `error_severity="ERROR"` with a safe message beginning `"native:<ErrorKind>: "`.
-Credentials and row contents MUST NOT appear in diagnostics or fixtures.
+Error diagnostics add `error_origin` with `file`, `line`, and `column` identifying the native error creation site.
+The file is a source basename; build paths, credentials, and row contents MUST NOT appear in diagnostics or fixtures.
 
 ## Fixture verification
 

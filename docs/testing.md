@@ -37,6 +37,10 @@ Plain CI runs this local gate with stock PGDG libpq 18 development files, prints
 ## Isolated database checks
 
 The retained `tools/test-db.py` harness owns disposable PostgreSQL clusters and verifies test receipts and independent SQL fingerprints.
+Its catalog profile includes a non-superuser money clone check across German and US monetary defaults.
+That profile requires already installed GNU `localedef`, `/usr/share/i18n/locales/de_DE`, `/usr/share/i18n/locales/en_US`, and `/usr/share/i18n/charmaps/UTF-8.gz`.
+It compiles only private locale files, establishes `LOCPATH` before starting the owned server, and passes that environment to the client utilities.
+Missing tools, source data, or compiled `LC_MONETARY` output fail the check; the harness installs no packages and changes no host locale archive.
 Install a complete server/client bundle, including `initdb`, `pg_ctl`, `postgres`, `psql`, and `pg_config`.
 Select the bundle with `PG_BINDIR` or `PG_CONFIG`; the harness also uses its established platform discovery when neither is set.
 Select the matching stock client library separately when validating a specific libpq major.
@@ -73,9 +77,8 @@ Use `task help` for retained focused profiles, including prepared execution, rep
 
 ## Container clone checks
 
-The qualified alpha evidence consists of staged PostgreSQL 16 to 16, 18 to 18, and 16 to 18 pair runs, each passing eleven cases and six actual Go report validations.
-The final staged test receipts passed 417 Rust tests, 24 CLI tests, and 183 portable tests; the aggregate Task commands were not rerun to exit zero after earlier failures.
-Strict lint remains held on staged unused code, and no operator-controller, CDC, power-loss, or failover qualification follows from this alpha.
+The [roadmap](roadmap.md) and [task ledger](../tasks/todo.md) record qualified clone runs and their exact input provenance.
+Container clone checks do not qualify an operator controller, power-loss durability, or failover.
 
 The M2 harness uses podman by default.
 Set `CONTAINER_RUNTIME` to a Podman-compatible executable when it is not named `podman`.
@@ -139,9 +142,10 @@ Resume on an absent or empty path refuses; a resource-free native INIT state may
 
 The admitted profile uses logged heap tables, inheritance children, and partition leaves exactly once, preserves explicit identity values, and computes generated columns on the target.
 Generated output must match canonical source bytes under the imported snapshot before the table marker and COMMIT; a mismatch refuses and rolls back.
-The 16 MiB row cap applies to the complete qualification row, including generated output, and that parity/cap path remains a PostgreSQL 16/18 closing qualification gate.
+The 16 MiB row cap applies to the complete qualification row, including generated output.
 Foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables are preflight refusals.
-Binary COPY, splitting, follow, filters, all-database/roles variants, destructive restore, and unsupported skip policies remain explicit refusals.
+Binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip policies remain explicit refusals.
+The separate follow profile below controls `clone --follow` qualification.
 Table and post-data jobs default to four; explicitly conflicting index/restore job counts fail instead of ignoring a setting.
 No-owner, no-ACL, no-comments, and no-tablespaces policies are passed through to the schema utilities.
 
@@ -158,6 +162,134 @@ Comparison byte progress estimates table coverage from measured `pg_table_size`;
 Progress inspection remains read-only while a worker holds its mutation lock; unknown counter fields are omitted instead of measured as zero.
 Operational `native-report` framing requires the validated four-field operator identity bound to native state.
 Standalone clone/progress emit unframed JSON with no fabricated Migration/PVC work identity.
+
+## Follow component and container checks
+
+We keep pgoutput checks separate from the historical test_decoding profiles.
+The component profiles require exact nonempty inventories from the registered harness manifests.
+M4 extends them with control, authority, drain, receiver shutdown, and cleanup regressions; discovery alone is not runtime evidence.
+The default `task test-db` registers these five profiles after the schema profile and before `copy_integration`.
+The obsolete `test-source-snapshot` task, `--source-snapshot` selector, and PostgreSQL 14/17 legacy stage are retired.
+The source profile uses a real owned logical `OwnedCluster`, including its token, data directory, and configuration file, so its durable-storage drift control cannot target an external server.
+The authority profile preserves the synchronous-wait cancellation case where a visible committed row cannot authorize feedback.
+It also checks that lazy checkpoint-only groups commit one durable frontier through both direct and pipeline authority paths without changing user rows.
+The receiver profile requires its seventy-second blocked-apply status test exactly once; the historical Engine profile excludes that exact native test.
+The current snapshot profile requires nine exact passed cases plus five independent native pgoutput fault receipts; the CREATE-tail receipt contains three required subphases.
+Its owned Unix relay binds the actual source publication, slot, stream, native format 8 intent, and importer/exporter process identities.
+Missing fields or phases, an unhit post-import PID mutation, a late fault, a live backend, an unreaped helper, or an ambiguous creation retry cannot pass that receipt check.
+An explicit child `PGAPPNAME` supports the application-name case without changing the Rust process environment.
+Direct unknown source-finish evidence proves no target anchor absence; the coordinator call-order and process-level qualification remain separate evidence.
+Select an actual PostgreSQL 16 or 18 server/client bundle and record the version variables as described above.
+
+The 133-case M4 closing subset per major comprises Schema3, Clone7, Catalog13, FollowSource12, FollowSnapshot9, FollowAuthority17, FollowReceive11, FollowApply11, and Engine50.
+The separately registered retained M3 gate, `task test-source-catalog`, requires SourceCatalog3 through `tools/test-db.py --source-catalog` with the `catalog::tests::live_source_identity_` selector.
+Schema3 checks pre-data drift, effective service/authentication/TLS option preservation, and binding schema children to the validated database and selected peer.
+Its owned TCP/SCRAM relay checks selected-peer loss with TLS disabled; option-byte evidence does not qualify TLS handshakes, client certificates, or encrypted keys.
+FollowSnapshot additionally requires five fault receipts and three CREATE-tail phases.
+The four adapter profiles, Transport, Prepared, Authority, and Replication, intentionally select subsets of Engine50; they are not additional disjoint cases.
+FollowReceive uses `--include-ignored --exact` with all eleven manifest names, because its required inventory includes ignored and nonignored tests.
+Using only `--ignored` silently omits required receiver cases and fails the inventory check.
+Engine excludes the native receiver and apply cases, snapshot profiles, source cleanup, clone, schema, and follow authority cases through the explicit Task selectors.
+
+1. Run the portable follow harness controls.
+
+   ```sh
+   task test-e2e-follow-unit
+   ```
+
+2. Run the selected native component profiles.
+
+   ```sh
+   task test-follow-source test-follow-snapshot test-follow-authority test-follow-receive test-follow-apply
+   ```
+
+3. Debug one initial copy and DML path with its separately scoped smoke receipt.
+
+   ```sh
+   task test-e2e-follow-smoke-16-16
+   ```
+
+4. Run the full declared matrix at milestone close.
+
+   ```sh
+   task test-e2e-follow
+   ```
+
+The smoke profile requires exactly one observed `initial_copy_dml` case and writes `target/e2e/follow-smoke-16-16.json` with `receipt_scope=smoke`.
+Matching `test-e2e-follow-smoke-18-18` and `test-e2e-follow-smoke-16-18` tasks check the other declared pairs.
+A smoke receipt does not establish the full fault inventory.
+The full profile requires every declared case for each of 16 to 16, 18 to 18, and 16 to 18, and writes `target/e2e/follow-<pair>.json`.
+An absent case, unobserved synchronization point, missing FIFO-full event, or successful exit without durable cutover completion fails qualification.
+Use the maintained task ledger for actual passed receipts; these commands define checks, not a support claim.
+
+The follow harness reuses the clone harness's immutable server images, private internal network, exact container cleanup, redacted failure metadata, and matching-target-major tools.
+It starts logical decoding only inside its disposable source container and checks the executable's actual linked libpq version.
+The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
+Its DEFAULT, INDEX, and keyless FULL identities cover changed keys, duplicate rows, NULLs, unchanged TOAST, TRUNCATE, explicit identity values, and differing source/target custom type OIDs.
+The independent row and schema fingerprints retain the clone oracle's row/byte bounds and multiplicity checks.
+The fixture's physical `ONLY` row counts must match its reviewed baseline before launch.
+
+A live data comparison runs only after the exact logged target authority row records an applied or certified frontier at the known source goal, captured forwarded status positions reach that goal, and the actual owned source slot has consumed that feedback through `confirmed_flush_lsn`.
+The observer validates the native format, exact relation/schema/owner OIDs, complete stream and operator binding, primary identity, and `fsync=on` plus `full_page_writes=on`.
+A copy anchor, received WAL header, row visibility, report, or process exit alone cannot satisfy this predicate.
+The target COMMIT-reply fault captures an earlier proven frontier and requires feedback to stay there while the later committed row remains unresolved.
+This controls the unknown-COMMIT boundary without treating visibility as proof of synchronous durability.
+Failure diagnostics retain bounded transaction LSNs and available observations of the exact owned target checkpoint and source slot, without row payloads.
+For a transaction beyond the copy anchor, feedback strictly greater than its COMMIT record LSN requires applied coverage through its transaction-end LSN; a position inside that interval cannot pass.
+Feedback equal to the COMMIT record LSN can describe prior-record progress.
+Visible target observations check consistency and do not certify durability.
+
+Private TCP gates pause a target COMMIT before dispatch, hold its observed successful response, or stop forwarding source frames after BEGIN.
+The harness kills the background engine, releases the exact held connection, and resumes from the retained owned source slot.
+The backpressure case additionally requires the engine's first actual `follow.backpressure` event, keeps that FIFO full beyond the receiver's confirmed 60-second walsender timeout, verifies unchanged safe status positions and the same source walsender, then releases apply and checks convergence.
+The WAL-loss fault changes [slot retention](https://www.postgresql.org/docs/18/runtime-config-replication.html#GUC-MAX-SLOT-WAL-KEEP-SIZE) only in the owned disposable source container, forces actual slot invalidation, and positively observes unlimited retention again before checking the lost-slot refusal.
+Foreign active slots/publications and unsafe source profiles must refuse before creating target objects or changing those source resources.
+
+The copying-stage recovery case observes the exact blocked owned pre-truncate statement, advances the COPY generation on retry, and verifies new positively recorded source resource identities.
+Uncertain pre-data ownership and post-data outcomes remain explicit recovery refusals and open qualification gaps.
+Retained Replication adapter checks use test_decoding; they do not qualify native pgoutput follow.
+
+Ongoing follow without admitted cutover stays in `streaming` and stops with a nonzero suspended/interrupted outcome.
+Streaming reports preserve the caller binding and omit drain or successful follow completion evidence.
+A selected `--report-probe` must accept the original streaming JSON bytes through the actual operator parser; an unavailable or failing selected probe has no local fallback.
+Receipts distinguish `local_m3_contract` from `operator_go_parse_report`.
+M4 owns the requested end, final synchronization, successful follow exit, drain proof, and cleanup.
+Process-kill receipts establish no power-loss, target failover, or operator-controller qualification.
+
+## Cutover qualification
+
+Read the [Native cutover handoff](native-cutover-handoff.md) before interpreting control rows or replication reports.
+Its native-8/metadata-6 readers must reject older state without conversion.
+Discovery retains `capabilities=[]` until the complete producer and milestone checks pass.
+The [task ledger](../tasks/todo.md) records actual runtime receipts, unresolved startup/recovery failures, and required remaining checks.
+No source inspection, pure contract test, or component receipt establishes a full follow matrix pass.
+
+Require nonempty runtime receipts for every discovered case, exact versions, active writers, complete table/sequence inventories, and observed fault injections.
+Cutover cases must stop ordinary and `synchronous_commit=off` writers and outstanding transactions before independently sampling and persisting E.
+Require actual keepalive and later-BEGIN coverage, full data/schema/sequence comparison, cleanup, and comparison again from the retained workdir.
+Exercise active-fence JSON refusal after E persists, worker completion without command acknowledgment, and the post-worker standalone helper's identical-E retry.
+Refuse false drain based on asynchronous visibility, omitted cases, missed faults, and incomplete cleanup inventories.
+Engine JSON does not replace the independent synchronous row barrier or actual operator Go validation.
+The existing uncertain post-data recovery refusal remains a gap; neither completed-row observation nor later-BEGIN coverage repairs it.
+Process-kill tests qualify their injected process failures, not power loss, target failover, or operator E2E.
+
+1. Run one cutover producer pair.
+
+   ```sh
+   task test-e2e-cutover-16-16
+   ```
+
+2. Run the exact three-pair cutover producer matrix at milestone close.
+
+   ```sh
+   task test-e2e-cutover
+   ```
+
+The ongoing matrix requires all 21 cases and the cutover producer matrix all ten cases for each declared pair, totaling 93 required executions.
+The cutover inventory includes `completed_resume_requires_checked_authority_close`, which requires completed resume to refuse when checked authority closure fails.
+The cutover Task routes through `tools/e2e/follow.py --cutover --pair <pair>` and validates the nonempty cutover manifest.
+Its receipts use `local_m4_producer` with `probe_checked=false`; actual engine/Go interoperability and the independent M6 reader are separate checks.
+Run integrated lint/tests, independent safety review, and assigned Go suites once at milestone close against the same frozen handoff.
 
 ## Local runner packaging
 
@@ -184,9 +316,7 @@ These commands build and inspect local images; publishing has separate release g
 ## Qualification boundaries
 
 The revised native profile targets 16→16, 18→18, and 16→18 only.
-The retained `test-db` and `test-engine` profiles keep their historical admission requirements and do not replace the native clone gate.
-`task test-follow-snapshot` registers nine native pgoutput snapshot cases with five independent fault receipts for PostgreSQL 16 and 18.
-The obsolete `test-source-snapshot` task, `--source-snapshot` selector, and PostgreSQL 14/17 legacy stage are retired.
+The retained `test-db` and `test-engine` profiles keep their declared admission requirements and do not replace the native clone gate.
 Shared lower COPY helpers retain portable test coverage; those checks do not qualify PostgreSQL 14/17 runtime behavior.
 Containers supplement the local harness as the engine/operator E2E layer, rather than replacing cargo live tests.
 Run independent review and applicable Go suites once per milestone at close; engine-only changes have no operator Go suite.
