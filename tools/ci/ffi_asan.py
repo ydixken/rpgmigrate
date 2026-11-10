@@ -223,9 +223,29 @@ def profile_evidence(profile, expected, result):
     return sanitized_evidence(profile, status="passed", returncode=0, test_count=len(expected))
 
 
-def validate_control(result):
-    require(result.returncode != 0 and re.search(r"ERROR: AddressSanitizer: heap-use-after-free\b", result.stdout + result.stderr),
-            "sanitizer control did not detect intentional heap-use-after-free")
+def control_projection():
+    lines = [number for number, line in enumerate(CONTROL.splitlines(), 1) if "std::ptr::read_volatile(ptr)" in line]
+    require(len(lines) == 1, "invalid sanitizer control source")
+    return {"category": "heap-use-after-free", "source": "asan-control.rs", "source_line": lines[0], "symbolized": True}
+
+
+def validate_control(result, source):
+    source = Path(source)
+    output = result.stdout + "\n" + result.stderr
+    report = re.search(r"^(?:==[0-9]+==)?ERROR: AddressSanitizer: heap-use-after-free\b[^\n]*\n", output, re.MULTILINE)
+    require(type(result.returncode) is int and result.returncode != 0 and report and source.is_absolute() and
+            source.name == "asan-control.rs", "sanitizer control did not detect intentional heap-use-after-free")
+    remainder = output[:report.start()] + output[report.end():]
+    require(not re.search(r"^[ \t]*(?:==[0-9]+==)?(?:WARNING:|ERROR:|FATAL:|(?:\S*/)?(?:llvm-?)?symbolizer(?:-[0-9]+)?:|"
+                          r"AddressSanitizer:(?:DEADLYSIGNAL|.*(?:failed|unable|cannot|CHECK failed))|"
+                          r"Sanitizer CHECK failed|Shadow memory range|ReserveShadowMemoryRange failed|ASan (?:runtime does not come first|cannot proceed))",
+                          remainder, re.MULTILINE | re.IGNORECASE), "sanitizer control reported a runtime or symbolizer failure")
+    access = re.match(r"READ of size [1-9][0-9]* at [^\n]+\n((?:[ \t]+#[0-9]+[ \t]+[^\n]*\n)+)", output[report.end():])
+    evidence = control_projection()
+    frame = (r"^[ \t]+#[0-9]+[ \t]+0x[0-9a-fA-F]+[ \t]+in[ \t]+(?!\?\?(?:[ \t]|$))\S+[^\n]*?[ \t]+" +
+             re.escape(str(source)) + rf":{evidence['source_line']}(?::[1-9][0-9]*)?[ \t]*$")
+    require(access and re.search(frame, access[1], re.MULTILINE), "sanitizer control lacks its symbolized access source line")
+    return evidence
 
 
 def linked_libpq(output):
@@ -235,7 +255,9 @@ def linked_libpq(output):
 
 
 def publish_receipt(path, receipt):
-    require(isinstance(receipt, dict) and receipt.get("profiles") and receipt.get("control") == "heap-use-after-free" and
+    control = receipt.get("control") if isinstance(receipt, dict) else None
+    require(type(control) is dict and control == control_projection() and type(control["source_line"]) is int and
+            control["symbolized"] is True and receipt.get("profiles") and
             all(item.get("cases") for item in receipt["profiles"]), "empty or incomplete ASAN receipt")
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -312,9 +334,9 @@ def execute(args):
     source = target_dir / "asan-control.rs"
     source.write_text(CONTROL)
     control = target_dir / "asan-control"
-    invoke(tool + ["rustc", "--edition=2024", "--target", args.target, "-Zsanitizer=address", "-Copt-level=0", str(source), "-o", str(control)])
+    invoke(tool + ["rustc", "--edition=2024", "--target", args.target, "-Zsanitizer=address", "-Copt-level=0", "-Cdebuginfo=2", str(source), "-o", str(control)])
     control_hash = check_binary(control, target_dir, args.target)
-    validate_control(invoke([str(control)], control=True))
+    control_evidence = validate_control(invoke([str(control)], control=True), source)
     listing = invoke([str(tests), "--list", "--format=terse"]).stdout
     inventory = re.findall(r"^(\S+): test$", listing, re.MULTILINE)
     require(inventory and len(inventory) == len(set(inventory)), "missing or duplicate libtest inventory")
@@ -347,7 +369,7 @@ def execute(args):
                "lockfile_sha256": pin["compatibility"]["lockfile_sha256"], "rustflags": environment["RUSTFLAGS"],
                "build_std": True, "asan_options": ASAN_OPTIONS, "symbolizer": symbolizer,
                "libpq": {"path": str(libpq), "sha256": digest(libpq), "version": int(libpq_version), **libpq_package},
-               "profiles": profiles, "control": "heap-use-after-free", "control_binary_sha256": control_hash,
+               "profiles": profiles, "control": control_evidence, "control_binary_sha256": control_hash,
                "owned_children_reaped": True,
                "coverage": pin["external_symbolizer"]["coverage"], **hashes}
     publish_receipt(args.receipt, receipt)

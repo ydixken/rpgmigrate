@@ -16,6 +16,7 @@ from unittest.mock import patch
 PATH = Path(__file__).with_name("ffi_asan.py")
 PIN = PATH.with_name("ffi_asan_toolchain.toml")
 TARGET = "x86_64-unknown-linux-gnu"
+CONTROL_SOURCE = Path("/private/owned-control/asan-control.rs")
 
 
 class AsanTests(unittest.TestCase):
@@ -34,6 +35,21 @@ class AsanTests(unittest.TestCase):
                 "version": "LLVM version 23.1.0", "package": "llvm-23",
                 "package_version": "23.1.0-1", "architecture": "amd64"}}}
         return pin
+
+    def control_output(self, source=CONTROL_SOURCE, line=8):
+        return ("==123==ERROR: AddressSanitizer: heap-use-after-free on address 0x502000000010\n"
+                "READ of size 8 at 0x502000000010 thread T0\n"
+                "    #0 0x1234 in core::ptr::read_volatile /rust/library/core/src/ptr/mod.rs:100:9\n"
+                f"    #1 0x1235 in asan_control::main {source}:{line}:30\n"
+                "    #2 0x1236 in __libc_start_main (/lib/libc.so.6+0x1236)\n\n"
+                "0x502000000010 is located 0 bytes inside of 8-byte region\n"
+                "freed by thread T0 here:\n"
+                "    #0 0x1237 in free (/lib/libasan.so+0x1237)\n"
+                f"    #1 0x1238 in asan_control::main {source}:7:9\n\n"
+                "previously allocated by thread T0 here:\n"
+                f"    #0 0x1239 in asan_control::main {source}:4:19\n\n"
+                f"SUMMARY: AddressSanitizer: heap-use-after-free {source}:{line}:30 in asan_control::main\n"
+                "==123==ABORTING\n")
 
     def test_tracked_pin_requires_external_symbolizer_qualification(self):
         pin = self.asan.load_pin(PIN)
@@ -129,13 +145,66 @@ class AsanTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.asan.validate_profile("Replication", expected, good + "Replication verified 1 exact cases; full E1 suite not selected\n")
 
-    def test_sanitizer_control_requires_failure_and_expected_category(self):
-        self.asan.validate_control(subprocess.CompletedProcess([], 1, "", "ERROR: AddressSanitizer: heap-use-after-free"))
-        for result in (subprocess.CompletedProcess([], 0, "", "ERROR: AddressSanitizer: heap-use-after-free"),
-                       subprocess.CompletedProcess([], 1, "", "private failure"),
-                       subprocess.CompletedProcess([], 1, "", "AddressSanitizer: stack-buffer-overflow")):
+    def test_sanitizer_control_requires_failure_and_symbolized_access_frame(self):
+        output = self.control_output()
+        evidence = self.asan.validate_control(subprocess.CompletedProcess([], -6, "", output), CONTROL_SOURCE)
+        self.assertEqual(evidence, {"category": "heap-use-after-free", "source": "asan-control.rs",
+                                    "source_line": 8, "symbolized": True})
+        for code, text in ((0, output), (1, "ERROR: AddressSanitizer: heap-use-after-free"),
+                           (1, "private failure"), (1, output.replace("heap-use-after-free", "stack-buffer-overflow"))):
+            with self.subTest(code=code, text=text[:30]), self.assertRaises(RuntimeError):
+                self.asan.validate_control(subprocess.CompletedProcess([], code, "", text), CONTROL_SOURCE)
+
+    def test_sanitizer_control_rejects_missing_wrong_or_unresolved_access_location(self):
+        output = self.control_output()
+        frame = f"    #1 0x1235 in asan_control::main {CONTROL_SOURCE}:8:30\n"
+        bad_frames = ("", f"    #1 0x1235 in asan_control::main {CONTROL_SOURCE}:0:30\n",
+                      f"    #1 0x1235 in asan_control::main {CONTROL_SOURCE}\n",
+                      f"    #1 0x1235 in asan_control::main {CONTROL_SOURCE}:7:30\n",
+                      "    #1 0x1235 in asan_control::main /foreign/asan-control.rs:8:30\n",
+                      "    #1 0x1235 in asan_control::main asan-control.rs:8:30\n",
+                      f"    #1 0x1235 in ?? {CONTROL_SOURCE}:8:30\n",
+                      f"source location {CONTROL_SOURCE}:8:30\n")
+        for replacement in bad_frames:
+            with self.subTest(frame=replacement), self.assertRaises(RuntimeError):
+                self.asan.validate_control(subprocess.CompletedProcess([], -6, "", output.replace(frame, replacement)), CONTROL_SOURCE)
+        free_only = output.replace(frame, "") + f"    #2 0x1235 in asan_control::main {CONTROL_SOURCE}:8:30\n"
+        with self.assertRaises(RuntimeError):
+            self.asan.validate_control(subprocess.CompletedProcess([], -6, "", free_only), CONTROL_SOURCE)
+
+    def test_sanitizer_control_derives_access_line_from_control_source(self):
+        with patch.object(self.asan, "CONTROL", "\n" + self.asan.CONTROL):
+            result = subprocess.CompletedProcess([], -6, "", self.control_output(line=9))
+            self.assertEqual(self.asan.validate_control(result, CONTROL_SOURCE)["source_line"], 9)
             with self.assertRaises(RuntimeError):
-                self.asan.validate_control(result)
+                self.asan.validate_control(subprocess.CompletedProcess([], -6, "", self.control_output()), CONTROL_SOURCE)
+
+    def test_sanitizer_control_refuses_symbolizer_and_startup_failures(self):
+        for diagnostic in ("WARNING: invalid path to external symbolizer!", "LLVMSymbolizer: error reading file",
+                           "/usr/lib/llvm-19/bin/llvm-symbolizer: error reading file", "  ==123==WARNING: symbolizer unavailable",
+                           "WARNING: Failed to use and restart external symbolizer!", "AddressSanitizer:DEADLYSIGNAL",
+                           "Sanitizer CHECK failed", "Shadow memory range interleaves with an existing memory mapping",
+                           "ReserveShadowMemoryRange failed", "ERROR: Failed to mmap", "ASan runtime does not come first",
+                           "ASan cannot proceed correctly"):
+            with self.subTest(diagnostic=diagnostic), self.assertRaises(RuntimeError):
+                self.asan.validate_control(subprocess.CompletedProcess([], -6, "", self.control_output() + diagnostic), CONTROL_SOURCE)
+
+    def test_control_evidence_and_errors_do_not_expose_output_or_source_paths(self):
+        passing, failures = [], []
+        for canary in ("row-secret-A", "credential-secret-B-with-a-different-length"):
+            source = Path("/private") / canary / "asan-control.rs"
+            output = self.control_output(source) + canary
+            passing.append(self.asan.validate_control(subprocess.CompletedProcess([], -6, canary, output), source))
+            with self.assertRaises(RuntimeError) as error:
+                self.asan.validate_control(subprocess.CompletedProcess([], -6, canary, "ERROR: AddressSanitizer: heap-use-after-free " + canary), source)
+            failures.append(str(error.exception))
+            for value in (json.dumps(passing[-1]), failures[-1]):
+                self.assertNotIn(canary, value)
+                self.assertNotIn(str(source), value)
+                for field in ("stdout", "stderr", "output_sha256", "output_length"):
+                    self.assertNotIn(field, value)
+        self.assertEqual(passing[0], passing[1])
+        self.assertEqual(failures[0], failures[1])
 
     def test_failed_timed_out_or_sanitizer_reporting_children_refuse(self):
         for stdout, stderr in (("", "ERROR: AddressSanitizer: bad"), ("SUMMARY: LeakSanitizer: bad", ""),
@@ -229,12 +298,36 @@ class AsanTests(unittest.TestCase):
             path = Path(directory) / "receipt.json"
             with self.assertRaises(RuntimeError):
                 self.asan.publish_receipt(path, {})
-            receipt = {"profiles": [{"cases": ["synthetic-case"]}], "control": "heap-use-after-free"}
+            receipt = {"profiles": [{"cases": ["synthetic-case"]}],
+                       "control": {"category": "heap-use-after-free", "source": "asan-control.rs",
+                                   "source_line": 8, "symbolized": True}}
             self.asan.publish_receipt(path, receipt)
             self.assertEqual(json.loads(path.read_text()), receipt)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             with self.assertRaises(RuntimeError):
                 self.asan.publish_receipt(path, receipt)
+
+    def test_category_only_control_cannot_authorize_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            receipt = {"profiles": [{"cases": ["synthetic-case"]}], "control": "heap-use-after-free"}
+            with self.assertRaisesRegex(RuntimeError, "incomplete ASAN receipt"):
+                self.asan.publish_receipt(path, receipt)
+            self.assertFalse(path.exists())
+
+    def test_control_receipt_requires_exact_closed_projection(self):
+        control = {"category": "heap-use-after-free", "source": "asan-control.rs", "source_line": 8, "symbolized": True}
+        invalid = [{key: value for key, value in control.items() if key != missing} for missing in control]
+        invalid.extend({**control, key: value} for key, value in (
+            ("category", "stack-buffer-overflow"), ("source", str(CONTROL_SOURCE)), ("source_line", 0),
+            ("source_line", 8.0), ("source_line", 7), ("symbolized", False), ("symbolized", 1),
+            ("stdout", "private-canary"), ("output_sha256", "a" * 64), ("output_length", 100)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            for evidence in invalid:
+                with self.subTest(evidence=evidence), self.assertRaisesRegex(RuntimeError, "incomplete ASAN receipt"):
+                    self.asan.publish_receipt(path, {"profiles": [{"cases": ["synthetic-case"]}], "control": evidence})
+                self.assertFalse(path.exists())
 
     def test_mocked_pipeline_keeps_argv_instrumentation_and_all_six_live_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -298,9 +391,10 @@ class AsanTests(unittest.TestCase):
                     text = "180006\n"
                 elif "rustc" in argv:
                     self.assertIn("-Zsanitizer=address", argv)
+                    self.assertIn("-Cdebuginfo=2", argv)
                     elf(Path(argv[-1])); text = ""
                 elif control:
-                    return subprocess.CompletedProcess(argv, 1, "", "ERROR: AddressSanitizer: heap-use-after-free")
+                    return subprocess.CompletedProcess(argv, -6, "", self.control_output(args.target_dir / "asan-control.rs"))
                 elif "--list" in argv:
                     text = "".join(name + ": test\n" for name in inventory)
                 elif argv[0] == str(test_binary):
@@ -328,6 +422,9 @@ class AsanTests(unittest.TestCase):
             self.assertEqual(observed_profiles, [(profile, version) for version in ("16.14", "18.6")
                                                 for profile in ("Transport", "Prepared", "Replication")])
             self.assertEqual(receipt["libpq"]["version"], 180006)
+            self.assertEqual(receipt["control"], {"category": "heap-use-after-free", "source": "asan-control.rs",
+                                                  "source_line": 8, "symbolized": True})
+            self.assertNotIn(str(args.target_dir / "asan-control.rs"), args.receipt.read_text())
             self.assertNotIn("synthetic-libpq", args.receipt.read_text())
 
 
