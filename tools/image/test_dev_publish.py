@@ -3,10 +3,12 @@
 
 import base64
 import copy
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -356,13 +358,14 @@ class PublisherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             publisher = self.publisher(object(), directory)
             inspect = [{"Id": self.smoke["image_id"], "Os": "linux", "Architecture": "arm64", "Config": {"Labels": {}}}]
-            responses = [b'{"host":{"os":"linux","arch":"arm64"}}', b"--retry --authfile --digestfile --tls-verify", b"", encoded(inspect)]
+            responses = self.tool_responses() + [b"", encoded(inspect)]
             with patch.object(self.dev.platform, "system", return_value="Linux"), \
                  patch.object(self.dev.platform, "machine", return_value="aarch64"), \
-                 patch.object(self.dev, "validate_build_inputs"), patch.object(self.dev, "command", side_effect=responses) as run:
+                 patch.object(self.dev, "validate_build_inputs"), patch.object(self.dev, "command", side_effect=responses) as run, \
+                 contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(RuntimeError, "LABEL"):
                     publisher.build_and_smoke()
-                self.assertEqual(run.call_count, 4)
+                self.assertEqual(run.call_count, 6)
 
     def test_host_bootstrap_is_only_one_absent_package_write(self):
         class Registry:
@@ -375,25 +378,201 @@ class PublisherTests(unittest.TestCase):
             build.assert_not_called()
 
     def test_darwin_bootstrap_requires_same_native_linux_vm_architecture(self):
-        for architecture in ("amd64", "arm64"):
+        responses = self.tool_responses(client="6.1.4", server="5.8.3", client_os="darwin")
+        responses[1] = b'{"host":{"os":"linux","arch":"amd64"}}'
+        with self.assertRaisesRegex(RuntimeError, "NATIVE_VM"):
+            self.tool_probe(responses, system="Darwin", machine="arm64", bootstrap=True)
+
+    def tool_responses(self, *, client="5.7.0", server=None, client_os="linux", architecture="arm64"):
+        version = {"Client": {"Version": client, "OsArch": client_os + "/" + architecture}}
+        if server is not None:
+            version["Server"] = {"Version": server, "OsArch": "linux/" + architecture}
+        info = {"host": {"os": "linux", "arch": architecture}, "version": {"Version": server or client}}
+        push = b"      --retry uint\n      --authfile string\n      --digestfile string\n      --tls-verify\n"
+        pull = b"      --retry uint\n      --authfile string\n      --tls-verify\n"
+        return [encoded(version), encoded(info), push, pull]
+
+    def tool_probe(self, responses, *, system="Linux", machine="aarch64", bootstrap=False):
+        self.assertTrue(hasattr(self.dev, "tool_preflight"), "selected tools must be probed before credentials")
+        output = io.StringIO()
+        self.tool_output = output
+        with patch.object(self.dev.platform, "system", return_value=system), \
+             patch.object(self.dev.platform, "machine", return_value=machine), \
+             patch.object(self.dev, "command", side_effect=responses) as run, contextlib.redirect_stdout(output):
+            value = self.dev.tool_preflight("arm64", bootstrap=bootstrap)
+        return value, output.getvalue(), run
+
+    def test_tool_preflight_records_local_engine_without_fabricated_server(self):
+        evidence, output, run = self.tool_probe(self.tool_responses())
+        self.assertEqual(evidence["client_version"], "5.7.0")
+        self.assertIsNone(evidence["server_version"])
+        self.assertEqual(evidence["engine_mode"], "local")
+        self.assertEqual(evidence["engine_version"], "5.7.0")
+        self.assertEqual(evidence["architecture"], "arm64")
+        self.assertEqual(evidence["os"], "linux")
+        self.assertEqual(json.loads(output)["status"], "READY")
+        self.assertEqual([call.args[0][1] for call in run.call_args_list], ["version", "info", "push", "pull"])
+
+    def test_tool_preflight_accepts_independent_darwin_and_native_vm_versions(self):
+        evidence, _, _ = self.tool_probe(self.tool_responses(client="6.1.4", server="5.8.3", client_os="darwin"),
+                                        system="Darwin", machine="arm64", bootstrap=True)
+        self.assertEqual((evidence["client_version"], evidence["server_version"], evidence["engine_mode"]),
+                         ("6.1.4", "5.8.3", "remote"))
+        with self.assertRaisesRegex(RuntimeError, "SERVER"):
+            self.tool_probe(self.tool_responses(client_os="darwin"), system="Darwin", machine="arm64", bootstrap=True)
+
+    def test_tool_preflight_rejects_old_push_or_pull_and_retry_delay_substring(self):
+        self.assertTrue(hasattr(self.dev, "tool_preflight"), "exact options must be checked")
+        for index in (2, 3):
+            for invalid in (self.tool_responses()[index].replace(b"--retry uint", b"--retry-delay string"),
+                            b"--authfile string\n--tls-verify\n", b"notes mention --retry but do not declare it\n", b"canary-secret\xff"):
+                responses = self.tool_responses()
+                responses[index] = invalid
+                output = io.StringIO()
+                with self.subTest(index=index, invalid=invalid), contextlib.redirect_stdout(output), self.assertRaises(RuntimeError):
+                    self.tool_probe(responses)
+                self.assertNotIn("canary-secret", self.tool_output.getvalue())
+
+    def test_tool_preflight_rejects_malformed_versions_platform_and_unknown_output(self):
+        self.assertTrue(hasattr(self.dev, "tool_preflight"), "malformed tool metadata must fail")
+        valid = self.tool_responses()
+        valid[0] = encoded({**json.loads(valid[0]), "unknown_secret": "canary-secret"})
+        _, output, _ = self.tool_probe(valid)
+        self.assertNotIn("canary-secret", output)
+        for client in (None, True, 5.7, "", "5.7", "5.7.0-canary-secret", "secret\n5.7.0"):
+            responses = self.tool_responses(client=client)
+            with self.subTest(client=client), self.assertRaises(RuntimeError):
+                self.tool_probe(responses)
+        for index, field, value in ((0, "Client", {"Version": "5.7.0", "OsArch": "linux/amd64"}),
+                                    (0, "Server", {"Version": "canary-secret", "OsArch": "linux/arm64"}),
+                                    (0, "Server", {"Version": "5.8.3", "OsArch": "windows/arm64"}),
+                                    (1, "host", {"os": "linux", "arch": "amd64"}),
+                                    (1, "version", {"Version": "canary-secret"}),
+                                    (1, "version", {"Version": "5.8.1"})):
+            responses = self.tool_responses()
+            values = json.loads(responses[index]);values[field] = value;values["unknown_secret"] = "canary-secret"
+            responses[index] = encoded(values)
+            output = io.StringIO()
+            with self.subTest(field=field, value=value), contextlib.redirect_stdout(output), self.assertRaises(RuntimeError):
+                self.tool_probe(responses)
+            self.assertNotIn("canary-secret", self.tool_output.getvalue())
+
+    def test_tool_preflight_missing_command_discards_private_diagnostics(self):
+        self.assertTrue(hasattr(self.dev, "tool_preflight"), "missing tools must refuse")
+        output = io.StringIO()
+        with patch.object(self.dev.platform, "system", return_value="Linux"), \
+             patch.object(self.dev.platform, "machine", return_value="aarch64"), \
+             patch.object(self.dev.subprocess, "run", side_effect=FileNotFoundError("canary-secret")), \
+             contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "COMMAND_FAILED") as failure:
+            self.dev.tool_preflight("arm64")
+        self.assertNotIn("canary-secret", output.getvalue() + str(failure.exception))
+
+    def test_main_tool_refusal_precedes_host_or_workflow_credentials(self):
+        self.assertTrue(hasattr(self.dev, "tool_preflight"), "tool check must run before credentials")
+        for bootstrap in (False, True):
             with tempfile.TemporaryDirectory() as directory:
-                publisher = self.publisher(object(), directory, bootstrap=True)
-                with patch.object(self.dev.platform, "system", return_value="Darwin"), \
-                     patch.object(self.dev.platform, "machine", return_value="arm64"), \
-                     patch.object(self.dev, "command", return_value=encoded({"host": {"os": "linux", "arch": architecture}})), \
-                     patch.object(self.dev, "validate_build_inputs"):
-                    with self.assertRaisesRegex(RuntimeError, "NATIVE_VM" if architecture == "amd64" else "PODMAN_PUSH_FLAGS"):
-                        publisher.build_and_smoke()
+                argv = ["dev_publish.py", "publish", "--architecture", "arm64", "--expected-commit", COMMIT,
+                        "--output-dir", directory] + (["--bootstrap-native"] if bootstrap else [])
+                env = {} if bootstrap else {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "ydixken/rpgmigrate",
+                         "GITHUB_REF": "refs/heads/feat/native-engine", "GITHUB_SHA": COMMIT, "GITHUB_TOKEN": "canary-secret"}
+                with patch.object(self.dev.sys, "argv", argv), patch.dict(os.environ, env, clear=True), \
+                     patch.object(self.dev, "source_identity", return_value=SOURCE), \
+                     patch.object(self.dev, "command", return_value=b"feat/native-engine\n") as run, \
+                     patch.object(self.dev, "tool_preflight", side_effect=RuntimeError("PODMAN_PUSH_FLAGS_UNSUPPORTED")), \
+                     patch.object(self.dev, "GHCR") as registry, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(self.dev.main(), 1)
+                    self.assertEqual(run.call_count, 1)
+                    self.assertNotIn("gh", run.call_args.args[0])
+                    registry.assert_not_called()
+                    if not bootstrap: self.assertEqual(os.environ["GITHUB_TOKEN"], "canary-secret")
+
+    def source_fixture(self, directory):
+        root = Path(directory).resolve()
+        for argv in (["git", "init", "-b", "feature"], ["git", "config", "user.name", "Fixture"],
+                     ["git", "config", "user.email", "fixture@example.invalid"],
+                     ["git", "remote", "add", "origin", SOURCE["repository"] + ".git"]):
+            subprocess.run(argv, cwd=root, check=True, capture_output=True)
+        file = root / "input";file.write_bytes(b"actual committed input")
+        subprocess.run(["git", "add", "input"], cwd=root, check=True)
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "fixture"], cwd=root, check=True, capture_output=True)
+        return root, file, subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+    def test_source_real_clean_blob_accepts_read_atime_observation_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, file, head = self.source_fixture(directory)
+            real_read, real_stat = Path.read_bytes, Path.stat
+            was_read = []
+            def read(path):
+                value = real_read(path)
+                if path == file: was_read.append(True)
+                return value
+            def observe(path, *args, **kwargs):
+                value = real_stat(path, *args, **kwargs)
+                if path == file and was_read:
+                    fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+                    fields.update(st_atime=value.st_atime + 1, st_atime_ns=value.st_atime_ns + 1000000000)
+                    return types.SimpleNamespace(**fields)
+                return value
+            with patch.object(Path, "read_bytes", read), patch.object(Path, "stat", observe):
+                identity = self.dev.source_identity(root, head)
+            self.assertEqual(identity["commit"], head)
+            self.assertEqual(file.read_bytes(), b"actual committed input")
+
+    def test_source_read_refuses_each_stable_identity_and_nanosecond_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, file, head = self.source_fixture(directory)
+            real_read, real_stat = Path.read_bytes, Path.stat
+            for field in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"):
+                was_read = []
+                def read(path):
+                    value = real_read(path)
+                    if path == file: was_read.append(True)
+                    return value
+                def observe(path, *args, **kwargs):
+                    value = real_stat(path, *args, **kwargs)
+                    if path == file and was_read:
+                        fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+                        fields[field] += 1
+                        return types.SimpleNamespace(**fields)
+                    return value
+                with self.subTest(field=field), patch.object(Path, "read_bytes", read), patch.object(Path, "stat", observe), \
+                     self.assertRaisesRegex(RuntimeError, "SOURCE_CHANGED"):
+                    self.dev.source_identity(root, head)
+
+    def test_workflow_preflight_invocation_selects_only_safe_metadata_before_credentials(self):
+        text = (PATH.parents[2] / ".github/workflows/dev-runner-image.yml").read_text()
+        code = re.search(r'python3 -B -c \\\n\s+"([^\n]+)"', text)[1].replace("${{ matrix.arch }}", "arm64")
+        responses = self.tool_responses()
+        version = json.loads(responses[0]);version["connection_secret"] = "canary-secret";responses[0] = encoded(version)
+        calls, output = [], io.StringIO()
+        def invoke(argv, **kwargs):
+            calls.append(argv)
+            self.assertFalse(kwargs.get("shell", False))
+            for key in ("GITHUB_TOKEN", "HTTPS_PROXY", "REGISTRY_AUTH_FILE"):
+                self.assertNotIn(key, kwargs["env"])
+            return subprocess.CompletedProcess(argv, 0, responses.pop(0), b"canary-secret")
+        with patch.object(self.dev.platform, "system", return_value="Linux"), \
+             patch.object(self.dev.platform, "machine", return_value="aarch64"), \
+             patch.object(self.dev.subprocess, "run", side_effect=invoke), \
+             patch.dict(os.environ, {"GITHUB_TOKEN": "canary-secret", "HTTPS_PROXY": "https://canary-secret.invalid", "REGISTRY_AUTH_FILE": "/private/canary-secret"}), \
+             contextlib.chdir(PATH.parents[2]), contextlib.redirect_stdout(output):
+            exec(code, {"__name__": "workflow_preflight_test"})
+        self.assertEqual(calls, [["podman", "version", "--format=json"], ["podman", "info", "--format=json"],
+                                 ["podman", "push", "--help"], ["podman", "pull", "--help"]])
+        self.assertEqual(json.loads(output.getvalue())["status"], "READY")
+        self.assertNotIn("canary-secret", output.getvalue())
 
     def test_workflow_restricts_branch_permissions_native_hosts_and_writer_window(self):
         text = (PATH.parents[2] / ".github/workflows/dev-runner-image.yml").read_text()
-        for value in ("feat/native-engine", "ubuntu-24.04-arm", "ubuntu-24.04", "packages: write", "contents: read", "cancel-in-progress: false", "dev-ghcr-ydixken-rpgmigrate"):
+        for value in ("feat/native-engine", "ubuntu-26.04-arm", "ubuntu-26.04", "packages: write", "contents: read", "cancel-in-progress: false", "dev-ghcr-ydixken-rpgmigrate"):
             self.assertIn(value, text)
         for forbidden in ("pull_request", "workflow_dispatch", "latest", "docker/login-action", "secrets.GH_PAT"):
             self.assertNotIn(forbidden, text)
         for line in text.splitlines():
             if "uses:" in line: self.assertRegex(line, r"@[0-9a-f]{40}")
         self.assertLess(text.index("jobs:"), text.index("packages: write"))
+        self.assertIn("tool_preflight", text)
+        self.assertLess(text.index("tool_preflight"), text.index("GITHUB_TOKEN:"))
 
 
 if __name__ == "__main__":

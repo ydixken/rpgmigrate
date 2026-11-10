@@ -84,6 +84,12 @@ def command(argv, *, cwd=ROOT, timeout=120, env=None):
         raise RuntimeError("COMMAND_FAILED") from error
 
 
+def stable_file_identity(info):
+    # Reading may update atime without changing the committed payload.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def source_identity(root, expected_commit):
     root = Path(root).resolve()
     tag_for(expected_commit, "amd64")
@@ -116,7 +122,8 @@ def source_identity(root, expected_commit):
                 "SOURCE_FILE_INVALID")
         data = path.read_bytes()
         total += len(data)
-        require(total <= 128 * MAX_JSON and len(data) == info.st_size and path.stat() == info, "SOURCE_CHANGED")
+        require(total <= 128 * MAX_JSON and len(data) == info.st_size
+                and stable_file_identity(path.stat()) == stable_file_identity(info), "SOURCE_CHANGED")
         blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
         require(committed[name] == (stat.S_IMODE(info.st_mode), blob), "SOURCE_COMMIT_CONTENT_CHANGED")
         inventory.append([name, stat.S_IMODE(info.st_mode), sha(data)])
@@ -398,6 +405,66 @@ def verify_public(receipt):
     return completed_receipt(receipt, public)
 
 
+def tool_preflight(architecture, bootstrap=False):
+    evidence = {"status": "REFUSED", "client_version": None, "server_version": None, "engine_version": None,
+                "engine_mode": None, "client_os": None, "client_architecture": None,
+                "server_os": None, "server_architecture": None, "os": None, "architecture": None,
+                "push_flags": {}, "pull_flags": {}}
+
+    def numeric(value):
+        require(type(value) is str and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", value),
+                "PODMAN_VERSION_INVALID")
+        return value
+
+    def version_fields(value, expected_os):
+        require(type(value) is dict and type(value.get("OsArch")) is str, "PODMAN_PLATFORM_INVALID")
+        os_arch = value["OsArch"].split("/")
+        require(os_arch == [expected_os, architecture]
+                and value.get("Os", expected_os) == expected_os, "PODMAN_PLATFORM_INVALID")
+        return numeric(value.get("Version")), os_arch[0], os_arch[1]
+
+    try:
+        physical_arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64"}.get(platform.machine())
+        system = platform.system()
+        require(architecture in ("arm64", "amd64") and physical_arch == architecture and (system == "Linux"
+                or bootstrap and system == "Darwin" and physical_arch == "arm64"), "NATIVE_LINUX_BUILD_REQUIRED")
+        version = decode(command(["podman", "version", "--format=json"]))
+        require(type(version) is dict, "PODMAN_VERSION_INVALID")
+        client = version_fields(version.get("Client"), system.lower())
+        evidence.update(client_version=client[0], client_os=client[1], client_architecture=client[2])
+        if "Server" in version:
+            server = version_fields(version["Server"], "linux")
+            evidence.update(server_version=server[0], server_os=server[1], server_architecture=server[2], engine_mode="remote")
+        else:
+            require(system == "Linux", "PODMAN_REMOTE_SERVER_REQUIRED")
+        runtime = decode(command(["podman", "info", "--format=json"]))
+        require(type(runtime) is dict and type(runtime.get("host")) is dict
+                and runtime["host"].get("os") == "linux" and runtime["host"].get("arch") == physical_arch,
+                "NATIVE_VM_PLATFORM_MISMATCH")
+        evidence.update(os="linux", architecture=physical_arch,
+                        engine_mode="remote" if "Server" in version else "local")
+        engine = runtime.get("version")
+        require(engine is None or type(engine) is dict, "PODMAN_VERSION_INVALID")
+        if engine is not None and "Version" in engine:
+            evidence["engine_version"] = numeric(engine["Version"])
+            require(evidence["engine_version"] == (evidence["server_version"] or evidence["client_version"]),
+                    "PODMAN_ENGINE_VERSION_MISMATCH")
+        for operation, flags in (("push", ("retry", "authfile", "digestfile", "tls-verify")),
+                                 ("pull", ("retry", "authfile", "tls-verify"))):
+            try:
+                help_text = command(["podman", operation, "--help"]).decode()
+            except UnicodeError:
+                raise RuntimeError("PODMAN_HELP_INVALID") from None
+            declared = set(re.findall(r"(?m)^[ \t]*(?:-[A-Za-z0-9],[ \t]*)?(--[a-z][a-z0-9-]*)(?=[ \t=]|$)", help_text))
+            evidence[operation + "_flags"] = {flag.replace("-", "_"): "--" + flag in declared for flag in flags}
+        require(all(evidence["push_flags"].values()), "PODMAN_PUSH_FLAGS_UNSUPPORTED")
+        require(all(evidence["pull_flags"].values()), "PODMAN_PULL_FLAGS_UNSUPPORTED")
+        evidence["status"] = "READY"
+        return evidence
+    finally:
+        print(json.dumps(evidence, sort_keys=True), flush=True)
+
+
 def validate_build_inputs(smoke):
     tracked = set(command(["git", "ls-files", "-z"]).decode().split("\0")[:-1])
     inputs = [line.split("  ", 1)[1] for line in smoke.source_manifest().splitlines()]
@@ -415,6 +482,7 @@ class Publisher:
                 "OUTPUT_DIRECTORY_MUST_BE_PRIVATE_EXTERNAL")
         require(not (self.output / "publication.json").exists(), "PUBLICATION_STATE_ALREADY_EXISTS")
         self.smoke = None
+        self.toolchain = None
 
     def state(self, value):
         write_private(self.output / "publication.json", value)
@@ -424,16 +492,8 @@ class Publisher:
         require(source_identity(ROOT, self.source["commit"]) == self.source, "SOURCE_CHANGED")
 
     def build_and_smoke(self):
-        physical_arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64"}.get(platform.machine())
-        require(physical_arch == self.architecture and (platform.system() == "Linux"
-                or self.bootstrap and platform.system() == "Darwin" and physical_arch == "arm64"),
-                "NATIVE_LINUX_BUILD_REQUIRED")
-        runtime = decode(command(["podman", "info", "--format=json"]))
-        require(type(runtime) is dict and type(runtime.get("host")) is dict
-                and runtime["host"].get("os") == "linux" and runtime["host"].get("arch") == physical_arch,
-                "NATIVE_VM_PLATFORM_MISMATCH")
-        help_text = command(["podman", "push", "--help"]).decode()
-        require(all(flag in help_text for flag in ("--retry", "--authfile", "--digestfile", "--tls-verify")), "PODMAN_PUSH_FLAGS_UNSUPPORTED")
+        if self.toolchain is None:
+            self.toolchain = tool_preflight(self.architecture, bootstrap=self.bootstrap)
         spec = importlib.util.spec_from_file_location("publication_smoke", ROOT / "tools/image/smoke.py")
         smoke = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(smoke)
@@ -574,19 +634,24 @@ def main():
             require(command(["git", "branch", "--show-current"]).decode().strip() == BRANCH, "SOURCE_BRANCH_NOT_AUTHORIZED")
             if args.bootstrap_native:
                 require(not os.environ.get("GITHUB_ACTIONS"), "FIRST_PACKAGE_HOST_ONLY")
-                token = command(["gh", "auth", "token"]).decode().strip()
-                username = "ydixken"
             else:
                 require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("GITHUB_EVENT_NAME") == "push"
                         and os.environ.get("GITHUB_REPOSITORY") == "ydixken/rpgmigrate"
                         and os.environ.get("GITHUB_REF") == "refs/heads/" + BRANCH
                         and os.environ.get("GITHUB_SHA") == source["commit"], "WORKFLOW_SOURCE_NOT_AUTHORIZED")
+            with contextlib.redirect_stdout(sys.stderr):
+                toolchain = tool_preflight(args.architecture, bootstrap=args.bootstrap_native)
+            if args.bootstrap_native:
+                token = command(["gh", "auth", "token"]).decode().strip()
+                username = "ydixken"
+            else:
                 token, username = os.environ.pop("GITHUB_TOKEN", None), os.environ.get("GITHUB_ACTOR")
             require(type(token) is str and token and not any(ord(char) < 33 for char in token), "PUBLICATION_TOKEN_REQUIRED")
             registry = GHCR(source, args.architecture, token, username, args.bootstrap_native)
             retained = read_private(args.retained_receipt) if args.retained_receipt else None
             publisher = Publisher(registry, args.output_dir, source, args.architecture, retained=retained,
                                   bootstrap=args.bootstrap_native)
+            publisher.toolchain = toolchain
             if args.bootstrap_native:
                 lock_root = Path.home() / ".rpgmigrate-publication"
                 lock_root.mkdir(mode=0o700, exist_ok=True)
