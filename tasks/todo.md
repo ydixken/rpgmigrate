@@ -704,18 +704,33 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### Evidence checkpoint, 2026-11-10
 
 Production native admission still returns `UnsupportedEngine`; no actual native operator workflow is qualified.
-The accepted operator source checkpoint is `aaad6c7e117f94e9997194b86ecfe65e1995add0`, tree `a23e9dcc39d6c5c519050563ca0ae4c39bd8faa8`, with a clean checkout recorded in its proof.
-The signed chain adds identity receipts/worker TTL (`9fbf51506e0b601c90004962bb25fdae4b35395f`), retained TERM primitives (`57591ce8daead4659cd226c5649622a0aba28b0d`), and bounded clone capture/parsing (`aaad6c7e117f94e9997194b86ecfe65e1995add0`); each intermediate tree compiled and passed scoped lint with zero findings.
-The composed source passed 288 named focused race checks and nineteen existing final-proof-join race checks, with zero failures or skips; broad Go gates and whole-M6 review remain open.
-Proof: `/tmp/m6-lifecycle-components-integration-export-20261110/checkpoint-manifest.json`, SHA-256 `15fc47e882e9863980e3440b716afc8f13e5d3e4f1a3b6db64071f26baac75f7`.
-The follow/E/ACK/target-join component export passed 81 focused race checks and scoped lint with zero findings, but is not integrated and ran no actual SQL, Kubernetes, or native engine process.
-Proof: `/tmp/m6-follow-flow-export-20261110/manifest.json`, SHA-256 `1f78346be36e277a54d3f9cfaa0935f35f51af9af723a562034e401ef9674040`.
-The cleaned-completion producer, plain-clone finalization, helper TTL retention, sampler publication, main dependency injection/dispatch, and production runner-profile qualification remain open.
-The root-approved interface freeze requires optional `nativeJobUID`/`nativePVCUID` fields as atomic known-create receipts, strict refusal to adopt when receipts are absent, and each invocation's Pod identity bound to the recorded Job/PVC.
-Native worker Job TTL must remain unset until durable lifecycle completion; retained TERM handling must be followed by independently observed quiescence.
-ACK helper joining exposed an evidence-retention gap: user TTL zero or a short TTL can delete a checked helper before capture and final proof joining.
-The revised helper plan requires separate native evidence-bearing helper retention through capture/proof joining and exact-UID cleanup; implementation remains pending, without a broader legacy TTL change.
+The accepted operator source checkpoint is `f8214a63db1f7e421157f3024aa2afb394621ffe`, tree `5e071d1f79a67579c701598c464e7363c596f1d8`, with clean authoritative and isolated checkouts recorded in its proof.
+Five signed completion commits add helper receipts (`30686fa`), evidence retention (`50be291`), cleaned completion (`d937958`), follow/E/ACK dependency composition (`d87c920`), and plain-clone completion/verification (`6a27266`).
+Each prefix compiled and passed scoped lint with zero findings, with byte-identical qualified final-tree evidence reused where recorded.
+Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json`, SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
+Sampler publication and metrics then entered signed checkpoint `f8214a6` through an exact sealed seven-file relocation into an isolated worktree, preserving all 662 tracked peers.
+Its source-equivalent 73 named focused race checks passed without failures or skips; fresh compilation and scoped lint passed with zero findings.
+Sampler proof: `/tmp/m6-sampler-checkpoint-integration-20261110/checkpoint-manifest.json`, SHA-256 `a1835132bd9fd90de693cd2dcfdaca85ef587f338f121a7f70c213f158c7407e`.
+These are source/component checkpoints; no broad Go suite, whole-M6 review, actual SQL/Kubernetes/native operator workflow, or runtime qualification follows.
+
+The root-approved completion-rejoin amendment requires separate partial-cleanup admission for flags `00`, `10`, and `01`, with actual target-row completion authority and completion-only credential-free version discovery.
+Ordinary active admission and the fully cleaned predicate remain unchanged; status and resource inventory cannot authorize completion.
+Private plan: `/tmp/rpgmigrate-m6-completion-rejoin-plan-20261110/2026-11-10-m6-completion-rejoin-amendment.md`, SHA-256 `1b4dfa9c7051a4037c92be38520d09bbcf4ce52f0e8a7e3f6d2fe5d9fd294dbf`.
+Preflight six-path, partial-cleanup twelve-path, and finalizer twelve-path packets are component-qualified but not integrated at this checkpoint.
+The finalizer successor includes the production constant-build repair and stale-failed-condition repair; its actual production build, 39 affected race checks, and scoped lint passed with zero findings.
+Its older 335-race-check packet retains separate provenance and is not relabeled as qualification of the repaired successor.
+Finalizer proof: `/tmp/m6-clone-stale-failure-repair-export-20261110/manifest.json`, SHA-256 `3dfc5322c44bb678da6d966621a2b91a495bc86590099ce0646d2bbf75b1525c`.
+Main/recovery dispatch integration and terminal replay after helper disposal remain open, with the latter requiring its policy plan.
+The root-approved interface freeze retains atomic known-create `nativeJobUID`/`nativePVCUID` receipts, refusal to adopt absent receipts, invocation-bound Pod identity, worker TTL retention, and independently observed quiescence after TERM.
+Native evidence-bearing helper retention is checkpointed; exact-UID disposal and terminal replay still require composed lifecycle qualification.
+Native runner-profile Task 1/Task 2 packets are frozen with passing component checks; actual NSS, authentication/TLS, PVC/provider behavior, and canonical runtime admission remain unqualified.
+Canonical NSS/resolver guards and `UnsupportedEngine` remain closed; production runner-profile qualification, three-pair native acceptance, broad Go gates, and the whole-M6 review remain open.
 Actual Kubernetes TERM and the full native lifecycle remain unqualified.
+
+The preceding `aaad6c7` lifecycle checkpoint added identity receipts/worker TTL, retained TERM primitives, and bounded clone capture/parsing, with 288 named focused race checks and nineteen final-proof-join race checks.
+Prior lifecycle proof: `/tmp/m6-lifecycle-components-integration-export-20261110/checkpoint-manifest.json`, SHA-256 `15fc47e882e9863980e3440b716afc8f13e5d3e4f1a3b6db64071f26baac75f7`.
+The earlier follow/E/ACK/target-join export passed 81 focused race checks and zero scoped lint findings before its composition in `d87c920`; it ran no actual SQL, Kubernetes, or native engine process.
+Prior follow proof: `/tmp/m6-follow-flow-export-20261110/manifest.json`, SHA-256 `1f78346be36e277a54d3f9cfaa0935f35f51af9af723a562034e401ef9674040`.
 
 The preceding operator checkpoint `9fd9061790f158ee8c65908113029ac667da68ba`, tree `53d2abe0385d28918d99d45cb71057dd24575739`, added worker locale pinning (`73c8a9b`), owned cleanup builders (`35f4ae3`), informational sampling (`f1ca944`), and identity status fields (`9fd9061`); each intermediate tree compiled and passed scoped lint with zero findings.
 Prior proof: `/tmp/rpgmigrate-m6-ready-exports-composed-20261110/integrated-manifest.json`, SHA-256 `4709a0d229a45d59d0f59de328fec702b39bf22bc8144032f604fc9f0a276b25`.
@@ -926,6 +941,17 @@ Application write fencing and ending outstanding transactions remain the operato
 
 ### Evidence checkpoint, 2026-11-10
 
+The fresh `f59a7f4b` M7 source passed UP, supervisor handover, and LOAD for the PostgreSQL 18 component/API profile.
+Its legacy gate FAILED during storage-probe image-ID recognition: the actual probe Pod Succeeded with exit zero and bound PVC/PV, but the wrapper refused the exact declared tag at its selected manifest.
+Go migration tests and the metrics observer did not run; no legacy or native workflow acceptance follows.
+Failure proof: `/private/var/tmp/rpgmigrate-m7-tagged-legacy-gate-6s2i181n/final-failed-gate-proof.json`, SHA-256 `269d0780ab532117842ce072674dbd4356c41c21f7873c64050fa61872afcc92`.
+The private declared-imageID fix has source inventory SHA-256 `b5da9c9aa6a0142fd27eaf69950d639c9be68363376be2f930cbe3662f2259a3` at `/private/var/tmp/rpgmigrate-declared-imageid-candidate-zad1graq/source`.
+It changes five paths, preserves 527 peers, and passed one full 259-test Python run, thirty top-level/186 named focused Go checks, and zero scoped lint findings.
+Independent verification and fresh workflow acceptance remain pending; the retained failed gate is unchanged.
+Six old unused kind volumes have independent read-only candidate proof, and none were deleted.
+Proof: `/private/var/tmp/rpgmigrate-m7-unused-volume-safety-c3anxbon/final-candidate-proof.json`, SHA-256 `06fe68baef50633e019b070f32605ebdb4f39b9eaeea4ee4f426b2bc09428f12`.
+The current S2 baseline protects all prior volumes; any execution must wait for its retirement and revalidate the exact sealed ownership/reference barrier immediately before non-force removal.
+
 The M7 `c275` source passed fresh UP/CHECK and qualified supervisor handover after its retained PREPARE/CHECK success.
 Its first LOAD pair FAILED: default `ctr images tag` dropped labels and CRI retargeted the existing config-ID key from the prepared child manifest to its one-child archive index.
 No legacy or native migration test ran.
@@ -937,7 +963,7 @@ Exact retirement of the old `c275` nodes and S2 passed, with their processes/cgr
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-c275-retirement-sx7gdvy6/final-retirement-proof.json`, SHA-256 `f184619aef2dbd2f3c7b408415095e4f6d0320da7c0227ac4fc85f5e8f3a9d0a`.
 Fresh `f410` PREPARE/CHECK passed for RUN `/private/var/tmp/rpgmigrate-m7-local-run-g3o_x2i9`, RunID `048dc2ed3e044990bc25f7a11d7a91e0`, using manager config `09b96b6eed4b3a55f6a2933c7f98fa0e765191a5559d54b3a1c555388ca8a660` and build VERSION `m7-f41042c308ba`; the preparation proof does not qualify the runtime version.
 Preparation proof: `/private/var/tmp/rpgmigrate-m7-local-preparation-1k5qtccq/final-artifact-packet.json`, SHA-256 `16ded43c7d7fd9dae5075eba3d357ebd1fcb09cb13a5326ec21b8e67af53ce5a`.
-The fresh UP command returned under a fixed lease ending at 05:06:57.016634 UTC on 2026-11-10; full-ready CHECK, supervisor handover, LOAD, and legacy execution remain unqualified at this checkpoint.
+That earlier fresh UP command returned under a fixed lease ending at 05:06:57.016634 UTC on 2026-11-10; it did not itself qualify full-ready CHECK, supervisor handover, LOAD, or legacy execution.
 The old lease was not renewed, and the historical `c275` LOAD receipt remains FAILED.
 The capacity baseline is fourteen CPUs, 32 GiB memory, and 160 GiB disk; runtime admission still requires fresh capacity evidence.
 M0–M5 remain closed and M6–M10 remain open.

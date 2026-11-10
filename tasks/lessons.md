@@ -489,3 +489,10 @@ Confirm that a CLI test driver actually supports a requested selector before rep
 Update `docs/roadmap.md` and `tasks/todo.md` together when an accepted checkpoint changes milestone evidence or remaining gates.
 Keep M0–M5 closed and M6–M10 open until their full acceptance evidence passes; fresh packaging or PREPARE/CHECK does not close native lifecycle or legacy workflow gates.
 Retain historical failures under their original input identities and record successor results separately.
+
+## Verify implementation isolation before granting a file lease, 2026-11-10
+
+Before granting a source-file lease, the leader MUST receive and verify a distinct worktree path, feature branch, and exact HEAD.
+The authoritative checkout MUST NOT be an implementation destination.
+If owned edits reach the wrong checkout, first preserve an exact sealed copy in the isolated worktree, then reverse only the owned verified patch while preserving all other work.
+Do not use `reset --hard`, `clean`, or broad restoration to recover isolation.
