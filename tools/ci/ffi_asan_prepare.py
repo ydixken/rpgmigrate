@@ -30,6 +30,8 @@ DEB_PINS = {"amd64": "139cb82e16e75fcdd4a56562804ff9bfb482b65d0929580d621d280880
             "arm64": "1d9c87ff9fe17d0ee00703ec0f339ab687e2807b3508b51cf517e05281de104d"}
 SYMBOLIZER = Path("/usr/lib/llvm-18/bin/llvm-symbolizer")
 STAGES = ("admission", "toolchain", "graphs", "symbolizer", "control", "retention", "bindings")
+ADMISSION_SUBSTAGES = ("uid", "native-architecture", "dpkg-architecture", "os-release", "binfmt", "project-lock",
+                      "public-pin", "runner-image", "scratch-disk", "available-memory", "core-limit", "complete")
 GIB = 1024 ** 3
 HEX = re.compile(r"[0-9a-f]{64}")
 PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?::(?:amd64|arm64))?")
@@ -845,8 +847,9 @@ def run_controls(supervisor, target):
 
 def new_attempt(target):
     require(target in asan.TARGETS)
-    return {"schema_version": 1, "kind": "rpgmigrate-asan-preparation", "scope": "native-inventory-and-symbolization-control",
+    return {"schema_version": 2, "kind": "rpgmigrate-asan-preparation", "scope": "native-inventory-and-symbolization-control",
             "qualification": "not-assessed", "target": target, "status": "failed",
+            "admission_substage": None,
             "stages": {name: {"status": "not-run", "reason": "none"} for name in STAGES},
             "owned_children_reaped": False, "public_pin_unchanged": False, "artifacts": {},
             "first_failure": {"stage": "none", "reason": "none"}}
@@ -854,10 +857,12 @@ def new_attempt(target):
 
 def validate_attempt(attempt):
     require(type(attempt) is dict and set(attempt) == set(new_attempt(next(iter(asan.TARGETS)))))
-    require(type(attempt["schema_version"]) is int and attempt["schema_version"] == 1 and
+    require(type(attempt["schema_version"]) is int and attempt["schema_version"] == 2 and
             attempt["kind"] == "rpgmigrate-asan-preparation" and attempt["scope"] == "native-inventory-and-symbolization-control" and
             attempt["qualification"] == "not-assessed" and attempt["target"] in asan.TARGETS and attempt["status"] == "failed")
     require(type(attempt["owned_children_reaped"]) is bool and type(attempt["public_pin_unchanged"]) is bool)
+    substage = attempt["admission_substage"]
+    require(substage is None or (type(substage) is str and substage in ADMISSION_SUBSTAGES))
     require(type(attempt["first_failure"]) is dict and set(attempt["first_failure"]) == {"stage", "reason"} and
             attempt["first_failure"]["stage"] in (*STAGES, "none") and attempt["first_failure"]["reason"] in CODES | {"none"})
     require(type(attempt["stages"]) is dict and set(attempt["stages"]) == set(STAGES))
@@ -866,6 +871,8 @@ def validate_attempt(attempt):
                 value["status"] in ("passed", "failed", "incomplete", "not-run") and value["reason"] in CODES | {"none"})
         require((value["status"] in ("passed", "not-run")) == (value["reason"] == "none"))
         require(value["status"] != "incomplete" or (name == "graphs" and value["reason"] == "inventory-incomplete"))
+    require(attempt["stages"]["admission"]["status"] != "passed" or substage == "complete")
+    require(attempt["stages"]["admission"]["status"] != "not-run" or substage is None)
     failures = [name for name in STAGES if attempt["stages"][name]["status"] in ("failed", "incomplete")]
     expected_failure = {"stage": failures[0], "reason": attempt["stages"][failures[0]]["reason"]} if failures else {"stage": "none", "reason": "none"}
     require(attempt["first_failure"] == expected_failure)
@@ -893,25 +900,37 @@ def source_binding(supervisor):
     return {"commit": commit, "tree": tree, "files": files}
 
 
-def admit(supervisor, target, parent, pin):
+def admit(supervisor, target, parent, pin, attempt):
+    attempt["admission_substage"] = "uid"
     require(os.getuid() != 0, "admission")
+    attempt["admission_substage"] = "native-architecture"
     asan.native_target(target)
+    attempt["admission_substage"] = "dpkg-architecture"
     architecture = supervisor.run(["/usr/bin/dpkg", "--print-architecture"]).stdout.strip()
     require(architecture == asan.TARGETS[target][2], "admission")
+    attempt["admission_substage"] = "os-release"
     release = Path("/etc/os-release").read_text()
     require(re.search(r"^ID=ubuntu$", release, re.MULTILINE) and re.search(r'^VERSION_ID="24\.04"$', release, re.MULTILINE), "admission")
+    attempt["admission_substage"] = "binfmt"
     binfmt = Path("/proc/sys/fs/binfmt_misc")
     entries = [path for path in binfmt.iterdir() if path.name not in ("register", "status")] if binfmt.is_dir() else []
     require(not entries, "admission")
-    require(sha256(ROOT / "Cargo.lock") == pin["compatibility"]["lockfile_sha256"] and
-            pin["external_symbolizer"]["status"] == "qualification-required", "admission")
+    attempt["admission_substage"] = "project-lock"
+    require(sha256(ROOT / "Cargo.lock") == pin["compatibility"]["lockfile_sha256"], "admission")
+    attempt["admission_substage"] = "public-pin"
+    require(pin["external_symbolizer"]["status"] == "qualification-required", "admission")
+    attempt["admission_substage"] = "runner-image"
     image = {key: parent.get(key, "") for key in ("ImageOS", "ImageVersion")}
     require(image["ImageOS"] == "ubuntu24" and re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", image["ImageVersion"]), "admission")
+    attempt["admission_substage"] = "scratch-disk"
     free = shutil.disk_usage(supervisor.run_dir).free
     require(free >= 12 * GIB, "admission")
+    attempt["admission_substage"] = "available-memory"
     memory = re.search(r"^MemAvailable: +([0-9]+) kB$", Path("/proc/meminfo").read_text(), re.MULTILINE)
     require(memory and int(memory[1]) * 1024 >= 6 * GIB, "admission")
+    attempt["admission_substage"] = "core-limit"
     require(resource.getrlimit(resource.RLIMIT_CORE)[0] == 0, "admission")
+    attempt["admission_substage"] = "complete"
     return {"machine": asan.TARGETS[target][0], "dpkg_architecture": architecture,
             "runner_image": image, "binfmt": "no-registered-interpreters", "core_limit_bytes": 0,
             "host_available_memory_bytes": int(memory[1]) * 1024,
@@ -962,7 +981,7 @@ def execute(args):
         pin = asan.load_pin(pin_path)
         pin_hash = sha256(pin_path)
         provenance["effective_cgroup"] = cgroup_limits(Path("/proc/self/cgroup").read_text())
-        provenance["native"] = admit(supervisor, args.target, parent, pin)
+        provenance["native"] = admit(supervisor, args.target, parent, pin, attempt)
         source = source_binding(supervisor)
         provenance["source"] = source
         provenance["public_pin_sha256"] = pin_hash

@@ -2,6 +2,7 @@
 
 import ast
 import copy
+from contextlib import ExitStack
 import importlib.util
 import io
 import json
@@ -370,10 +371,13 @@ class PreparationTests(unittest.TestCase):
                 return report
             source = {"commit": "a" * 40, "tree": "b" * 40, "files": [{"source": "Cargo.toml", "sha256": "c" * 64}]}
             graph = {"graphs": {"cli": {"units": 1}, "libtest": {"units": 1}}, "selected_closure": "not-extracted"}
+            def admission(*arguments):
+                arguments[-1]["admission_substage"] = "complete"
+                return {"machine": "x86_64"}
             with patch.dict(os.environ, {"RUNNER_TEMP": str(root)}, clear=True), \
                     patch.object(self.prep, "reject_overrides"), patch.object(self.prep, "cgroup_limits", return_value={}), \
                     patch.object(self.prep.Path, "read_text", autospec=True, side_effect=lambda path, *a, **k: "0::/cell\n" if str(path) == "/proc/self/cgroup" else Path.read_bytes(path).decode()), \
-                    patch.object(self.prep, "admit", return_value={"machine": "x86_64"}), \
+                    patch.object(self.prep, "admit", side_effect=admission), \
                     patch.object(self.prep, "source_binding", return_value=source), \
                     patch.object(self.prep.resource, "setrlimit"), \
                     patch.object(self.prep, "prepare_toolchain", side_effect=prepare), \
@@ -388,6 +392,7 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(attempt["stages"]["control"]["status"], "passed")
             self.assertEqual(attempt["first_failure"], {"stage": "graphs", "reason": "inventory-incomplete"})
             self.assertTrue(attempt["public_pin_unchanged"])
+            self.assertEqual(attempt["admission_substage"], "complete")
             for path in public.iterdir():
                 self.assertNotIn(CANARY, path.read_text())
                 self.assertNotIn(str(root), path.read_text())
@@ -431,6 +436,7 @@ class PreparationTests(unittest.TestCase):
             attempt = json.loads(args.receipt.read_text())
             self.assertEqual(attempt["first_failure"], {"stage": "admission", "reason": "configuration"})
             self.assertEqual(attempt["stages"]["toolchain"]["status"], "not-run")
+            self.assertIsNone(attempt["admission_substage"])
             self.assertNotIn(CANARY, "".join(path.read_text() for path in public.iterdir()))
 
     def test_receipt_rejects_inconsistent_stage_reason_and_first_failure(self):
@@ -617,12 +623,14 @@ class PreparationTests(unittest.TestCase):
                     patch.object(self.prep.shutil, "disk_usage", return_value=SimpleNamespace(free=free)), \
                     patch.object(self.prep.resource, "getrlimit", return_value=(0, 0)):
                 if admitted:
-                    value = self.prep.admit(supervisor, TARGET, parent, pin)
+                    attempt = self.prep.new_attempt(TARGET)
+                    value = self.prep.admit(supervisor, TARGET, parent, pin, attempt)
+                    self.assertEqual(attempt["admission_substage"], "complete")
                     self.assertEqual(value["host_available_memory_bytes"], memory_kib * 1024)
                     self.assertEqual(value["scratch"]["enforcement"], "bounded-monitor-not-hard-quota")
                 else:
                     with self.assertRaises(RuntimeError):
-                        self.prep.admit(supervisor, TARGET, parent, pin)
+                        self.prep.admit(supervisor, TARGET, parent, pin, self.prep.new_attempt(TARGET))
 
     def test_first_graph_child_failure_preserves_failure_and_collects_independent_libtest_shape(self):
         calls = []
@@ -638,6 +646,138 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(shapes["graphs"]["libtest"]["units"], 0)
         with self.assertRaisesRegex(RuntimeError, "graphs"):
             self.prep.require_selected_closure(shapes)
+
+    def admission_attempt(self, refusal):
+        pin = self.prep.asan.load_pin(SCRIPT.with_name("ffi_asan_toolchain.toml"))
+        if refusal == "public-pin":
+            pin["external_symbolizer"]["status"] = "qualified"
+        real_read = Path.read_text
+        real_is_dir, real_iterdir = Path.is_dir, Path.iterdir
+        real_sha, real_admit = self.prep.sha256, self.prep.admit
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            public = root / "public"
+            public.mkdir(mode=0o700)
+            args = SimpleNamespace(target=TARGET, run_dir=root / "private", receipt=public / "attempt.json")
+            parent = {"RUNNER_TEMP": str(root), "ImageOS": "ubuntu24", "ImageVersion": "20261101.360.1"}
+            if refusal == "runner-image":
+                parent["ImageVersion"] = CANARY
+
+            def read(path, *args, **kwargs):
+                name = str(path)
+                if refusal == "os-release-exception" and name == "/etc/os-release":
+                    raise OSError(CANARY)
+                if refusal == "memory-exception" and name == "/proc/meminfo":
+                    raise OSError(CANARY)
+                values = {"/proc/self/cgroup": "0::/cell\n", "/etc/os-release": 'ID=ubuntu\nVERSION_ID="24.04"\n',
+                          "/proc/meminfo": f"MemAvailable: {7 * 1024 ** 2} kB\n"}
+                if refusal == "os-release":
+                    values["/etc/os-release"] = CANARY
+                if refusal == "available-memory":
+                    values["/proc/meminfo"] = f"MemAvailable: {5 * 1024 ** 2} kB\n"
+                return values[name] if name in values else real_read(path, *args, **kwargs)
+
+            def is_dir(path):
+                if str(path) == "/proc/sys/fs/binfmt_misc":
+                    if refusal == "binfmt-exception":
+                        raise OSError(CANARY)
+                    return refusal == "binfmt"
+                return real_is_dir(path)
+
+            def children(path):
+                if str(path) == "/proc/sys/fs/binfmt_misc":
+                    return iter([Path("/proc/sys/fs/binfmt_misc/qemu-foreign")])
+                return real_iterdir(path)
+
+            def digest(path):
+                if Path(path) == self.prep.ROOT / "Cargo.lock":
+                    if refusal == "lock-exception":
+                        raise OSError(CANARY)
+                    if refusal == "project-lock":
+                        return "0" * 64
+                return real_sha(path)
+
+            def native(*args):
+                if refusal == "native-exception":
+                    raise RuntimeError(CANARY)
+
+            def command(argv, **kwargs):
+                if refusal == "dpkg-exception":
+                    raise RuntimeError(CANARY)
+                self.assertEqual(argv, ["/usr/bin/dpkg", "--print-architecture"])
+                return subprocess.CompletedProcess(argv, 0, "arm64\n" if refusal == "dpkg-architecture" else "amd64\n", "")
+
+            def admission(*args):
+                with patch.object(self.prep.os, "getuid", return_value=0 if refusal == "uid" else 1000):
+                    return real_admit(*args)
+
+            def core(_):
+                if refusal == "core-exception":
+                    raise OSError(CANARY)
+                return (1, 1) if refusal == "core-limit" else (0, 0)
+
+            stack.enter_context(patch.dict(os.environ, parent, clear=True))
+            stack.enter_context(patch.object(self.prep.resource, "setrlimit"))
+            stack.enter_context(patch.object(self.prep.resource, "getrlimit", side_effect=core))
+            stack.enter_context(patch.object(self.prep, "reject_overrides"))
+            stack.enter_context(patch.object(self.prep.asan, "load_pin", return_value=pin))
+            stack.enter_context(patch.object(self.prep.asan, "native_target", side_effect=native))
+            stack.enter_context(patch.object(self.prep, "admit", side_effect=admission))
+            stack.enter_context(patch.object(self.prep, "sha256", side_effect=digest))
+            stack.enter_context(patch.object(self.prep.Path, "read_text", autospec=True, side_effect=read))
+            stack.enter_context(patch.object(self.prep.Path, "is_dir", autospec=True, side_effect=is_dir))
+            stack.enter_context(patch.object(self.prep.Path, "iterdir", autospec=True, side_effect=children))
+            stack.enter_context(patch.object(self.prep, "cgroup_limits", return_value={"ancestor_limits_checked": True}))
+            stack.enter_context(patch.object(self.prep.Supervisor, "run", side_effect=command))
+            stack.enter_context(patch.object(self.prep.shutil, "disk_usage", return_value=SimpleNamespace(
+                free=(11 if refusal == "scratch-disk" else 13) * self.prep.GIB)))
+            source = stack.enter_context(patch.object(self.prep, "source_binding"))
+            toolchain = stack.enter_context(patch.object(self.prep, "prepare_toolchain"))
+            child = stack.enter_context(patch.object(self.prep.subprocess, "Popen"))
+            self.assertEqual(self.prep.execute(args), 1)
+            source.assert_not_called()
+            toolchain.assert_not_called()
+            child.assert_not_called()
+            attempt = json.loads(real_read(args.receipt))
+            retained = "".join(real_read(path) for path in real_iterdir(public))
+            self.assertNotIn(CANARY, retained)
+            self.assertNotIn(str(root), retained)
+            self.assertFalse(attempt["public_pin_unchanged"])
+            self.assertEqual(attempt["first_failure"], {"stage": "admission", "reason": "admission"})
+            self.assertTrue(all(attempt["stages"][stage]["status"] == "not-run" for stage in self.prep.STAGES if stage != "admission"))
+            return attempt
+
+    def test_nine_admission_refusals_identify_closed_substage_without_changing_failure(self):
+        for refusal in ("uid", "dpkg-architecture", "os-release", "binfmt", "project-lock", "runner-image",
+                        "scratch-disk", "available-memory", "core-limit"):
+            with self.subTest(refusal=refusal):
+                attempt = self.admission_attempt(refusal)
+                self.assertEqual(attempt.get("admission_substage"), refusal)
+
+    def test_admission_exceptions_identify_native_file_and_resource_operation(self):
+        for refusal, expected in (("native-exception", "native-architecture"), ("dpkg-exception", "dpkg-architecture"),
+                                  ("os-release-exception", "os-release"), ("binfmt-exception", "binfmt"),
+                                  ("lock-exception", "project-lock"), ("memory-exception", "available-memory"),
+                                  ("core-exception", "core-limit"), ("public-pin", "public-pin")):
+            with self.subTest(refusal=refusal):
+                self.assertEqual(self.admission_attempt(refusal).get("admission_substage"), expected)
+
+    def test_attempt_schema_two_requires_nullable_closed_admission_substage(self):
+        self.assertEqual(self.prep.ADMISSION_SUBSTAGES,
+                         ("uid", "native-architecture", "dpkg-architecture", "os-release", "binfmt", "project-lock",
+                          "public-pin", "runner-image", "scratch-disk", "available-memory", "core-limit", "complete"))
+        attempt = self.prep.new_attempt(TARGET)
+        self.assertEqual(attempt["schema_version"], 2)
+        self.assertIn("admission_substage", attempt)
+        self.assertIsNone(attempt["admission_substage"])
+        self.prep.validate_attempt(attempt)
+        for change in ({"admission_substage": CANARY}, {"admission_substage": 1},
+                       {"admission_substage": []}, {"schema_version": 1}, {"admission_substage": "uid"}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.prep.validate_attempt({**attempt, **change})
+        del attempt["admission_substage"]
+        with self.assertRaises(RuntimeError):
+            self.prep.validate_attempt(attempt)
 
     def test_workflow_is_feature_only_fixed_native_readonly_and_failure_preserving(self):
         workflow = SCRIPT.parents[2] / ".github/workflows/asan-prepare.yml"
