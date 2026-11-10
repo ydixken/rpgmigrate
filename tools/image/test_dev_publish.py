@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
+import traceback
 import io
 import urllib.error
 import types
@@ -562,6 +563,112 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["status"], "READY")
         self.assertNotIn("canary-secret", output.getvalue())
 
+    def unknown_push_fixture(self, directory):
+        class Registry:
+            token = "canary-secret"
+            username = "ydixken"
+            reads = 0
+            def package(self, bootstrap=False): return {"visibility": "public"}
+            def lookup(self, tag): return None
+            def raw_graph(registry, reference):
+                registry.reads += 1
+                raise RuntimeError("READBACK_UNCERTAIN")
+        registry = Registry()
+        return self.publisher(registry, directory), registry
+
+    def assert_push_diagnostic(self, directory, *, stage, failure, attempted, return_code=None, timed_out=False,
+                               stderr_class="UNOBSERVED"):
+        path = Path(directory) / "push-failure.json"
+        self.assertTrue(path.is_file(), "unknown push must retain fixed diagnostic facts")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        value = json.loads(path.read_bytes())
+        expected = {"schema_version": 1, "source": SOURCE, "architecture": "arm64", "tag": "dev-" + COMMIT + "-arm64",
+                    "stage": stage, "failure": failure, "launch_attempted": attempted, "return_code": return_code,
+                    "timed_out": timed_out, "stderr_class": stderr_class}
+        self.assertEqual(value, expected)
+        self.assertNotIn("canary", path.read_text())
+        self.assertNotIn("process_started", value)
+        return value
+
+    def test_every_push_failure_keeps_unknown_one_readback_and_fixed_diagnostics(self):
+        cases = [("auth", "AUTH_VALIDATION", "AUTH_INVALID", False, None, False, "UNOBSERVED"),
+                 ("prepare", "AUTH_VALIDATION", "NO_INVOCATION", False, None, False, "UNOBSERVED"),
+                 ("launch", "LAUNCH", "LAUNCH_ERROR", True, None, False, "UNOBSERVED"),
+                 ("return", "RETURN", "NONZERO_EXIT", True, 125, False, "PERMISSION"),
+                 ("timeout", "RETURN", "TIMEOUT", True, None, True, "NETWORK"),
+                 ("cap", "RETURN", "OUTPUT_LIMIT", True, 0, False, "OTHER"),
+                 ("missing", "DIGEST", "DIGEST_IO_ERROR", True, 0, False, "UNOBSERVED"),
+                 ("malformed", "DIGEST", "DIGEST_INVALID", True, 0, False, "UNOBSERVED"),
+                 ("cleanup", "RETURN", "CLEANUP_ERROR", True, 0, False, "UNOBSERVED")]
+        for case, stage, failure, attempted, return_code, timed_out, stderr_class in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                publisher, registry = self.unknown_push_fixture(directory)
+                if case == "auth": registry.token = ""
+                real_write = self.dev.write_private
+                real_temporary = tempfile.TemporaryDirectory
+                @contextlib.contextmanager
+                def temporary(*args, **kwargs):
+                    with real_temporary(*args, **kwargs) as private:
+                        yield private
+                    if case == "cleanup": raise OSError("canary-cleanup-path")
+                def write(path, value):
+                    if case == "prepare" and Path(path).name == "auth.json": raise OSError("canary-private-path")
+                    return real_write(path, value)
+                def invoke(argv, **kwargs):
+                    if case == "launch": raise FileNotFoundError("canary-exception-path")
+                    if case == "return": raise subprocess.CalledProcessError(125, ["canary-argv"], output=b"canary-output", stderr=b"permission denied canary-stderr")
+                    if case == "timeout": raise subprocess.TimeoutExpired(["canary-argv"], 600, output=b"canary-output", stderr=b"connection refused canary-stderr")
+                    if case in ("malformed", "cleanup"):
+                        Path(argv[argv.index("--digestfile") + 1]).write_text("canary-invalid-digest" if case == "malformed" else digest(self.raw))
+                    stdout = b"x" * (16 * self.dev.MAX_JSON + 1) if case == "cap" else b"canary-output"
+                    return subprocess.CompletedProcess(argv, 0, stdout, b"canary-stderr")
+                with patch.object(publisher, "build_and_smoke", return_value=self.smoke), \
+                     patch.object(publisher, "recheck_source"), patch.object(self.dev, "write_private", side_effect=write), \
+                     patch.object(self.dev.tempfile, "TemporaryDirectory", side_effect=temporary), \
+                     patch.object(self.dev.subprocess, "run", side_effect=invoke) as run:
+                    with self.assertRaisesRegex(RuntimeError, "PUSH_OUTCOME_UNKNOWN") as error:
+                        publisher.execute()
+                self.assertNotIn("canary", "".join(traceback.format_exception(error.exception)))
+                self.assertEqual(run.call_count, 1 if attempted else 0)
+                self.assertEqual(registry.reads, 1)
+                self.assertEqual(json.loads((Path(directory) / "publication.json").read_text())["status"], "PUSH_OUTCOME_UNKNOWN")
+                self.assert_push_diagnostic(directory, stage=stage, failure=failure, attempted=attempted,
+                                            return_code=return_code, timed_out=timed_out, stderr_class=stderr_class)
+                self.assertFalse(any(path.name.startswith(".auth-") for path in Path(directory).iterdir()))
+
+    def test_stderr_classification_and_diagnostics_do_not_retain_secret_values(self):
+        prefixes = [(b"permission denied", "PERMISSION"), (b"authentication required", "AUTHENTICATION"),
+                    (b"x509: certificate signed by unknown authority", "TLS"), (b"connection reset", "NETWORK"),
+                    (b"unknown flag: --canary", "OPTION"), (b"unclassified error", "OTHER")]
+        for prefix, category in prefixes:
+            observations = []
+            for secret in (b"first-private-token", b"another-token-and-private-path"):
+                with self.subTest(category=category, secret=secret), tempfile.TemporaryDirectory() as directory:
+                    publisher = self.publisher(types.SimpleNamespace(token="valid-secret", username="ydixken"), directory)
+                    publisher.smoke = self.smoke
+                    failure = subprocess.CalledProcessError(125, [secret.decode()], output=secret, stderr=prefix + b" " + secret)
+                    with patch.object(self.dev.subprocess, "run", side_effect=failure):
+                        with self.assertRaises(RuntimeError) as error: publisher.push()
+                    self.assertNotIn(secret.decode(), "".join(traceback.format_exception(error.exception)))
+                    observations.append(self.assert_push_diagnostic(directory, stage="RETURN", failure="NONZERO_EXIT",
+                                       attempted=True, return_code=125, stderr_class=category))
+            self.assertEqual(observations[0], observations[1])
+
+    def test_typed_command_failures_have_only_fixed_facts_without_raw_exception_chain(self):
+        self.assertTrue(hasattr(self.dev, "CommandFailure"), "command failure must preserve only selected process facts")
+        failures = [FileNotFoundError("canary-private-path"),
+                    subprocess.CalledProcessError(125, ["canary-argv"], output="canary-output", stderr="canary-stderr"),
+                    subprocess.TimeoutExpired(["canary-argv"], 1, output="canary-output", stderr="canary-stderr"),
+                    subprocess.CalledProcessError("canary-return-code", ["canary-argv"], stderr="canary-stderr"),
+                    subprocess.SubprocessError("canary-exception-value")]
+        for failure in failures:
+            with patch.object(self.dev.subprocess, "run", side_effect=failure):
+                with self.assertRaises(self.dev.CommandFailure) as error: self.dev.command(["podman", "push"])
+            self.assertIsNone(error.exception.__cause__)
+            self.assertIsNone(error.exception.__context__)
+            self.assertNotIn("canary", repr(error.exception.__dict__) + "".join(traceback.format_exception(error.exception)))
+            self.assertTrue(error.exception.launch_attempted)
+
     def test_workflow_restricts_branch_permissions_native_hosts_and_writer_window(self):
         text = (PATH.parents[2] / ".github/workflows/dev-runner-image.yml").read_text()
         for value in ("feat/native-engine", "ubuntu-26.04-arm", "ubuntu-26.04", "packages: write", "contents: read", "cancel-in-progress: false", "dev-ghcr-ydixken-rpgmigrate"):
@@ -572,6 +679,8 @@ class PublisherTests(unittest.TestCase):
             if "uses:" in line: self.assertRegex(line, r"@[0-9a-f]{40}")
         self.assertLess(text.index("jobs:"), text.index("packages: write"))
         self.assertIn("tool_preflight", text)
+        self.assertIn("/push-failure.json", text)
+        self.assertNotIn("*.log", text)
         self.assertLess(text.index("tool_preflight"), text.index("GITHUB_TOKEN:"))
 
 

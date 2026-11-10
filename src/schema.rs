@@ -801,8 +801,8 @@ mod tests {
         let source = sealed(b"source-fixture");
         let target = sealed(b"target-fixture");
         let ambient = sealed(b"unrelated-fixture");
-        // SAFETY: only this owned fixture is made inheritable for the negative control.
         assert_eq!(
+            // SAFETY: only this owned fixture is made inheritable for the negative control.
             unsafe { libc::fcntl(ambient.as_raw_fd(), libc::F_SETFD, 0) },
             0
         );

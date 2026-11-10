@@ -61,4 +61,5 @@ jobs:
           path: |
             ${{ runner.temp }}/native-publication-${{ matrix.arch }}/publication.json
             ${{ runner.temp }}/native-publication-${{ matrix.arch }}/smoke.json
+            ${{ runner.temp }}/native-publication-${{ matrix.arch }}/push-failure.json
           if-no-files-found: error

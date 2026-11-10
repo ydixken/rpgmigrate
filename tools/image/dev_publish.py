@@ -69,6 +69,34 @@ def tag_for(commit, architecture):
     return "dev-" + commit + "-" + architecture
 
 
+def stderr_classification(value):
+    if value is None or not isinstance(value, (bytes, str)):
+        return "UNOBSERVED"
+    data = value.encode("utf-8", errors="replace") if isinstance(value, str) else value
+    if not data:
+        return "NONE"
+    data = data.lower()
+    categories = (
+        ("PERMISSION", (b"permission denied", b"permission_denied", b"insufficient_scope", b"requested access to the resource is denied")),
+        ("AUTHENTICATION", (b"unauthorized", b"authentication required", b"authentication failed", b"invalid username/password")),
+        ("TLS", (b"x509:", b"tls handshake", b"certificate verify failed", b"certificate signed by unknown authority")),
+        ("NETWORK", (b"connection refused", b"connection reset", b"network is unreachable", b"no such host", b"i/o timeout", b"context deadline exceeded")),
+        ("OPTION", (b"unknown flag:", b"unknown shorthand flag:", b"unrecognized option", b"unknown option", b"flag provided but not defined")),
+    )
+    return next((category for category, phrases in categories if any(phrase in data for phrase in phrases)), "OTHER")
+
+
+class CommandFailure(RuntimeError):
+    def __init__(self, code, failure, *, return_code=None, timed_out=False, stderr_class="UNOBSERVED"):
+        super().__init__(code)
+        self.stage = "LAUNCH" if failure == "LAUNCH_ERROR" else "RETURN"
+        self.failure = failure
+        self.launch_attempted = True
+        self.return_code = return_code if type(return_code) is int else None
+        self.timed_out = timed_out
+        self.stderr_class = stderr_class
+
+
 def command(argv, *, cwd=ROOT, timeout=120, env=None):
     # Subprocess output can contain credentials even when the command fails.
     safe_env = {key: os.environ[key] for key in ("PATH", "HOME", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "TMPDIR")
@@ -76,12 +104,27 @@ def command(argv, *, cwd=ROOT, timeout=120, env=None):
     safe_env["PYTHONDONTWRITEBYTECODE"] = "1"
     if env:
         safe_env.update(env)
+    failure = None
     try:
         result = subprocess.run(argv, cwd=cwd, env=safe_env, check=True, capture_output=True, timeout=timeout)
-        require(len(result.stdout) <= 16 * MAX_JSON, "COMMAND_OUTPUT_TOO_LARGE")
-        return result.stdout
-    except (OSError, subprocess.SubprocessError) as error:
-        raise RuntimeError("COMMAND_FAILED") from error
+    except subprocess.CalledProcessError as error:
+        failure = CommandFailure("COMMAND_FAILED", "NONZERO_EXIT", return_code=error.returncode,
+                                 stderr_class=stderr_classification(error.stderr))
+    except subprocess.TimeoutExpired as error:
+        failure = CommandFailure("COMMAND_FAILED", "TIMEOUT", timed_out=True,
+                                 stderr_class=stderr_classification(error.stderr))
+    except OSError:
+        failure = CommandFailure("COMMAND_FAILED", "LAUNCH_ERROR")
+    except subprocess.SubprocessError:
+        failure = CommandFailure("COMMAND_FAILED", "COMMAND_ERROR")
+    if failure is not None:
+        raise failure
+    if len(result.stdout) > 16 * MAX_JSON:
+        failure = CommandFailure("COMMAND_OUTPUT_TOO_LARGE", "OUTPUT_LIMIT", return_code=result.returncode,
+                                 stderr_class=stderr_classification(result.stderr))
+        del result
+        raise failure
+    return result.stdout
 
 
 def stable_file_identity(info):
@@ -524,17 +567,41 @@ class Publisher:
         return receipt
 
     def push(self):
-        token, username = self.registry.token, self.registry.username
-        require(token and username, "PUSH_AUTH_REQUIRED")
-        with tempfile.TemporaryDirectory(prefix=".auth-", dir=self.output) as directory:
-            authfile = Path(directory) / "auth.json"
-            write_private(authfile, {"auths": {"ghcr.io": {"auth": base64.b64encode((username + ":" + token).encode()).decode()}}})
-            digestfile = Path(directory) / "digest"
-            command(["podman", "push", "--retry=0", "--tls-verify=true", "--authfile", str(authfile),
-                     "--digestfile", str(digestfile), self.smoke["image_id"], "docker://" + PACKAGE + ":" + self.tag], timeout=600)
-            digest = digestfile.read_text().strip()
-            require(re.fullmatch("sha256:[0-9a-f]{64}", digest), "PUSH_DIGEST_INVALID")
+        diagnostic = {"schema_version": 1, "source": self.source, "architecture": self.architecture, "tag": self.tag,
+                      "stage": "AUTH_VALIDATION", "failure": "AUTH_INVALID", "launch_attempted": False,
+                      "return_code": None, "timed_out": False, "stderr_class": "UNOBSERVED"}
+        try:
+            token, username = getattr(self.registry, "token", None), getattr(self.registry, "username", None)
+            require(type(token) is str and token and not any(ord(char) < 33 for char in token)
+                    and type(username) is str and re.fullmatch("[A-Za-z0-9-]{1,100}", username), "PUSH_AUTH_REQUIRED")
+            diagnostic["failure"] = "NO_INVOCATION"
+            with tempfile.TemporaryDirectory(prefix=".auth-", dir=self.output) as directory:
+                authfile = Path(directory) / "auth.json"
+                write_private(authfile, {"auths": {"ghcr.io": {"auth": base64.b64encode((username + ":" + token).encode()).decode()}}})
+                digestfile = Path(directory) / "digest"
+                diagnostic["stage"] = "LAUNCH"
+                command(["podman", "push", "--retry=0", "--tls-verify=true", "--authfile", str(authfile),
+                         "--digestfile", str(digestfile), self.smoke["image_id"], "docker://" + PACKAGE + ":" + self.tag], timeout=600)
+                diagnostic.update(stage="DIGEST", failure="DIGEST_IO_ERROR", launch_attempted=True, return_code=0)
+                digest = digestfile.read_text().strip()
+                diagnostic["failure"] = "DIGEST_INVALID"
+                require(re.fullmatch("sha256:[0-9a-f]{64}", digest), "PUSH_DIGEST_INVALID")
+                diagnostic.update(stage="RETURN", failure="CLEANUP_ERROR")
             return digest
+        except CommandFailure as error:
+            diagnostic.update(stage=error.stage, failure=error.failure, launch_attempted=error.launch_attempted,
+                              return_code=error.return_code, timed_out=error.timed_out, stderr_class=error.stderr_class)
+            failure = error
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            failure = RuntimeError("PUSH_" + diagnostic["failure"])
+        diagnostic_unavailable = False
+        try:
+            write_private(self.output / "push-failure.json", diagnostic)
+        except (RuntimeError, OSError):
+            diagnostic_unavailable = True
+        if diagnostic_unavailable:
+            raise RuntimeError("PUSH_DIAGNOSTIC_UNAVAILABLE")
+        raise failure
 
     def execute(self):
         authority = self.registry.package(bootstrap=self.bootstrap)
@@ -662,7 +729,7 @@ def main():
         print(json.dumps({"status": result["status"], "tag": result["tag"], "manifest_digest": result.get("manifest_digest")}, sort_keys=True))
         return 0 if result["status"] == "PUBLIC" else 2
     except (RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-        message = str(error) if type(error) is RuntimeError and re.fullmatch("[A-Za-z_]+", str(error)) else "PUBLICATION_REFUSED"
+        message = str(error) if type(error) in (RuntimeError, CommandFailure) and re.fullmatch("[A-Za-z_]+", str(error)) else "PUBLICATION_REFUSED"
         print("development publication failed: " + message, file=sys.stderr)
         return 1
 

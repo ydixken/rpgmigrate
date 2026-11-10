@@ -209,8 +209,8 @@ fn descriptor_admission_refuses_missing_type_mode_owner_and_size() {
     assert!(inspect(wrong_mode.as_raw_fd()).is_err());
     let input = sealed(b"fixture");
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: successful fstat initializes the metadata below.
     assert_eq!(
+        // SAFETY: successful fstat initializes the metadata below.
         unsafe { libc::fstat(input.as_raw_fd(), metadata.as_mut_ptr()) },
         0
     );
@@ -308,8 +308,8 @@ fn utility_descendants_inherit_only_their_unique_role_descriptors() {
     let shared = sealed(b"shared-combined-pem-fixture");
     let other = sealed(b"target-only-fixture");
     let ambient = sealed(b"unrelated-fixture");
-    // SAFETY: deliberately make the unrelated fixture inheritable to exercise isolation.
     assert_eq!(
+        // SAFETY: deliberately make the unrelated fixture inheritable to exercise isolation.
         unsafe { libc::fcntl(ambient.as_raw_fd(), libc::F_SETFD, 0) },
         0
     );
