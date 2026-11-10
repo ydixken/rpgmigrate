@@ -563,3 +563,10 @@ Request the unavailable browser step asynchronously and continue independent app
 Map the exact approved GitHub SSH origin to its canonical HTTPS identity before deciding whether a source is qualified.
 Preserve the original Git remote configuration and refuse unrelated identities; identity equivalence does not authorize a remote rewrite.
 Keep credential-bearing raw snapshots out of diagnostics and retained evidence.
+
+## Test resume defaults through the actual public CLI, 2026-11-10
+
+The public CLI has no limit options, so compiled default limits represent omission on resume.
+Restore persisted effective limits for that path, while keeping explicit nondefault internally injected limits and the direct strict resolver strict.
+Exercise the real CLI omission/default path in tests.
+Passing stored limits directly to a helper does not prove that the CLI restores them.

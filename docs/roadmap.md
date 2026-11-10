@@ -112,8 +112,10 @@ Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explic
 The engine publication source is `11a28a4d1c77b035f96cc16b7b948768dd6aa6c9`, tree `e33b886b61abdd97314a57c998cc681412c9ba15`.
 The first native Linux ARM64 build, read-only smoke, and single development push completed under the approved bootstrap exception.
 The immutable native tag is `dev-11a28a4d1c77b035f96cc16b7b948768dd6aa6c9-arm64`, manifest `sha256:8916bba4c10ee30e2b7ed7d6877818c1eaa4ffa1d542e851d9bcb7a8508a4e9a`, config `sha256:420a6f33ef3bf5d46cd57911256b72466f2cdb90f8015bb5c2c52c897a075ece`.
-Publication status is `PUBLICITY_PENDING`: the package is private and unlinked, and the user has been asked to complete the manual visibility/linkage step asynchronously because the browser host was unavailable.
-Anonymous public verification and owned-node pull qualification remain open.
+The user made the native package public, linked its repository, and enabled Actions `repositoryWrite`.
+Anonymous verification passed for the retained native manifest, config, and all eleven layers.
+Public verification proof: `/private/var/tmp/rpgmigrate-native-first-publication-11a28a4-apozt_ez/public-verification-proof.json`, SHA-256 `45930f72ff5bff3311d6f41a8d8ab2d45e084b2bf78108ccb23c243f75b53a35`.
+Owned-node pull and runtime qualification remain open.
 Publication proof: `/private/var/tmp/rpgmigrate-native-first-publication-11a28a4-apozt_ez/publication.json`, SHA-256 `d5cb68e11305457107bf4f0bfe317a3cc7dfb6514a30603650c160272e3b84a8`.
 
 The build used the physical ARM64 Mac and ARM64 Linux VM with Podman client 6.1.4/server 5.8.3, without a tool upgrade.
@@ -139,19 +141,55 @@ The M6 stage freeze is parent PREPARE, UP, PULL (eight pulls with three attempts
 The recorded Q deadline must not exceed the original lease, independently of the current V cap.
 S2 may consume opaque kubeconfig locally in memory only for the necessary identity and authentication checks; it adds no Secret API read or export and makes no zero-secret-memory-read claim.
 
-M7 operator source is signed at `93cc670309e1039e05ee6dc0e462196d23248888`, with 105 checks and scoped lint passing; it has not been pushed.
-Actual Guard admission refused the clean source at canonical SSH-origin mapping, so no RUN is qualified; a narrow identity correction remains in preparation.
+The historical Guard refused operator source `93cc670309e1039e05ee6dc0e462196d23248888` at canonical SSH-origin mapping.
+We pushed successor operator source `29edbfba1d03afb890429b2ef69ab8f5a9d088e1`, preserving that refusal under its original input identity.
+Its [offline contract run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42823505464) and [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42823505340) passed.
+The [manager publication run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42823505418) published the AMD64 image publicly at digest `sha256:b728d28ddf9e956e6912853c3541d877482f72b0d0fa86437139dfdbb1cf3136`.
+The same run passed ARM64 publication at manifest digest `sha256:b3ccc7ec689bdd721e943a3dd2c2f4844a9684aabaca2640060a8d0a3129e9da`, config `sha256:10a1064b16874241ad9c94f37ac0aa7872bd582cec07a6415b2d52d11ac07154`, without an OCI index.
+Independent anonymous graph verification passed for both architectures, including all fourteen layers per image.
+The manager package API reports public visibility and repository linkage to `ydixken/pgcopydb-operator`.
+Hosted publication proves effective write access, while the manager Actions UI setting remains uninspected.
+Sealed eighteen-file manager evidence: `/tmp/rpgmigrate-m7-hosted-ci-public-20261110-ws3q891j/receipt-manifest.json`, SHA-256 `b21c161a38a24710ef2f6fc52ee10d55d11e8fdd9ee77dfa7017d15dd1581b05`.
+Lock-ready image input: `/tmp/rpgmigrate-m7-hosted-ci-public-20261110-ws3q891j/manager-lock-ready-images.json`, SHA-256 `d9b38e132048e54ac162933eaf1ff0dda4ac2a097f8b3270b7f7337be09a1366`.
+Fresh source-bound runtime RUN qualification remains open.
+
+Historical engine source `a38e02d95e47adff912054d9ffc087219e2b82b7` passed all three plain-clone pairs and both architecture runner-image smokes in [CI run 42817666258](https://github.com/ydixken/rpgmigrate/actions/runs/42817666258).
+Its Linux Clippy gate failed on three safety-comment placements.
+The separate [development publication run](https://github.com/ydixken/rpgmigrate/actions/runs/42817666532) retained `PUSH_OUTCOME_UNKNOWN` for both images with anonymous 404 results.
+Keep those immutable tags untouched and retain the unknown outcomes.
+Successor source `abd1a36e50726a26a9f655c5f53bb34ed8d182c1` fixes those three comment placements and sanitizes push-failure diagnostics, with 451 portable checks passing.
+We pushed the signed successor to the feature branch.
+Push proof: `/tmp/rpgmigrate-native-safe-diagnostics-feature-push-proof-20261110.json`, SHA-256 `aee53d8539b35f329975c7d5a3d6685145c59233a61d4089710cb6c841659f8a`.
+Fresh [checks run 42824505133](https://github.com/ydixken/rpgmigrate/actions/runs/42824505133) passed all eight jobs, including Linux Clippy, dependency/docs checks, all three plain-clone pairs, and both architecture runner-image smokes.
+The [development publication run 42824505294](https://github.com/ydixken/rpgmigrate/actions/runs/42824505294) passed both Ubuntu 26 native publication jobs.
+Typed public/source artifact verification and independent anonymous graph verification remain pending for these successor images.
+Hosted publication success alone does not qualify their public graph or an operator migration.
 
 The signed isolated M8 candidate `ea51e2375e51adc3d42115c588f5d3b23ea6d4a6`, tree `70198152465b405002ec4bf95d68775fa7342ed1`, composes Apache/GHCR changes without changing the M8 core and passed 398 portable tests.
 Composition proof: `/tmp/rpgmigrate-m8-primary-source-composition-20261110/signed-checkpoint.json`, SHA-256 `51f840b0fcc65eac496ddd93c1f2ab209f1571e7c0f68ecfb100076ee962a39a`.
 The earlier independent binary `2f0b077c` from source `611d1a4` passed one catalog and all ten Clone cases on each of PostgreSQL 16.15 and 18.6, with zero failures or ignored cases.
 Component summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json`, SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
-This remains a component pass: the six-profile workflow across all three pairs, including 16-to-18, has not run.
-Shared tag/cache, network/volume cleanup, and logical-startup harness repairs remain in preparation; the Task PROFILE source patch is ready but has no integration or runtime result.
+The first six-profile workflow attempt on 16-to-16 failed before Cargo or PostgreSQL started because the Podman pasta inspect shape differed from the harness assumption.
+It executed zero profiles and produced zero reports, so it does not qualify the three-pair workflow.
+Independent cleanup and preservation released the window.
+Failure/preservation proof: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-16-16-6d0f41c9/independent-failure-preservation-release-proof.json`, SHA-256 `3dc97cf996c6444327a1edf9c2688e2da0461d476360b35d1e7b824e7e8f5608`.
+The signed model-only inspect fix uses isolated source `5f287cdd8fa0a79008b8bc0e9b17863725014f0e`, tree `344cc30d8594c87cb550f19f83a10e4fe7c7d42b`, with all 426 portable checks passing.
+Signed checkpoint: `/tmp/rpgmigrate-m8-pasta-successor-integration-20261110/signed-checkpoint.json`, SHA-256 `36ed365b432435481d54a23f1c2bf2318f02f5718b7bf8de608d1c125519f033`.
+The fresh 334-entry source export passed verification.
+The old failure remains RED, and a fresh live workflow retry remains open.
 The format 9 / metadata 7 candidate remains separate from the primary format 8 / metadata 6 baseline, without capability activation.
 
-The final private M9 plan passed review and its interfaces are frozen; source A/B work is underway, with tests incomplete pending a coherent core join.
-`REPLAY_SAFE_BARRIER_INTERVAL_MS` remains `None`, release mode is unavailable, and benchmark execution remains on HOLD with no actual benchmark result.
+The final private M9 plan passed review and its interfaces are frozen.
+Focused tests cover settings, persistence, scheduler, producer, and reader packets.
+Coherent live proof remains open.
+Production discovery remains on HOLD.
+`REPLAY_SAFE_BARRIER_INTERVAL_MS` remains `None`, release mode is unavailable, and no measured cadence or benchmark result exists.
+Benchmark execution remains on HOLD.
+
+The approved M9 implementation clarification follows the actual public CLI, which has no limit options.
+Compiled default limits represent omission on resume and restore the persisted effective limits.
+Explicit nondefault internally injected limits remain strict, and the direct strict resolver remains unchanged.
+Test omission and compiled defaults through the real CLI path instead of passing stored limits directly to a helper.
 
 M10 source-tool preparation is committed at `81c5b8c035806e4934806caec4d41e7dcd85d660`: nine tooling files and three portable-suite registrations passed 439 tests across twenty suites with zero skips.
 Integration proof: `/private/tmp/rpgmigrate-m10-tool-integration-evidence-jckqtq98/integration-evidence.json`, SHA-256 `591d5168b9475370f918cbedbff1e79fc0abe219d908842fe82ffec62ccf1337`; commit/fast-forward proof SHA-256 `526aedfc157eb9257c28ea0063b268baac15c4ad29e9566f3ef0a462eafdcd14`.
@@ -614,7 +652,8 @@ The approved [M9 implementation plan](superpowers/plans/2026-11-09-m9-durability
 Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized.
 M10 remains open.
 Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
-The reviewed private final plan and frozen interfaces permit source A/B work; the checkpoint above records incomplete tests, unavailable release mode, and the unchanged benchmark HOLD.
+The reviewed private final plan and frozen interfaces permit source A/B work.
+The checkpoint above records focused packet tests, the approved CLI omission clarification, pending coherent live proof, unavailable release mode, and benchmark HOLD.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
 - [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.
