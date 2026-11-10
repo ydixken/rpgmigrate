@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 publish = false
+license = "Apache-2.0"
 description = "PostgreSQL migration engine with explicit ownership and durable completion"
 
 [dependencies]

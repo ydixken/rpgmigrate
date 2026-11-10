@@ -102,7 +102,9 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
 On 2026-11-09, the user directed us to push through M10: continue all approved M6–M10 execution gates rather than stopping at intermediate plans or source checkpoints.
-Milestone closure still requires evidence, benchmark runs remain unapproved, and main/tag/release/GHCR boundaries remain unchanged; no ETA or measured speedup is implied.
+Milestone closure still requires evidence, benchmark runs remain unapproved, and main/tag/release boundaries remain unchanged.
+The dated M7 amendment permits only development GHCR publication.
+We make no ETA or measured-speedup claim.
 Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explicit; M4 engine qualification does not activate the operator.
 
 ### M0: Preserve and reset (rpgmigrate)
@@ -265,11 +267,13 @@ M5 is complete after the same reviewer’s final acceptance of hosted multi-arch
 The retained database evidence preserves its original 266-case subset and forty-case sampling/composite provenance; exact source/Cargo/build/Taskfile/test/harness bindings are unchanged from `67f7fcb` to `7c04dff`.
 This acceptance claims neither a fresh aggregate database run nor migration using the production image; broad operator Go checks are not applicable to engine-only packaging.
 The operator-publication P1 is resolved by the dated explicit GitLab mirror authorization; it remains separate from engine M5 qualification.
-No tags, releases, or GHCR publication are authorized, and these checks do not close M10.
+Tags and releases remain unauthorized.
+The dated M7 amendment permits only development GHCR publication, and these checks do not close M10.
 
 - [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
 - [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, and both native image builds.
-- [ ] GHCR publication on tags only, pending separate publication authorization.
+- [ ] Release GHCR publication on version tags only, pending separate release authorization.
+Development publication follows the dated M7 amendment.
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
@@ -384,6 +388,24 @@ One independent whole-M6 review belongs at milestone close, and users retain wri
 
 ### M7: Operator-driven E2E
 
+#### Approved registry amendment, 2026-11-10
+
+The user approved direct public-registry pulls for upstream CloudNativePG, operator, PostgreSQL, and other public dependencies, each pinned by digest.
+This direction supersedes the local-registry proposal and the M7 archive/containerd-import, alias, and tag-retargeting path.
+We may publish manager and native-runner development images as public GHCR packages under the approved user namespace.
+Use existing manager `ghcr.io/ydixken/pgcopydb-operator`.
+`ghcr.io/ydixken/rpgmigrate` is the native-image example.
+Use immutable `dev-<sha>` image tags and reference the resulting image digest from kind.
+This approval covers development publication only.
+Version tags, `latest`, releases, and main pushes remain unauthorized.
+M10 offline candidate archive retention remains a separate qualification requirement.
+Preserve exact ownership, the original execution clock, resource caps, and cleanup guards.
+Keep archived source and old RUN evidence unchanged.
+The old Ready RUN held before LOAD under S1 does not qualify registry pulls.
+Implementation planning and fresh registry-path runtime qualification remain pending.
+M6, M8, and M10 work continues.
+M6–M10 remain open and benchmark execution stays on HOLD.
+
 #### Evidence checkpoint, 2026-11-10
 
 The fresh `f59a7f4b` M7 source passed UP, supervisor handover, and LOAD for the PostgreSQL 18 component/API profile.
@@ -419,7 +441,8 @@ That earlier fresh UP command returned under a fixed lease ending at 05:06:57.01
 The old lease was not renewed, and the historical `c275` LOAD receipt remains FAILED.
 The capacity baseline is fourteen CPUs, 32 GiB memory, and 160 GiB disk; runtime admission still requires fresh capacity evidence.
 M0–M5 remain closed and M6–M10 remain open.
-Benchmark execution remains on HOLD; approved feature-branch pushes exclude main, tags, releases, and GHCR publication.
+Benchmark execution remains on HOLD.
+Main pushes, tags, and releases remain excluded, with development GHCR publication governed by the dated M7 amendment.
 
 #### Retained bootstrap and failed-run evidence
 
@@ -608,19 +631,32 @@ The separate mechanism plan and required validation remain open; this authorizat
 On 2026-11-09, after approving the second exact failed-kind cleanup, the user authorized future removal of independently verified rpgmigrate-owned failed kind-node containers without repeated cleanup approval.
 This standing authorization covers containers only: preserve volumes, networks, images, backups, original PostgreSQL containers, source, and RUN evidence; do not extend it to other resources or repair RUN markers.
 The user authorized pushing `rpgmigrate` branch `feat/native-engine` and the operator feature branch carrying native work to `origin` for hosted CI, including native AMD64 checks under M5/M10.
-This authorizes feature branches only: do not push or merge to main, create tags/releases, or publish to GHCR.
+This earlier authorization covered feature branches only, excluding main pushes/merges, tags/releases, and GHCR.
+The dated M7 amendment separately authorizes development GHCR publication.
 The user separately authorized one-off removal of exactly the three failed kind-node containers identified for the failed RUN.
 That exception covers no volumes, networks, images, backups, original services, RUN-marker edits, or generic guard bypass; final independent verification now accepts its exact three-container cleanup.
 The cleanup result is recorded separately from its approval; no push, hosted-CI, image-build, or kind workflow success is claimed.
 Operator preflight exposed existing all-ref/tag GitLab mirroring and skipped tests; the earlier hold prevented inferring downstream authorization from the origin-only decision.
 On 2026-11-09, the user explicitly approved the existing GitLab mirroring triggered by the operator native feature branch.
-We resolved the publication P1 by authorization and keep the existing mirror enabled; this decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
+We resolved the publication P1 by authorization and keep the existing mirror enabled.
+This mirror decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
+Development GHCR approval follows the dated M7 amendment.
 The CI owner restored its mirror-guard edits to baseline and committed only hosted checks in `ccde83912cdbc9e152f0bc51c47c49954ede8a9d`, parent `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 The normal feature push to `origin/test/m4-closing-m6-composed-20261109` is verified; its [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254999) passed.
 [Operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254706) passed docs and its unit/envtest, cluster-free E2E, and PostgreSQL 18 coverage test job; the run failed only lint on SC2015.
 The reviewed mechanical correction `5616d82f03e6a917147e55ed4a3fb436a1cc6d89` was pushed normally to the feature ref after prior tests became terminal, without cancellation.
 The new [operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42636601113) is in progress and its authorized [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42636601234) passed; no new CI pass is claimed.
 Engine feature pushes of `34208b6` and `7c04dff` retain their exact hosted-run scopes above; no feature CI result closes a milestone by itself.
+
+## Project license decision, 2026-11-10
+
+The user selected Apache License 2.0 for rpgmigrate.
+We record the SPDX identifier `Apache-2.0` in `Cargo.toml` and retain `publish = false`.
+The root [LICENSE](../LICENSE) contains the unchanged [official Apache License 2.0 text](https://www.apache.org/licenses/LICENSE-2.0.txt), including the unfilled Appendix example.
+Its SHA-256 is `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`.
+Existing third-party notices retain their original bytes and licenses.
+M6–M10 remain open, benchmark execution remains on HOLD, and tags and releases remain unauthorized.
+Development GHCR publication has separate dated approval.
 
 ## Execution model
 
@@ -635,7 +671,9 @@ The original 21:35 UTC startup failure predates the CPU/memory resize.
 Maintenance and failed-node quiet reservations are released; preserve host Cargo headroom and the approved resource budgets for subsequent M6/M7 execution.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
 See the [capacity and preservation record](../tasks/todo.md#capacity-and-parallel-execution-user-update-2026-11-08) for budgets and the restart prerequisites.
-Commits remain small, conventional, and lint-clean; feature-branch CI pushes have the dated user authorization above, while main pushes/merges, tags, releases, and GHCR publication remain unauthorized.
+Commits remain small, conventional, and lint-clean.
+Feature-branch CI pushes have the dated user authorization above, while main pushes/merges, tags, and releases remain unauthorized.
+Development GHCR publication follows the dated M7 amendment.
 
 > [!important]
 > On 2026-11-08, the user approved exactly two local WIP checkpoint commits: `e544f2d` on `feat/native-engine` and `5e8cbcb` on the isolated operator `feat/native-contract-v1` branch, as an exception to the lint-clean-per-commit rule.
