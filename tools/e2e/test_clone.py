@@ -243,6 +243,12 @@ class CloneHarnessTests(unittest.TestCase):
                 self.assertTrue(failure.exception.metadata["retained"])
 
 
+def pasta_placeholder():
+    return {"pasta": {"EndpointID": "", "Gateway": "", "IPAddress": "", "IPPrefixLen": 0,
+                      "IPv6Gateway": "", "GlobalIPv6Address": "", "GlobalIPv6PrefixLen": 0,
+                      "MacAddress": "", "NetworkID": "pasta", "DriverOpts": None, "IPAMConfig": None, "Links": None}}
+
+
 class ModelRuntime:
     def __init__(self, root, fault=None):
         self.root, self.fault, self.commands, self.removed = root, fault, [], []
@@ -296,7 +302,7 @@ class ModelRuntime:
             identity = self.references.get(args[2], args[2])
             return json.dumps([self.images[identity]]).encode()
         if args[0] == "history": return b'[{"id":"safe-id","created":1,"size":1,"createdBy":"private-never-persist"}]'
-        if args[:2] == ["network", "ls"]: return "\n".join(self.networks).encode()
+        if args[:2] == ["network", "ls"]: return "\n".join(value["name"] for value in self.networks.values()).encode()
         if args[:2] == ["network", "inspect"]:
             value = self.networks.get(args[2]) or next(value for value in self.networks.values() if value["name"] == args[2])
             return json.dumps([value]).encode()
@@ -306,6 +312,22 @@ class ModelRuntime:
         if args[:2] == ["build", "--help"]: return b"--cpu-period uint --cpu-quota int --memory string\n"
         if args[0] == "build":
             tag = args[args.index("--tag")+1]; label = args[args.index("--label")+1].split("=", 1)[1]
+            paths = list(self.root.rglob("*." + label + ".runtime.json"))
+            assert len(paths) == 1, "build requires one exact run-bound ledger"
+            path = paths[0]
+            assert path.is_file() and not path.is_symlink() and stat.S_IMODE(path.stat().st_mode) == 0o600
+            ledger = json.loads(path.read_text())
+            assert ledger["run"] == label, "build ledger belongs to a different run"
+            assert Path(ledger["private_path"]) == Path(args[args.index("--file")+1]).parents[3], "build ledger belongs to a different private source"
+            assert isinstance(ledger.get("private_identity"), dict), "created private identity was not durably retained before mutation"
+            identity = ledger["private_identity"]
+            info = Path(ledger["private_path"]).lstat()
+            assert identity["device"] == info.st_dev and identity["inode"] == info.st_ino
+            assert identity["uid"] == info.st_uid and identity["mode"] == stat.S_IMODE(info.st_mode) == 0o700
+            assert identity["nonce"] == ledger["run"].rsplit("-", 1)[1] and len(identity["nonce"]) == 32
+            assert identity["absent_before"] is True
+            if hasattr(info, "st_birthtime"): assert identity["birthtime"] == info.st_birthtime
+            self.build_ledger_path = path
             identity = "sha256:" + "5"*64
             self.references[tag] = identity
             self.images[identity] = {"Id": identity, "RepoTags": [tag], "RepoDigests": [], "Size": 100, "Labels": {"io.rpgmigrate.e2e": label}, "Architecture": "arm64"}
@@ -330,7 +352,9 @@ class ModelRuntime:
             networks = {}
             if "--network" in args:
                 network_name = args[args.index("--network")+1]
-                if network_name != "pasta":
+                if network_name == "pasta":
+                    networks = pasta_placeholder()
+                else:
                     network = next(value for value in self.networks.values() if value["name"] == network_name)
                     network["containers"][cid] = {"name": name}
                     networks[network_name] = {"NetworkID": network["id"], "Aliases": [role]}
@@ -359,6 +383,11 @@ class ModelRuntime:
                     (receipt / "m8-smoke.json").write_text(json.dumps(smoke)); (receipt / "m8-smoke.json").chmod(0o600)
                 if self.fault == "runner": raise RuntimeError("modeled runner failure")
                 (receipt / "result.json").write_text(json.dumps({"pair": "16-16", "binding": binding, "build_smoke": smoke}))
+                if self.fault == "foreign_private":
+                    private = receipt.parent
+                    private.rename(private.with_name(private.name + ".retained"))
+                    private.mkdir(mode=0o700)
+                    (private / "foreign").write_text("preserve foreign leaf")
             return b""
         if args[0] == "exec":
             actual = self.containers[args[1]]
@@ -552,13 +581,15 @@ class RuntimeOwnershipTests(unittest.TestCase):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import copy_features
         try:
-            for profile, fault in (("disabled", None), ("m8", None), ("m8", "runner"), ("m8", "data_directory")):
-                with self.subTest(profile=profile, fault=fault), tempfile.TemporaryDirectory() as temporary:
+            for profile, fault, location in (("disabled", None, "default"), ("disabled", None, "root"), ("disabled", None, "nested"),
+                                             ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache")):
+                with self.subTest(profile=profile, fault=fault, location=location), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
                     (root / ".env").write_text("must-not-persist")
                     (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
                     model = ModelRuntime(root, fault)
-                    args = types.SimpleNamespace(pair="16-16", receipt=str(root / "target/e2e/result.json"), report_probe=None, profile=profile)
+                    output = root / ({"default": "target/e2e/16-16.json", "root": "result.json", "nested": "nested/result.json", "cache": "target/e2e/result.json"}[location])
+                    args = types.SimpleNamespace(pair="16-16", receipt=None if location == "default" else str(output), report_probe=None, profile=profile)
                     def execute(guard, command, **kwargs):
                         guard.checkpoint()
                         result = model.call(command, **kwargs)
@@ -570,7 +601,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
                             patch.object(harness, "run", side_effect=model.call), patch.object(harness.subprocess, "run", side_effect=model.subprocess), \
                             patch.object(harness.RuntimeGuard, "execute", execute), patch.object(copy_features, "validate_receipt"):
                         if fault:
-                            with self.assertRaises(RuntimeError): harness.outer(args, receipt_validator=lambda *_: None)
+                            with self.assertRaises((RuntimeError, OSError)): harness.outer(args, receipt_validator=lambda *_: None)
                         else:
                             harness.outer(args, receipt_validator=lambda *_: None)
                     self.assertFalse(model.containers)
@@ -590,13 +621,22 @@ class RuntimeOwnershipTests(unittest.TestCase):
                         name = argv[argv.index("--name")+1]
                         if name.endswith(("-source", "-target")):
                             self.assertEqual("wal_level=logical" in argv, profile == "m8")
-                    ledger = json.loads(next((root / "target/e2e").glob("*.runtime.json")).read_text())
+                    token = builds[0][builds[0].index("--label")+1].split("=", 1)[1]
+                    ledger_path = output.parent / (output.name + "." + token + ".runtime.json")
+                    self.assertEqual(model.build_ledger_path, ledger_path)
+                    ledger = json.loads(ledger_path.read_text())
                     self.assertTrue(ledger["cleanup_complete"])
-                    self.assertTrue(ledger["private_removed"])
-                    self.assertTrue(ledger["secret_file_absent"])
+                    self.assertEqual(ledger["private_removed"], fault != "foreign_private")
+                    self.assertEqual(ledger["secret_file_absent"], fault != "foreign_private")
+                    if fault == "foreign_private":
+                        private = Path(ledger["private_path"])
+                        self.assertEqual((private / "foreign").read_text(), "preserve foreign leaf")
+                        original = private.with_name(private.name + ".retained").lstat()
+                        self.assertEqual(ledger["private_identity"]["inode"], original.st_ino)
+                        self.assertNotEqual(ledger["private_identity"]["inode"], private.lstat().st_ino)
                     self.assertNotIn("must-not-persist", json.dumps(ledger))
                     self.assertNotIn("private-never-persist", json.dumps(ledger))
-                    self.assertEqual(Path(args.receipt).exists(), fault is None)
+                    self.assertEqual(output.exists(), fault is None)
         finally:
             sys.path.pop(0)
 
@@ -746,6 +786,122 @@ class RuntimeOwnershipTests(unittest.TestCase):
                         self.assertTrue(ledger["private_removed"])
         finally:
             sys.path.pop(0)
+
+
+    def test_actual_addressless_pasta_shape_is_build_only_and_closed(self):
+        entry = {"id": "a"*64, "image": "sha256:"+"b"*64, "name": "fresh-build", "role": "build", "memory": 4*1024**3, "mounts": []}
+        actual = {"Id": entry["id"], "Image": "b"*64, "Name": entry["name"], "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}}, "Mounts": [],
+                  "HostConfig": {"Memory": entry["memory"], "NanoCpus": 2000000000, "CpuPeriod": 100000, "CpuQuota": 200000, "Privileged": False, "NetworkMode": "pasta", "PortBindings": {}},
+                  "NetworkSettings": {"Ports": {}, "Networks": pasta_placeholder()}}
+        for networks in (pasta_placeholder(), {}, None):
+            with self.subTest(accepted=networks):
+                admitted = True
+                try:
+                    harness.validate_owned_container({**actual, "NetworkSettings": {"Ports": {}, "Networks": networks}}, entry, "fresh", set())
+                except RuntimeError:
+                    admitted = False
+                self.assertTrue(admitted, "actual addressless rootless pasta placeholder must be admitted")
+        for key, value in (("EndpointID", "foreign"), ("Gateway", "10.88.0.1"), ("IPAddress", "10.88.0.2"), ("IPPrefixLen", 24),
+                           ("IPv6Gateway", "::1"), ("GlobalIPv6Address", "::2"), ("GlobalIPv6PrefixLen", 64), ("MacAddress", "aa:bb:cc:dd:ee:ff"),
+                           ("NetworkID", "c"*64), ("DriverOpts", {}), ("IPAMConfig", {}), ("Links", []), ("Aliases", None), ("IPPrefixLen", False)):
+            bad = copy.deepcopy(actual); bad["NetworkSettings"]["Networks"]["pasta"][key] = value
+            with self.subTest(endpoint_key=key), self.assertRaises(RuntimeError):
+                harness.validate_owned_container(bad, entry, "fresh", set())
+        for key in pasta_placeholder()["pasta"]:
+            bad = copy.deepcopy(actual); del bad["NetworkSettings"]["Networks"]["pasta"][key]
+            with self.subTest(missing=key), self.assertRaises(RuntimeError):
+                harness.validate_owned_container(bad, entry, "fresh", set())
+        for change in (lambda x: x["HostConfig"].update(NetworkMode="bridge"),
+                       lambda x: x["NetworkSettings"]["Networks"].update(foreign=pasta_placeholder()["pasta"]),
+                       lambda x: x["NetworkSettings"].update(Networks={"foreign": pasta_placeholder()["pasta"]}),
+                       lambda x: x["NetworkSettings"].update(Ports={"5432/tcp": [{"HostPort": "12345"}]}),
+                       lambda x: x["HostConfig"].update(Memory=0), lambda x: x["HostConfig"].update(NanoCpus=0, CpuQuota=0),
+                       lambda x: x["Mounts"].append({"Type": "volume", "Source": "foreign", "Destination": "/data", "RW": True}),
+                       lambda x: x["Config"]["Labels"].update({"io.rpgmigrate.e2e": "foreign"})):
+            bad = copy.deepcopy(actual); change(bad)
+            with self.subTest(changed=bad), self.assertRaises(RuntimeError):
+                harness.validate_owned_container(bad, entry, "fresh", set())
+        with self.assertRaises(RuntimeError):
+            harness.validate_owned_container(actual, entry, "fresh", {entry["id"]})
+        with self.assertRaises(RuntimeError):
+            harness.validate_owned_container(actual, {**entry, "role": "source", "network": {"name": "fresh", "id": "c"*64}}, "fresh", set())
+
+
+    def test_existing_private_leaf_is_refused_without_adopting_identity_or_mutation(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
+                (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
+                private = root / "target/e2e" / ("rpgmigrate-m8-" + "f"*32 + ".private")
+                private.mkdir(mode=0o700, parents=True); (private / "foreign").write_text("preserve stale leaf")
+                original = private.lstat()
+                model = ModelRuntime(root)
+                args = types.SimpleNamespace(pair="16-16", receipt=str(root / "target/e2e/result.json"), report_probe=None, profile="m8")
+                with patch.object(harness, "ROOT", root), patch.object(harness.uuid, "uuid4", return_value=types.SimpleNamespace(hex="f"*32)), \
+                        patch.object(harness.shutil, "which", return_value="/fake/podman"), patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*1024**3)), \
+                        patch.object(harness, "run", side_effect=model.call), patch.object(harness.subprocess, "run", side_effect=model.subprocess), \
+                        self.assertRaisesRegex(RuntimeError, "private path already exists"):
+                    harness.outer(args)
+                self.assertEqual((private / "foreign").read_text(), "preserve stale leaf")
+                self.assertEqual(private.lstat().st_ino, original.st_ino)
+                ledger = json.loads(next((root / "target/e2e").glob("*.runtime.json")).read_text())
+                self.assertNotIn("private_identity", ledger)
+                self.assertFalse(any(len(command)>1 and command[1] in ("create", "start", "rm", "pull") for command in model.commands))
+        finally:
+            sys.path.pop(0)
+
+
+    def test_network_descriptor_ids_are_the_protected_inventory_identity(self):
+        expected = {"id": "a"*64, "name": "fresh"}
+        actual = {"id": expected["id"], "name": "fresh", "internal": True, "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {}}
+        for before in ({"kind": {"id": "a"*64, "name": "kind"}}, {"kind": {"name": "kind"}}):
+            with self.subTest(before=before), self.assertRaises(RuntimeError):
+                harness.validate_owned_network(actual, expected, "fresh", before, empty=True)
+        harness.validate_owned_network(actual, expected, "fresh", {"kind": {"id": "b"*64, "name": "kind"}}, empty=True)
+        with self.subTest(inventory="daemon_names"), tempfile.TemporaryDirectory() as temporary:
+            model = ModelRuntime(Path(temporary))
+            model.networks["b"*64] = {"id": "b"*64, "name": "kind", "internal": False, "driver": "bridge", "labels": {}, "containers": {}}
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.deadline = "podman", harness.time.monotonic() + 60
+            with patch.object(harness, "run", side_effect=model.call):
+                before = guard.inventory()
+            self.assertEqual(set(before["networks"]), {"b"*64})
+            self.assertEqual(before["networks"]["b"*64]["name"], "kind")
+
+
+    def test_model_build_uses_only_one_ledger_bound_to_its_run_and_private_path(self):
+        for fault in (None, "missing", "wrong_run", "wrong_private", "ambiguous"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                token, old_token = "rpgmigrate-m8-" + "f"*32, "rpgmigrate-m8-" + "e"*32
+                private = root / "target/e2e" / (token + ".private")
+                private.mkdir(mode=0o700, parents=True)
+                info = private.lstat()
+                identity = {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "mode": stat.S_IMODE(info.st_mode), "nonce": "f"*32, "absent_before": True}
+                if hasattr(info, "st_birthtime"): identity["birthtime"] = info.st_birthtime
+                record = {"run": token, "private_path": str(private), "private_identity": identity}
+                decoy = root / "target/e2e" / ("stale.json." + old_token + ".runtime.json")
+                decoy.write_text(json.dumps({**record, "run": old_token, "private_identity": {**identity, "nonce": "e"*32}})); decoy.chmod(0o600)
+                chosen = root / "nested" / ("explicit.json." + token + ".runtime.json")
+                chosen.parent.mkdir()
+                if fault != "missing":
+                    value = copy.deepcopy(record)
+                    if fault == "wrong_run": value["run"] = old_token
+                    if fault == "wrong_private": value["private_path"] = str(root / "foreign")
+                    chosen.write_text(json.dumps(value)); chosen.chmod(0o600)
+                if fault == "ambiguous":
+                    copied = root / ("copied.json." + token + ".runtime.json")
+                    copied.write_text(json.dumps(record)); copied.chmod(0o600)
+                model = ModelRuntime(root)
+                command = ["podman", "build", "--tag", "localhost/fresh:dev", "--label", "io.rpgmigrate.e2e=" + token,
+                           "--file", str(private / "source/tools/e2e/Containerfile")]
+                if fault:
+                    with self.assertRaises(AssertionError): model.call(command)
+                    self.assertNotIn("localhost/fresh:dev", model.references)
+                else:
+                    model.call(command)
+                    self.assertEqual(getattr(model, "build_ledger_path", None), chosen)
 
 
 if __name__ == "__main__":
