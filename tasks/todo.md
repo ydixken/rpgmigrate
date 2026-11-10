@@ -142,8 +142,19 @@ We pushed the signed successor to the feature branch.
 Push proof: `/tmp/rpgmigrate-native-safe-diagnostics-feature-push-proof-20261110.json`, SHA-256 `aee53d8539b35f329975c7d5a3d6685145c59233a61d4089710cb6c841659f8a`.
 Fresh [checks run 42824505133](https://github.com/ydixken/rpgmigrate/actions/runs/42824505133) passed all eight jobs, including Linux Clippy, dependency/docs checks, all three plain-clone pairs, and both architecture runner-image smokes.
 The [development publication run 42824505294](https://github.com/ydixken/rpgmigrate/actions/runs/42824505294) passed both Ubuntu 26 native publication jobs.
-Typed public/source artifact verification and independent anonymous graph verification remain pending for these successor images.
-Hosted publication success alone does not qualify their public graph or an operator migration.
+Typed public/source artifact verification and independent anonymous graph verification passed for both successor native images.
+Sealed native evidence: `/private/tmp/rpgmigrate-abd1-ci-verification-wp3sm6jz/manifest.json`, SHA-256 `bfbdd941990af3f37cd4880bf0faa25c13d422b7904edf715c624e6d94d06f66`.
+Lock-ready native input: `/private/tmp/rpgmigrate-abd1-ci-verification-wp3sm6jz/lock-ready-native-images.json`, SHA-256 `367652be5b567f2bf01d4c1e2b2eb8b1ccf3b326353aca6b0b1b01d3f8e30393`.
+These image checks do not qualify an operator migration.
+
+The strict twelve-role ARM64 lock binds public manager/native images and pinned upstream graphs.
+Fresh upstream verification hashed 72 layers totaling 1.234 GB, and the canonical operator `29ed` receipt-input checks passed.
+Private lock: `/private/tmp/rpgmigrate-m7-arm64-public-lock-20261110-build-a7f2/image-lock.json`, SHA-256 `0cb3eb6be70f56709274d8d5f55ac6f592663ea98407adad4caba36859752da1`.
+The canonical M6 private-envelope rebind manifest is `b293524d39398576cb3a02f13d709221edc3cbb2c909ed021debf29760a8b4c5`, with status `UNBOUND`.
+The sealed canonical supervisor packet retains status `UNBOUND`.
+Supervisor packet: `/private/var/tmp/rpgmigrate-m7-ghcr-registry-supervisors-canonical29ed-20261110/source-packet.json`, SHA-256 `ced1a9dea61f033729bbea7cc6df956d9eeaf2573471a4d9798d57ba0909410b`.
+Fresh kind admission checks remain open.
+The kind admission worker performs read-only checks, without PREPARE or UP execution.
 
 The signed isolated M8 candidate `ea51e2375e51adc3d42115c588f5d3b23ea6d4a6`, tree `70198152465b405002ec4bf95d68775fa7342ed1`, composes Apache/GHCR changes without changing the M8 core and passed 398 portable tests.
 Composition proof: `/tmp/rpgmigrate-m8-primary-source-composition-20261110/signed-checkpoint.json`, SHA-256 `51f840b0fcc65eac496ddd93c1f2ab209f1571e7c0f68ecfb100076ee962a39a`.
@@ -156,12 +167,26 @@ Failure/preservation proof: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-eviden
 The signed model-only inspect fix uses isolated source `5f287cdd8fa0a79008b8bc0e9b17863725014f0e`, tree `344cc30d8594c87cb550f19f83a10e4fe7c7d42b`, with all 426 portable checks passing.
 Signed checkpoint: `/tmp/rpgmigrate-m8-pasta-successor-integration-20261110/signed-checkpoint.json`, SHA-256 `36ed365b432435481d54a23f1c2bf2318f02f5718b7bf8de608d1c125519f033`.
 The fresh 334-entry source export passed verification.
-The old failure remains RED, and a fresh live workflow retry remains open.
+The earlier pasta failure remains RED under its original input identity.
+The `5f287` successor compiled, passed stock-libpq smoke, and started owned PostgreSQL 16, then failed with `actual COPY format observation is missing or invalid`.
+Accepted complete profiles and reports both total zero.
+The attempted profile ordinal and partial case counts remain unknown.
+Failure handoff: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-16-16-successor-0b65b7a1/successor-workflow-failure-handoff.json`, SHA-256 `33d044ce10a7b3b31956e7f60225290597a2163442aefb031aff273ac71de7a5`.
+Independent cleanup released the window and preserved all 424 protected image IDs, 206 volumes, and four original containers.
+The new owned `b32` image remains retained, making the next inventory 425 image IDs.
+Release proof: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-16-16-successor-0b65b7a1/independent-successor-failure-preservation-release-proof.json`, SHA-256 `86b5fa4cb4d50acbfacac02d2f3ffc64642f0720921f4cb3b0c4c80523e6f25c`.
+The engine uses extended-query `PQsendQueryParams` framing, while the observer recognizes COPY only through simple-query `Q` messages.
+An in-memory reproduction accepts simple-query COPY and rejects the actual extended Parse/Bind/Describe/Execute/Sync framing.
+The observer fix remains source work, without a runtime pass or weaker COPY evidence requirements.
 The format 9 / metadata 7 candidate remains separate from the primary format 8 / metadata 6 baseline, without capability activation.
 
 The final private M9 plan passed review and its interfaces are frozen.
 Focused tests cover settings, persistence, scheduler, producer, and reader packets.
-Coherent live proof remains open.
+Signed engine core `9eb3154672979dc3ca9c6e560fdca99af6d716b8` passed focused tests and strict Clippy.
+Signed operator consumer `e71949fad962db604b45ec052620245a73af80cf` covers ten paths with zero configured lint findings, 243 native checks, and five controller event checks.
+Signed H1 packet `0c507a73db3c969d140829d6351e8bbbbf5819e9` passed 21 authority checks and ten focused checks including the new async selector.
+These isolated packets have no production merge, push, or activation evidence.
+Coherent live replay proof remains open.
 Production discovery remains on HOLD.
 `REPLAY_SAFE_BARRIER_INTERVAL_MS` remains `None`, release mode is unavailable, and no measured cadence or benchmark result exists.
 Benchmark execution remains on HOLD.
@@ -173,7 +198,10 @@ Test omission and compiled defaults through the real CLI path instead of passing
 
 M10 source-tool preparation is committed at `81c5b8c035806e4934806caec4d41e7dcd85d660`: nine tooling files and three portable-suite registrations passed 439 tests across twenty suites with zero skips.
 Integration proof: `/private/tmp/rpgmigrate-m10-tool-integration-evidence-jckqtq98/integration-evidence.json`, SHA-256 `591d5168b9475370f918cbedbff1e79fc0abe219d908842fe82ffec62ccf1337`; commit/fast-forward proof SHA-256 `526aedfc157eb9257c28ea0063b268baac15c4ad29e9566f3ef0a462eafdcd14`.
-The actual docs checker is not green: getting-started, operator, troubleshooting, and durability guides are absent.
+Signed isolated M10 phase-one source `41a80ad9d63711c365522cd46e5c0b01881fe766` passed 22 portable ASAN controls.
+The real toolchain remains unqualified, and the public ASAN manifest refuses execution.
+Signed isolated guide source `6732d800f01e02de85c5c9f6a78c1fda930ad1e5`, tree `a00969a8fcadd81def41ccf8b21de8a3e093fbfb`, passed focused Markdown and hard structural STE checks with zero findings.
+The actual same-source ten-guide gate remains pending, so draft checks do not qualify the documentation suite.
 The pinned ASAN manifest refuses execution until the binary, symbolizer, complete build-std dependency graph, and native runtime are qualified.
 LLVM tools contain no symbolizer, and the project `Cargo.lock` alone does not describe the complete build-std graph.
 No actual ASAN, fuzz, or runtime qualification follows from this source preparation.
@@ -1554,11 +1582,12 @@ The two WIP checkpoints retain their historical scope; normal source commit `7b6
 
 - [x] Synchronize native public verification, feature CI outcomes, operator publication evidence, and the failed M8 workflow with the roadmap.
 - [x] Record the approved M9 CLI omission/default clarification and its test lesson.
-- [x] Complete independent review and documentation checks before integration.
+- [x] Review the refreshed publication, M8 failure, M9 packet, M10 preparation, and COPY/cgroup lesson evidence before integration.
 
 This documentation-only checkpoint changes no engine or operator source.
 M0–M5 remain closed and M6–M10 remain open.
 
-The leader accepted the scoped content review.
+The preceding status checkpoint passed scoped review and documentation checks.
+The leader accepted the refreshed checkpoint review.
 Affected Markdown, changed-prose structural STE, paired-checkpoint parity, exact three-file scope, unchanged peer files, and whitespace checks passed.
 We ran no engine tests, database workload, or runtime qualification for this documentation-only change.

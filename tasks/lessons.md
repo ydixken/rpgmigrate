@@ -570,3 +570,17 @@ The public CLI has no limit options, so compiled default limits represent omissi
 Restore persisted effective limits for that path, while keeping explicit nondefault internally injected limits and the direct strict resolver strict.
 Exercise the real CLI omission/default path in tests.
 Passing stored limits directly to a helper does not prove that the CLI restores them.
+
+## Exercise the actual native COPY wire protocol, 2026-11-10
+
+Test the observer against extended Parse/Bind/Describe/Execute/Sync messages from `PQsendQueryParams`, alongside simple-query controls.
+Retain bounded case identity, wire context, and failure diagnostics before cleanup.
+Keep the actual COPY-format proof strict when fixing the observer.
+Report unknown attempted ordinals and partial counts as unknown.
+
+## Separate requested limits from effective cgroup proof, 2026-11-10
+
+Check requested `HostConfig` limits before container start.
+Effective cgroups exist only after start, so observe them at the earliest bounded post-start check, approximately five seconds later.
+Require that check before qualification or profile acceptance.
+A post-start probe does not prove pre-execution enforcement.
