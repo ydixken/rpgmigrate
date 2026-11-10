@@ -22,6 +22,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import follow as harness
+from test_clone import ModelRuntime
 from follow_wire import WireGate, PgoutputObservation
 
 
@@ -975,39 +976,32 @@ class FollowHarnessTests(unittest.TestCase):
     def test_outer_forwards_diagnostic_selector_and_never_overwrites_existing_receipt(self):
         for race in (False, True):
             with self.subTest(race=race), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                output, calls, created = root / "diagnostic.json", [], {}
+                root = Path(temporary).resolve()
+                (root / "tools/e2e").mkdir(parents=True)
+                (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6" * 64 + "\n")
+                output = root / "diagnostic.json"
+                model = ModelRuntime(root)
                 args = SimpleNamespace(pair="16-16", report_probe=None, receipt=str(output), smoke=False, diagnostic_case="before_commit_rollback")
-                def run(command, **_kwargs):
-                    calls.append(command)
-                    if command[1:3] == ["image", "inspect"]:
-                        return b"fixture-image" if "--format" in command else b'[{"Id":"fixture-image"}]'
-                    if command[1] == "run":
-                        return (b'a' if "source" in command else b'b') * 64
-                    if command[1] == "create":
-                        cid = str(len(created) + 1).encode() * 64
-                        created[cid.decode()] = command
-                        return cid
-                    if command[1:3] == ["start", "--attach"]:
-                        created_command = created[command[-1]]
-                        if "--inside" in created_command:
-                            self.assertEqual(created_command[-2:], ["--diagnostic-case", "before_commit_rollback"])
-                            receipt_mount = next(value.removesuffix(":/receipt") for value in created_command if value.endswith(":/receipt"))
-                            (Path(receipt_mount) / "result.json").write_text(json.dumps(self.diagnostic_receipt()))
+                def execute(guard, command, **kwargs):
+                    guard.checkpoint()
+                    result = model.call(command, **kwargs)
+                    if command[1] == "start" and "--attach" in command:
+                        guard.sample()
+                        actual = model.containers[command[-1]]
+                        if actual["model_role"] == "runner":
+                            created = next(call for call in model.commands if call[1] == "create" and "tools/e2e/follow.py" in call)
+                            self.assertEqual(created[-2:], ["--diagnostic-case", "before_commit_rollback"])
+                            receipt = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/receipt"))
+                            (receipt / "result.json").write_text(json.dumps(self.diagnostic_receipt()))
                             if race:
                                 output.write_text("existing full receipt")
-                        return b""
-                    return b""
-                cleanup_calls = []
-                def external(command, **_kwargs):
-                    cleanup_calls.append(command)
-                    if command[1] == "inspect":
-                        label = next(item for call in calls if "--label" in call for item in [call[call.index("--label") + 1]])
-                        return SimpleNamespace(returncode=0, stdout=b"other-owner" if race else label.split("=", 1)[1].encode())
-                    return SimpleNamespace(returncode=1 if command[1:3] == ["container", "exists"] else 0, stdout=b"")
-                with patch.object(harness.clone, "ROOT", root), patch.object(harness.clone, "DIAGNOSTIC_ROOT", root / "diagnostics"), \
-                        patch.object(harness.clone.shutil, "which", return_value="/owned/podman"), patch.object(harness.clone, "run", run), \
-                        patch.object(harness.clone.subprocess, "run", external), redirect_stdout(io.StringIO()):
+                    return result
+                with patch.object(harness.clone, "ROOT", root), patch.object(harness.clone, "DIAGNOSTIC_ROOT", root / "target/e2e/diagnostics"), \
+                        patch.object(harness.clone.shutil, "which", return_value="/owned/podman"), \
+                        patch.object(harness.clone.shutil, "disk_usage", return_value=SimpleNamespace(free=57 * 1024**3)), \
+                        patch.object(harness.clone, "run", side_effect=model.call), \
+                        patch.object(harness.clone.subprocess, "run", side_effect=model.subprocess), \
+                        patch.object(harness.clone.RuntimeGuard, "execute", execute), redirect_stdout(io.StringIO()):
                     validator = lambda report, manifest: harness.validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case)
                     if race:
                         with self.assertRaises(FileExistsError):
@@ -1020,15 +1014,16 @@ class FollowHarnessTests(unittest.TestCase):
                     ledger = json.loads(ledger_path.read_text())
                     self.assertEqual(ledger["scope"], "runtime_resource_ownership")
                     self.assertEqual({entry["role"] for entry in ledger["containers"]}, {"source", "target", "build", "runner"})
-                    self.assertEqual(ledger["cleanup_complete"], not race)
+                    self.assertTrue(ledger["cleanup_complete"])
                     self.assertEqual(stat.S_IMODE(ledger_path.stat().st_mode), 0o600)
                     owned_ids = {entry["id"] for entry in ledger["containers"]}
-                    self.assertEqual({command[-1] for command in cleanup_calls if command[1] == "rm"}, set() if race else owned_ids)
-                    self.assertEqual({command[-1] for command in cleanup_calls if command[1:3] == ["container", "exists"]}, owned_ids)
-                    before = len(calls)
+                    self.assertEqual(set(model.removed), owned_ids)
+                    self.assertFalse(model.containers)
+                    self.assertFalse(model.networks)
+                    before = len(model.commands)
                     with self.assertRaises((RuntimeError, FileExistsError)):
                         harness.clone.outer(args, program="follow", manifest=harness.load_manifest(), receipt_validator=validator)
-                    self.assertEqual(len(calls), before)
+                    self.assertEqual(len(model.commands), before)
 
     def test_inner_diagnostic_runs_only_selected_case_and_checks_rollback_before_resume(self):
         for diagnostic, noop in ((None, False), ("before_commit_rollback", False), ("before_commit_rollback", True)):

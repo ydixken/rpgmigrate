@@ -142,6 +142,63 @@ The large-object component case checks initial content and retry; final re-sync,
 > Qualification requires the admitted 16:16, 18:18, and 16:18 matrix, including operator defaults and independent fault observations.
 > Preserve the historical M2/M4/M7 receipts and their formats separately from fresh M8 native format 9 / metadata 7 inputs.
 
+### M8 direct CLI workflow profile
+
+The existing clone pair tasks accept `PROFILE=disabled` (the default) or `PROFILE=m8`.
+A CLI value overrides the inherited `PROFILE` environment variable; empty or unknown values fail before the harness starts.
+`CONTAINER_RUNTIME` retains the same CLI-over-environment precedence.
+The matrix task forwards the selected profile through 16 to 16, 18 to 18, and 16 to 18 sequentially and stops at the first failure.
+
+> [!WARNING]
+> M8 runtime workflows remain unqualified until their source-bound receipts and cleanup proofs pass review.
+> The retained component checkpoint passed ten Clone cases and one catalog case on PostgreSQL 16.15 and 18.6; it does not qualify these workflows or the cross-major pair.
+> These commands do not qualify an operator deployment, activate capabilities, or supply benchmark evidence.
+
+Use a clean committed candidate checkout and complete runtime admission before running these commands.
+The M8 outer harness builds a debug executable from that source, measures its image and utility identities, and uses fresh owned resources.
+It rejects the old Go report probe, so unset `RPGMIGRATE_E2E_REPORT_PROBE` explicitly.
+
+1. Run the first pair in its admitted runtime window.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE task test-e2e-clone-16-16 PROFILE=m8 CONTAINER_RUNTIME=podman
+   ```
+
+2. Review its receipt and cleanup proof, then run the second pair in a new admitted window.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE task test-e2e-clone-18-18 PROFILE=m8 CONTAINER_RUNTIME=podman
+   ```
+
+3. Review its receipt and cleanup proof, then run the cross-major pair in a new admitted window.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE task test-e2e-clone-16-18 PROFILE=m8 CONTAINER_RUNTIME=podman
+   ```
+
+For an explicit receipt destination, use the existing Python interface after setting `M8_RUN_DIR` to a fresh private admitted directory.
+The destination file must not exist.
+
+1. Run the selected pair with its receipt path.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE CONTAINER_RUNTIME=podman python3 tools/e2e/clone.py --pair 16-16 --profile m8 --receipt "$M8_RUN_DIR/clone-m8-16-16.json"
+   ```
+
+The [case manifest](../tests/fixtures/clone/m8-cases.json), [fixtures](../tests/fixtures/clone/), and [profile producer](../tools/e2e/copy_features.py) define six serial cases for each pair:
+
+- `binary_safe` requires unsplit binary COPY, matching independent row fingerprints, and empty large-object inventories.
+- `binary_fallback` requires binary COPY for safe columns and whole-table text fallback for an integer-array table, with matching row fingerprints.
+- `split_default` measures the heap against the 536870912-byte default threshold, observes contiguous split ranges and simultaneous held backend PIDs, and compares source/target wire formats, counts, and row fingerprints.
+- `large_objects` checks five objects, including sparse content and EOF, with owner, ACL, and comments preserved initially and after follow drain.
+- `lo_only` proves empty physical user-table inventories and five matching large objects before accepting native comparison `[]`; it uses `--no-owner` while retaining ACL and comment checks.
+- `mixed` combines binary COPY, text fallback, and five large objects under `--no-owner --no-acl --no-comments`; it does not exercise the split fixture.
+
+The three large-object cases require durable completion at the exact final follow boundary and an injected target mismatch that comparison must reject before restoration.
+All cases require stable physical inventories and matching independent table fingerprints.
+These profiles do not exercise interrupted binary relay, split restart, interrupted large-object copy, large-object reset/restart, or failure during final re-sync.
+The [roadmap](roadmap.md) retains those recovery and operator closing gates separately.
+
 ### Plain clone admission and recovery
 
 The M2 implementation targets primary source/target databases on 16 or 18 with source major no greater than target major, and matching-target-major pg_dump/pg_restore.
@@ -157,7 +214,7 @@ The admitted profile uses logged heap tables, inheritance children, and partitio
 Generated output must match canonical source bytes under the imported snapshot before the table marker and COMMIT; a mismatch refuses and rolls back.
 The 16 MiB row cap applies to the complete qualification row, including generated output.
 The historical M2 profile refuses foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables during preflight.
-Its binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip-policy cases remain refusal checks; the M8 component profile above covers the candidate implementation separately.
+Its binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip-policy cases remain refusal checks; the M8 component and direct CLI profiles above cover the candidate implementation separately.
 The separate follow profile below controls `clone --follow` qualification.
 Table and post-data jobs default to four; explicitly conflicting index/restore job counts fail instead of ignoring a setting.
 No-owner, no-ACL, no-comments, and no-tablespaces policies are passed through to the schema utilities.

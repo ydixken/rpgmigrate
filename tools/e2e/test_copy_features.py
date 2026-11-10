@@ -29,6 +29,25 @@ def decode(records):
     return harness.decode_large_objects(b"\n".join(json.dumps(value).encode() for value in records), max_objects=16, max_logical_bytes=16777216)
 
 
+def artifact_binding():
+    return {"binary_sha256": "a" * 64, "source_tree_sha256": "b" * 64, "source_commit": "1"*40, "source_git_tree": "2"*40,
+            "runner_image_id": "sha256:" + "c" * 64, "server_image_ids": ["sha256:" + "d"*64, "sha256:" + "e"*64], "run": "f"*32,
+            "servers": [{"id": value*64, "image": "sha256:" + image*64, "role": role, "system_identifier": system, "version": version,
+                         "data_directory": directory, "wal_level": "logical", "started_at": "2026-11-10T00:00:00Z", "pgdata_permissions": "700|postgres"}
+                        for value, image, role, system, version, directory in (("3", "d", "source", "7706000000000000001", "16.15", "/var/lib/postgresql/data"),
+                                                                             ("4", "e", "target", "7706000000000000002", "18.6", "/var/lib/postgresql/18/docker"))]}
+
+
+def build_smoke(binding):
+    return {"binary_sha256": binding["binary_sha256"], "source_tree_sha256": binding["source_tree_sha256"], "runner_image_id": binding["runner_image_id"],
+            "architecture": "arm64", "client_versions": {tool: "18.6" for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": 180006,
+            "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18", "library_sha256": "7"*64,
+            "packages": {"libpq5": {"version": "18.6-1.pgdg13+1", "architecture": "arm64"}, "postgresql-client-16": {"version": "16.15-1.pgdg13+1", "architecture": "arm64"},
+                         "postgresql-client-18": {"version": "18.6-1.pgdg13+1", "architecture": "arm64"}},
+            "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
+            "version_text": "rpgmigrate 0.1.0\nlibpq 180006\n"}
+
+
 class CopyFeatureTests(unittest.TestCase):
     def test_feature_manifest_pins_budget_and_reviewed_fixture_bytes(self):
         manifest = harness.load_manifest()
@@ -168,8 +187,7 @@ class CopyFeatureTests(unittest.TestCase):
             harness.validate_native_comparison([], {"source": [], "target": []}, lo_verified=True, native=False)
 
     def test_retained_lo_evidence_rejects_matching_but_malformed_inventory(self):
-        binding = {"binary_sha256": "a" * 64, "source_tree_sha256": "b" * 64, "runner_image_id": "sha256:" + "c" * 64,
-                   "server_image_ids": ["sha256:" + "d" * 64, "sha256:" + "e" * 64], "run": "f" * 32}
+        binding = artifact_binding()
         for inventory in ([], {"90001": {}}, {"90001": {"oid": 90002, "length": 0, "sha256": "0" * 64, "owner": "owner"}}):
             stage = {"source": inventory, "target": inventory, "lo_verified": True}
             report = {"binding": binding, "cases": {"lo_only": {"initial": stage, "final": stage, "inventories": {"source": [], "target": []}}}}
@@ -177,8 +195,7 @@ class CopyFeatureTests(unittest.TestCase):
                 harness.validate_feature_receipt(report, binding, ("lo_only",))
 
     def test_receipts_reject_binary_image_replay_omitted_lo_and_empty_case_inventory(self):
-        binding = {"binary_sha256": "a" * 64, "source_tree_sha256": "b" * 64, "runner_image_id": "sha256:" + "c" * 64,
-                   "server_image_ids": ["sha256:" + "d" * 64, "sha256:" + "e" * 64], "run": "f" * 32}
+        binding = artifact_binding()
         report = {"binding": binding, "cases": {"lo_only": {"initial": {"source": {}, "target": {}, "lo_verified": True}, "final": {"source": {}, "target": {}, "lo_verified": True}, "inventories": {"source": [], "target": []}}}}
         harness.validate_feature_receipt(report, binding, ("lo_only",))
         for actual, expected, cases in (({**report, "binding": {**binding, "binary_sha256": "0" * 64}}, binding, ("lo_only",)),
@@ -193,6 +210,44 @@ class CopyFeatureTests(unittest.TestCase):
         bad = copy.deepcopy(report); bad["cases"]["lo_only"]["final"]["target"] = {"90001": {"sha256": "0" * 64}}
         with self.assertRaises(RuntimeError):
             harness.validate_feature_receipt(bad, binding, ("lo_only",))
+
+
+    def test_artifact_binding_requires_clean_source_and_distinct_fresh_server_identities(self):
+        self.assertTrue(callable(getattr(harness, "validate_artifact_binding", None)), "missing complete artifact binding")
+        binding = artifact_binding()
+        harness.validate_artifact_binding(binding)
+        for change in ({"servers": []}, {"source_commit": ""}, {"source_git_tree": ""}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                harness.validate_artifact_binding({**binding, **change})
+        for key, value in (("id", binding["servers"][0]["id"]), ("system_identifier", binding["servers"][0]["system_identifier"]),
+                           ("system_identifier", "7705796426308472853"), ("data_directory", "/tmp/borrowed"), ("wal_level", "replica"), ("version", "18.5"), ("pgdata_permissions", "755|root")):
+            bad = copy.deepcopy(binding); bad["servers"][1][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                harness.validate_artifact_binding(bad)
+
+    def test_source_bound_smoke_requires_actual_version_tools_library_and_debug_executable(self):
+        self.assertTrue(callable(getattr(harness, "validate_build_smoke", None)), "missing source-bound debug smoke")
+        binding = artifact_binding(); smoke = build_smoke(binding)
+        harness.validate_build_smoke(smoke, binding, "16-18")
+        for change in ({"binary_sha256": "0"*64}, {"runner_image_id": "sha256:" + "0"*64}, {"client_versions": {}}, {"linked_libpq": 180005},
+                       {"version_text": "rpgmigrate 0.1.0\nlibpq 180005\n"}, {"version_json": {}}, {"packages": {}}, {"library_sha256": ""}, {"architecture": "unknown"}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                harness.validate_build_smoke({**smoke, **change}, binding, "16-18")
+
+
+    def test_database_receipts_bind_each_fresh_oid_to_exact_server_and_case(self):
+        self.assertTrue(callable(getattr(harness, "validate_database_identities", None)), "missing exact database identity evidence")
+        binding = artifact_binding()
+        cases = {name: {"databases": {role: {"name": prefix + name, "oid": 100 + number, "system_identifier": server["system_identifier"]}
+                                      for role, prefix, server in zip(("source", "target"), ("src_m8_", "dst_m8_"), binding["servers"])}}
+                 for number, name in enumerate(harness.CASES)}
+        harness.validate_database_identities(cases, binding)
+        for key, value in (("oid", 0), ("name", "borrowed"), ("system_identifier", "7705796426308472853")):
+            bad = copy.deepcopy(cases); bad["binary_safe"]["databases"]["source"][key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError): harness.validate_database_identities(bad, binding)
+        bad = copy.deepcopy(cases); bad["binary_fallback"]["databases"]["source"]["oid"] = 100
+        with self.assertRaises(RuntimeError): harness.validate_database_identities(bad, binding)
+        with self.assertRaises(RuntimeError): harness.validate_database_identities({}, binding)
 
 
 if __name__ == "__main__":

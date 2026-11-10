@@ -31,6 +31,14 @@ vars:
   RPGMIGRATE_BIN: null
   RPGMIGRATE_E2E_REPORT_PROBE: null
   CONTAINER_RUNTIME: null
+  PROFILE: null
+  CLONE_PROFILE:
+    sh: |-
+      profile={{if ne .PROFILE nil}}{{.PROFILE | shellQuote}}{{else}}"${PROFILE-disabled}"{{end}}
+      case "$profile" in
+        disabled|m8) printf '%s' "$profile" ;;
+        *) printf '%s\n' 'error: PROFILE must be disabled or m8' >&2; exit 1 ;;
+      esac
   IMAGE: null
   IMAGE_REVISION: null
   IMAGE_REVISION_VALUE:
@@ -277,22 +285,22 @@ tasks:
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_copy_features.py'
 
   test-e2e-clone-16-16:
-    desc: Qualify plain clone and recovery boundaries on PostgreSQL 16 to 16
+    desc: Run the selected clone workflow profile on PostgreSQL 16 to 16
     cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 16-16'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 16-16 --profile {{.CLONE_PROFILE | shellQuote}}'
 
   test-e2e-clone-18-18:
-    desc: Qualify plain clone and recovery boundaries on PostgreSQL 18 to 18
+    desc: Run the selected clone workflow profile on PostgreSQL 18 to 18
     cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 18-18'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 18-18 --profile {{.CLONE_PROFILE | shellQuote}}'
 
   test-e2e-clone-16-18:
-    desc: Qualify plain clone and recovery boundaries on PostgreSQL 16 to 18
+    desc: Run the selected clone workflow profile on PostgreSQL 16 to 18
     cmds:
-      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 16-18'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/clone.py --pair 16-18 --profile {{.CLONE_PROFILE | shellQuote}}'
 
   test-e2e-clone:
-    desc: Qualify all three declared plain-clone version pairs
+    desc: Run the selected clone workflow profile on all three version pairs
     cmds:
       - task: test-e2e-clone-16-16
       - task: test-e2e-clone-18-18

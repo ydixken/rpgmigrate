@@ -147,15 +147,59 @@ def require_copy_branch(evidence, relation, format, *, split=False, simultaneous
     return records
 
 
+def validate_artifact_binding(binding):
+    keys = {"binary_sha256", "source_tree_sha256", "source_commit", "source_git_tree", "runner_image_id", "server_image_ids", "servers", "run"}
+    if (not isinstance(binding, dict) or set(binding) != keys
+            or any(not re.fullmatch(r"[a-f0-9]{64}", binding.get(key, "")) for key in ("binary_sha256", "source_tree_sha256"))
+            or any(not re.fullmatch(r"[a-f0-9]{40}", binding.get(key, "")) for key in ("source_commit", "source_git_tree"))
+            or not re.fullmatch(r"[a-f0-9]{32}", binding.get("run", ""))
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", binding.get("runner_image_id", ""))
+            or not isinstance(binding.get("server_image_ids"), list) or len(binding["server_image_ids"]) != 2
+            or any(not re.fullmatch(r"sha256:[a-f0-9]{64}", value) for value in binding["server_image_ids"])
+            or not isinstance(binding.get("servers"), list) or len(binding["servers"]) != 2):
+        raise RuntimeError("candidate artifact identity is absent or malformed")
+    seen_ids, seen_systems = set(), {"7705796426308472853", "7705919902701522967"}
+    for server, role, image in zip(binding["servers"], ("source", "target"), binding["server_image_ids"]):
+        if (not isinstance(server, dict) or set(server) != {"id", "image", "role", "system_identifier", "version", "data_directory", "wal_level", "started_at", "pgdata_permissions"}
+                or server.get("role") != role or server.get("image") != image
+                or not re.fullmatch(r"[a-f0-9]{64}", server.get("id", "")) or server["id"] in seen_ids
+                or not re.fullmatch(r"[0-9]{19,20}", server.get("system_identifier", "")) or server["system_identifier"] in seen_systems
+                or server.get("version") not in ("16.15", "18.6") or server.get("wal_level") != "logical"
+                or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+\-]+Z?", server.get("started_at", ""))
+                or server.get("data_directory") != {"16.15": "/var/lib/postgresql/data", "18.6": "/var/lib/postgresql/18/docker"}.get(server.get("version"))
+                or server.get("pgdata_permissions") != "700|postgres"):
+            raise RuntimeError("candidate fresh server identity or startup evidence differs")
+        seen_ids.add(server["id"])
+        seen_systems.add(server["system_identifier"])
+
+
+def validate_build_smoke(smoke, binding, pair):
+    expected_client = {"16": "16.15", "18": "18.6"}[pair.split("-")[1]]
+    discovery = smoke.get("version_json", {})
+    if (set(smoke) != {"binary_sha256", "source_tree_sha256", "runner_image_id", "architecture", "client_versions", "linked_libpq", "library_path", "library_sha256", "packages", "version_json", "version_text"}
+            or [server["version"] for server in binding["servers"]] != [{"16": "16.15", "18": "18.6"}[major] for major in pair.split("-")]
+            or any(smoke.get(key) != binding[key] for key in ("binary_sha256", "source_tree_sha256", "runner_image_id"))
+            or smoke.get("architecture") not in ("arm64", "amd64") or smoke.get("linked_libpq") != 180006
+            or smoke.get("client_versions") != {tool: expected_client for tool in ("psql", "pg_dump", "pg_restore")}
+            or not isinstance(smoke.get("library_path"), str) or not smoke["library_path"].startswith("/usr/lib/")
+            or not re.fullmatch(r"[a-f0-9]{64}", smoke.get("library_sha256", ""))
+            or set(discovery) != {"protocol_version", "engine_version", "capabilities"} or type(discovery.get("protocol_version")) is not int or discovery["protocol_version"] != 1
+            or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.\-]+)?", discovery.get("engine_version", ""))
+            or discovery.get("capabilities") != ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
+            or smoke.get("version_text") != "rpgmigrate " + discovery["engine_version"] + "\nlibpq 180006\n"):
+        raise RuntimeError("candidate source-bound debug version, tools, or library smoke differs")
+    packages = smoke.get("packages", {})
+    if set(packages) != {"libpq5", "postgresql-client-16", "postgresql-client-18"}:
+        raise RuntimeError("candidate measured client package inventory is absent")
+    for name, version in (("libpq5", "18.6"), ("postgresql-client-16", "16.15"), ("postgresql-client-18", "18.6")):
+        if (set(packages[name]) != {"version", "architecture"} or packages[name].get("version", "").split("-")[0] != version or packages[name].get("architecture") != smoke["architecture"]):
+            raise RuntimeError("candidate measured client package minor or architecture differs")
+
+
 def validate_feature_receipt(report, binding, required_cases=CASES):
     if not isinstance(binding, dict) or not required_cases or len(set(required_cases)) != len(required_cases) or set(report.get("cases", {})) != set(required_cases) or report.get("binding") != binding:
         raise RuntimeError("candidate feature receipt inventory or artifact binding differs")
-    if (set(binding) != {"binary_sha256", "source_tree_sha256", "runner_image_id", "server_image_ids", "run"}
-            or any(not re.fullmatch(r"[a-f0-9]{64}", binding.get(key, "")) for key in ("binary_sha256", "source_tree_sha256"))
-            or not re.fullmatch(r"[a-f0-9]{32}", binding.get("run", ""))
-            or not re.fullmatch(r"sha256:[a-f0-9]{64}", binding.get("runner_image_id", ""))
-            or len(binding.get("server_image_ids", [])) != 2 or any(not re.fullmatch(r"sha256:[a-f0-9]{64}", value) for value in binding["server_image_ids"])):
-        raise RuntimeError("candidate artifact identity is absent or malformed")
+    validate_artifact_binding(binding)
     for case in report["cases"].values():
         for stage in ("initial", "final"):
             value = case.get(stage, {})
@@ -299,6 +343,26 @@ def native_compare(driver, source, target, srcname, dstname, state, lo_verified)
     return inventories, {"before": inventories, "after": after}
 
 
+def database_identity(database, name):
+    return json.loads(database.sql(name, "SELECT json_build_object('name',current_database(),'oid',(SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname=current_database()),'system_identifier',(SELECT system_identifier::text FROM pg_catalog.pg_control_system()));"), object_pairs_hook=clone.unique_object)
+
+
+def validate_database_identities(cases, binding):
+    if set(cases) != set(CASES):
+        raise RuntimeError("fresh database case inventory is absent")
+    for role, prefix, server in zip(("source", "target"), ("src_m8_", "dst_m8_"), binding["servers"]):
+        seen = set()
+        for name, case in cases.items():
+            databases = case.get("databases", {})
+            if set(databases) != {"source", "target"}:
+                raise RuntimeError("fresh database endpoint inventory is absent")
+            actual = databases[role]
+            if (set(actual) != {"name", "oid", "system_identifier"} or actual["name"] != prefix + name
+                    or not valid_oid(actual["oid"]) or actual["oid"] in seen or actual["system_identifier"] != server["system_identifier"]):
+                raise RuntimeError("fresh database identity changed or differs from its exact owned server")
+            seen.add(actual["oid"])
+
+
 def run_profiles(source, target, driver, root, manifest):
     import cutover
     cases = {}
@@ -307,6 +371,7 @@ def run_profiles(source, target, driver, root, manifest):
     for case in CASES:
         srcname, dstname = "src_m8_" + case, "dst_m8_" + case
         src, dst = source.create(srcname), target.create(dstname)
+        databases = {"source": database_identity(source, srcname), "target": database_identity(target, dstname)}
         state = root / case
         has_lo = case in ("large_objects", "lo_only", "mixed")
         policy = {"no_owner": case != "large_objects", "no_acl": case == "mixed", "no_comments": case == "mixed"}
@@ -367,13 +432,15 @@ def run_profiles(source, target, driver, root, manifest):
                 incoming = sorted((tuple(row["relation"]), row["format"], row["columns"], row["rows"]) for row in target_evidence["records"] if row["complete"] and row["eof"])
                 if outgoing != incoming:
                     raise RuntimeError("source/target actual COPY response format or row counts differ")
-                value = {"initial": initial, "final": final, "inventories": inventories, "inventory_boundary": boundary, "tables": expected_tables, "copy": evidence, "target_copy": target_evidence,
+                value = {"databases": databases, "initial": initial, "final": final, "inventories": inventories, "inventory_boundary": boundary, "tables": expected_tables, "copy": evidence, "target_copy": target_evidence,
                          "branches": branches, "simultaneous": list(sessions), "scope": "direct_cli_operator_flags"}
                 if case == "split_default":
                     value.update(heap_bytes=heap, threshold=DEFAULT_THRESHOLD)
                 if has_lo:
                     value["final_end_lsn"] = end
                     value["lo_mismatch_refusal"] = lo_mismatch_refusal(driver, source, target, srcname, dstname, state, policy, final, expected_tables, manifest, inventories["target"])
+                if databases != {"source": database_identity(source, srcname), "target": database_identity(target, dstname)}:
+                    raise RuntimeError("fresh profile database identity changed during the oracle boundary")
                 cases[case] = value
             finally:
                 driver.kill(worker)
@@ -399,6 +466,8 @@ def ready_follow(driver, worker):
 def validate_receipt(report, manifest, *, binding):
     clone.validate_runtime(report)
     validate_feature_receipt(report, binding)
+    validate_build_smoke(report.get("build_smoke", {}), binding, report["pair"])
+    validate_database_identities(report["cases"], binding)
     if report.get("fixture_sha256") != hashlib.sha256((FIXTURES / "m8-cases.json").read_bytes()).hexdigest():
         raise RuntimeError("candidate feature fixture binding differs")
     validation = report.get("report_validation", {})
@@ -451,7 +520,10 @@ def inner(args):
     if not args.feature_binding or args.report_probe is not None:
         raise RuntimeError("candidate profile requires independent artifact inputs without the old Go probe")
     binding = json.loads(Path(args.feature_binding).read_bytes(), object_pairs_hook=clone.unique_object)
+    validate_artifact_binding(binding)
     binary = Path(args.binary)
+    if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise RuntimeError("candidate source-bound debug executable is absent or replaced")
     if hashlib.sha256(binary.read_bytes()).hexdigest() != binding.get("binary_sha256") or cutover.source_inventory(clone.ROOT)["sha256"] != binding.get("source_tree_sha256"):
         raise RuntimeError("candidate actual binary/source identity differs from admitted inputs")
     bindir = Path("/usr/lib/postgresql") / args.pair.split("-")[1] / "bin"
@@ -467,6 +539,30 @@ def inner(args):
               "client_versions": clients, "linked_libpq": int(ctypes.CDLL(linked[1]).PQlibVersion()), "binding": binding,
               "fixture_sha256": hashlib.sha256((FIXTURES / "m8-cases.json").read_bytes()).hexdigest()}
     clone.validate_runtime(report)
+    for database, expected in zip((source, target), binding["servers"]):
+        actual = json.loads(database.sql("postgres", "SELECT json_build_object('system_identifier',(SELECT system_identifier::text FROM pg_catalog.pg_control_system()),'version',split_part(current_setting('server_version'),' ',1),'data_directory',current_setting('data_directory'),'wal_level',current_setting('wal_level'));"))
+        if any(actual.get(key) != expected[key] for key in ("system_identifier", "version", "data_directory", "wal_level")):
+            raise RuntimeError("candidate runner reached a different server identity")
+    library = Path(linked[1]).resolve(strict=True)
+    packages = {}
+    package_output = clone.run(["dpkg-query", "-W", "-f=${Package}|${Version}|${Architecture}|${db:Status-Status}\n", "libpq5", "postgresql-client-16", "postgresql-client-18"])
+    for row in package_output.decode().splitlines():
+        fields = row.split("|")
+        if len(fields) != 4 or fields[3] != "installed" or fields[0] in packages:
+            raise RuntimeError("candidate measured client package output differs")
+        packages[fields[0]] = {"version": fields[1], "architecture": fields[2]}
+    smoke = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "source_tree_sha256": binding["source_tree_sha256"], "runner_image_id": binding["runner_image_id"],
+             "architecture": {"aarch64": "arm64", "x86_64": "amd64"}.get(os.uname().machine), "client_versions": clients, "linked_libpq": report["linked_libpq"],
+             "library_path": str(library), "library_sha256": hashlib.sha256(library.read_bytes()).hexdigest(), "packages": packages,
+             "version_json": json.loads(clone.run([str(binary), "version", "--json"]), object_pairs_hook=clone.unique_object),
+             "version_text": clone.run([str(binary), "version"]).decode()}
+    validate_build_smoke(smoke, binding, args.pair)
+    report["build_smoke"] = smoke
+    with Path(args.receipt).with_name("m8-smoke.json").open("x") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(smoke, stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-m8-") as temporary:
         root = Path(temporary)
         driver = clone.Driver(binary, environment, root, mode="operator")

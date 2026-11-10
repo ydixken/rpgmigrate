@@ -148,7 +148,7 @@ class TaskfileTests(unittest.TestCase):
         self.bin.mkdir()
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("TASK_") and key not in
-                    ("CARGO", "PYTHON", "IMAGE", "IMAGE_REVISION", "PQ_LIB_DIR", "STORAGE_ROOT", *FORWARDED)}
+                    ("CARGO", "PYTHON", "PROFILE", "IMAGE", "IMAGE_REVISION", "PQ_LIB_DIR", "STORAGE_ROOT", *FORWARDED)}
         self.env.update(PATH=str(self.bin) + os.pathsep + os.environ["PATH"], CALL_LOG=str(self.log))
         script = "#!" + sys.executable + "\n" + '''import json, os, pathlib, sys
 args = sys.argv[1:]
@@ -460,13 +460,58 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.assertEqual(self.calls(), [])
         self.assertFalse((self.root / "injected").exists())
 
-    def test_clone_matrix_enumerates_exact_pairs_and_stops_on_failure(self):
-        self.passed(self.run_task("test-e2e-clone"))
-        self.assertEqual([row["argv"] for row in self.calls()],
-                         [["tools/e2e/clone.py", "--pair", pair] for pair in ("16-16", "18-18", "16-18")])
+    def test_clone_profiles_reach_each_pair_and_sequential_matrix(self):
+        pairs = ("16-16", "18-18", "16-18")
+        for profile in (None, "disabled", "m8"):
+            args = () if profile is None else ("PROFILE=" + profile,)
+            for target, selected in [("test-e2e-clone-" + pair, (pair,)) for pair in pairs] + [("test-e2e-clone", pairs)]:
+                with self.subTest(profile=profile, target=target):
+                    self.log.unlink(missing_ok=True)
+                    self.passed(self.run_task(target, *args))
+                    self.assertEqual([row["argv"] for row in self.calls()],
+                                     [["tools/e2e/clone.py", "--pair", pair, "--profile", profile or "disabled"]
+                                      for pair in selected])
+        for profile in ("disabled", "m8"):
+            self.log.unlink()
+            self.assertNotEqual(self.run_task("test-e2e-clone", "PROFILE=" + profile,
+                                             env={"FAIL_MATCH": "18-18"}).returncode, 0)
+            self.assertEqual([row["argv"][2] for row in self.calls()], ["16-16", "18-18"])
+
+    def test_clone_profile_environment_cli_precedence_and_runtime_quoting(self):
+        self.passed(self.run_task("test-e2e-clone", env={"PROFILE": "m8", "CONTAINER_RUNTIME": "inherited runtime"}))
+        self.assertEqual([row["argv"][-1] for row in self.calls()], ["m8"] * 3)
+        self.assertEqual([row["env"]["CONTAINER_RUNTIME"] for row in self.calls()], ["inherited runtime"] * 3)
+        runtime = "runtime path 'quoted' $(touch injected); $literal"
         self.log.unlink()
-        self.assertNotEqual(self.run_task("test-e2e-clone", env={"FAIL_MATCH": "18-18"}).returncode, 0)
-        self.assertEqual([row["argv"][-1] for row in self.calls()], ["16-16", "18-18"])
+        self.passed(self.run_task("test-e2e-clone", "PROFILE=disabled", "CONTAINER_RUNTIME=" + runtime,
+                                 env={"PROFILE": "m8", "CONTAINER_RUNTIME": "missing"}))
+        self.assertEqual([row["argv"][-1] for row in self.calls()], ["disabled"] * 3)
+        self.assertEqual([row["env"]["CONTAINER_RUNTIME"] for row in self.calls()], [runtime] * 3)
+        self.assertFalse((self.root / "injected").exists())
+
+    def test_clone_profile_invalid_empty_and_injection_fail_before_children_even_dry(self):
+        for target in ("test-e2e-clone", "test-e2e-clone-16-16", "test-e2e-clone-18-18", "test-e2e-clone-16-18"):
+            for profile in ("", "unknown", "m8; touch injected", "$(touch injected)", "m8'\"quote"):
+                for dry in (False, True):
+                    for cli in (False, True):
+                        with self.subTest(target=target, profile=profile, dry=dry, cli=cli):
+                            self.log.unlink(missing_ok=True)
+                            args = (["--dry"] if dry else []) + [target] + (["PROFILE=" + profile] if cli else [])
+                            result = self.run_task(*args, env={"PROFILE": "m8" if cli else profile})
+                            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assertIn("PROFILE must be disabled or m8", result.stderr)
+                            self.assertEqual(self.calls(), [])
+                            self.assertFalse((self.root / "injected").exists())
+
+    def test_clone_dry_run_has_exact_profile_argv_without_children(self):
+        for profile in (None, "m8"):
+            result = self.run_task("--silent=false", "--dry", "test-e2e-clone", *(() if profile is None else ("PROFILE=" + profile,)))
+            self.passed(result)
+            commands = [line for line in (result.stdout + result.stderr).splitlines() if "tools/e2e/clone.py" in line]
+            self.assertEqual(len(commands), 3)
+            for pair, line in zip(("16-16", "18-18", "16-18"), commands):
+                self.assertEqual(shlex.split(line)[-5:], ["tools/e2e/clone.py", "--pair", pair, "--profile", profile or "disabled"])
+            self.assertEqual(self.calls(), [])
 
     def test_follow_matrix_enumerates_exact_pairs_and_stops_on_failure(self):
         self.passed(self.run_task("test-e2e-follow"))

@@ -1,6 +1,7 @@
 """Portable controls for the disposable clone qualification harness."""
 
 import importlib.util
+import copy
 from contextlib import closing
 import json
 import sqlite3
@@ -9,6 +10,9 @@ from pathlib import Path
 import tempfile
 import subprocess
 import sys
+import types
+import io
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -237,6 +241,511 @@ class CloneHarnessTests(unittest.TestCase):
                 self.assertEqual(failure.exception.metadata["command_kind"], "independent-oracle")
                 self.assertEqual(failure.exception.metadata["callsite"]["function"], self._testMethodName)
                 self.assertTrue(failure.exception.metadata["retained"])
+
+
+class ModelRuntime:
+    def __init__(self, root, fault=None):
+        self.root, self.fault, self.commands, self.removed = root, fault, [], []
+        self.containers = {}
+        self.networks = {}
+        self.images = {}
+        self.references = {}
+        for major, value in (("16", "1"), ("18", "2")):
+            reference = "docker.io/library/postgres:" + major + "@" + harness.load_manifest()["images"][major]
+            self.references[reference] = "sha256:" + value*64
+        self.references["example.invalid/rust@sha256:" + "6"*64] = "sha256:" + "3"*64
+        for reference, identity in self.references.items():
+            self.images[identity] = {"Id": identity, "RepoTags": [], "RepoDigests": [reference], "Size": 1, "Labels": {}, "Architecture": "arm64"}
+        self.images["sha256:" + "4"*64] = {"Id": "sha256:" + "4"*64, "RepoTags": ["localhost/rpgmigrate-m2-dev:stock"], "RepoDigests": [], "Size": 1, "Labels": {}, "Architecture": "arm64"}
+
+    def call(self, argv, **kwargs):
+        self.commands.append(list(argv))
+        if argv[0] == "git":
+            if argv[-1] == "--porcelain" and self.fault == "dirty": return b" M tracked-source\n"
+            source = self.root / "tools/e2e/Containerfile"
+            data = source.read_bytes()
+            if "ls-tree" in argv:
+                blob = __import__("hashlib").sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+                return ("100644 blob " + blob + " " + str(len(data)) + "\ttools/e2e/Containerfile\0").encode()
+            if "archive" in argv:
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w") as archive:
+                    entry = tarfile.TarInfo("tools/e2e/Containerfile"); entry.mode = 0o644; entry.size = len(data)
+                    archive.addfile(entry, io.BytesIO(data))
+                return stream.getvalue()
+            return b"1"*40 + b"\n" if argv[-1] == "HEAD" else b"2"*40 + b"\n" if argv[-1] == "HEAD^{tree}" else b"feat/model\n" if argv[-1] == "--show-current" else b""
+        args = argv[1:]
+        if args[:2] == ["version", "--format"]:
+            return json.dumps({"Client": {"Version": "6.1.4"}, "Server": {"Version": "5.8.3"}}).encode()
+        if args[:2] == ["info", "--format"]:
+            return json.dumps({"host": {"security": {"rootless": True}, "networkBackend": "netavark", "pasta": {"executable": "/usr/bin/pasta", "package": "passt-model"}}}).encode()
+        if args[:2] == ["run", "--help"]: return b"--network stringArray"
+        if args[:2] == ["machine", "ssh"]:
+            if args[2] == "which": return b"/usr/bin/pasta\n"
+            if args[2] in ("sha256sum", "test"): return b""
+            if args[2] == "cat": return b"MemAvailable: 7340032 kB\n" if self.fault == "capacity" else b"MemAvailable: 25165824 kB\n"
+            if args[2] == "df": return b"Filesystem 1B-blocks Used Available Use% Mounted\nroot 100 10 40802189312 1% /\n"
+            return b"14\n"
+        if args[0] == "ps":
+            if "--filter" in args:
+                identity = args[args.index("--filter")+1].split("=",1)[1]
+                return "\n".join(self.networks[identity]["containers"]).encode()
+            return "\n".join(self.containers).encode()
+        if args[:2] == ["image", "ls"]: return "\n".join(self.images).encode()
+        if args[:2] == ["image", "inspect"]:
+            identity = self.references.get(args[2], args[2])
+            return json.dumps([self.images[identity]]).encode()
+        if args[0] == "history": return b'[{"id":"safe-id","created":1,"size":1,"createdBy":"private-never-persist"}]'
+        if args[:2] == ["network", "ls"]: return "\n".join(self.networks).encode()
+        if args[:2] == ["network", "inspect"]:
+            value = self.networks.get(args[2]) or next(value for value in self.networks.values() if value["name"] == args[2])
+            return json.dumps([value]).encode()
+        if args[:2] == ["volume", "ls"]: return b"old-volume\n"
+        if args[:2] == ["volume", "inspect"]: return b'[{"Name":"old-volume","Driver":"local","Mountpoint":"/old","CreatedAt":"old","Scope":"local","Options":null,"Labels":null}]'
+        if args[0] == "inspect": return json.dumps([self.containers[args[1]]]).encode()
+        if args[:2] == ["build", "--help"]: return b"--cpu-period uint --cpu-quota int --memory string\n"
+        if args[0] == "build":
+            tag = args[args.index("--tag")+1]; label = args[args.index("--label")+1].split("=", 1)[1]
+            identity = "sha256:" + "5"*64
+            self.references[tag] = identity
+            self.images[identity] = {"Id": identity, "RepoTags": [tag], "RepoDigests": [], "Size": 100, "Labels": {"io.rpgmigrate.e2e": label}, "Architecture": "arm64"}
+            return b""
+        if args[:2] == ["network", "create"]:
+            name = args[-1]; identity = "7"*64
+            self.networks[identity] = {"id": identity, "name": name, "internal": True, "driver": "bridge", "labels": {"io.rpgmigrate.e2e": name}, "containers": {}}
+            return name.encode()
+        if args[0] == "create":
+            name = args[args.index("--name")+1]; role = name.rsplit("-", 1)[1]
+            cid = {"source": "a", "target": "b", "build": "c", "runner": "d"}[role]*64
+            label = args[args.index("--label")+1].split("=",1)[1]
+            image = next(value for value in args if value.startswith("sha256:"))
+            memory = {"1g": 1073741824, "4g": 4294967296}[args[args.index("--memory")+1]]
+            mounts = []
+            for i, value in enumerate(args):
+                if value == "--volume":
+                    source, destination, *mode = args[i+1].split(":")
+                    if destination == "/workspace":
+                        assert Path(source) != self.root and not (Path(source) / ".env").exists() and not (Path(source) / ".git").exists()
+                    mounts.append({"Type": "bind", "Source": source, "Destination": destination, "RW": mode != ["ro"]})
+            networks = {}
+            if "--network" in args:
+                network_name = args[args.index("--network")+1]
+                if network_name != "pasta":
+                    network = next(value for value in self.networks.values() if value["name"] == network_name)
+                    network["containers"][cid] = {"name": name}
+                    networks[network_name] = {"NetworkID": network["id"], "Aliases": [role]}
+            self.containers[cid] = {"Id": cid, "Name": name, "Image": image, "Config": {"Labels": {"io.rpgmigrate.e2e": label}, "Env": ["PASSWORD=must-not-persist"]},
+                "Mounts": mounts, "HostConfig": {"Memory": memory, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "pasta" if role == "build" else "bridge", "PortBindings": {}},
+                "NetworkSettings": {"Ports": {}, "Networks": networks}, "Created": "now", "RestartCount": 0, "State": {"Running": True, "Status": "running", "StartedAt": "2026-11-10T00:00:00Z", "FinishedAt": "zero", "Pid": 42}}
+            self.containers[cid]["model_role"] = role
+            self.containers[cid]["model_pgdata"] = next((value[7:] for value in args if value.startswith("PGDATA=")), None)
+            return cid.encode()
+        if args[0] == "start":
+            cid = args[-1]; actual = self.containers[cid]; role = actual["model_role"]
+            if role == "build":
+                cache = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/build"))
+                (cache / "debug").mkdir(); (cache / "debug/rpgmigrate").write_bytes(b"debug executable"); (cache / "debug/rpgmigrate").chmod(0o700)
+            if role == "runner":
+                receipt = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/receipt"))
+                binding = json.loads((receipt / "m8-input.json").read_text()) if (receipt / "m8-input.json").exists() else None
+                smoke = None
+                if binding:
+                    smoke = {"binary_sha256": binding["binary_sha256"], "source_tree_sha256": binding["source_tree_sha256"], "runner_image_id": binding["runner_image_id"],
+                             "architecture": "arm64", "client_versions": {tool: "16.15" for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": 180006,
+                             "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18", "library_sha256": "9"*64,
+                             "packages": {name: {"version": version + "-1.pgdg13+1", "architecture": "arm64"} for name, version in (("libpq5", "18.6"), ("postgresql-client-16", "16.15"), ("postgresql-client-18", "18.6"))},
+                             "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
+                             "version_text": "rpgmigrate 0.1.0\nlibpq 180006\n"}
+                    (receipt / "m8-smoke.json").write_text(json.dumps(smoke)); (receipt / "m8-smoke.json").chmod(0o600)
+                if self.fault == "runner": raise RuntimeError("modeled runner failure")
+                (receipt / "result.json").write_text(json.dumps({"pair": "16-16", "binding": binding, "build_smoke": smoke}))
+            return b""
+        if args[0] == "exec":
+            actual = self.containers[args[1]]
+            if args[2] == "cat": return b"200000 100000\n" + str(actual["HostConfig"]["Memory"]).encode() + b"\n"
+            if args[2] == "stat": return b"700|postgres\n"
+            if "pg_ls_waldir" in args[-1]: return b"1000|1000\n"
+            role = actual["model_role"]
+            data = actual["model_pgdata"]
+            if self.fault == "data_directory": data = "/borrowed"
+            return json.dumps({"system_identifier": "770600000000000000" + ("1" if role == "source" else "2"), "version": "16.15", "data_directory": data, "wal_level": "logical"}).encode()
+        if args[0] == "logs": return b"bounded startup diagnostic"
+        if args[0] == "rm":
+            cid = args[-1]; self.removed.append(cid)
+            self.containers.pop(cid)
+            for network in self.networks.values(): network["containers"].pop(cid, None)
+            return cid.encode()
+        if args[:2] == ["network", "rm"]:
+            self.networks.pop(args[-1]); return b""
+        raise AssertionError("unexpected modeled command: " + repr(argv))
+
+    def subprocess(self, argv, **kwargs):
+        if len(argv)>2 and argv[2] == "exists":
+            kind, identity = argv[1], argv[3]
+            if kind == "image" and self.fault == "missing_ref" and identity.startswith("example.invalid/"):
+                return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"")
+            if kind == "image" and self.fault == "image_collision" and identity.startswith("localhost/rpgmigrate-"):
+                return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+            present = identity in self.references or identity in self.images if kind == "image" else identity in self.networks or any(value["name"] == identity for value in self.networks.values()) if kind == "network" else identity in self.containers or any(value["Name"] == identity for value in self.containers.values())
+            return subprocess.CompletedProcess(argv, 0 if present else 1, stdout=b"", stderr=b"")
+        if len(argv)>3 and argv[1] == "exec" and argv[3] == "pg_isready":
+            return subprocess.CompletedProcess(argv, 0, stdout=b"accepting connections", stderr=b"")
+        raise AssertionError("unexpected modeled low-level subprocess")
+
+
+class RuntimeOwnershipTests(unittest.TestCase):
+    def test_server_arguments_enable_logical_only_for_m8(self):
+        self.assertTrue(callable(getattr(harness, "server_start_arguments", None)), "missing reviewed startup selection")
+        self.assertEqual(harness.server_start_arguments("disabled", ()), ())
+        logical = ("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s")
+        self.assertEqual(harness.server_start_arguments("m8", ()), logical)
+        self.assertEqual(harness.server_start_arguments("disabled", logical), logical)
+        with self.assertRaises(RuntimeError):
+            harness.server_start_arguments("m8", ("-c", "wal_level=replica"))
+
+    def test_exact_container_identity_caps_and_mounts_are_required(self):
+        self.assertTrue(callable(getattr(harness, "validate_owned_container", None)), "missing exact ownership admission")
+        entry = {"id": "a" * 64, "image": "sha256:" + "b" * 64, "name": "fresh-source", "memory": 1073741824, "mounts": [], "network": {"name": "fresh", "id": "c"*64}}
+        actual = {"Id": entry["id"], "Image": entry["image"], "Name": entry["name"], "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
+                  "Mounts": [], "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "fresh", "PortBindings": {}},
+                  "NetworkSettings": {"Ports": {"5432/tcp": None}, "Networks": {"fresh": {"NetworkID": "c"*64}}}}
+        harness.validate_owned_container(actual, entry, "fresh", set())
+        for mutate in (lambda x: x.update(Id="c" * 64), lambda x: x.update(Image="sha256:" + "c" * 64),
+                       lambda x: x["Config"]["Labels"].clear(), lambda x: x["Mounts"].append({"Type": "volume", "Destination": "/var/lib/postgresql/data"}),
+                       lambda x: x["HostConfig"].update(Memory=0), lambda x: x["HostConfig"].update(NanoCpus=0),
+                       lambda x: x["HostConfig"].update(Privileged=True), lambda x: x["HostConfig"].update(NetworkMode="host"),
+                       lambda x: x["HostConfig"].update(PortBindings={"5432/tcp": [{"HostPort": "5432"}]}),
+                       lambda x: x["NetworkSettings"]["Networks"].update(foreign={"NetworkID": "d"*64}),
+                       lambda x: x["NetworkSettings"]["Networks"]["fresh"].update(NetworkID="d"*64)):
+            bad = copy.deepcopy(actual); mutate(bad)
+            with self.subTest(actual=bad), self.assertRaises(RuntimeError):
+                harness.validate_owned_container(bad, entry, "fresh", set())
+        with self.assertRaises(RuntimeError):
+            harness.validate_owned_container(actual, entry, "fresh", {entry["id"]})
+        cfs = copy.deepcopy(actual); cfs["HostConfig"].update(NanoCpus=0, CpuPeriod=100000, CpuQuota=200000)
+        harness.validate_owned_container(cfs, entry, "fresh", set())
+
+    def test_network_cleanup_requires_exact_identity_label_internal_and_empty_membership(self):
+        self.assertTrue(callable(getattr(harness, "validate_owned_network", None)), "missing exact network admission")
+        expected = {"id": "a" * 64, "name": "fresh"}
+        actual = {"id": expected["id"], "name": "fresh", "internal": True, "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {}}
+        harness.validate_owned_network(actual, expected, "fresh", set(), empty=True)
+        for change in ({"id": "b" * 64}, {"name": "foreign"}, {"internal": False}, {"labels": {}}, {"containers": {"foreign": {}}}, {"containers": None}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                harness.validate_owned_network({**actual, **change}, expected, "fresh", set(), empty=True)
+        with self.assertRaises(RuntimeError):
+            harness.validate_owned_network(actual, expected, "fresh", {expected["id"]}, empty=True)
+
+    def test_capacity_and_fixed_deadline_fail_closed(self):
+        self.assertTrue(callable(getattr(harness, "validate_capacity", None)), "missing capacity admission")
+        gib = 1024 ** 3
+        initial = {"vm_free": 38*gib, "host_free": 57*gib, "vm_available": 24*gib, "vm_cpus": 14}
+        harness.validate_capacity(initial, initial, initial=True)
+        for change in ({"vm_free": 31*gib}, {"host_free": 31*gib}, {"vm_available": 11*gib}, {"vm_cpus": 5}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                harness.validate_capacity({**initial, **change}, initial, initial=True)
+        for change in ({"vm_free": 19*gib}, {"host_free": 19*gib}, {"vm_available": 7*gib}, {"host_free": 44*gib}, {"vm_free": 25*gib}, {"vm_free": None}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                harness.validate_capacity({**initial, **change}, initial)
+
+    def test_build_cpu_caps_require_supported_cfs_options(self):
+        self.assertTrue(callable(getattr(harness, "build_cpu_arguments", None)), "missing supported build CPU admission")
+        self.assertEqual(harness.build_cpu_arguments(b"--cpu-period uint --cpu-quota int"), ["--cpu-period", "100000", "--cpu-quota", "200000"])
+        for help_text in (b"--jobs int --memory string", b"--cpus float", b"--cpu-period uint"):
+            with self.assertRaises(RuntimeError):
+                harness.build_cpu_arguments(help_text)
+
+
+    def test_preservation_refuses_changed_old_associations_and_unowned_resources(self):
+        self.assertTrue(callable(getattr(harness, "validate_preservation", None)), "missing preservation proof")
+        before = {"containers": {"a"*64: {"state": "running"}}, "external": ["a"*64], "images": {"b"*64: {"tags": ["old:tag"], "digests": ["old@digest"]}}, "networks": {"c"*64: {"name": "old"}}, "volumes": {"old-volume": {"name": "old-volume"}}}
+        harness.validate_preservation(before, copy.deepcopy(before), set())
+        after = copy.deepcopy(before); after["images"]["d"*64] = {"tags": ["fresh:run"]}
+        harness.validate_preservation(before, after, {"d"*64})
+        for kind in before:
+            bad = copy.deepcopy(before)
+            if isinstance(bad[kind], dict):
+                bad[kind].clear()
+            else:
+                bad[kind] = []
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                harness.validate_preservation(before, bad, set())
+        for kind, value in (("volumes", {"anonymous": {}}), ("containers", {"unowned": {}}), ("networks", {"foreign": {}}), ("images", {"unowned": {}})):
+            bad = copy.deepcopy(before); bad[kind].update(value)
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                harness.validate_preservation(before, bad, set())
+
+    def test_cleanup_refuses_wrong_image_label_foreign_network_and_failed_absence(self):
+        self.assertTrue(hasattr(harness, "RuntimeGuard"), "missing bounded shared ownership lifecycle")
+        for fault in ("image", "label", "unavailable", "remove", "absence", "ok"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+                guard.runtime, guard.token = "podman", "fresh"
+                guard.path = Path(temporary) / "ledger.json"
+                guard.deadline = harness.time.monotonic() + 30
+                guard.baseline = {"containers": {}, "networks": {}}
+                entry = {"id": "a"*64, "image": "sha256:" + "b"*64, "name": "fresh-source", "memory": 1073741824, "mounts": [], "role": "source"}
+                guard.ledger = {"containers": [entry]}
+                actual = {"Id": entry["id"], "Image": entry["image"], "Name": entry["name"], "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}}, "Mounts": [],
+                          "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "fresh", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
+                if fault == "image": actual["Image"] = "sha256:" + "c"*64
+                if fault == "label": actual["Config"]["Labels"] = {}
+                calls = []
+                def command(argv, **kwargs):
+                    calls.append(argv)
+                    if argv[1] == "inspect":
+                        if fault == "unavailable": raise RuntimeError("unavailable")
+                        return json.dumps([actual]).encode()
+                    if argv[1] == "rm" and fault == "remove": raise RuntimeError("failed removal")
+                    return b""
+                def absent(*args, **kwargs):
+                    return subprocess.CompletedProcess(args[0], 125 if fault == "absence" else 1)
+                with patch.object(harness, "run", side_effect=command), patch.object(harness.subprocess, "run", side_effect=absent):
+                    guard.cleanup_container(entry)
+                removed = any(argv[1] == "rm" for argv in calls)
+                self.assertEqual(removed, fault not in ("image", "label", "unavailable"))
+                self.assertTrue(all("--volumes" not in argv for argv in calls))
+                self.assertEqual(entry.get("cleanup_status") == "absent", fault == "ok")
+
+    def test_expired_lease_starts_no_child_and_cleanup_deadline_never_extends(self):
+        self.assertTrue(hasattr(harness, "RuntimeGuard"), "missing fixed runtime deadline")
+        guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+        guard.work_deadline = harness.time.monotonic() - 1
+        guard.deadline = guard.work_deadline + 300
+        with patch.object(harness.subprocess, "Popen") as launch, self.assertRaisesRegex(RuntimeError, "deadline"):
+            guard.execute(["must-not-start"])
+        launch.assert_not_called()
+
+
+    def test_outer_uses_guard_and_refuses_unadmitted_work_before_build_for_both_profiles(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            for profile in ("disabled", "m8"):
+                args = types.SimpleNamespace(pair="16-16", receipt=None, report_probe=None, profile=profile)
+                with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temporary:
+                    (Path(temporary) / "source").write_text("fixture")
+                    with patch.object(harness, "ROOT", Path(temporary)), patch.object(harness.shutil, "which", return_value="/fake/podman"), \
+                            patch.object(harness.RuntimeGuard, "__init__", side_effect=RuntimeError("admission closed")) as admission, \
+                            patch.object(harness, "run", side_effect=RuntimeError("unadmitted subprocess")):
+                        with self.assertRaisesRegex(RuntimeError, "admission closed"):
+                            harness.outer(args)
+                        admission.assert_called_once()
+        finally:
+            sys.path.pop(0)
+
+
+    def test_retained_inspection_projection_excludes_environment_errors_and_history_commands(self):
+        self.assertTrue(callable(getattr(harness, "container_snapshot", None)), "missing closed safe projection")
+        actual = {"Id": "a"*64, "Name": "old", "Created": "today", "Image": "sha256:" + "b"*64, "RestartCount": 0,
+                  "Config": {"Env": ["PASSWORD=must-not-persist"], "Cmd": ["private-row"], "Labels": {"foreign": "must-not-persist"}},
+                  "HostConfig": {"Memory": 1024, "LogConfig": {"secret": "must-not-persist"}}, "Mounts": [],
+                  "State": {"Running": True, "Status": "running", "Pid": 42, "StartedAt": "now", "FinishedAt": "zero", "Error": "must-not-persist"},
+                  "NetworkSettings": {"Ports": {}}}
+        value = harness.container_snapshot(actual)
+        self.assertEqual(value["id"], actual["Id"])
+        self.assertEqual(value["state"]["Pid"], 42)
+        self.assertNotIn("must-not-persist", json.dumps(value))
+        self.assertNotIn("private-row", json.dumps(value))
+
+
+    def test_actual_outer_argv_private_image_no_volumes_and_failure_cleanup(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import copy_features
+        try:
+            for profile, fault in (("disabled", None), ("m8", None), ("m8", "runner"), ("m8", "data_directory")):
+                with self.subTest(profile=profile, fault=fault), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
+                    (root / ".env").write_text("must-not-persist")
+                    (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
+                    model = ModelRuntime(root, fault)
+                    args = types.SimpleNamespace(pair="16-16", receipt=str(root / "target/e2e/result.json"), report_probe=None, profile=profile)
+                    def execute(guard, command, **kwargs):
+                        guard.checkpoint()
+                        result = model.call(command, **kwargs)
+                        if command[1] == "start" and "--attach" in command:
+                            guard.sample()
+                        return result
+                    with patch.object(harness, "ROOT", root), patch.object(harness, "DIAGNOSTIC_ROOT", root / "target/e2e/failures"), \
+                            patch.object(harness.shutil, "which", return_value="/fake/podman"), patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*1024**3)), \
+                            patch.object(harness, "run", side_effect=model.call), patch.object(harness.subprocess, "run", side_effect=model.subprocess), \
+                            patch.object(harness.RuntimeGuard, "execute", execute), patch.object(copy_features, "validate_receipt"):
+                        if fault:
+                            with self.assertRaises(RuntimeError): harness.outer(args, receipt_validator=lambda *_: None)
+                        else:
+                            harness.outer(args, receipt_validator=lambda *_: None)
+                    self.assertFalse(model.containers)
+                    self.assertFalse(model.networks)
+                    self.assertEqual(len(model.removed), 2 if fault == "data_directory" else 4)
+                    builds = [argv for argv in model.commands if len(argv)>1 and argv[1] == "build" and "--tag" in argv]
+                    self.assertEqual(len(builds), 1)
+                    self.assertNotIn("localhost/rpgmigrate-m2-dev:stock", builds[0])
+                    self.assertIn("--cpu-quota", builds[0])
+                    creates = [argv for argv in model.commands if len(argv)>1 and argv[1] == "create"]
+                    self.assertTrue(creates)
+                    for argv in creates:
+                        self.assertIn("--image-volume=ignore", argv)
+                        self.assertNotIn("--privileged", argv)
+                        self.assertNotIn("--volumes", argv)
+                        self.assertNotIn(str(root / "target/e2e/build")+":/build", argv)
+                        name = argv[argv.index("--name")+1]
+                        if name.endswith(("-source", "-target")):
+                            self.assertEqual("wal_level=logical" in argv, profile == "m8")
+                    ledger = json.loads(next((root / "target/e2e").glob("*.runtime.json")).read_text())
+                    self.assertTrue(ledger["cleanup_complete"])
+                    self.assertTrue(ledger["private_removed"])
+                    self.assertTrue(ledger["secret_file_absent"])
+                    self.assertNotIn("must-not-persist", json.dumps(ledger))
+                    self.assertNotIn("private-never-persist", json.dumps(ledger))
+                    self.assertEqual(Path(args.receipt).exists(), fault is None)
+        finally:
+            sys.path.pop(0)
+
+
+    def test_source_payload_contains_only_bounded_tracked_regular_archive_files(self):
+        self.assertTrue(callable(getattr(harness, "materialize_source", None)), "missing tracked source materialization")
+        def archive(name, kind=tarfile.REGTYPE):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w") as output:
+                entry = tarfile.TarInfo(name); entry.type = kind; entry.mode = 0o755; entry.size = 6 if kind == tarfile.REGTYPE else 0
+                output.addfile(entry, io.BytesIO(b"source") if kind == tarfile.REGTYPE else None)
+            return stream.getvalue()
+        for name, kind in (("src/main.rs", tarfile.REGTYPE), ("../escape", tarfile.REGTYPE), (".git/config", tarfile.REGTYPE), ("link", tarfile.SYMTYPE)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                destination = Path(temporary) / "source"
+                blob = __import__("hashlib").sha1(b"blob 6\0source").hexdigest()
+                def git(command, **kwargs):
+                    return ("100755 blob " + blob + " 6\tsrc/main.rs\0").encode() if "ls-tree" in command else archive(name, kind)
+                with patch.object(harness, "run", side_effect=git):
+                    if name == "src/main.rs":
+                        harness.materialize_source(Path(temporary), destination)
+                        self.assertEqual((destination / name).read_bytes(), b"source")
+                        self.assertEqual(stat.S_IMODE((destination / name).stat().st_mode), 0o755)
+                        self.assertFalse((destination / ".git").exists())
+                    else:
+                        with self.assertRaises(RuntimeError): harness.materialize_source(Path(temporary), destination)
+
+
+    def test_source_export_refuses_export_ignore_substitution_and_lfs_pointer(self):
+        for content, omitted in ((b"changed", False), (b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n", False), (b"source", True)):
+            with self.subTest(content=content, omitted=omitted), tempfile.TemporaryDirectory() as temporary:
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w") as output:
+                    if not omitted:
+                        member = tarfile.TarInfo("file"); member.mode = 0o644; member.size = len(content)
+                        output.addfile(member, io.BytesIO(content))
+                blob_content = content if content.startswith(b"version ") else b"source"
+                blob = __import__("hashlib").sha1(b"blob " + str(len(blob_content)).encode() + b"\0" + blob_content).hexdigest()
+                def git(command, **kwargs):
+                    return ("100644 blob " + blob + " " + str(len(blob_content)) + "\tfile\0").encode() if "ls-tree" in command else stream.getvalue()
+                with patch.object(harness, "run", side_effect=git), self.assertRaises(RuntimeError):
+                    harness.materialize_source(Path(temporary), Path(temporary) / "payload")
+
+
+    def test_cgroup_limits_require_live_exact_owned_process_and_hard_cpu_memory_caps(self):
+        self.assertTrue(hasattr(harness.RuntimeGuard, "observe_caps"), "missing effective cgroup admission")
+        entry = {"id": "a"*64, "name": "fresh-source", "role": "source", "image": "sha256:"+"b"*64, "memory": 1073741824, "mounts": []}
+        actual = {"Id": entry["id"], "Name": entry["name"], "Image": entry["image"], "State": {"Running": True}, "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
+                  "Mounts": [], "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "bridge", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
+        for limits in (b"200000 100000\n1073741824\n", b"max 100000\n1073741824\n", b"200000 100000\nmax\n", b"400000 100000\n1073741824\n", b"200000 100000\n4294967296\n", b""):
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.token, guard.baseline = "fresh", {"containers": {}}
+            with self.subTest(limits=limits), patch.object(guard, "inspect", return_value=actual), patch.object(guard, "raw", return_value=limits):
+                if limits.startswith(b"200000 100000\n1073741824"):
+                    guard.observe_caps(entry)
+                    self.assertTrue(entry["cgroup_verified"])
+                else:
+                    with self.assertRaises(RuntimeError): guard.observe_caps(entry)
+
+
+    def test_network_cleanup_refuses_foreign_attachment_wrong_identity_and_unavailable_absence(self):
+        for fault in ("id", "label", "inspect", "foreign_map", "foreign_filter", "remove", "absence", "ok"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+                guard.token, guard.path, guard.baseline = "fresh", Path(temporary) / "ledger.json", {"networks": {}}
+                entry = {"id": "a"*64, "name": "fresh"}
+                guard.ledger = {"network": entry}
+                actual = {"id": "a"*64, "name": "fresh", "internal": True, "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {}}
+                if fault == "id": actual["id"] = "b"*64
+                if fault == "label": actual["labels"].clear()
+                if fault == "foreign_map": actual["containers"] = {"foreign": {}}
+                calls = []
+                def raw(arguments, **kwargs):
+                    calls.append(arguments)
+                    if arguments[:2] == ["network", "inspect"]:
+                        if fault == "inspect": raise RuntimeError("unavailable")
+                        return json.dumps([actual]).encode()
+                    if arguments[0] == "ps": return b"foreign-id\n" if fault == "foreign_filter" else b""
+                    if arguments[:2] == ["network", "rm"] and fault == "remove": raise RuntimeError("removal failed")
+                    return b""
+                def exists(*_):
+                    if fault == "absence": raise RuntimeError("absence unavailable")
+                    return False
+                with patch.object(guard, "raw", side_effect=raw), patch.object(guard, "exists", side_effect=exists):
+                    guard.cleanup_network()
+                removed = [command for command in calls if command[:2] == ["network", "rm"]]
+                self.assertEqual(bool(removed), fault in ("remove", "absence", "ok"))
+                self.assertEqual(entry["cleanup_status"] == "absent", fault == "ok")
+                self.assertTrue(all("--force" not in command for command in calls))
+
+    def test_only_independently_recorded_builtin_network_created_field_can_vary(self):
+        before = {"containers": {}, "external": [], "images": {}, "volumes": {}, "networks": {"a"*64: {"name": "podman", "id": "a"*64, "driver": "bridge", "internal": False, "created": "first"}, "b"*64: {"name": "foreign", "created": "stable"}}}
+        for fault in (None, "driver", "foreign", "identity"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                after = copy.deepcopy(before); after["networks"]["a"*64]["created"] = "third"
+                if fault == "driver": after["networks"]["a"*64]["driver"] = "changed"
+                if fault == "foreign": after["networks"]["b"*64]["created"] = "changed"
+                if fault == "identity": after["networks"].pop("a"*64)
+                guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+                guard.baseline, guard.path = before, Path(temporary) / "ledger.json"
+                guard.ledger = {"containers": [], "builtin_network_created_observations": [{"id": "a"*64, "before": "first", "after": "second"}]}
+                with patch.object(guard, "inventory", return_value=after): guard.close()
+                self.assertEqual(guard.ledger["preservation_verified"], fault is None)
+                self.assertEqual(guard.ledger["after"], after)
+
+    def test_total_work_deadline_kills_only_owned_child_and_keeps_cleanup_reserve(self):
+        guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+        guard.work_deadline = harness.time.monotonic() + .1
+        guard.deadline = guard.work_deadline + 300
+        guard.last_sample = harness.time.monotonic()
+        guard.ledger = {"processes": []}
+        started = harness.time.monotonic()
+        with patch.object(guard, "persist"), self.assertRaisesRegex(RuntimeError, "deadline"):
+            guard.execute([sys.executable, "-c", "import time;time.sleep(30)"], timeout=60)
+        self.assertEqual(len(guard.ledger["processes"]), 1)
+        self.assertIsInstance(guard.ledger["processes"][0]["pid"], int)
+        self.assertIsNotNone(guard.ledger["processes"][0]["returncode"])
+        self.assertNotIn("argv", guard.ledger["processes"][0])
+        self.assertLess(harness.time.monotonic() - started, 3)
+        self.assertGreater(guard.deadline - harness.time.monotonic(), 295)
+
+
+    def test_missing_pinned_ref_image_collision_dirty_source_and_capacity_refuse_without_effects(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            for fault in ("missing_ref", "image_collision", "dirty", "capacity"):
+                with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
+                    (root / ".env").write_text("must-not-persist")
+                    (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
+                    model = ModelRuntime(root, fault)
+                    args = types.SimpleNamespace(pair="16-16", receipt=str(root / "target/e2e/result.json"), report_probe=None, profile="m8")
+                    def execute(guard, command, **kwargs):
+                        return model.call(command, **kwargs)
+                    with patch.object(harness, "ROOT", root), patch.object(harness, "DIAGNOSTIC_ROOT", root / "target/e2e/failures"), \
+                            patch.object(harness.shutil, "which", return_value="/fake/podman"), patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*1024**3)), \
+                            patch.object(harness, "run", side_effect=model.call), patch.object(harness.subprocess, "run", side_effect=model.subprocess), patch.object(harness.RuntimeGuard, "execute", execute):
+                        with self.assertRaises(RuntimeError): harness.outer(args)
+                    self.assertFalse(Path(args.receipt).exists())
+                    self.assertFalse(model.containers)
+                    self.assertFalse(model.networks)
+                    self.assertFalse(any(len(command)>1 and command[1] in ("pull", "build", "create", "start", "rm") and "--help" not in command for command in model.commands))
+                    ledger = json.loads(next((root / "target/e2e").glob("*.runtime.json")).read_text())
+                    if fault == "capacity": self.assertTrue(ledger["admission_failed"])
+                    else:
+                        self.assertTrue(ledger["cleanup_complete"])
+                        self.assertTrue(ledger["private_removed"])
+        finally:
+            sys.path.pop(0)
 
 
 if __name__ == "__main__":
