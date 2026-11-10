@@ -139,16 +139,26 @@ The M6 stage freeze is parent PREPARE, UP, PULL (eight pulls with three attempts
 The recorded Q deadline must not exceed the original lease, independently of the current V cap.
 S2 may consume opaque kubeconfig locally in memory only for the necessary identity and authentication checks; it adds no Secret API read or export and makes no zero-secret-memory-read claim.
 
-The isolated M8 format 9 / metadata 7 source handoff is signed at engine `c30ad3c0ba92029f199894e50dd627ad8a586c55` and operator `1678754de74222e61422d3d88789ebdde95f898b`; it has not entered the primary format 8 / metadata 6 baseline or activated capabilities.
-Source proof: `/tmp/rpgmigrate-m8-format-integration-20261110/checkpoints.json`, SHA-256 `713a580722d04d8c8340d1f0ed802a71106a439c5d8a046146f3c055391bf5a6`.
-Nine safe PostgreSQL 16/18 components retain their historical passing inputs.
-A fresh full-runtime attempt failed before tests because a mode-0700 parent prevented server traversal, with captured `Permission denied` evidence.
-The private adapter now uses a mode-0755 parent and actual mode-0700 PGDATA, fsyncs diagnostics before cleanup, and validates Podman `.ID` under a bounded deadline.
-The independent successor passed one catalog and ten Clone cases, including the marker case, on each of PostgreSQL 16.15 and 18.6, with zero failures or ignored cases and all four stage exits zero.
-Both runs used binary `2f0b077c` from source `611d1a4`; this is a component pass, with the six-profile workflow and 16-to-18 cross-version run still pending.
-Summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json`, SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
-All new fixtures were cleaned and the window released, preserving all 129 current image records, 206 volumes, and four originals; only default-network creation was an explicitly volatile observation.
-Preservation: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/final-preservation-proof.json`, SHA-256 `cb8220eb9b7d1d2352a84b412677899c503ca6646bf9dc6f2dbf31388f5e5b2f`.
+M7 operator source is signed at `93cc670309e1039e05ee6dc0e462196d23248888`, with 105 checks and scoped lint passing; it has not been pushed.
+Actual Guard admission refused the clean source at canonical SSH-origin mapping, so no RUN is qualified; a narrow identity correction remains in preparation.
+
+The signed isolated M8 candidate `ea51e2375e51adc3d42115c588f5d3b23ea6d4a6`, tree `70198152465b405002ec4bf95d68775fa7342ed1`, composes Apache/GHCR changes without changing the M8 core and passed 398 portable tests.
+Composition proof: `/tmp/rpgmigrate-m8-primary-source-composition-20261110/signed-checkpoint.json`, SHA-256 `51f840b0fcc65eac496ddd93c1f2ab209f1571e7c0f68ecfb100076ee962a39a`.
+The earlier independent binary `2f0b077c` from source `611d1a4` passed one catalog and all ten Clone cases on each of PostgreSQL 16.15 and 18.6, with zero failures or ignored cases.
+Component summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json`, SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
+This remains a component pass: the six-profile workflow across all three pairs, including 16-to-18, has not run.
+Shared tag/cache, network/volume cleanup, and logical-startup harness repairs remain in preparation; the Task PROFILE source patch is ready but has no integration or runtime result.
+The format 9 / metadata 7 candidate remains separate from the primary format 8 / metadata 6 baseline, without capability activation.
+
+The final private M9 plan passed review and its interfaces are frozen; source A/B work is underway, with tests incomplete pending a coherent core join.
+`REPLAY_SAFE_BARRIER_INTERVAL_MS` remains `None`, release mode is unavailable, and benchmark execution remains on HOLD with no actual benchmark result.
+
+M10 source-tool preparation is committed at `81c5b8c035806e4934806caec4d41e7dcd85d660`: nine tooling files and three portable-suite registrations passed 439 tests across twenty suites with zero skips.
+Integration proof: `/private/tmp/rpgmigrate-m10-tool-integration-evidence-jckqtq98/integration-evidence.json`, SHA-256 `591d5168b9475370f918cbedbff1e79fc0abe219d908842fe82ffec62ccf1337`; commit/fast-forward proof SHA-256 `526aedfc157eb9257c28ea0063b268baac15c4ad29e9566f3ef0a462eafdcd14`.
+The actual docs checker is not green: getting-started, operator, troubleshooting, and durability guides are absent.
+The pinned ASAN manifest refuses execution until the binary, symbolizer, complete build-std dependency graph, and native runtime are qualified.
+LLVM tools contain no symbolizer, and the project `Cargo.lock` alone does not describe the complete build-std graph.
+No actual ASAN, fuzz, or runtime qualification follows from this source preparation.
 Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
 The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
 Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
@@ -582,7 +592,7 @@ The approved plan permits isolated M8 source work before M7 closure after Task 1
 The root approved the Task 1 interface freeze; isolated state/CLI, catalog, authority, COPY/large-object, and phase/recovery owners are building against it.
 Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
 Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
-Compare/progress wiring is included, but actual large-object verification and physical-table full-part progress have source tests only.
+At the earlier joined-source checkpoint, compare/progress wiring had source tests only; the later component checkpoint above records the additional same-major runtime evidence.
 The separate seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; positive E2E profiles, authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
@@ -604,6 +614,7 @@ The approved [M9 implementation plan](superpowers/plans/2026-11-09-m9-durability
 Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized.
 M10 remains open.
 Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
+The reviewed private final plan and frozen interfaces permit source A/B work; the checkpoint above records incomplete tests, unavailable release mode, and the unchanged benchmark HOLD.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
 - [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.
@@ -615,9 +626,10 @@ Initial-copy planning keeps fork async and native per-table durability enabled; 
 The approved [M10 implementation plan](superpowers/plans/2026-11-09-m10-release-readiness.md) uses bounded mutation tests, native Linux ASAN with its nightly still unverified, STE source/license provenance, and exact production OCI artifacts for the final matrix.
 These preparation decisions close no release or runtime gate.
 The reviewed structural STE script, exact MIT license, and [provenance](../tools/docs/provenance.md) are now vendored unchanged, reusing the same-input self-test, ten CLI controls, and provenance checks.
-This prepares the checker only: the repository gate must enforce a nonempty expected inventory and parseable findings, because upstream accepts empty stdin and malformed UTF-8 exits 1 with a traceback.
+The source-tool checkpoint above adds the checked inventory and portable registrations; actual documentation and ASAN qualification remain open.
 
 - [x] Vendor the reviewed STE script, license, and provenance as preparation only.
+- [x] Commit M10 source tooling and register its three portable suites, retaining actual docs/ASAN/fuzz/runtime qualification as open gates.
 
 - [ ] README index, getting started, durability, operator guide, troubleshooting; docs drift and STE100 checks.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.

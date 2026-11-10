@@ -557,3 +557,9 @@ If the command accepts a missing revision, exercise the actual individual-task d
 
 Keep the source-bound first build, smoke, push, and preservation receipts when visibility or repository linkage remains pending.
 Request the unavailable browser step asynchronously and continue independent approved work without claiming anonymous pull or runtime qualification.
+
+## Canonicalize only the approved repository identity, 2026-11-10
+
+Map the exact approved GitHub SSH origin to its canonical HTTPS identity before deciding whether a source is qualified.
+Preserve the original Git remote configuration and refuse unrelated identities; identity equivalence does not authorize a remote rewrite.
+Keep credential-bearing raw snapshots out of diagnostics and retained evidence.
