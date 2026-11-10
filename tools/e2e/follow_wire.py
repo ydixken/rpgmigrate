@@ -227,27 +227,73 @@ class PgoutputObservation:
         self.stages = {side: {"stage": "startup_wait" if side == "client" else "connect_wait", "at": time.monotonic(), "closure": "open"} for side in ("client", "server")}
         self.copy_records, self.copy_pending, self.copy_current = [], None, None
         self.copy_invalid = self.copy_overflow = False
+        self.copy_statement, self.copy_stage = None, None
         self.counts = {side: {event: {} for event in ("received", "forwarded")} for side in ("client", "server")}
 
+    def copy_query(self, payload):
+        if not payload.startswith(b'COPY '):
+            return
+        if len(payload) > 65536 or self.copy_current is not None:
+            self.copy_invalid = True
+            return
+        identifier = rb'"(?:[^"\x00]|"")+"'
+        columns = identifier + rb'(?:, ' + identifier + rb')*'
+        relation = rb'(' + identifier + rb')\.(' + identifier + rb')'
+        bounds = rb"(?: WHERE ctid >= '\(([0-9]+),0\)'::pg_catalog.tid(?: AND ctid < '\(([0-9]+),0\)'::pg_catalog.tid)?)?"
+        source = re.fullmatch(rb'COPY \(SELECT ' + columns + rb' FROM ONLY ' + relation + bounds + rb'\) TO STDOUT WITH \(FORMAT (text|binary)\)\x00', payload)
+        target = re.fullmatch(rb'COPY ' + relation + rb' \(' + columns + rb'\) FROM STDIN WITH \(FORMAT (text|binary)(?:, FREEZE true)?\)\x00', payload)
+        match = source or target
+        if match is None:
+            self.copy_invalid = True
+            return
+        names = [value[1:-1].replace(b'""', b'"').decode("utf-8") for value in match.group(1, 2)]
+        start, end = ((int(source[3]), int(source[4]) if source[4] else None) if source and source[3] else (None, None))
+        return {"relation": names, "direction": "out" if source else "in",
+                "range": [start, end], "format": match[5 if source else 3].decode()}
+
     def copy_frontend(self, kind, payload):
-        if kind == b'Q':
-            self.copy_pending = None
-            if not payload.startswith(b'COPY '):
+        if kind in (b'Q', b'P'):
+            if self.copy_pending is not None or self.copy_current is not None:
+                self.copy_invalid = True
+            self.copy_statement, self.copy_stage, self.copy_pending = None, None, None
+            if kind == b'Q':
+                self.copy_pending = self.copy_query(payload)
                 return
-            identifier = rb'"(?:[^"\x00]|"")+"'
-            columns = identifier + rb'(?:, ' + identifier + rb')*'
-            relation = rb'(' + identifier + rb')\.(' + identifier + rb')'
-            bounds = rb"(?: WHERE ctid >= '\(([0-9]+),0\)'::pg_catalog.tid(?: AND ctid < '\(([0-9]+),0\)'::pg_catalog.tid)?)?"
-            source = re.fullmatch(rb'COPY \(SELECT ' + columns + rb' FROM ONLY ' + relation + bounds + rb'\) TO STDOUT WITH \(FORMAT (text|binary)\)\x00', payload)
-            target = re.fullmatch(rb'COPY ' + relation + rb' \(' + columns + rb'\) FROM STDIN WITH \(FORMAT (text|binary)(?:, FREEZE true)?\)\x00', payload)
-            match = source or target
-            if match is None or len(payload) > 65536 or self.copy_current is not None:
+            name_end = payload.find(b'\0', 0, 129)
+            query_end = payload.find(b'\0', name_end + 1, name_end + 65538) if name_end >= 0 else -1
+            if name_end < 0 or query_end < 0:
                 self.copy_invalid = True
                 return
-            names = [value[1:-1].replace(b'""', b'"').decode("utf-8") for value in match.group(1, 2)]
-            start, end = ((int(source[3]), int(source[4]) if source[4] else None) if source and source[3] else (None, None))
-            self.copy_pending = {"relation": names, "direction": "out" if source else "in",
-                                 "range": [start, end], "format": match[5 if source else 3].decode()}
+            query = payload[name_end + 1:query_end + 1]
+            if not query.startswith(b'COPY '):
+                return
+            if name_end != 0 or payload[query_end + 1:] != b'\0\0':
+                self.copy_invalid = True
+                return
+            self.copy_statement = self.copy_query(query)
+            self.copy_stage = "parsed" if self.copy_statement is not None else None
+        elif kind in (b'B', b'D', b'E') and self.copy_statement is not None:
+            expected = {b'B': ("parsed", b'\0\0\0\0\0\0\0\1\0\0', "bound"),
+                        b'D': ("bound", b'P\0', "described"),
+                        b'E': ("described", b'\0\0\0\0\0', "executed")}[kind]
+            if self.copy_stage != expected[0] or payload != expected[1]:
+                self.copy_invalid = True
+                self.copy_statement, self.copy_stage, self.copy_pending = None, None, None
+                return
+            self.copy_stage = expected[2]
+            if kind == b'E':
+                self.copy_pending = dict(self.copy_statement)
+        elif kind == b'S' and (self.copy_statement is not None or self.copy_pending is not None or self.copy_current is not None):
+            if payload or self.copy_stage not in (None, "executed", "synced"):
+                self.copy_invalid = True
+                self.copy_statement, self.copy_stage, self.copy_pending = None, None, None
+            elif self.copy_stage is not None:
+                self.copy_stage = "synced"
+        elif kind in (b'C', b'X'):
+            self.copy_invalid |= self.copy_pending is not None or self.copy_current is not None
+            self.copy_statement, self.copy_stage, self.copy_pending = None, None, None
+        elif kind in (b'B', b'D', b'E') and (self.copy_pending is not None or self.copy_current is not None):
+            self.copy_invalid = True
         elif kind in (b'd', b'c') and self.copy_current is not None and self.copy_current["direction"] == "in":
             if kind == b'd':
                 self.copy_current["data_frames"] += 1
@@ -260,6 +306,7 @@ class PgoutputObservation:
         if kind in (b'G', b'H'):
             pending = self.copy_pending
             self.copy_pending = None
+            self.copy_statement, self.copy_stage = None, None
             if pending is None or self.backend_pid is None or len(payload) < 3:
                 self.copy_invalid = True
                 return
@@ -277,6 +324,9 @@ class PgoutputObservation:
                                  "columns": count, "rows": None, "data_frames": 0, "eof": False,
                                  "complete": False, "held": False, "released": False}
             self.copy_records.append(self.copy_current)
+        elif kind in (b'E', b'Z') and (self.copy_pending is not None or self.copy_statement is not None):
+            self.copy_invalid = True
+            self.copy_pending, self.copy_statement, self.copy_stage = None, None, None
         elif self.copy_current is not None:
             current = self.copy_current
             if kind == b'd' and current["direction"] == "out":
@@ -455,12 +505,17 @@ class WireGate:
             raise RuntimeError("COPY hold needs one exact relation on an observation gate")
         self.copy_relation = list(relation)
 
-    def copy_evidence(self):
-        with self.lock:
+    def copy_evidence(self, timeout=None):
+        acquired = self.lock.acquire() if timeout is None else self.lock.acquire(timeout=max(0, min(timeout, 0.02)))
+        if not acquired:
+            raise RuntimeError("COPY observer lock unavailable")
+        try:
             values = [observer.copy_evidence() for observer in self.observers]
             return {"invalid": bool(self.errors) or any(value["invalid"] for value in values),
                     "overflow": self.observer_overflow or any(value["overflow"] for value in values),
                     "records": [record for value in values for record in value["records"]]}
+        finally:
+            self.lock.release()
 
     def arm(self):
         if self.armed.is_set() or self.mode == "observe":

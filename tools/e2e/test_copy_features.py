@@ -3,6 +3,12 @@
 import copy
 import hashlib
 import json
+import stat
+import tempfile
+import types
+from unittest.mock import patch
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import sys
 import unittest
@@ -46,6 +52,14 @@ def build_smoke(binding):
                          "postgresql-client-18": {"version": "18.6-1.pgdg13+1", "architecture": "arm64"}},
             "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
             "version_text": "rpgmigrate 0.1.0\nlibpq 180006\n"}
+
+
+def progress_driver():
+    work = {"migration_uid": "12345678-9abc-def0-1234-56789abcdef0", "run_id": "123456789abcdef0123456789abcdef0", "workdir_id": "m2-pvc-"+"1"*32, "checkpoint_generation": 1}
+    record = {"binding": {"command": "clone", "work": work}, "probe_checked": False,
+              "raw_json": json.dumps({"protocol_version": 1, "engine_version": "0.1.0", "command": "clone", "capabilities": ["clone.single_db"], "work": work,
+                                      "phase": "completed", "copy": {name: {"total": 1, "done": 1} for name in ("tables", "indexes", "bytes")}})}
+    return types.SimpleNamespace(reports=[record], work={Path("binary_safe"): work})
 
 
 class CopyFeatureTests(unittest.TestCase):
@@ -248,6 +262,150 @@ class CopyFeatureTests(unittest.TestCase):
         bad = copy.deepcopy(cases); bad["binary_fallback"]["databases"]["source"]["oid"] = 100
         with self.assertRaises(RuntimeError): harness.validate_database_identities(bad, binding)
         with self.assertRaises(RuntimeError): harness.validate_database_identities({}, binding)
+
+
+    def test_progress_retains_closed_case_wire_and_validated_partial_report(self):
+        self.assertTrue(hasattr(harness, "ProfileProgress"), "missing pre-cleanup M8 progress capture")
+        binding = artifact_binding()
+        driver = progress_driver()
+        record = {"relation": ["public", "m8_safe"], "direction": "out", "range": [None, None], "format": "binary", "connection": 1,
+                  "backend_pid": 123, "columns": 1, "rows": 4, "data_frames": 1, "eof": True, "complete": True, "held": False, "released": False,
+                  "sql": "fixture-secret-row"}
+        wire = types.SimpleNamespace(copy_evidence=lambda **_: {"invalid": True, "overflow": False, "records": [record], "raw_packet": "fixture-secret-row"},
+                                     snapshot=lambda **_: {"status": "observed", "overflow": False, "gates": {key: False for key in ("armed", "held", "released", "abort_requested", "stopping")}, "connections": [], "environment": "fixture-secret-row"})
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "m8-progress.json"
+            progress = harness.ProfileProgress(path, binding, "16-18")
+            progress.capture("binary_safe", "wire_validation", {}, driver, (wire, wire), failed=True)
+            value = json.loads(path.read_text())
+            self.assertEqual(value["scope"], "m8_profile_diagnostic")
+            self.assertEqual(value["current"], {"case": "binary_safe", "ordinal": 1, "stage": "wire_validation"})
+            self.assertEqual(value["status"], "failed")
+            self.assertEqual(value["completed_case_ids"], [])
+            self.assertEqual(value["producer_report_count"], 1)
+            self.assertEqual(value["producer_reports"][0]["case"], "binary_safe")
+            self.assertTrue(value["wire"]["source"]["copy"]["invalid"])
+            self.assertEqual(value["wire"]["source"]["copy"]["records"][0]["rows"], 4)
+            self.assertNotIn("fixture-secret-row", path.read_text())
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_progress_capture_unavailable_cannot_mask_original_failure(self):
+        self.assertTrue(hasattr(harness, "ProfileProgress"), "missing bounded failure capture")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "m8-progress.json"
+            progress = harness.ProfileProgress(path, artifact_binding(), "16-18")
+            driver = types.SimpleNamespace(reports=[], work={})
+            progress.capture("binary_safe", "clone_start", {}, driver)
+            stderr = io.StringIO()
+            with patch.object(harness.os, "replace", side_effect=OSError("fixture-secret-row")), redirect_stderr(stderr):
+                progress.capture("binary_safe", "wire_validation", {}, driver, failed=True)
+            self.assertTrue(progress.failure_attempted)
+            self.assertIn("unavailable", stderr.getvalue())
+            self.assertNotIn("fixture-secret-row", stderr.getvalue())
+            self.assertEqual(json.loads(path.read_text())["current"]["stage"], "clone_start")
+            wire = types.SimpleNamespace(copy_evidence=lambda **_: (_ for _ in ()).throw(RuntimeError("fixture-secret-row")), snapshot=lambda **_: {})
+            progress.capture("binary_safe", "wire_validation", {}, driver, (wire, wire), failed=True)
+            value = json.loads(path.read_text())
+            self.assertEqual(value["wire"]["source"]["status"], "unavailable")
+            self.assertNotIn("fixture-secret-row", path.read_text())
+
+
+    def test_progress_report_and_total_caps_fail_unavailable_without_raw_data(self):
+        for fault in ("report_bytes", "report_count", "total_bytes", "report_unknown_field"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                driver = progress_driver()
+                if fault == "report_bytes": driver.reports[0]["raw_json"] += " "*65536
+                if fault == "report_count": driver.reports *= 10
+                if fault == "total_bytes":
+                    driver.reports[0]["raw_json"] += " "*30000
+                    driver.reports *= 9
+                if fault == "report_unknown_field":
+                    raw = json.loads(driver.reports[0]["raw_json"]); raw["sql"] = "fixture-secret-row"
+                    driver.reports[0]["raw_json"] = json.dumps(raw)
+                path = Path(temporary) / "m8-progress.json"
+                progress = harness.ProfileProgress(path, artifact_binding(), "16-18")
+                with redirect_stderr(io.StringIO()):
+                    self.assertFalse(progress.capture("binary_safe", "wire_validation", {}, driver, failed=True))
+                value = json.loads(path.read_text())
+                self.assertEqual(value["capture_status"], "unavailable")
+                self.assertIsNone(value["producer_report_count"])
+                self.assertIsNone(value["completed_case_ids"])
+                self.assertLessEqual(path.stat().st_size, 262144)
+                self.assertNotIn("fixture-secret-row", path.read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "m8-progress.json"; path.write_text("old evidence")
+            with self.assertRaises(RuntimeError): harness.ProfileProgress(path, artifact_binding(), "16-18")
+            self.assertEqual(path.read_text(), "old evidence")
+
+    def test_profile_failure_context_precedes_worker_and_wire_cleanup_and_survives_temp_state(self):
+        binding, events = artifact_binding(), []
+        inventory = [{"schema": "public", "name": "m8_safe"}]
+        tables = {"public.m8_safe": {"rows": 4, "sha256": "7"*64}}
+        source, target = (types.SimpleNamespace(host=role, sql=lambda *_: b"", create=lambda name: name) for role in ("source", "target"))
+        driver = progress_driver(); pending = driver.reports.pop()
+        driver.start = lambda *_args, **_kwargs: object()
+        driver.finish = lambda _worker: driver.reports.append(pending)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary); state = base / "temporary-state"; state.mkdir()
+            diagnostics = base / "diagnostics"; diagnostics.mkdir(mode=0o700)
+            path = diagnostics / "m8-progress.json"
+            progress = harness.ProfileProgress(path, binding, "16-18")
+            def cleanup(_worker):
+                events.append("worker_cleanup")
+                self.assertEqual(json.loads(path.read_text())["status"], "failed")
+            driver.kill = cleanup
+            class Gate:
+                def __enter__(self): return self
+                def __exit__(self, *_):
+                    events.append("wire_cleanup")
+                    self_test.assertEqual(json.loads(path.read_text())["status"], "failed")
+                def connection(self, value): return value
+                def copy_evidence(self, **_): return {"invalid": True, "overflow": False, "records": []}
+                def snapshot(self, **_):
+                    return {"status": "observed", "overflow": False, "gates": {key: False for key in ("armed", "held", "released", "abort_requested", "stopping")}, "connections": []}
+            self_test = self
+            with patch.object(harness, "WireGate", side_effect=lambda *_: Gate()), \
+                    patch.object(harness, "database_identity", return_value={"oid": 42}), patch.object(harness, "physical_inventory", return_value=inventory), \
+                    patch.object(harness, "table_fingerprint", return_value=tables), patch.object(harness, "observe_large_objects", return_value={"lo_verified": True}), \
+                    patch.object(harness, "native_compare", return_value=({"source": inventory, "target": inventory}, {})), \
+                    self.assertRaisesRegex(RuntimeError, "actual COPY format observation is missing or invalid"):
+                harness.run_profiles(source, target, driver, state, harness.load_manifest(), progress=progress)
+            import shutil
+            shutil.rmtree(state)
+            value = json.loads(path.read_text())
+            self.assertEqual(value["current"], {"case": "binary_safe", "ordinal": 1, "stage": "wire_validation"})
+            self.assertEqual(value["status"], "failed")
+            self.assertEqual(value["producer_report_count"], 1)
+            self.assertEqual(value["completed_case_ids"], [])
+            self.assertEqual(events, ["worker_cleanup", "wire_cleanup", "wire_cleanup"])
+            self.assertFalse(state.exists())
+
+
+    def test_progress_wire_caps_and_unknown_scalar_values_are_explicitly_unavailable(self):
+        record = {"relation": ["public", "m8_safe"], "direction": "out", "range": [None, None], "format": "binary", "connection": 1,
+                  "backend_pid": 123, "columns": 1, "rows": 4, "data_frames": 1, "eof": True, "complete": True, "held": False, "released": False}
+        for fault in ("records", "connections", "counter", "relation"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                selected = copy.deepcopy(record)
+                if fault == "counter": selected["rows"] = "fixture-secret-row"
+                if fault == "relation": selected["relation"] = ["public", "fixture-secret-row"]
+                wire = types.SimpleNamespace(copy_evidence=lambda **_: {"invalid": False, "overflow": False, "records": [selected]* (257 if fault == "records" else 1)},
+                    snapshot=lambda **_: {"status": "observed", "overflow": False, "gates": {key: False for key in ("armed", "held", "released", "abort_requested", "stopping")}, "connections": [{}]* (65 if fault == "connections" else 0)})
+                path = Path(temporary) / "m8-progress.json"
+                progress = harness.ProfileProgress(path, artifact_binding(), "16-18")
+                progress.capture("binary_safe", "wire_validation", {}, progress_driver(), (wire, wire), failed=True)
+                value = json.loads(path.read_text())
+                self.assertEqual(value["capture_status"], "partial")
+                self.assertEqual(value["wire"]["source"]["status"], "unavailable")
+                self.assertNotIn("copy", value["wire"]["source"])
+                self.assertNotIn("fixture-secret-row", path.read_text())
+
+
+    def test_inside_m8_selects_persistent_diagnostic_mount_before_validation(self):
+        with patch.object(harness.clone, "DIAGNOSTIC_ROOT", Path("/unmounted-workspace/target/failures")):
+            with self.assertRaises(RuntimeError):
+                harness.inner(types.SimpleNamespace(feature_binding=None, report_probe=None))
+            self.assertEqual(harness.clone.DIAGNOSTIC_ROOT, Path("/diagnostics"))
 
 
 if __name__ == "__main__":

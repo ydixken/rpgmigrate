@@ -108,6 +108,78 @@ class ExtendedWireTests(unittest.TestCase):
         observer.wire_event("server", "received", b'H', b'\0\0\0')
         self.assertTrue(observer.copy_evidence()["invalid"])
 
+    def test_native_extended_copy_requires_bound_execute_and_actual_response(self):
+        for direction in ("out", "in"):
+            for format in ("text", "binary"):
+                with self.subTest(direction=direction, format=format):
+                    query = (b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT ' + format.encode() + b')'
+                             if direction == "out" else b'COPY "public"."m8_safe" ("id") FROM STDIN WITH (FORMAT ' + format.encode() + b', FREEZE true)')
+                    observer = follow_wire.PgoutputObservation(1)
+                    observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                    for request in (parse(query), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')):
+                        observer.copy_frontend(request[:1], request[5:])
+                    self.assertEqual(observer.copy_evidence()["records"], [])
+                    for kind, payload in ((b'1', b''), (b'2', b''), (b'n', b''),
+                                          (b'H' if direction == "out" else b'G', struct.pack("!BHH", int(format == "binary"), 1, int(format == "binary")))):
+                        observer.wire_event("server", "received", kind, payload)
+                    if direction == "in": observer.copy_frontend(b'c', b'')
+                    else: observer.wire_event("server", "received", b'c', b'')
+                    observer.wire_event("server", "received", b'C', b'COPY 0\0')
+                    evidence = observer.copy_evidence()
+                    self.assertFalse(evidence["invalid"], "native PQsendQueryParams COPY must be observed")
+                    self.assertEqual(len(evidence["records"]), 1)
+                    record = evidence["records"][0]
+                    self.assertEqual((record["direction"], record["format"], record["relation"], record["backend_pid"]), (direction, format, ["public", "m8_safe"], 123))
+                    self.assertTrue(record["complete"] and record["eof"])
+                    self.assertEqual(record["rows"], 0)
+
+    def test_native_extended_copy_refuses_stale_malformed_or_unexecuted_bindings(self):
+        query = b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT binary)'
+        requests = [parse(query), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')]
+        variants = [[parse(query, statement=b'named'), *requests[1:]], [parse(query, types=(23,)), *requests[1:]],
+                    [requests[0], bind(statement=b'other'), *requests[2:]], [requests[0], bind(portal=b'named'), *requests[2:]],
+                    [requests[0], bind(values=(b'value',)), *requests[2:]], [*requests[:2], frame(b'D', b'S\0'), *requests[3:]],
+                    [*requests[:3], execute(limit=1), requests[4]], [*requests[:3], execute(portal=b'named'), requests[4]],
+                    requests[:1] + requests[2:], requests[:2] + requests[3:], requests[:3],
+                    requests[:1] + [frame(b'S')] + requests[1:], requests[:4] + [execute(), requests[4]],
+                    requests[:3] + [parse(b'SELECT 1'), *requests[3:]], requests[:3] + [frame(b'Q', b'SELECT 1\0'), *requests[3:]],
+                    requests[:3] + [frame(b'C', b'P\0'), *requests[3:]], requests[:4] + [frame(b'S', b'not-empty')]]
+        for index, frames in enumerate(variants):
+            with self.subTest(variant=index):
+                observer = follow_wire.PgoutputObservation(1)
+                observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                for request in frames: observer.copy_frontend(request[:1], request[5:])
+                observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+                self.assertTrue(observer.copy_evidence()["invalid"])
+                self.assertEqual(observer.copy_evidence()["records"], [])
+        for response in (b'\0\0\1\0\0', b'\1\0\1\0\0', b'\1\0\1'):
+            with self.subTest(response=response):
+                observer = follow_wire.PgoutputObservation(1)
+                observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                for request in requests: observer.copy_frontend(request[:1], request[5:])
+                observer.wire_event("server", "received", b'H', response)
+                self.assertTrue(observer.copy_evidence()["invalid"])
+        observer = follow_wire.PgoutputObservation(1)
+        observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+        for request in requests: observer.copy_frontend(request[:1], request[5:])
+        observer.wire_event("server", "received", b'E', b'SERROR\0CXX000\0Mfixture\0\0')
+        observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+        self.assertTrue(observer.copy_evidence()["invalid"])
+        self.assertEqual(observer.copy_evidence()["records"], [])
+
+    def test_copy_diagnostic_snapshot_has_bounded_lock_wait(self):
+        gate = WireGate.__new__(WireGate)
+        gate.lock, gate.errors, gate.observers, gate.observer_overflow = threading.Lock(), [], [], False
+        gate.lock.acquire()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lock unavailable"):
+                gate.copy_evidence(timeout=.01)
+        finally:
+            gate.lock.release()
+        self.assertLess(time.monotonic() - started, .1)
+        self.assertEqual(gate.copy_evidence(timeout=.01), {"invalid": False, "overflow": False, "records": []})
+
     def test_source_copy_hold_observes_each_real_worker_until_release(self):
         with self.relay("observe") as (gate, producer, backend):
             gate.hold_copy(["public", "m8_split"])
@@ -147,7 +219,8 @@ class ExtendedWireTests(unittest.TestCase):
                 response = frame(b'H', b'\1\0\1\0\1')
                 for producer, backend, bounds in ((first, first_backend, b" WHERE ctid >= '(0,0)'::pg_catalog.tid AND ctid < '(12,0)'::pg_catalog.tid"),
                                                    (second, second_backend, b" WHERE ctid >= '(12,0)'::pg_catalog.tid")):
-                    query = frame(b'Q', b'COPY (SELECT "id" FROM ONLY "public"."m8_split"' + bounds + b') TO STDOUT WITH (FORMAT binary)\0')
+                    sql = b'COPY (SELECT "id" FROM ONLY "public"."m8_split"' + bounds + b') TO STDOUT WITH (FORMAT binary)'
+                    query = parse(sql) + bind() + frame(b'D', b'P\0') + execute() + frame(b'S')
                     producer.sendall(query)
                     self.assertEqual(receive(backend, len(query)), query)
                     gate.copy_held.clear()
