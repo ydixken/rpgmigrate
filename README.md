@@ -1,7 +1,7 @@
 # rpgmigrate
 
 rpgmigrate is a Rust PostgreSQL migration engine for database operators.
-The executable implements plain clone and pgoutput follow on PostgreSQL 16 to 16, 18 to 18, and 16 to 18; the [roadmap](docs/roadmap.md) records verified engine workflows and remaining cutover, operator, and durability gates.
+The executable implements plain clone and pgoutput follow on the PostgreSQL [16/16, 18/18, and 16/18 pairs](docs/roadmap.md).
 
 [TOC]
 
@@ -32,7 +32,7 @@ The executable implements plain clone and pgoutput follow on PostgreSQL 16 to 16
 
 1. Install the Rust toolchain required by `Cargo.toml`, Python 3, pkg-config, and stock libpq development files.
    Use the [Testing guide](docs/testing.md) for library and database-tool selection.
-   Confirm the checkout before running any database checks.
+   Check the checkout before running any database checks.
 
    ```sh
    git status --short --branch
@@ -76,6 +76,30 @@ The executable implements plain clone and pgoutput follow on PostgreSQL 16 to 16
 | `task test-e2e-cutover` | Run the three-pair cutover producer matrix. |
 | `task image:build` | Build the local native runner image. |
 | `task image:smoke` | Inspect the local image and emit a packaging receipt. |
+
+## Setup
+
+See the [Getting started guide](docs/getting-started.md).
+
+## Operator use
+
+See the [Operator guide](docs/operator-guide.md).
+
+## Troubleshooting
+
+See the [Troubleshooting guide](docs/troubleshooting.md).
+
+## Durability
+
+See the [Durability guide](docs/durability.md).
+
+## Runner image
+
+See the [Runner image guide](docs/runner-image.md).
+
+## Native protocol
+
+See the [Native protocol](docs/native-protocol.md).
 
 ## Testing
 

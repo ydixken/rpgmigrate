@@ -4,12 +4,16 @@ The user accepted this operator-first release scope on 2026-11-07.
 We implement the operator's consumed migration contract and sensible general controls, rather than requiring full pgcopydb CLI parity.
 The [approved design](superpowers/specs/2026-11-06-rpgmigrate-design.md) and [roadmap](roadmap.md) use this matrix.
 The roadmap amendments approved on 2026-11-08 narrow the native profile and define the milestone gates below.
-The original source audit is pinned to `pgcopydb-operator` commit `639bdf997f2ed32b6e0b88420455428cb5112c06`; it inspected production callers and API renderers, not executed operator E2E.
+The original source audit is pinned to `pgcopydb-operator` commit `639bdf997f2ed32b6e0b88420455428cb5112c06`.
+It inspected production callers and API renderers, not executed operator E2E.
 
 > [!IMPORTANT]
 > Plain clone and ongoing follow passed all three engine pair profiles, including independent comparisons and actual Go clone-report checks.
-> M0 through M5 are closed, including the narrowed M4 engine cutover profile; native operator activation remains unqualified.
-> No native operator workflow is qualified by the existing component results.
+> M0 through M5 are closed, including the narrowed M4 engine cutover profile.
+> Native operator activation remains unqualified.
+> Production admission returns `UnsupportedEngine`.
+> No actual native operator workflow is qualified.
+> M6 through M10 remain open.
 > Use the [maintained task ledger](../tasks/todo.md) for exact implementation and qualification evidence.
 
 The M1 validator contract is pinned to operator commit `0267c787a900f37702181810c37ec313085e1287`.
@@ -18,7 +22,8 @@ See the [native protocol v1](native-protocol.md) for exact discovery/report fiel
 ## Release boundary
 
 Eight production operator command paths are reachable from the 48 behavioral paths in the frozen parser inventory.
-The other 40 are deferred as parity requirements; existing commands and parser fixtures are retained, not removed.
+The other 40 are deferred as parity requirements.
+Existing commands and parser fixtures are retained, not removed.
 General `help`, `version`, and `ping`, explicit connection/work-directory inputs, existing environment precedence, and nonzero failure reporting remain part of the native interface.
 The counts describe command surface, not implementation effort or a percentage of completion.
 
@@ -30,28 +35,33 @@ No universal CLI or drop-in compatibility claim follows from this scope.
 ## Required command paths
 
 The [native dispatch](../src/config.rs) admits implemented native routes and refuses unsupported configurations.
-Qualification remains a separate gate; parser acceptance is not implementation.
+Qualification remains a separate gate.
+Parser acceptance is not implementation.
 The native adapter must preserve each admitted operation through an explicit, tested native contract.
 `list tables` remains an explicit staged refusal in the revised native profile.
-Accept and record `--origin`, but never create or own a replication origin; cleanup reports it as not owned.
+Accept and record `--origin`, but never create or own a replication origin.
+Cleanup reports it as not owned.
 
 | Command path | Consumed operation |
 | --- | --- |
 | `clone` | Clone, optional follow, native restart/resume lifecycle. |
 | `stream cleanup` | Idempotent cleanup of exactly owned slot and publication. |
-| `stream sentinel set endpos` | Persist explicit E; observe acknowledgment through JSON retry. |
+| `stream sentinel set endpos` | Persist explicit E and observe acknowledgment through JSON retry. |
 | `stream sentinel get` | Read end position or replay LSN after worker exit. |
 | `list progress` | Version-gated JSON progress and completion counters. |
 | `compare data` | Drain fallback, final verification, and rehearsal data comparison. |
 | `compare schema` | Final schema verification, including selected all-database mode. |
-| `list tables` | Rehearsal inventory; explicit staged refusal in the native profile. |
+| `list tables` | Rehearsal inventory with explicit staged refusal. |
 
-The production call sites are the [job builders][op-jobs], [verification controller][op-verify], [rehearsal builder][op-rehearsal], and [cutover exec][op-sentinel].
-There is no production standalone `follow` launch: follow is appended to `clone`.
-The first worker attempt uses `--restart`; retries use `--resume --not-consistent`, and permitted snapshot-loss start-over adds cleanup.
-Native startup admits the first restart only through checked absent/private-empty initialization, or a matching resource-free native INIT retry; it never rebinds foreign or legacy state.
-A completed native retry with `--resume --not-consistent` verifies existing durable completion and preserves generation and table markers instead of recopying.
-Native recovery must prove that these requests are safe; legacy flag spelling never authorizes unsafe snapshot reuse or state adoption.
+The production call sites are the [job builders][op-jobs], [verification controller][op-verification], [rehearsal builder][op-rehearsal], and [cutover exec][op-sentinel].
+There is no production standalone `follow` start: follow is appended to `clone`.
+The first worker attempt uses `--restart`.
+Retries use `--resume --not-consistent`, and permitted snapshot-loss start-over adds cleanup.
+Native startup admits the first restart only through checked absent/private-empty initialization, or a matching resource-free native INIT retry.
+It never rebinds foreign or legacy state.
+A completed native retry with `--resume --not-consistent` checks existing durable completion and preserves generation and table markers instead of recopying.
+Native recovery must prove that these requests are safe.
+Legacy flag spelling never authorizes unsafe snapshot reuse or state adoption.
 
 ## Finite option contract
 
@@ -71,14 +81,16 @@ The 31 clone names are:
 - Skips: `--skip-large-objects`, `--skip-extensions`, `--skip-ext-comments`, `--skip-collations`, `--skip-vacuum`, `--skip-analyze`, `--skip-db-properties`, `--skip-split-by-ctid`.
 
 The seven [follow additions][op-follow] are `--follow`, `--slot-name`, `--origin`, `--plugin`, `--publication`, `--wal2json-numeric-as-string`, and `--replay-no-op-updates`.
-Helpers add `--current`, `--source`, `--endpos`, `--replay-lsn`, and `--json` through the [cutover][op-set-end], [drain][op-drain], [progress][op-progress], and [verification][op-verify] paths.
-Preserve the existing connection, passfile/TLS, JSON-log, and `PGCOPYDB_APPLY_GROUP_TXNS` environment contracts through the native adapter; credentials must remain absent from diagnostics.
+Helpers add `--current`, `--source`, `--endpos`, `--replay-lsn`, and `--json` through the [cutover][op-set-end], [drain][op-drain], [progress][op-progress], and [verification][op-verification] paths.
+Preserve the existing connection, passfile/TLS, JSON-log, and `PGCOPYDB_APPLY_GROUP_TXNS` environment contracts through the native adapter.
+Credentials must remain absent from diagnostics.
 
 ## Defaults and selected feature semantics
 
 An optional CRD field is optional for the customer to select, not optional to implement while claiming compatibility with that configuration.
 Every admitted feature must execute its selected semantics.
-A staged profile must reject unsupported configurations explicitly during admission or preflight, before mutation; it must not ignore fields or substitute different behavior.
+A staged profile must reject unsupported configurations explicitly during admission or preflight, before mutation.
+It must not ignore fields or substitute different behavior.
 Full operator API compatibility requires qualification of all exposed configurations within the declared profile.
 
 The [admitted follow plugin defaults to `pgoutput`][op-plugin], and the renderer emits that value.
@@ -90,12 +102,13 @@ Refuse other plugins and unsupported plugin options before mutation.
 
 The [clone renderer][op-args] includes large objects unless `clone.skip.largeObjects` is explicit.
 Binary COPY defaults on and requires the established safe per-table text fallback.
-The [parallel/split defaults][op-defaults] use at least four table workers, a 512 MiB split threshold, and eight parts; these are core operator behavior, not deferred CLI extras.
+The [parallel/split defaults][op-defaults] use at least four table workers, a 512 MiB split threshold, and eight parts.
+These are core operator behavior, not deferred CLI extras.
 
 The [CRD and renderers][op-types] also expose these feature groups:
 
 - Full clone phases: schema, data, indexes, constraints, sequences, partitions, extensions, and large objects.
-- Parallelism: table, index, restore, and large-object workers; split limits, estimated sizes, and deferred indexes.
+- Parallelism: table, index, restore, and large-object workers, split limits, estimated sizes, and deferred indexes.
 - Selection: include/exclude schemas, tables, and extensions, plus excluded indexes and table data.
 - Restore policy: requested roles, password/owner/ACL/comment/tablespace omissions, destructive restore, fail-fast, and the eight explicit skips.
 - Follow: slot/publication selection, plugin-specific numeric output, no-op updates, and apply grouping.
@@ -105,10 +118,14 @@ The [CRD and renderers][op-types] also expose these feature groups:
 Retain [API combination constraints][op-admission], including all-database exclusions and ownership-handover requirements.
 The M2 plain-clone implementation covers schema, parallel text COPY, post-data, sequences, and ANALYZE.
 Binary COPY, splitting, large objects, and full operator configuration behavior remain unqualified and explicitly staged.
-M3/M4 follow and cutover implementation does not qualify the complete operator workflow; use the task ledger for the exact closing gates.
-The M7 vertical slice explicitly switches off binary COPY, splitting, and large objects; M8 qualifies them before using operator defaults.
-In the explicitly narrowed native profile, an effective split threshold of zero makes the operator native renderer omit both `--split-tables-larger-than` and `--split-max-parts`, including when max-parts is otherwise positive.
-This is a renderer rule, not a relaxation of engine parser admission; the default/nonzero split profile and binary COPY still require their qualified capabilities, and the legacy renderer remains unchanged.
+M3/M4 follow and cutover implementation does not qualify the complete operator workflow.
+Use the task ledger for the exact closing gates.
+The M7 vertical slice explicitly switches off binary COPY, splitting, and large objects.
+M8 qualifies them before using operator defaults.
+In the narrowed native profile, a zero effective split threshold makes the renderer omit both `--split-tables-larger-than` and `--split-max-parts`.
+This includes otherwise positive max-parts values.
+This is a renderer rule, not a relaxation of engine parser admission.
+The default/nonzero split profile and binary COPY still require their qualified capabilities, and the legacy renderer remains unchanged.
 Dormant native worker construction and passing CLI vectors do not establish production native support or the M7 runtime profile.
 DropIfExists and filters are excluded from the native E2E profile.
 M1 freezes precise native option and environment admission rather than inferring support from the inventory above.
@@ -116,13 +133,15 @@ M1 freezes precise native option and environment admission rather than inferring
 ## Native operator adapter
 
 The accepted direction is an optional immutable `spec.engine` selection, `pgcopydb` or `rpgmigrate`, with omission retaining the legacy runtime.
-Native selection applies to new migrations with a new UID and marked native workdir; it cannot retarget an existing migration.
+Native selection applies to new migrations with a new UID and marked native workdir.
+It cannot retarget an existing migration.
 Freeze the generated API/admission changes and DTOs before implementation.
 Extend the existing `ProgressOps`/`SentinelOps` boundary through per-migration backend selection and reuse exec, connection, and job helpers.
 
 The legacy [job builder hardcodes `pgcopydb`][op-binary].
 Its [progress gate][op-progress] strips the exact first-line prefix `"pgcopydb version "` and compares against [21 exact configured strings][op-versions].
-Unknown versions suppress that progress path; a numeric Rust version alone cannot satisfy the protocol.
+Unknown versions suppress that progress path.
+A numeric Rust version alone cannot satisfy the protocol.
 Use a native version/capability handshake and native identity, not a fake pgcopydb version or binary alias.
 
 M1 freezes native DTOs for version/capabilities, status and COPY metrics, distinct source/target positions, durable checkpoints, certified drain, cutover LSN, and owned cleanup.
@@ -130,73 +149,96 @@ Comparison keeps its existing transport outside the native Report DTO.
 Use `version --json` capabilities in preflight, `native-report: {json}` stdout for phase/progress/drain/cleanup, and work identity derived from the Migration UID and PVC.
 Keep the existing per-table comparison JSON array and `"compare progress: "` shapes outside `ParseReport`.
 Discovery stays identity-free with exactly `protocol_version`, `engine_version`, and `capabilities` under protocol v1.
-Linux advertises the ordered core six followed by `verify.sealed_files.v1`; non-Linux keeps the original six, as defined in the [native protocol](native-protocol.md#discovery).
-The shared 134-file fixture trees preserve the historical empty/six-name syntax and distinguish fixture-only `qualified_capabilities` from `qualified_linux_capabilities`; neither extends executable discovery.
+Linux advertises the ordered core six followed by `verify.sealed_files.v1`.
+Non-Linux keeps the original six, as defined in the [native protocol](native-protocol.md#discovery).
+The shared 134-file fixture trees preserve the historical empty/six-name syntax and distinguish fixture-only `qualified_capabilities` from `qualified_linux_capabilities`.
+Neither extends executable discovery.
 The mandatory native M6 base profile requires `verify.sealed_files.v1` even when optional verification is off, because helper workflows can reach sealed-file comparison.
-Old six-name discovery remains valid syntax but fails native admission before credential projection; the actual historical golden is compacted to a valid line for that refusal control, creating/deleting only one discovery Job and no DB helper.
-The Linux-seven golden passes the corresponding mocked checked preflight; this is consumer evidence, not runtime acceptance.
+Old six-name discovery remains valid syntax but fails native admission before credential projection.
+The actual historical golden is compacted to a valid line for that refusal control, creating/deleting only one discovery Job and no DB helper.
+The Linux-seven golden passes the corresponding mocked checked preflight.
+This is consumer evidence, not runtime acceptance.
 Keep unknown/duplicate/null/field/framing refusals, require every selected capability, and retain the binary/split/large-object default refusals.
 Non-Linux core standalone verification retains its existing profile but cannot satisfy native M6 sealed-file admission.
-The [private sealed-file interface](native-protocol.md#private-sealed-file-inputs-for-comparison) preserves raw DSN and Report/compare-array contracts; runtime descriptor/kernel/file and database checks remain mandatory.
-Production `UnsupportedEngine` and resolver refusal remain closed; discovery does not qualify helpers, PVC/file delivery, SQL authority, or lifecycle behavior.
+The [private sealed-file interface](native-protocol.md#private-sealed-file-inputs-for-comparison) preserves raw DSN and Report/compare-array contracts.
+Runtime descriptor/kernel/file and database checks remain mandatory.
+Production `UnsupportedEngine` and resolver refusal remain closed.
+Discovery does not qualify helpers, PVC/file delivery, SQL authority, or lifecycle behavior.
 New ARM executable/image bytes need fresh packaging and exact-image M6 checks on all three declared pairs.
 AMD64 packaging scope stays separate from native database runtime qualification, which remains an M10 gate.
-Supplied operator identity grants no native-state authority; M2 binds all four values to recorded state and refuses mismatches before mutation.
-Only that bound mode emits operational native-report framing; standalone clone/progress/stream emit unframed JSON without synthetic Migration/PVC identity.
+Supplied operator identity grants no native-state authority.
+M2 binds all four values to recorded state and refuses mismatches before mutation.
+Only that bound mode emits operational native-report framing.
+Standalone clone/progress/stream emit unframed JSON without synthetic Migration/PVC identity.
 Keep JSON error classes in `{error_severity, message}`, and OR both engines' application_name patterns in matching.
 M1 freezes exact DTO fields, environment names, owned schema, workdir, application names, and cleanup inventory.
 Map the consumed [log records][op-logs], progress JSON, comparison results, scalar LSN output, exit status, and independent drain checks explicitly.
-Legacy missing-counter behavior is not a native completion proof; reject missing or incomplete verification evidence despite exit zero.
-Legacy target-origin SQL stays on the legacy backend; missing native proof blocks native completion.
+Legacy missing-counter behavior is not a native completion proof.
+Reject missing or incomplete verification evidence despite exit zero.
+Legacy target-origin SQL stays on the legacy backend.
+Missing native proof blocks native completion.
 
-Legacy cutover runs inside the live worker container and shares the PVC, `/work/pgcopydb`, writable `/tmp`, URI files, passfile, and TLS mounts through the existing [exec][op-sentinel] and [mount][op-mounts] paths.
+Legacy cutover runs inside the live worker container through the existing [exec][op-sentinel] and [mount][op-mounts] paths.
+It shares the PVC, `/work/pgcopydb`, writable `/tmp`, URI files, passfile, and TLS mounts.
 The native adapter reuses these mount and exec boundaries with a native-owned workdir whose exact layout freezes in M1.
 This permits native workdir/control access without reproducing a legacy database layout.
-M6 MUST also provide a standalone helper with those mounts after the worker exits; `Execer.RunningPod` alone cannot obtain the final native acknowledgment.
+M6 MUST also provide a standalone helper with those mounts after the worker exits.
+`Execer.RunningPod` alone cannot obtain the final native acknowledgment.
 The legacy `--current` resampling retry is unsuitable for native cutover.
 The audit found no direct production SQLite or source-sentinel-table queries.
 Do not emulate legacy SQLite files or source-sentinel storage.
-Control must use checked native identity and ownership; requested endpos, a visible checkpoint, or worker exit alone cannot certify durable drain.
+Control must use checked native identity and ownership.
+Requested endpos, a visible checkpoint, or worker exit alone cannot certify durable drain.
 Exclude only exact owned metadata objects from comparison and ownership changes, and clean only resources owned by that native run.
 
 ## Native profile and milestone gates
 
 The revised release targets 16→16, 18→18, and 16→18 with stock PGDG libpq and client tools 16 and 18.
 Refuse other source/target pairs before mutation.
-Client tools match the target major; historical legacy version matrices do not widen native admission.
+Client tools match the target major.
+Historical legacy version matrices do not widen native admission.
 Apply requires permission to set `session_replication_role=replica` and refuses ENABLE ALWAYS/REPLICA user triggers.
 After creation, missing slots/publications and changed publication OIDs cause a gap refusal.
 Native cleanup never adopts a foreign resource or removes pgcopydb state.
 
 The [roadmap](roadmap.md#milestones) defines these gates, and the [task ledger](../tasks/todo.md) records their evidence:
 
-- M0 retains a buildable component scaffold, stock-libpq authentication tests, and plain CI; it qualifies no operator migration.
+- M0 retains a buildable component scaffold, stock-libpq authentication tests, and plain CI.
+  It qualifies no operator migration.
 - M1 freezes the command, option, environment, protocol, identity, and shared golden-fixture contracts in both repositories.
 - M2 through M4 implement clone, pgoutput follow, recovery, cutover, durable drain, and owned cleanup.
-- M5 provides the runner image and engine release CI; M0 retires the previous custom image pipeline.
+- M5 provides the runner image and engine release CI.
+  M0 retires the previous custom image pipeline.
 - M6 implements the adapter at the existing operator boundaries with unit and envtest coverage.
 - M7 qualifies the narrowed native vertical slice through operator E2E on the three declared version pairs.
 - M8 widens binary COPY, split parts, and large objects, then reruns the native matrix with operator defaults.
-- M9 enables replay-safe tuning and conditional relaxed mode only with measured evidence; M10 closes release review and artifact gates.
+- M9 enables replay-safe tuning and conditional relaxed mode only with measured evidence.
+  M10 closes release review and artifact gates.
 
-In `durable` and `replay-safe`, the source slot retains WAL throughout copy and until target durability is proven; there is no local copy-phase spool.
+In `durable` and `replay-safe`, the source slot retains WAL throughout copy and until target durability is proven.
+There is no local copy-phase spool.
 M9 keeps `relaxed` conditional on measured gain and explicit loss reservations, without claiming its availability.
 The barrier-proven durable replay frontier authorizes feedback.
-Later-BEGIN drain coverage can exceed that frontier and never raises feedback or reconnect authority.
-Before the follow-copy anchor, resume restarts only the run's recorded owned data phase with a new snapshot and generation; after it, resume uses the checkpoint.
+Later-`BEGIN` drain coverage can exceed that frontier and never raises feedback or reconnect authority.
+Before the follow-copy anchor, resume restarts only the run's recorded owned data phase with a new snapshot and generation.
+After it, resume uses the checkpoint.
 The operator MUST stop source writers and outstanding transactions, sample source `pg_current_wal_insert_lsn()`, and persist E once before the first explicit-E command.
 Hold the writer fence through drain, final sequence synchronization, and verification.
-Retry that unchanged E after any error; do not resample `--current`.
+Retry that unchanged E after any error.
+Do not resample `--current`.
 A command can persist E and return nonzero without JSON acknowledgment while the worker holds the target fence.
 After worker exit, use the standalone helper for an identical-E retry and require positive acknowledgment before independent verification.
-The independent reader MUST acquire the same target fence, validate and lock the exact logged row, perform a checked same-value UPDATE, positively commit synchronously, and complete checked closure.
+The independent reader MUST acquire the same target fence, then check and lock the exact logged row.
+It MUST perform a checked same-value UPDATE, positively commit synchronously, and complete checked closure.
 An asynchronously visible row or polling result is no flush proof.
-The [Native cutover handoff](native-cutover-handoff.md) freezes the layout and helper qualification boundary; no operator activation follows from engine JSON.
+The [Native cutover handoff](native-cutover-handoff.md) freezes the layout and helper qualification boundary.
+No operator activation follows from engine JSON.
 The proof must match the same logged row's work identity, checkpoint token, certified and durable frontiers, persisted endpos, witness, and witness kind.
-Keepalive witnesses are covered by the certified frontier; a later-BEGIN witness is the strictly later `BEGIN.final_lsn`.
+Keepalive witnesses are covered by the certified frontier.
+A later-`BEGIN` witness is the strictly later `BEGIN.final_lsn`.
 Requested endpos, missing reports, or exit zero alone cannot complete a native migration.
 `stream cleanup` requires both `--source` and `--target` before opening native state.
-Cleanup requires the exact caller-declared resource inventory and complete confirmed native receipts, including exactly one confirmed target receipt, before terminal intent or deletion.
+Cleanup requires the exact caller-declared resource inventory and complete positively established native receipts, including exactly one positively established target receipt, before terminal intent or deletion.
 Follow the handoff's [exclusive-administration cleanup boundary](native-cutover-handoff.md#exact-owned-cleanup) through every retry.
 Cleanup retains the owned workdir, target metadata, and comparison state, and leaves recorded origins unowned and unremoved.
 Final sequence sync and, when enabled, large-object re-sync happen under the write freeze after drain.
@@ -204,25 +246,43 @@ Final sequence sync and, when enabled, large-object re-sync happen under the wri
 Golden argument tests must cover defaults and every conditional renderer branch, including explicit refusal of unsupported stage configurations.
 Lifecycle negatives must cover foreign state/resources, stale or missing proof, incomplete reports, unknown COMMIT, lost snapshots, worker/helper failure, and missing fault injection.
 Retain independent content checks for tables, sequences, large objects, schemas, ownership, and partitions.
-The [operator E2E matrix][op-e2e] lists concrete pairs; source inspection does not prove those runs or a universal version cross-product.
+The [operator E2E matrix][op-e2e] lists concrete pairs.
+Source inspection does not prove those runs or a universal version cross-product.
 Keep component tests, production/operator workflow gates, and measured performance as separate evidence.
 No backend winner, general crash-resume guarantee, throughput gain, or ETA follows from the reduced command count.
 
 [op-args]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/pgcopydb/args.go#L69
+
 [op-follow]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/pgcopydb/args.go#L226
+
 [op-types]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/api/v1beta1/migration_types.go#L179
+
 [op-plugin]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/api/v1beta1/migration_types.go#L375
+
 [op-defaults]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/pgcopydb/defaults.go#L29
+
 [op-jobs]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/resources.go#L139
+
 [op-rehearsal]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/resources.go#L294
-[op-verify]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/verification.go#L151
+
+[op-verification]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/verification.go#L151
+
 [op-drain]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/resources.go#L249
+
 [op-progress]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/progress/progress.go#L84
+
 [op-versions]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/cmd/main.go#L114
+
 [op-binary]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/resources.go#L1685
+
 [op-sentinel]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/sentinel/sentinel.go#L54
+
 [op-set-end]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/sentinel/sentinel.go#L148
+
 [op-mounts]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/controller/resources.go#L1616
+
 [op-logs]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/internal/pgcopydb/logs.go#L72
+
 [op-admission]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/api/v1beta1/migration_types.go#L649
+
 [op-e2e]: https://github.com/ydixken/pgcopydb-operator/blob/639bdf997f2ed32b6e0b88420455428cb5112c06/hack/e2e-matrix.sh#L10
