@@ -182,6 +182,33 @@ mod tests {
     }
 
     #[test]
+    fn actual_owner_projection_is_numeric_and_decoder_refuses_non_u32_values() {
+        let policy = RestorePolicy::default();
+        for exact in [false, true] {
+            let sql = metadata_query(7, exact, &policy);
+            assert!(sql.contains(
+                "pg_catalog.json_build_object('owner',m.lomowner::pg_catalog.int8,'acl'"
+            ));
+        }
+        for owner in [1, u32::MAX] {
+            let value = format!(r#"{{"owner":{owner},"acl":null,"comment":null}}"#);
+            assert_eq!(actual_metadata(value.as_bytes()).unwrap().owner, owner);
+        }
+        for value in [
+            r#"{"owner":"42","acl":null,"comment":null}"#,
+            r#"{"owner":0,"acl":null,"comment":null}"#,
+            r#"{"owner":-1,"acl":null,"comment":null}"#,
+            r#"{"owner":4294967296,"acl":null,"comment":null}"#,
+            r#"{"owner":null,"acl":null,"comment":null}"#,
+            r#"{"acl":null,"comment":null}"#,
+            r#"{"owner":42,"comment":null}"#,
+            r#"{"owner":42,"acl":null,"comment":null,"extra":1}"#,
+        ] {
+            assert!(actual_metadata(value.as_bytes()).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn aggregate_counts_refuse_object_and_byte_overflow() {
         let receipt = LargeObjectDone {
             generation: crate::contracts::CopyGeneration(1),
@@ -324,7 +351,7 @@ fn metadata_query(after_oid: u32, exact: bool, policy: &RestorePolicy) -> String
     };
     let predicate = if exact { "=" } else { ">" };
     format!(
-        "SELECT oid, CASE WHEN pg_catalog.octet_length(selected)+pg_catalog.octet_length(actual)<=65536 THEN selected END, CASE WHEN pg_catalog.octet_length(selected)+pg_catalog.octet_length(actual)<=65536 THEN actual END FROM (SELECT m.oid, pg_catalog.json_build_object('owner',{owner},'acl',{acl},'comment',{comment})::pg_catalog.text AS selected, pg_catalog.json_build_object('owner',m.lomowner,'acl',m.lomacl::pg_catalog.text,'comment',pg_catalog.obj_description(m.oid,'pg_largeobject'))::pg_catalog.text AS actual FROM pg_catalog.pg_largeobject_metadata AS m WHERE m.oid {predicate} {after_oid}::pg_catalog.oid ORDER BY m.oid LIMIT 128) AS bounded ORDER BY oid"
+        "SELECT oid, CASE WHEN pg_catalog.octet_length(selected)+pg_catalog.octet_length(actual)<=65536 THEN selected END, CASE WHEN pg_catalog.octet_length(selected)+pg_catalog.octet_length(actual)<=65536 THEN actual END FROM (SELECT m.oid, pg_catalog.json_build_object('owner',{owner},'acl',{acl},'comment',{comment})::pg_catalog.text AS selected, pg_catalog.json_build_object('owner',m.lomowner::pg_catalog.int8,'acl',m.lomacl::pg_catalog.text,'comment',pg_catalog.obj_description(m.oid,'pg_largeobject'))::pg_catalog.text AS actual FROM pg_catalog.pg_largeobject_metadata AS m WHERE m.oid {predicate} {after_oid}::pg_catalog.oid ORDER BY m.oid LIMIT 128) AS bounded ORDER BY oid"
     )
 }
 

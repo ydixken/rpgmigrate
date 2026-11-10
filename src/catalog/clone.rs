@@ -109,7 +109,7 @@ fn binary_columns(
     io: &IoControl,
 ) -> Result<Vec<BinaryColumn>> {
     let result = connection.query(&format!(r#"SELECT a.attname,t.oid,t.typnamespace,t.typname,t.typtype,a.atttypmod,
- t.typelem=0 AND t.typbasetype=0 AND t.typrelid=0,t.typsend,t.typreceive,
+ t.typelem=0 AND t.typbasetype=0 AND t.typrelid=0,t.typsend::pg_catalog.oid,t.typreceive::pg_catalog.oid,
  COALESCE(s.proname::pg_catalog.text,''),COALESCE(r.proname::pg_catalog.text,''),
  COALESCE(s.pronamespace=11 AND s.prolang=12 AND s.prokind='f' AND s.prosrc=s.proname::pg_catalog.text,false),
  COALESCE(r.pronamespace=11 AND r.prolang=12 AND r.prokind='f' AND r.prosrc=r.proname::pg_catalog.text,false),
@@ -1340,6 +1340,17 @@ mod tests {
         };
         assert_eq!(get("plain").identity_modes, [b'a', b'd']);
         assert_eq!(get("plain").partition_identity_modes, None);
+        let binary_columns = binary_columns(&mut connection, get("plain").source_oid, &io).unwrap();
+        assert_eq!(binary_columns.len(), 2);
+        for column in binary_columns {
+            assert_eq!(
+                (column.type_oid, column.send_oid, column.receive_oid),
+                (23, 2407, 2406)
+            );
+            assert_eq!(column.send_name, "int4send");
+            assert_eq!(column.receive_name, "int4recv");
+            assert!(column.send_builtin && column.receive_builtin);
+        }
         assert_eq!(get("parent").identity_modes, [b'a', 0]);
         assert_eq!(get("child").identity_modes, [b'd', 0]);
         assert_eq!(get("child").partition_identity_modes, None);

@@ -26,6 +26,59 @@ fn control() -> IoControl {
     IoControl::unbounded(Arc::new(AtomicBool::new(false)))
 }
 
+fn fixture_copy_tables(
+    tables: &[crate::contracts::CloneTable],
+    format: CopyFormat,
+    parts: &[crate::contracts::CopyPart],
+) -> Vec<crate::contracts::CloneTableCopy> {
+    let mut profiles = catalog::provisional_copy_tables(tables).unwrap();
+    for profile in &mut profiles {
+        profile.format = format;
+        profile.parts = parts.to_vec();
+    }
+    profiles
+}
+
+#[test]
+fn fixture_execution_profiles_follow_oid_order_without_reordering_catalog_tables() {
+    let table = |source_oid, name: &str| crate::contracts::CloneTable {
+        source_oid,
+        name: crate::contracts::QualifiedTable {
+            schema: "public".into(),
+            table: name.into(),
+        },
+        writable_columns: vec!["id".into()],
+        all_columns: vec!["id".into()],
+        identity_modes: vec![0],
+        partition_identity_modes: None,
+    };
+    let tables = vec![
+        table(30_000, "a_created_second"),
+        table(20_000, "z_created_first"),
+    ];
+    let original = tables.clone();
+    let parts = vec![crate::contracts::CopyPart {
+        number: 1,
+        count: 1,
+        start_block: 0,
+        end_block: None,
+    }];
+    let profiles = fixture_copy_tables(&tables, CopyFormat::Binary, &parts);
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.source_oid)
+            .collect::<Vec<_>>(),
+        [20_000, 30_000]
+    );
+    assert!(
+        profiles
+            .iter()
+            .all(|profile| profile.format == CopyFormat::Binary && profile.parts == parts)
+    );
+    assert_eq!(tables, original);
+}
+
 impl Fixture {
     fn new(source_ddl: &[&str], target_ddl: &[&str], seed: &[&str]) -> Self {
         Self::new_profile(
@@ -101,14 +154,7 @@ impl Fixture {
             source: snapshot.ticket().source.clone(),
             target: catalog::read_clone_target(&mut target, &io).unwrap(),
             generation: CopyGeneration(1),
-            copy_tables: tables
-                .iter()
-                .map(|table| crate::contracts::CloneTableCopy {
-                    source_oid: table.source_oid,
-                    format,
-                    parts: parts.clone(),
-                })
-                .collect(),
+            copy_tables: fixture_copy_tables(&tables, format, &parts),
             copy_policy: crate::contracts::CloneCopyPolicy {
                 use_copy_binary: format == CopyFormat::Binary,
                 split_tables_larger_than: if parts.len() > 1 { 1 } else { 0 },
@@ -633,6 +679,18 @@ fn live_large_object_initial_copy_preserves_empty_binary_multichunk_and_sparse_o
         ],
     );
     fixture.copy().unwrap();
+    let oid_json = fixture
+        .snapshot
+        .connection()
+        .unwrap()
+        .query(
+        "SELECT pg_catalog.json_typeof(pg_catalog.json_build_object('owner',m.lomowner)->'owner'),pg_catalog.json_typeof(pg_catalog.json_build_object('owner',m.lomowner::pg_catalog.int8)->'owner') FROM pg_catalog.pg_largeobject_metadata m ORDER BY m.oid LIMIT 1",
+        &fixture.io,
+    )
+        .unwrap();
+    assert_eq!(oid_json.rows(), 1);
+    assert_eq!(oid_json.cell(0, 0).unwrap(), Some(b"string".as_slice()));
+    assert_eq!(oid_json.cell(0, 1).unwrap(), Some(b"number".as_slice()));
     let completion = crate::large_objects::run_initial(
         &fixture.options,
         &fixture.plan,
