@@ -266,6 +266,7 @@ tasks:
     desc: Check disposable clone harness controls without containers
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_clone.py'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_copy_features.py'
 
   test-e2e-clone-16-16:
     desc: Qualify plain clone and recovery boundaries on PostgreSQL 16 to 16

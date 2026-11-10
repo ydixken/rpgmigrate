@@ -1,0 +1,10 @@
+BEGIN;
+SELECT lo_unlink(90002);
+SELECT lo_truncate64(lo_open(90003,131072),17);
+SELECT lo_put(90004,0,decode('ff00','hex'));
+SELECT lo_from_bytea(90006,decode('ff000102','hex'));
+ALTER LARGE OBJECT 90006 OWNER TO m8_source_owner;
+COMMENT ON LARGE OBJECT 90003 IS '';
+COMMENT ON LARGE OBJECT 90004 IS 'final large object';
+GRANT UPDATE ON LARGE OBJECT 90005 TO m8_reader;
+COMMIT;

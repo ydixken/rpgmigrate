@@ -196,3 +196,44 @@ An already absent owned resource satisfies only its explicit obligation.
 Never turn an empty, incomplete, duplicate, or expanded inventory into `complete=true`.
 Retain the workdir, target metadata, comparison state, target data, and unowned origins; preserve unrelated resources.
 No production cleanup, operator deployment, or activation is authorized by this document.
+
+## Candidate M8 observation route
+
+Fresh M8 candidates use native format 9 and target metadata 7.
+The historical M4/M6 format 8 and metadata 6 receipts above retain their original scope.
+The candidate checkpoint still has 29 columns; its confirmed provenance additionally identifies the `large_object_done` heap and primary index.
+The candidate inventory validates the checkpoint primary index and all five recorded relation identities before excluding only the three exact owned heap OIDs.
+A same-name replacement or another table in the owned schema remains visible and refuses an empty-inventory claim.
+
+The development harness selects six candidate profiles: safe binary, whole-table text fallback, default-threshold split, large objects, LO-only follow, and mixed follow.
+These are direct CLI checks with operator flags.
+They do not qualify the Go operator's admission or lifecycle.
+The default `disabled` clone profile keeps the earlier binary-off, split-off, and skip-LO path; obsolete staged-feature refusal expectations are removed.
+
+1. Admit the exact candidate source, binary, image identities, and resource budget with the runtime verification owner.
+   The split fixture requires a measured source heap between 536870912 and 671088640 bytes, plus a separate target heap and WAL capacity.
+2. Run one admitted pair in disposable owned containers.
+
+   ```sh
+   python3 tools/e2e/clone.py --pair 16-16 --profile m8
+   ```
+
+3. Retain the result and runtime ownership ledger together.
+   Repeat the admitted route for `18-18` and `16-18` before making a matrix claim.
+
+The outer harness binds each receipt to the actual binary hash, source inventory, runner image, server images, and fresh run ID.
+Its SQL oracle reads the complete LO OID set, logical length, bounded content slices including holes, explicit empty EOF, effective ACL, owner, and comments in a repeatable-read transaction.
+Selected ACL checks apply the source delta to target owner defaults; `noOwner` preserves literal grant recipients and nonowner grantors.
+The owner-origin grantor becomes the actual restored owner.
+NULL and empty comments remain distinct.
+The mixed profile exercises the selected ACL/comment omission policies separately.
+
+The wire observer captures actual COPY response formats and terminal row counts on both endpoints.
+For default splitting, it holds source COPY responses for one exact fixture relation, observes at least two distinct live backend sessions before release, and checks contiguous completed ranges.
+It does not infer worker concurrency or binary selection from a saved plan.
+The LO profiles observe both initial contents and final changed membership, shortening, sparse content, and selected metadata after drain.
+They also require a real nonzero engine comparison for a target LO mismatch while table fingerprints still match, followed by a checked fixture restore.
+
+Native `[]` succeeds only after actual LO verification and positive zero physical inventories on both endpoints before and after comparison.
+Missing inventory, changed object identity, dropped table output, skipped LO checks, replayed artifact bindings, and legacy `[]` remain failures.
+Portable controls validate these guards without qualifying PostgreSQL execution or activating capabilities.

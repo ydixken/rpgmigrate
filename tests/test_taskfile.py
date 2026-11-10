@@ -170,7 +170,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             path = self.bin / name
             path.write_text(script)
             path.chmod(0o755)
-        for path in ("tools/test-db.py", "tests/cli_contract.py", "tools/ci/unit.py", "tools/e2e/clone.py", "tools/e2e/test_clone.py", "tools/e2e/follow.py", "tools/e2e/test_follow.py", "tools/image/smoke.py"):
+        for path in ("tools/test-db.py", "tests/cli_contract.py", "tools/ci/unit.py", "tools/e2e/clone.py", "tools/e2e/test_clone.py", "tools/e2e/test_copy_features.py", "tools/e2e/follow.py", "tools/e2e/test_follow.py", "tools/image/smoke.py"):
             fixture = self.root / path
             fixture.parent.mkdir(parents=True, exist_ok=True)
             fixture.touch()
@@ -409,6 +409,16 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.passed(self.run_task("image:smoke", "CONTAINER_RUNTIME=" + runtime, "IMAGE=" + image))
         self.assertEqual(self.calls()[-1]["argv"], ["tools/image/smoke.py", "--image", image])
         self.assertEqual(self.calls()[-1]["env"]["CONTAINER_RUNTIME"], runtime)
+
+    def test_clone_unit_target_includes_copy_feature_controls_and_stops_on_failure(self):
+        self.passed(self.run_task("test-e2e-clone-unit"))
+        self.assertEqual([row["argv"] for row in self.calls()],
+                         [["-W", "error", "tools/e2e/" + name] for name in
+                          ("test_clone.py", "test_copy_features.py")])
+        for name, expected in (("test_clone.py", 1), ("test_copy_features.py", 2)):
+            self.log.unlink()
+            self.assertNotEqual(self.run_task("test-e2e-clone-unit", env={"FAIL_MATCH": name}).returncode, 0)
+            self.assertEqual(len(self.calls()), expected)
 
     def test_clone_matrix_enumerates_exact_pairs_and_stops_on_failure(self):
         self.passed(self.run_task("test-e2e-clone"))

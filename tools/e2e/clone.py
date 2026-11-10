@@ -75,7 +75,7 @@ def require_failure(status, output, reason, observed=True):
         raise RuntimeError("required refusal reason or observed fault is absent")
 
 
-def validate_receipt(report, manifest, *, require_reports=True):
+def validate_runtime(report):
     if report.get("pair") not in PAIRS:
         raise RuntimeError("wrong version pair")
     source, target = report["pair"].split("-")
@@ -87,6 +87,10 @@ def validate_receipt(report, manifest, *, require_reports=True):
         raise RuntimeError("actual client version mismatch")
     if not isinstance(report.get("linked_libpq"), int) or report["linked_libpq"] // 10000 not in (16, 18):
         raise RuntimeError("actual linked libpq version missing or unsupported")
+
+
+def validate_receipt(report, manifest, *, require_reports=True):
+    validate_runtime(report)
     if require_reports:
         validation = report.get("report_validation", {})
         records = validation.get("reports", [])
@@ -374,7 +378,7 @@ class Driver:
         self.reports.append({"binding": binding, "raw_json": raw.decode("utf-8"), "probe_checked": checked})
         return report
 
-    def start(self, source, target, state, *arguments, gate=None):
+    def start(self, source, target, state, *arguments, gate=None, skip_large_objects=True):
         self.number += 1
         output = self.root / f"command-{self.number}.log"
         output.touch(mode=0o600)
@@ -389,7 +393,7 @@ class Driver:
         with output.open("wb") as stream, stderr_path.open("wb") as errors:
             process = subprocess.Popen([str(self.binary), "clone", "--source", source, "--target", target,
                                         "--dir", str(state), "--table-jobs", "4", "--index-jobs", "4", "--restore-jobs", "4",
-                                        "--skip-large-objects", *arguments], env=environment, stdout=stream,
+                                        *(["--skip-large-objects"] if skip_large_objects else []), *arguments], env=environment, stdout=stream,
                                        stderr=errors, start_new_session=True)
         process.output = output
         process.error_output = stderr_path
@@ -476,7 +480,7 @@ def inner(args):
     linked = int(libpq.PQlibVersion())
     receipt = {"pair": args.pair, "server_versions": versions, "client_versions": clients, "linked_libpq": linked, "cases": {}}
     # Refuse wrong inputs before the engine can create target objects.
-    validate_receipt({**receipt, "cases": {name: {"observed": True} for name in manifest["cases"]}}, manifest, require_reports=False)
+    validate_runtime(receipt)
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-m2-") as temporary:
         root = Path(temporary)
         driver = Driver(binary, environment, root, mode="operator", report_probe=args.report_probe)
@@ -545,20 +549,6 @@ def inner(args):
         if signature != target.catalog_signature(dstname) or before != target.sql(dstname, "SELECT oid FROM pg_class WHERE oid='public.foreign_probe'::regclass; SELECT * FROM public.foreign_probe;"):
             raise RuntimeError("foreign target object changed")
         receipt["cases"]["foreign_collision"] = {"observed": True}
-        for name, flags in (("binary_refusal", ("--use-copy-binary",)), ("split_refusal", ("--split-tables-larger-than", "1MB"))):
-            srcname, dstname, src, dst, state = case(name)
-            before = target.catalog_signature(dstname)
-            driver.finish(driver.start(src, dst, state, *flags), success=False, reason="unimplemented option " + flags[0])
-            if before != target.catalog_signature(dstname):
-                raise RuntimeError("unsupported option mutated target")
-            receipt["cases"][name] = {"observed": True}
-        srcname, dstname, src, dst, state = case("lo")
-        source.sql(srcname, "SELECT lo_create(90001);")
-        before = target.catalog_signature(dstname)
-        driver.finish(driver.start(src, dst, state), success=False, reason="large")
-        if before != target.catalog_signature(dstname) or target.sql(dstname, "SELECT count(*) FROM pg_largeobject_metadata;").strip() != b"0":
-            raise RuntimeError("unsupported large object mutated target")
-        receipt["cases"]["large_object_refusal"] = {"observed": True}
     receipt["report_validation"] = {"mode": "operator_go_parse_report" if args.report_probe is not None else "local_m2_contract", "reports": driver.reports}
     if args.report_probe is not None:
         receipt["report_validation"]["probe_sha256"] = hashlib.sha256(Path(args.report_probe).read_bytes()).hexdigest()
@@ -633,6 +623,14 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     manifest = load_manifest() if manifest is None else manifest
     diagnostic_case = getattr(args, "diagnostic_case", None)
     cutover_mode = getattr(args, "cutover", False)
+    feature_mode = getattr(args, "profile", "disabled") == "m8"
+    if feature_mode:
+        if program != "clone" or args.report_probe is not None:
+            raise RuntimeError("candidate M8 direct CLI profile requires clone without the old Go report probe")
+        import copy_features
+        import cutover
+        copy_features.load_manifest()
+        source_tree = cutover.source_inventory(ROOT)
     if cutover_mode:
         if program != "follow" or args.report_probe is not None or diagnostic_case or getattr(args, "smoke", False):
             raise RuntimeError("cutover producer mode requires its distinct follow route without the clone-only probe")
@@ -650,9 +648,9 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     token = "rpgmigrate-" + ("m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex[:12]
     label = "io.rpgmigrate.e2e=" + token
     image = "localhost/rpgmigrate-m2-dev:stock"
-    output = Path(args.receipt).resolve() if args.receipt else ROOT / "target/e2e" / (("" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
-    if diagnostic_case and output.exists():
-        raise RuntimeError("follow diagnostic receipt already exists")
+    output = Path(args.receipt).resolve() if args.receipt else ROOT / "target/e2e" / (("clone-m8-" if feature_mode else "" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
+    if (diagnostic_case or feature_mode) and output.exists():
+        raise RuntimeError("explicit diagnostic/candidate receipt already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
     ledger_path = output.parent / (output.name + "." + token + ".runtime.json")
     ledger = {"version": 1, "scope": "runtime_resource_ownership", "run": token, "containers": [], "cleanup_complete": False}
@@ -753,9 +751,15 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                  "--volume", str(ROOT) + ":/workspace:ro", "--volume", str(cache) + ":/build",
                  "--volume", str(cargo_cache) + ":/cargo", image_id, "cargo", "build", "--locked"]
         owned_container(fetch, timeout=1200, role="build")
+        if feature_mode:
+            feature_binding = {"binary_sha256": hashlib.sha256((cache / "debug/rpgmigrate").read_bytes()).hexdigest(),
+                               "source_tree_sha256": source_tree["sha256"], "runner_image_id": image_id,
+                               "server_image_ids": server_images, "run": uuid.uuid4().hex}
+            (receipt_dir / "m8-input.json").write_text(json.dumps(feature_binding))
         result = owned_container([*command, "python3", "tools/e2e/" + program + ".py", "--inside", "--pair", args.pair,
                       "--binary", "/build/debug/rpgmigrate", "--receipt", "/receipt/result.json",
                       *(["--report-probe", "/report-probe"] if args.report_probe is not None else []),
+                      *(["--profile", "m8", "--feature-binding", "/receipt/m8-input.json"] if feature_mode else []),
                       *(["--smoke"] if getattr(args, "smoke", False) else []),
                       *(["--cutover"] if cutover_mode else []),
                       *(["--diagnostic-case", diagnostic_case] if diagnostic_case else [])], timeout=1200, role="runner")
@@ -763,8 +767,13 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
         report.update(runner_image_id=image_id, server_image_ids=server_images)
         if cutover_mode and (report.get("source_tree") != source_tree or cutover.source_inventory(ROOT) != source_tree):
             raise RuntimeError("cutover producer receipt differs from the actual unchanged runner source tree")
-        receipt_validator(report, manifest)
-        with output.open("x" if diagnostic_case else "w") as stream:
+        if feature_mode:
+            if cutover.source_inventory(ROOT) != source_tree:
+                raise RuntimeError("candidate source changed during qualification")
+            copy_features.validate_receipt(report, manifest, binding=feature_binding)
+        else:
+            receipt_validator(report, manifest)
+        with output.open("x" if diagnostic_case or feature_mode else "w") as stream:
             stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
         print(result.decode(), end="")
         print(program + " receipt: " + str(output))
@@ -776,6 +785,8 @@ def main():
     parser.add_argument("--pair", required=True, choices=PAIRS)
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--binary", default="/build/debug/rpgmigrate")
+    parser.add_argument("--profile", choices=("disabled", "m8"), default="disabled", help="explicit candidate profile; M8 requires separate runtime admission")
+    parser.add_argument("--feature-binding", help=argparse.SUPPRESS)
     parser.add_argument("--receipt")
     parser.add_argument("--report-probe", default=os.environ.get("RPGMIGRATE_E2E_REPORT_PROBE"), help="optional authoritative operator Go ParseReport executable")
     args = parser.parse_args()
@@ -785,7 +796,11 @@ def main():
         DIAGNOSTIC_ROOT = Path("/diagnostics")
         if not args.receipt:
             raise RuntimeError("inside qualification requires a receipt destination")
-        inner(args)
+        if args.profile == "m8":
+            import copy_features
+            copy_features.inner(args)
+        else:
+            inner(args)
     else:
         outer(args)
     return 0

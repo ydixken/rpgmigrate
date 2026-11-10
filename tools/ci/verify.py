@@ -10,7 +10,7 @@ HARNESS_SUITES = (
     "tests/support/test_copy_snapshot_harness.py", "tests/support/test_follow_snapshot_harness.py",
     "tests/support/test_follow_receive_peer.py", "tests/support/test_follow_m4_harness.py",
 )
-CI_SUITES = ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/e2e/test_cutover.py", "tools/image/test_smoke.py", *HARNESS_SUITES)
+CI_SUITES = ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_copy_features.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/e2e/test_cutover.py", "tools/image/test_smoke.py", *HARNESS_SUITES)
 
 
 class VerificationError(RuntimeError):
@@ -19,6 +19,8 @@ class VerificationError(RuntimeError):
 
 def _unit_inventory(root, suites):
     root = Path(root) if root is not None else Path(__file__).resolve().parents[2]
+    if len(set(suites)) != len(suites):
+        raise VerificationError("CI unit source inventory contains duplicates")
     inventory = {}
     for name in suites:
         try:

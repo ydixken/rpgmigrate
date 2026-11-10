@@ -225,7 +225,78 @@ class PgoutputObservation:
         self.backend_pid, self.wire_mode = None, "ordinary"
         self.wire_unknown = self.wire_overflow = False
         self.stages = {side: {"stage": "startup_wait" if side == "client" else "connect_wait", "at": time.monotonic(), "closure": "open"} for side in ("client", "server")}
+        self.copy_records, self.copy_pending, self.copy_current = [], None, None
+        self.copy_invalid = self.copy_overflow = False
         self.counts = {side: {event: {} for event in ("received", "forwarded")} for side in ("client", "server")}
+
+    def copy_frontend(self, kind, payload):
+        if kind == b'Q':
+            self.copy_pending = None
+            if not payload.startswith(b'COPY '):
+                return
+            identifier = rb'"(?:[^"\x00]|"")+"'
+            columns = identifier + rb'(?:, ' + identifier + rb')*'
+            relation = rb'(' + identifier + rb')\.(' + identifier + rb')'
+            bounds = rb"(?: WHERE ctid >= '\(([0-9]+),0\)'::pg_catalog.tid(?: AND ctid < '\(([0-9]+),0\)'::pg_catalog.tid)?)?"
+            source = re.fullmatch(rb'COPY \(SELECT ' + columns + rb' FROM ONLY ' + relation + bounds + rb'\) TO STDOUT WITH \(FORMAT (text|binary)\)\x00', payload)
+            target = re.fullmatch(rb'COPY ' + relation + rb' \(' + columns + rb'\) FROM STDIN WITH \(FORMAT (text|binary)(?:, FREEZE true)?\)\x00', payload)
+            match = source or target
+            if match is None or len(payload) > 65536 or self.copy_current is not None:
+                self.copy_invalid = True
+                return
+            names = [value[1:-1].replace(b'""', b'"').decode("utf-8") for value in match.group(1, 2)]
+            start, end = ((int(source[3]), int(source[4]) if source[4] else None) if source and source[3] else (None, None))
+            self.copy_pending = {"relation": names, "direction": "out" if source else "in",
+                                 "range": [start, end], "format": match[5 if source else 3].decode()}
+        elif kind in (b'd', b'c') and self.copy_current is not None and self.copy_current["direction"] == "in":
+            if kind == b'd':
+                self.copy_current["data_frames"] += 1
+            elif payload:
+                self.copy_invalid = True
+            else:
+                self.copy_current["eof"] = True
+
+    def copy_backend(self, kind, payload):
+        if kind in (b'G', b'H'):
+            pending = self.copy_pending
+            self.copy_pending = None
+            if pending is None or self.backend_pid is None or len(payload) < 3:
+                self.copy_invalid = True
+                return
+            count = struct.unpack_from("!H", payload, 1)[0]
+            expected = int(pending["format"] == "binary")
+            if (payload[0] != expected or len(payload) != 3 + count * 2 or count > 1600
+                    or any(struct.unpack_from("!H", payload, 3 + index * 2)[0] != expected for index in range(count))
+                    or pending["direction"] != ("in" if kind == b'G' else "out")):
+                self.copy_invalid = True
+                return
+            if len(self.copy_records) == self.LIMIT:
+                self.copy_overflow = True
+                return
+            self.copy_current = {**pending, "connection": self.connection, "backend_pid": self.backend_pid,
+                                 "columns": count, "rows": None, "data_frames": 0, "eof": False,
+                                 "complete": False, "held": False, "released": False}
+            self.copy_records.append(self.copy_current)
+        elif self.copy_current is not None:
+            current = self.copy_current
+            if kind == b'd' and current["direction"] == "out":
+                current["data_frames"] += 1
+            elif kind == b'c' and current["direction"] == "out":
+                self.copy_invalid |= bool(payload)
+                current["eof"] = not payload
+            elif kind == b'C':
+                count = re.fullmatch(rb'COPY (0|[1-9][0-9]{0,18})\x00', payload)
+                current["complete"] = current["eof"] and count is not None
+                current["rows"] = int(count[1]) if count else None
+                self.copy_invalid |= not current["complete"]
+                self.copy_current = None
+            elif kind in (b'E', b'Z'):
+                self.copy_invalid = True
+                self.copy_current = None
+
+    def copy_evidence(self):
+        return {"invalid": self.copy_invalid, "overflow": self.copy_overflow,
+                "records": [dict(record) for record in self.copy_records]}
 
     def wire_event(self, side, stage, kind=None, payload=b""):
         state = self.stages[side]
@@ -238,6 +309,7 @@ class PgoutputObservation:
             self.wire_overflow |= value == 2**64 - 1
             counters[label] = min(value + 1, 2**64 - 1)
         if side == "server" and stage == "received":
+            self.copy_backend(kind, payload)
             if kind == b'K':
                 if len(payload) == 8 and 0 < struct.unpack_from("!I", payload)[0] < 2**31:
                     self.backend_pid = struct.unpack_from("!I", payload)[0]
@@ -367,6 +439,8 @@ class WireGate:
         self.dropped_keepalives = 0
         self.fault_record = self.fault_observer = None
         self.close_deadline = self.close_candidate = None
+        self.copy_relation = None
+        self.copy_held, self.copy_release = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=self.accept, daemon=True)
 
     def __enter__(self):
@@ -375,6 +449,18 @@ class WireGate:
 
     def connection(self, connection):
         return connection.replace("host=" + self.host, "host=127.0.0.1 port=" + str(self.port))
+
+    def hold_copy(self, relation):
+        if self.mode != "observe" or self.copy_relation is not None or not isinstance(relation, list) or len(relation) != 2:
+            raise RuntimeError("COPY hold needs one exact relation on an observation gate")
+        self.copy_relation = list(relation)
+
+    def copy_evidence(self):
+        with self.lock:
+            values = [observer.copy_evidence() for observer in self.observers]
+            return {"invalid": bool(self.errors) or any(value["invalid"] for value in values),
+                    "overflow": self.observer_overflow or any(value["overflow"] for value in values),
+                    "records": [record for value in values for record in value["records"]]}
 
     def arm(self):
         if self.armed.is_set() or self.mode == "observe":
@@ -596,6 +682,7 @@ class WireGate:
                 status = commit = False
                 if observation is not None:
                     with self.lock:
+                        observation.copy_frontend(kind, payload)
                         if kind == b'Q':
                             observation.query(payload)
                         status = observation.copy_active and kind == b'd' and payload[:1] == b'r'
@@ -663,6 +750,20 @@ class WireGate:
                         observation.commit_protocol.backend(kind, payload)
                     close_ready = self.close_backend(observation, kind, frame, payload) if self.mode == "completed_resume_close" else False
                     logical_wal = observation.copy_active and kind == b'd' and payload[:1] == b'w'
+                if kind == b'H' and self.copy_relation is not None:
+                    with self.lock:
+                        current = observation.copy_current
+                        hold_copy = current is not None and current["relation"] == self.copy_relation
+                        if hold_copy:
+                            current["held"] = True
+                            self.copy_held.set()
+                    if hold_copy:
+                        deadline = time.monotonic() + 60
+                        while not self.copy_release.wait(0.1):
+                            if self.stopping.is_set() or time.monotonic() >= deadline:
+                                raise RuntimeError("COPY observation hold expired before release")
+                        with self.lock:
+                            current["released"] = True
                 if close_ready:
                     self.close_hold(client, server, observation)
                     return
@@ -773,6 +874,7 @@ class WireGate:
         try:
             self.stopping.set()
             self.release.set()
+            self.copy_release.set()
             self.listener.close()
             if self.mode == "completed_resume_close":
                 for observation in self.observers:

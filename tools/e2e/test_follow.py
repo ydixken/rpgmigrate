@@ -666,6 +666,20 @@ class FollowHarnessTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "partial applied frontier"):
                 harness.authority_frontier(database.authority("owned_target", state, work))
 
+            row["last_xid"] = None
+            row["version"] = 7
+            native["format_version"] = 9
+            expected["metadata_version"] = 7
+            record.update(large_object_table_oid=16391, large_object_index_oid=16392)
+            objects.extend(["16391|16386|10|p|r", "16392|16386|10|p|i"])
+            (state / "manifest.json").write_text(json.dumps(native))
+            self.assertEqual(database.authority("owned_target", state, work, candidate=True)["version"], 7)
+            objects.pop()
+            with self.assertRaisesRegex(RuntimeError, "owned checkpoint/marker"):
+                database.authority("owned_target", state, work, candidate=True)
+            with self.assertRaisesRegex(RuntimeError, "identity/version"):
+                database.authority("owned_target", state, work)
+
     def test_feedback_predicate_needs_positive_applied_or_certified_target_and_status(self):
         row = {"applied_order": 1, "last_xid": 3, "begin_ordinal": 16, "source_commit_lsn": "0/10", "source_end_lsn": "0/18", "certified_lsn": None}
         self.assertTrue(harness.require_feedback({"statuses": [(24, 24, 24)]}, row, 24))

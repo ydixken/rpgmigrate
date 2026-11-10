@@ -131,6 +131,18 @@ class CloneHarnessTests(unittest.TestCase):
             self.assertEqual(binding["command"], "clone")
             self.assertEqual(binding["work"]["run_id"], binding["work"]["migration_uid"].replace("-", ""))
 
+    def test_candidate_profile_can_include_los_without_weakening_disabled_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            engine = root / "engine"
+            engine.write_text("#!" + sys.executable + "\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+            engine.chmod(0o700)
+            driver = harness.Driver(engine, {}, root)
+            for include in (False, True):
+                process = driver.start("source", "target", root / "native", skip_large_objects=not include)
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertEqual("--skip-large-objects" in json.loads(process.output.read_text()), not include)
+
     def test_restart_observer_matches_only_owned_pretruncate_lock(self):
         with closing(sqlite3.connect(":memory:")) as database:
             database.create_function("current_database", 0, lambda: "owned-db")

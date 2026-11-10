@@ -1,0 +1,27 @@
+{
+  "cases": [
+    "binary_safe",
+    "binary_fallback",
+    "split_default",
+    "large_objects",
+    "lo_only",
+    "mixed"
+  ],
+  "fixtures": {
+    "m8-fallback.sql": "d33dfaa8864290b99143532f70bbab93533dda36587a504034ce3b66bc632cfa",
+    "m8-large-objects-final.sql": "04edab2e6dc32f1ff7909f1c91781ce067549826e289911156e90365008f6806",
+    "m8-large-objects.sql": "7b9df8ff12299db5db79291dc71dd213049eae15b0ccd762f4fe4fc3596f851a",
+    "m8-safe.sql": "30c00d0762a28371e3e5c348842122518e8af640cec294f3ff42df146eec02de",
+    "m8-split.sql": "0599de3f901f2e8422c20c974b395cb735826acd01f2a7962b0b97cd9d23e049"
+  },
+  "max_bytes": 33554432,
+  "max_heap_bytes": 671088640,
+  "max_logical_bytes": 16777216,
+  "max_objects": 16,
+  "max_rows": 400000,
+  "metadata_version": 7,
+  "native_format": 9,
+  "split_rows": 286720,
+  "split_threshold": 536870912,
+  "version": 1
+}
