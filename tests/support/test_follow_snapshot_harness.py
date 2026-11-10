@@ -117,6 +117,28 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
         self.records()
         fixture.validate_follow_snapshot_faults(self.context)
 
+    def test_candidate_native_format_is_explicit_and_relay_checks_it(self):
+        value = self.phase("source_finish_unknown")
+        path = Path(value["native_path"])
+        native = json.loads(path.read_text())
+        relay_state = relay.Relay.__new__(relay.Relay)
+        relay_state.native_path = path
+        relay_state.context = self.context
+        relay_state.source_identity = value["stream"]["source"]
+        relay_state.source_timeline = 1
+        relay_state.publication_name = value["publication"]["name"]
+        relay_state.slot_name = value["slot"]["name"]
+        for version in (8, 9):
+            native["format_version"] = version
+            path.write_text(json.dumps(native))
+            fixture.validate_phase(value, self.context, value["case"], value["phase"])
+            self.assertEqual(relay_state.native()[0]["format_version"], version)
+        for version in (7, 10, 999, True, 9.0):
+            native["format_version"] = version
+            path.write_text(json.dumps(native))
+            with self.subTest(version=version), self.assertRaises(AssertionError):
+                relay_state.native()
+
     def test_fault_inventory_rejects_missing_extra_duplicate_and_pending_records(self):
         records = self.records()
         first = self.root / "follow-snapshot-fault-create_reply_lost.json"
@@ -190,7 +212,7 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             path.write_text(json.dumps(bad))
             with self.subTest(missing=field), self.assertRaises(AssertionError):
                 fixture.validate_phase(value, self.context, value["case"], value["phase"])
-        for key, bad_value in (("format_version", 4), ("format_version", 5), ("format_version", 6), ("format_version", 7), ("format_version", 9), ("copy_complete", {}),
+        for key, bad_value in (("format_version", 4), ("format_version", 5), ("format_version", 6), ("format_version", 7), ("format_version", 10), ("format_version", True), ("format_version", 9.0), ("copy_complete", {}),
                                ("target_provenance", [{}]), ("clone_state", {}), ("run", [0] * 16)):
             path.write_text(json.dumps({**native, key: bad_value}))
             with self.subTest(key=key), self.assertRaises(AssertionError):

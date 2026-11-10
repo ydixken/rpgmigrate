@@ -871,94 +871,97 @@ copy_request(relay)
             with self.subTest(changes=changes), self.assertRaises(AssertionError):
                 validate_success_output(json.dumps({**valid, **changes}), state)
 
-    def test_copy_receipts_require_bound_native8_and_explicit_unused_state(self):
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            case = SimpleNamespace(state=state)
-            identity = state.stat()
-            for complete in (None, {"tables": 1, "rows": 1, "bytes": 8}):
-                value = {"magic": "RPGMIGRATE", "format_version": 8, "target_provenance": [], "source_slot": None,
-                         "clone_state": None, "follow_state": None, "operator": None,
-                         "run": list(range(16)), "canonical_path": str(state.resolve()),
-                         "directory_device": identity.st_dev, "directory_inode": identity.st_ino,
-                         "copy_complete": complete}
-                output = json.dumps({"command": "copy table-data", "status": "complete", "run": value["run"],
-                                     "state_format_version": 8, "tables": 1, "rows": 1, "bytes": 8})
-                check = (lambda: Cases.no_completion(case)) if complete is None else (
-                    lambda: Cases.completed(case, 1, 1, output))
-                path = state / "manifest.json"
-                path.write_text(json.dumps(value))
-                check()
-                invalid = [{"format_version": version} for version in (1, 2, 3, 4, 5, 6, 7, 9, 999, 8.0, True)]
-                invalid += [{"magic": "foreign"}, {"target_provenance": None}, {"source_slot": {}},
-                            {"copy_snapshot": None}, {"clone_state": {}}, {"follow_state": {}}, {"operator": {}},
-                            {"source_slot": {"phase": "provisioning", "record": {}}},
-                            {"source_slot": {"phase": "confirmed", "record": {}}},
-                            {"target_provenance": [{"phase": "confirmed", "record": {}}]},
-                            {"run": [0] * 16}, {"run": list(range(15))}, {"run": [True] * 16},
-                            {"run": [256] * 16}, {"run": [1.0] * 16},
-                            {"canonical_path": str(state / "foreign")}, {"canonical_path": None},
-                            {"directory_device": identity.st_dev + 1}, {"directory_inode": identity.st_ino + 1},
-                            {"directory_device": float(identity.st_dev)}, {"directory_inode": 0}]
-                for changes in invalid:
-                    with self.subTest(complete=complete, changes=changes), self.assertRaises(AssertionError):
-                        path.write_text(json.dumps({**value, **changes}))
-                        check()
-                for field in value:
-                    missing = dict(value)
-                    del missing[field]
-                    path.write_text(json.dumps(missing))
-                    with self.subTest(complete=complete, missing=field), self.assertRaises((AssertionError, KeyError)):
-                        check()
-                for raw in ("null", "[]", json.dumps(value)[:-1] + ', "format_version": 8}'):
-                    path.write_text(raw)
-                    with self.subTest(complete=complete, raw=raw[:8]), self.assertRaises(AssertionError):
-                        check()
-                path.unlink()
-                path.symlink_to(state / "missing")
-                with self.assertRaises(AssertionError):
+    def test_copy_receipts_require_bound_native_versions_and_explicit_unused_state(self):
+        for version in (8, 9):
+            with tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                case = SimpleNamespace(state=state)
+                identity = state.stat()
+                for complete in (None, {"tables": 1, "rows": 1, "bytes": 8}):
+                    value = {"magic": "RPGMIGRATE", "format_version": version, "target_provenance": [], "source_slot": None,
+                             "clone_state": None, "follow_state": None, "operator": None,
+                             "run": list(range(16)), "canonical_path": str(state.resolve()),
+                             "directory_device": identity.st_dev, "directory_inode": identity.st_ino,
+                             "copy_complete": complete}
+                    output = json.dumps({"command": "copy table-data", "status": "complete", "run": value["run"],
+                                         "state_format_version": version, "tables": 1, "rows": 1, "bytes": 8})
+                    check = (lambda: Cases.no_completion(case)) if complete is None else (
+                        lambda: Cases.completed(case, 1, 1, output))
+                    path = state / "manifest.json"
+                    path.write_text(json.dumps(value))
                     check()
-                path.unlink()
-            Cases.no_completion(case)
-            with self.assertRaises(AssertionError):
-                Cases.completed(case, 1, 1, output)
+                    invalid = [{"format_version": version} for version in (1, 2, 3, 4, 5, 6, 7, 10, 999, 8.0, 9.0, True)]
+                    invalid += [{"magic": "foreign"}, {"target_provenance": None}, {"source_slot": {}},
+                                {"copy_snapshot": None}, {"clone_state": {}}, {"follow_state": {}}, {"operator": {}},
+                                {"source_slot": {"phase": "provisioning", "record": {}}},
+                                {"source_slot": {"phase": "confirmed", "record": {}}},
+                                {"target_provenance": [{"phase": "confirmed", "record": {}}]},
+                                {"run": [0] * 16}, {"run": list(range(15))}, {"run": [True] * 16},
+                                {"run": [256] * 16}, {"run": [1.0] * 16},
+                                {"canonical_path": str(state / "foreign")}, {"canonical_path": None},
+                                {"directory_device": identity.st_dev + 1}, {"directory_inode": identity.st_ino + 1},
+                                {"directory_device": float(identity.st_dev)}, {"directory_inode": 0}]
+                    for changes in invalid:
+                        with self.subTest(complete=complete, changes=changes), self.assertRaises(AssertionError):
+                            path.write_text(json.dumps({**value, **changes}))
+                            check()
+                    for field in value:
+                        missing = dict(value)
+                        del missing[field]
+                        path.write_text(json.dumps(missing))
+                        with self.subTest(complete=complete, missing=field), self.assertRaises((AssertionError, KeyError)):
+                            check()
+                    for raw in ("null", "[]", json.dumps(value)[:-1] + ', "format_version": ' + str(version) + '}'):
+                        path.write_text(raw)
+                        with self.subTest(complete=complete, raw=raw[:8]), self.assertRaises(AssertionError):
+                            check()
+                    path.unlink()
+                    path.symlink_to(state / "missing")
+                    with self.assertRaises(AssertionError):
+                        check()
+                    path.unlink()
+                Cases.no_completion(case)
+                with self.assertRaises(AssertionError):
+                    Cases.completed(case, 1, 1, output)
 
     def test_copy_completion_requires_exact_unsigned_counts_and_matching_output(self):
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            case = SimpleNamespace(state=state)
-            identity = state.stat()
-            value = {"magic": "RPGMIGRATE", "format_version": 8, "run": list(range(16)),
-                     "canonical_path": str(state.resolve()), "directory_device": identity.st_dev,
-                     "directory_inode": identity.st_ino, "target_provenance": [], "source_slot": None,
-                     "clone_state": None, "follow_state": None, "operator": None}
-            path = state / "manifest.json"
-            for tables, rows, size in ((1, 1, 8), (2, 0, 0), (0, 0, 0)):
-                complete = {"tables": tables, "rows": rows, "bytes": size}
-                output = {"command": "copy table-data", "status": "complete", "run": value["run"],
-                          "state_format_version": 8, **complete}
-                path.write_text(json.dumps({**value, "copy_complete": complete}))
-                Cases.completed(case, tables, rows, json.dumps(output))
-                with self.assertRaises(AssertionError):
-                    Cases.no_completion(case)
-                invalid = [None, {}, {**complete, "extra": 0}]
-                for field in complete:
-                    invalid += [{key: count for key, count in complete.items() if key != field}]
-                    invalid += [{**complete, field: bad} for bad in (None, True, -1, 2**64, float(complete[field]), "0")]
-                invalid += [{**complete, "tables": tables + 1}, {**complete, "rows": rows + 1},
-                            {**complete, "bytes": 0 if rows else 1}]
-                for receipt in invalid:
-                    path.write_text(json.dumps({**value, "copy_complete": receipt}))
-                    with self.subTest(tables=tables, rows=rows, receipt=receipt), self.assertRaises((AssertionError, KeyError)):
-                        Cases.completed(case, tables, rows, json.dumps(output))
-                path.write_text(json.dumps({**value, "copy_complete": complete}))
-                for changes in ({"run": [1] * 16}, {"run": [float(byte) for byte in value["run"]]},
-                                {"state_format_version": 7}, {"state_format_version": 8.0},
-                                {"tables": tables + 1}, {"rows": rows + 1}, {"bytes": size + 1},
-                                {"tables": float(tables)}, {"rows": bool(rows)},
-                                {"status": "running"}, {"command": "ping"}, {"canonical_path": str(state)}):
-                    with self.subTest(output=changes), self.assertRaises(AssertionError):
-                        Cases.completed(case, tables, rows, json.dumps({**output, **changes}))
+        for version in (8, 9):
+            with tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                case = SimpleNamespace(state=state)
+                identity = state.stat()
+                value = {"magic": "RPGMIGRATE", "format_version": version, "run": list(range(16)),
+                         "canonical_path": str(state.resolve()), "directory_device": identity.st_dev,
+                         "directory_inode": identity.st_ino, "target_provenance": [], "source_slot": None,
+                         "clone_state": None, "follow_state": None, "operator": None}
+                path = state / "manifest.json"
+                for tables, rows, size in ((1, 1, 8), (2, 0, 0), (0, 0, 0)):
+                    complete = {"tables": tables, "rows": rows, "bytes": size}
+                    output = {"command": "copy table-data", "status": "complete", "run": value["run"],
+                              "state_format_version": version, **complete}
+                    path.write_text(json.dumps({**value, "copy_complete": complete}))
+                    Cases.completed(case, tables, rows, json.dumps(output))
+                    with self.assertRaises(AssertionError):
+                        Cases.no_completion(case)
+                    invalid = [None, {}, {**complete, "extra": 0}]
+                    for field in complete:
+                        invalid += [{key: count for key, count in complete.items() if key != field}]
+                        invalid += [{**complete, field: bad} for bad in (None, True, -1, 2**64, float(complete[field]), "0")]
+                    invalid += [{**complete, "tables": tables + 1}, {**complete, "rows": rows + 1},
+                                {**complete, "bytes": 0 if rows else 1}]
+                    for receipt in invalid:
+                        path.write_text(json.dumps({**value, "copy_complete": receipt}))
+                        with self.subTest(tables=tables, rows=rows, receipt=receipt), self.assertRaises((AssertionError, KeyError)):
+                            Cases.completed(case, tables, rows, json.dumps(output))
+                    path.write_text(json.dumps({**value, "copy_complete": complete}))
+                    for changes in ({"run": [1] * 16}, {"run": [float(byte) for byte in value["run"]]},
+                                    {"state_format_version": 7}, {"state_format_version": 8.0}, {"state_format_version": 9.0},
+                                    {"state_format_version": 9 if version == 8 else 8},
+                                    {"tables": tables + 1}, {"rows": rows + 1}, {"bytes": size + 1},
+                                    {"tables": float(tables)}, {"rows": bool(rows)},
+                                    {"status": "running"}, {"command": "ping"}, {"canonical_path": str(state)}):
+                        with self.subTest(output=changes), self.assertRaises(AssertionError):
+                            Cases.completed(case, tables, rows, json.dumps({**output, **changes}))
 
     def test_timed_out_command_terminates_its_descendant(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -187,8 +187,9 @@ The source profile uses a real owned logical `OwnedCluster`, including its token
 The authority profile preserves the synchronous-wait cancellation case where a visible committed row cannot authorize feedback.
 It also checks that lazy checkpoint-only groups commit one durable frontier through both direct and pipeline authority paths without changing user rows.
 The receiver profile requires its seventy-second blocked-apply status test exactly once; the historical Engine profile excludes that exact native test.
+The retained executable COPY integration checks accept explicit native format 8 and candidate format 9 receipts, with exact output-version equality.
 The current snapshot profile requires nine exact passed cases plus five independent native pgoutput fault receipts; the CREATE-tail receipt contains three required subphases.
-Its owned Unix relay binds the actual source publication, slot, stream, native format 8 intent, and importer/exporter process identities.
+Its owned Unix relay binds the actual source publication, slot, stream, explicit native format 8 or candidate format 9 intent, and importer/exporter process identities.
 Missing fields or phases, an unhit post-import PID mutation, a late fault, a live backend, an unreaped helper, or an ambiguous creation retry cannot pass that receipt check.
 An explicit child `PGAPPNAME` supports the application-name case without changing the Rust process environment.
 Direct unknown source-finish evidence proves no target anchor absence; the coordinator call-order and process-level qualification remain separate evidence.

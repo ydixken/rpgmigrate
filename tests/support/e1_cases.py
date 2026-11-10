@@ -21,7 +21,7 @@ EMPTY = '"E1 space"."empty table"'
 
 def validate_copy_native(value, state):
     assert isinstance(value, dict) and set(value) == NATIVE_FIELDS, "native COPY fields differ"
-    assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] == 8, "wrong native COPY format"
+    assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] in (8, 9), "wrong native COPY format"
     assert identifier(value["run"]), "invalid native COPY run identity"
     assert state.is_dir() and not state.is_symlink(), "invalid native COPY directory"
     assert value["canonical_path"] == str(state.resolve(strict=True)), "native COPY path binding differs"
