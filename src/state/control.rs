@@ -734,6 +734,9 @@ mod tests {
             &io(),
         )
         .unwrap();
+        native
+            .resolve_follow_settings(None, None, crate::contracts::FollowLimits::default())
+            .unwrap();
         let plan = ClonePlan {
             source: CloneSource {
                 identity: SourceId {

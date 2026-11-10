@@ -58,6 +58,5 @@ pub(crate) enum CommitOutcome {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TargetCommit {
     Synchronous,
-    #[cfg(test)]
     Asynchronous,
 }

@@ -57,6 +57,10 @@ pub(crate) fn run(options: StreamOptions, io: &IoControl) -> Result<String> {
             protocol::lsn(snapshot.durable_replay_lsn())
         ));
     }
+    let inspection = crate::state::inspect_clone(&options.state, options.operator.as_ref(), io)?;
+    let settings = inspection
+        .effective_follow_settings()
+        .ok_or_else(|| refusal("stream report has no stored follow settings"))?;
     protocol::replication_report(
         if matches!(options.command, StreamCommand::SetEndpos(_)) {
             StreamReportCommand::SetEndpos
@@ -67,6 +71,7 @@ pub(crate) fn run(options: StreamOptions, io: &IoControl) -> Result<String> {
         request.as_ref(),
         &snapshot,
         completed.as_ref(),
+        settings,
     )
 }
 

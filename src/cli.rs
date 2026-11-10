@@ -249,7 +249,16 @@ fn leaf(name: &'static str, parser: Parser) -> Command {
             .value_parser(OsStringValueParser::new()),
     );
     if matches!(name, "clone" | "follow") {
-        command.after_help("Native follow admits only pgoutput v1 with durable commits. Limits: 1024 queued messages, 8 MiB queued capacity plus one message up to 16 MiB when empty; apply groups default to 100 transactions, 10000 rows or 8 MiB, closing only at a source COMMIT. Cutover requires a persisted endpos and a caller write freeze through final sequence and selected large-object synchronization.")
+        let limits = crate::contracts::FollowLimits::default();
+        let replay_safe = match crate::contracts::REPLAY_SAFE_BARRIER_INTERVAL_MS {
+            Some(interval) => format!("replay-safe uses writing barriers every {interval} ms"),
+            None => "replay-safe is unavailable until measured cadence selection".into(),
+        };
+        command.after_help(format!(
+            "Native follow requires pgoutput v1. Durability defaults to durable; {replay_safe}; relaxed is unavailable. Limits: {} queued messages, {} queued bytes plus one message up to {} bytes when empty; apply groups default to {} transactions, {} logical events or {} canonical bytes, closing only at a source COMMIT. Cutover requires a persisted endpos and a caller write freeze through final sequence and selected large-object synchronization.",
+            limits.channel_messages, limits.channel_bytes, limits.max_message_bytes,
+            crate::contracts::DEFAULT_FOLLOW_APPLY_GROUP_TXNS, limits.group_rows, limits.group_bytes,
+        ))
     } else {
         command
     }
@@ -272,7 +281,7 @@ fn command() -> Command {
     base("rpgmigrate", Parser::Root)
         .bin_name("rpgmigrate")
         .about("PostgreSQL migration engine")
-        .after_help("Native profiles: single-database clone, read-only progress and schema/data comparison, ping, restricted copy table-data, bounded follow, stream sentinel get, stream sentinel set endpos, and stream cleanup of owned resources. Follow requires pgoutput v1 and durable commits. PostgreSQL pairs: 16 to 16, 18 to 18, and 16 to 18. Unsupported profile options fail before database or state changes.")
+        .after_help("Native profiles: single-database clone, read-only progress and schema/data comparison, ping, restricted copy table-data, bounded follow, stream sentinel get, stream sentinel set endpos, and stream cleanup of owned resources. Follow requires pgoutput v1 and defaults to durable; see follow --help for replay-safe availability. Relaxed is unavailable. PostgreSQL pairs: 16 to 16, 18 to 18, and 16 to 18. Unsupported profile options fail before database or state changes.")
         .subcommands(["clone", "fork", "follow"].map(|name| leaf(name, Parser::Copy)))
         .subcommand(leaf("snapshot", Parser::Snapshot))
         .subcommand(leaf("ping", Parser::Ping))
@@ -769,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_defaults_to_pgoutput_with_bounded_durable_groups() {
+    fn m9_omitted_requests_remain_none() {
         for args in [
             vec!["follow", "--skip-large-objects"],
             vec!["clone", "--follow", "--skip-large-objects"],
@@ -777,11 +786,74 @@ mod tests {
             let Invocation::Follow(options) = invoke(&args, CONNECTIONS).unwrap() else {
                 panic!("expected follow")
             };
-            assert_eq!(options.apply_group_txns, 100);
+            assert_eq!(options.durability, None);
+            assert_eq!(options.apply_group_txns, None);
             assert_eq!(options.limits, crate::contracts::FollowLimits::default());
             assert_eq!(options.clone.table_jobs, 4);
             assert_eq!(options.clone.post_data_jobs, 4);
             assert!(options.origin_name.is_none());
+        }
+    }
+
+    #[test]
+    fn m9_durable_and_replay_safe_request_modes() {
+        for (mode, expected) in [
+            ("durable", crate::contracts::DurabilityMode::Durable),
+            ("replay-safe", crate::contracts::DurabilityMode::ReplaySafe),
+        ] {
+            for route in [vec!["follow"], vec!["clone", "--follow"]] {
+                let mut args = route;
+                args.extend(["--durability", mode]);
+                let Invocation::Follow(options) = invoke(&args, CONNECTIONS).unwrap() else {
+                    panic!("expected follow")
+                };
+                assert_eq!(options.durability, Some(expected));
+                assert_eq!(options.apply_group_txns, None);
+            }
+            assert!(invoke(&["clone", "--durability", mode], CONNECTIONS).is_err());
+        }
+    }
+
+    #[test]
+    fn m9_help_reports_defaults_and_mode_availability() {
+        for route in ["clone", "follow"] {
+            let help = render_help(&CommandPath(vec![route.into()])).unwrap();
+            for expected in [
+                "Durability defaults to durable",
+                "relaxed is unavailable",
+                "1024 queued messages",
+                "8388608 queued bytes",
+                "16777216 bytes when empty",
+                "100 transactions",
+                "10000 logical events",
+                "8388608 canonical bytes",
+            ] {
+                assert!(help.contains(expected), "{route}: {expected}");
+            }
+            match crate::contracts::REPLAY_SAFE_BARRIER_INTERVAL_MS {
+                Some(interval) => assert!(help.contains(&format!("every {interval} ms"))),
+                None => assert!(
+                    help.contains("replay-safe is unavailable until measured cadence selection")
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn m9_relaxed_refuses_before_effects() {
+        for caps in [
+            vec![],
+            vec!["--loss-max-transactions", "1"],
+            vec!["--loss-max-bytes", "1"],
+            vec!["--loss-max-transactions", "1", "--loss-max-bytes", "1"],
+        ] {
+            let mut args = vec!["follow", "--durability", "relaxed"];
+            args.extend(caps);
+            let error = invoke(&args, CONNECTIONS).unwrap_err();
+            assert!(matches!(
+                error.kind,
+                ErrorKind::BadArgs | ErrorKind::BadConfig
+            ));
         }
     }
 
@@ -813,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_admits_positive_apply_group_environment_only_for_follow() {
+    fn m9_group_override_preserves_explicitness() {
         for value in ["1", "100", "18446744073709551615"] {
             let mut env = CONNECTIONS.to_vec();
             env.push(("PGCOPYDB_APPLY_GROUP_TXNS", value));
@@ -822,10 +894,24 @@ mod tests {
             else {
                 panic!("expected follow")
             };
-            assert_eq!(options.apply_group_txns, value.parse::<u64>().unwrap());
+            assert_eq!(
+                options.apply_group_txns,
+                Some(value.parse::<u64>().unwrap())
+            );
+            assert_eq!(options.durability, None);
             assert!(invoke(&["clone"], &env).is_err());
         }
-        for value in ["", "0", "-1", "18446744073709551616", "not-an-integer"] {
+        for value in [
+            "",
+            "0",
+            "-1",
+            "18446744073709551616",
+            "not-an-integer",
+            "0x64",
+            "1.0",
+            "1e2",
+            "true",
+        ] {
             let mut env = CONNECTIONS.to_vec();
             env.push(("PGCOPYDB_APPLY_GROUP_TXNS", value));
             let error = invoke(&["follow", "--skip-large-objects"], &env).unwrap_err();
@@ -865,7 +951,6 @@ mod tests {
         for args in [
             vec!["--plugin", "test_decoding"],
             vec!["--plugin", "wal2json"],
-            vec!["--durability", "replay-safe"],
             vec!["--endpos", "0/10"],
         ] {
             let mut argv = vec!["follow", "--skip-large-objects"];

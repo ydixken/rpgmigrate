@@ -8,8 +8,8 @@ use crate::apply::CloneAuthority;
 use crate::apply::checkpoint::{CompletedFollow, TargetAuthority};
 use crate::catalog;
 use crate::contracts::{
-    ClonePlan, CopyGeneration, Error, ErrorKind, FollowBinding, FollowOptions, IoControl,
-    RestorePolicy, Result, StateAction,
+    ClonePlan, CopyGeneration, EffectiveFollowSettings, Error, ErrorKind, FollowBinding,
+    FollowLimits, FollowOptions, IoControl, RestorePolicy, Result, StateAction,
 };
 use crate::pg::{PgConnection, operation_control};
 use crate::snapshot::{CloneSnapshot, FollowSnapshot};
@@ -41,19 +41,29 @@ fn entry(phase: Option<ClonePhase>, anchored: bool, action: StateAction) -> Resu
     }
 }
 
+fn resolve_settings(
+    native: &mut NativeState,
+    options: &FollowOptions,
+) -> Result<EffectiveFollowSettings> {
+    // The public CLI has no limit inputs, so its defaults represent omission.
+    let limits = if options.limits == FollowLimits::default() {
+        native
+            .effective_follow_settings()
+            .map_or(options.limits, |saved| saved.limits)
+    } else {
+        options.limits
+    };
+    native.resolve_follow_settings(options.durability, options.apply_group_txns, limits)
+}
+
 pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> {
-    options.limits.validate()?;
-    if options.apply_group_txns == 0 {
-        return Err(refusal(
-            "follow: apply group transaction limit must be positive",
-        ));
-    }
     let mut native = state::open_follow(
         &options.clone.state,
         options.clone.operator.as_ref(),
         options.origin_name.as_deref(),
         io,
     )?;
+    let settings = resolve_settings(&mut native, &options)?;
     let saved = native.checked_clone()?;
     if let Some(saved) = &saved {
         if options.clone.copy_policy() != saved.plan.copy_policy {
@@ -108,7 +118,7 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
         options.clone.state.action,
     )?;
     if let Some(completed) = completed {
-        return completed_report(&options, &completed, io);
+        return completed_report(&options, &settings, &completed, io);
     }
     let (plan, binding) = match mode {
         Entry::Fresh => fresh(&options, &mut native, io)?,
@@ -120,9 +130,9 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
             binding.ok_or_else(|| refusal("follow: native binding is absent"))?,
         ),
     };
-    crate::protocol::follow_startup(&options)?;
-    let completed = stream(&options, &plan, &binding, &mut native, io)?;
-    completed_report(&options, &completed, io)
+    crate::protocol::follow_startup(&settings)?;
+    let completed = stream(&options, &settings, &plan, &binding, &mut native, io)?;
+    completed_report(&options, &settings, &completed, io)
 }
 
 fn fresh(
@@ -394,6 +404,7 @@ enum WaitReady<T> {
 
 fn stream(
     options: &FollowOptions,
+    settings: &EffectiveFollowSettings,
     plan: &ClonePlan,
     binding: &FollowBinding,
     native: &mut NativeState,
@@ -402,7 +413,7 @@ fn stream(
     let control = ControlHandle::for_worker(native, io)?;
     let mut source = source(options, io)?;
     let confirmed = catalog::follow_confirmed_flush(&mut source, plan, binding, None, io)?;
-    let (send, input) = channel::bounded(options.limits)?;
+    let (send, input) = channel::bounded(settings.limits)?;
     let (feedback, proofs) = channel::feedback();
     let request_keepalive = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -421,6 +432,7 @@ fn stream(
                 || {
                     crate::apply::follow::run(
                         options,
+                        settings,
                         binding,
                         native,
                         confirmed,
@@ -454,6 +466,7 @@ fn stream(
                     || {
                         crate::cdc::receive::run(
                             options,
+                            settings,
                             binding,
                             start,
                             receive_send,
@@ -475,7 +488,8 @@ fn stream(
             if pid <= 0 {
                 return Err(refusal("follow: receiver returned an invalid backend PID"));
             }
-            emit_streaming(options, io).map_err(|error| coordinator_error(error, &outcome))?;
+            emit_streaming(options, settings, io)
+                .map_err(|error| coordinator_error(error, &outcome))?;
             let mut next_health = Instant::now();
             loop {
                 if let Ok(result) = outcome.try_recv() {
@@ -624,22 +638,38 @@ fn worker<T>(
 
 fn completed_report(
     options: &FollowOptions,
+    settings: &EffectiveFollowSettings,
     completed: &CompletedFollow,
     io: &IoControl,
 ) -> Result<String> {
     check(io)?;
     let progress = crate::progress::completed_follow(&options.clone, completed, io)?;
     check(io)?;
-    crate::protocol::completed_follow_report(progress.work.as_ref(), &progress.copy, completed)
+    let stored = progress
+        .settings
+        .as_ref()
+        .filter(|stored| *stored == settings)
+        .ok_or_else(|| refusal("follow: completed report lacks matching stored settings"))?;
+    crate::protocol::completed_follow_report(
+        progress.work.as_ref(),
+        &progress.copy,
+        completed,
+        stored,
+    )
 }
 
-fn emit_streaming(options: &FollowOptions, io: &IoControl) -> Result<()> {
+fn emit_streaming(
+    options: &FollowOptions,
+    settings: &EffectiveFollowSettings,
+    io: &IoControl,
+) -> Result<()> {
     let progress = crate::progress::read(&options.clone, io)?;
     let output = crate::protocol::copy_report(
         crate::protocol::CopyCommand::Clone,
         options.clone.operator.as_ref(),
         "streaming",
         &progress.copy,
+        Some(settings),
     )?;
     std::io::stdout()
         .lock()
@@ -1206,5 +1236,108 @@ mod tests {
             entry(None, false, StateAction::Restart).unwrap(),
             Entry::Fresh
         );
+    }
+
+    struct SettingsDir(std::path::PathBuf);
+
+    impl Drop for SettingsDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn m9_settings_fixture() -> (SettingsDir, NativeState, FollowOptions) {
+        use std::os::unix::fs::DirBuilderExt;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "rpgmigrate-follow-settings-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let args = [
+            std::ffi::OsString::from("rpgmigrate"),
+            "follow".into(),
+            "--source".into(),
+            "dbname=unused-source".into(),
+            "--target".into(),
+            "dbname=unused-target".into(),
+            "--dir".into(),
+            root.join("state").into_os_string(),
+        ];
+        let crate::contracts::Invocation::Follow(options) =
+            crate::cli::parse(&args, &crate::cli::Environment(Default::default())).unwrap()
+        else {
+            panic!("expected public follow request")
+        };
+        let native = state::open_follow(&options.clone.state, None, None, &control()).unwrap();
+        (SettingsDir(root), native, options)
+    }
+
+    #[test]
+    fn m9_public_resume_preserves_saved_limits_and_all_settings() {
+        let (_root, mut native, mut options) = m9_settings_fixture();
+        let limits = crate::contracts::FollowLimits {
+            group_rows: 17,
+            ..crate::contracts::FollowLimits::default()
+        };
+        let saved = native
+            .resolve_follow_settings(None, Some(23), limits)
+            .unwrap();
+        drop(native);
+        options.clone.state.action = StateAction::Resume;
+        let mut native = state::open_follow(&options.clone.state, None, None, &control()).unwrap();
+        let manifest = options.clone.state.path.join("manifest.json");
+        let before = std::fs::read(&manifest).unwrap();
+        assert_eq!(options.durability, None);
+        assert_eq!(options.apply_group_txns, None);
+        assert_eq!(options.limits, crate::contracts::FollowLimits::default());
+        assert_eq!(resolve_settings(&mut native, &options).unwrap(), saved);
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        drop(native);
+    }
+
+    #[test]
+    fn m9_internal_explicit_limits_conflict_preserves_saved_settings() {
+        let (_root, mut native, mut options) = m9_settings_fixture();
+        let limits = crate::contracts::FollowLimits {
+            group_rows: 17,
+            ..crate::contracts::FollowLimits::default()
+        };
+        let saved = native
+            .resolve_follow_settings(None, Some(23), limits)
+            .unwrap();
+        let manifest = options.clone.state.path.join("manifest.json");
+        let before = std::fs::read(&manifest).unwrap();
+        options.limits.group_rows = 18;
+        let error = resolve_settings(&mut native, &options).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadState);
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.message.contains("differ from stored settings"));
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        assert_eq!(
+            native.resolve_follow_settings(None, None, limits).unwrap(),
+            saved
+        );
+        drop(native);
+    }
+
+    #[test]
+    fn m9_public_fresh_follow_keeps_default_settings() {
+        let (_root, mut native, options) = m9_settings_fixture();
+        let settings = resolve_settings(&mut native, &options).unwrap();
+        assert_eq!(
+            settings,
+            EffectiveFollowSettings {
+                durability: crate::contracts::DurabilityMode::Durable,
+                barrier_interval_ms: None,
+                apply_group_txns: 100,
+                limits: crate::contracts::FollowLimits::default(),
+            }
+        );
+        drop(native);
     }
 }

@@ -123,10 +123,14 @@ impl Fixture {
             slot_name: format!("{database}_slot"),
             publication_name: format!("{database}_pub"),
             origin_name: None,
-            apply_group_txns: 100,
+            durability: None,
+            apply_group_txns: Some(100),
             limits: FollowLimits::default(),
         };
-        let native = crate::state::open_follow(&options.clone.state, None, None, &io).unwrap();
+        let mut native = crate::state::open_follow(&options.clone.state, None, None, &io).unwrap();
+        native
+            .resolve_follow_settings(options.durability, options.apply_group_txns, options.limits)
+            .unwrap();
         Self {
             admin,
             source,

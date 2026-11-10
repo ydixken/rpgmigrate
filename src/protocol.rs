@@ -1,7 +1,9 @@
 use serde::Serialize;
 
 use crate::cli::Environment;
-use crate::contracts::{Error, ErrorKind, FollowLimits, FollowOptions, OperatorIdentity, Result};
+use crate::contracts::{
+    EffectiveFollowSettings, Error, ErrorKind, FollowLimits, OperatorIdentity, Result,
+};
 use crate::identity::RunId;
 
 #[derive(Serialize)]
@@ -158,9 +160,11 @@ struct ReportDocument<'a, P> {
     protocol_version: u32,
     engine_version: &'static str,
     command: &'static str,
-    capabilities: [&'static str; 1],
+    capabilities: Vec<&'static str>,
     work: serde_json::Value,
     phase: Phase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings: Option<&'a EffectiveFollowSettings>,
     #[serde(flatten)]
     payload: &'a P,
 }
@@ -169,6 +173,8 @@ struct ReportDocument<'a, P> {
 struct StandaloneDocument<'a, P> {
     command: &'static str,
     phase: Phase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings: Option<&'a EffectiveFollowSettings>,
     #[serde(flatten)]
     payload: &'a P,
 }
@@ -179,21 +185,41 @@ fn report(
     operator: Option<&OperatorIdentity>,
     phase: Phase,
     payload: &impl Serialize,
+    settings: Option<&EffectiveFollowSettings>,
 ) -> Result<String> {
+    if let Some(settings) = settings {
+        settings
+            .validate()
+            .map_err(|_| report_refusal("native report settings are invalid"))?;
+        if !matches!(
+            command,
+            "clone" | "list progress" | "stream sentinel get" | "stream sentinel set endpos"
+        ) {
+            return Err(report_refusal(
+                "native report command does not support settings",
+            ));
+        }
+    }
     let encoded = match work(operator) {
         Some(work) => serde_json::to_string(&ReportDocument {
             protocol_version: 1,
             engine_version: env!("CARGO_PKG_VERSION"),
             command,
-            capabilities: [capability],
+            capabilities: if settings.is_some() {
+                vec![capability, "durability.status.v1"]
+            } else {
+                vec![capability]
+            },
             work,
             phase,
+            settings,
             payload,
         })
         .map(|document| format!("native-report: {document}\n")),
         None => serde_json::to_string(&StandaloneDocument {
             command,
             phase,
+            settings,
             payload,
         })
         .map(|document| format!("{document}\n")),
@@ -206,10 +232,16 @@ pub(crate) fn copy_report(
     operator: Option<&OperatorIdentity>,
     phase: &str,
     copy: &impl Serialize,
+    settings: Option<&EffectiveFollowSettings>,
 ) -> Result<String> {
     #[derive(Serialize)]
     struct Payload<'a, C> {
         copy: &'a C,
+    }
+    if phase == "streaming" && settings.is_none() {
+        return Err(report_refusal(
+            "follow streaming report has no stored settings",
+        ));
     }
     let (command, capability) = match command {
         CopyCommand::Clone => ("clone", "clone.single_db"),
@@ -221,6 +253,7 @@ pub(crate) fn copy_report(
         operator,
         Phase::parse(phase)?,
         &Payload { copy },
+        settings,
     )
 }
 
@@ -265,6 +298,7 @@ pub(crate) fn replication_report(
     request: Option<&crate::state::EndposRequest>,
     snapshot: &crate::apply::checkpoint::DurableFollowSnapshot,
     completed: Option<&crate::apply::checkpoint::CompletedFollow>,
+    settings: &EffectiveFollowSettings,
 ) -> Result<String> {
     use crate::apply::checkpoint::DrainKind;
     if operator.is_some_and(|operator| operator.run != snapshot.stream().run)
@@ -330,6 +364,7 @@ pub(crate) fn replication_report(
                 drain_proof,
             },
         },
+        Some(settings),
     )
 }
 
@@ -337,6 +372,7 @@ pub(crate) fn completed_follow_report(
     operator: Option<&OperatorIdentity>,
     copy: &impl Serialize,
     completed: &crate::apply::checkpoint::CompletedFollow,
+    settings: &EffectiveFollowSettings,
 ) -> Result<String> {
     if operator.is_some_and(|operator| operator.run != completed.target().intent.binding.stream.run)
     {
@@ -344,7 +380,13 @@ pub(crate) fn completed_follow_report(
             "completed clone report has a different operator binding",
         ));
     }
-    copy_report(CopyCommand::Clone, operator, "completed", copy)
+    copy_report(
+        CopyCommand::Clone,
+        operator,
+        "completed",
+        copy,
+        Some(settings),
+    )
 }
 
 pub(crate) fn cleanup_report(
@@ -418,6 +460,7 @@ pub(crate) fn cleanup_report(
                 resources,
             },
         },
+        None,
     )
 }
 
@@ -439,10 +482,10 @@ enum FollowLog {
 }
 
 impl FollowLog {
-    fn startup(options: &FollowOptions) -> Self {
+    fn startup(settings: &EffectiveFollowSettings) -> Self {
         Self::Startup {
-            limits: options.limits,
-            apply_group_txns: options.apply_group_txns,
+            limits: settings.limits,
+            apply_group_txns: settings.apply_group_txns,
         }
     }
 
@@ -477,8 +520,9 @@ impl FollowLog {
     }
 }
 
-pub(crate) fn follow_startup(options: &FollowOptions) -> Result<()> {
-    FollowLog::startup(options).write()
+pub(crate) fn follow_startup(settings: &EffectiveFollowSettings) -> Result<()> {
+    settings.validate()?;
+    FollowLog::startup(settings).write()
 }
 
 pub(crate) fn follow_backpressure(
@@ -498,6 +542,322 @@ pub(crate) fn follow_backpressure(
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    fn m9_settings(mode: crate::contracts::DurabilityMode) -> EffectiveFollowSettings {
+        EffectiveFollowSettings {
+            durability: mode,
+            barrier_interval_ms: match mode {
+                crate::contracts::DurabilityMode::Durable => None,
+                crate::contracts::DurabilityMode::ReplaySafe => Some(500),
+            },
+            apply_group_txns: 23,
+            limits: FollowLimits {
+                channel_messages: 17,
+                ..FollowLimits::default()
+            },
+        }
+    }
+
+    #[test]
+    fn m9_status_field_and_capability_paired() {
+        let operator = operator_identity(&environment()).unwrap().unwrap();
+        for mode in [
+            crate::contracts::DurabilityMode::Durable,
+            crate::contracts::DurabilityMode::ReplaySafe,
+        ] {
+            let settings = m9_settings(mode);
+            for command in [CopyCommand::Clone, CopyCommand::Progress] {
+                let output = copy_report(
+                    command,
+                    Some(&operator),
+                    "streaming",
+                    &serde_json::json!({}),
+                    Some(&settings),
+                )
+                .unwrap();
+                let value: serde_json::Value =
+                    serde_json::from_str(output.strip_prefix("native-report: ").unwrap()).unwrap();
+                assert_eq!(value["settings"], serde_json::to_value(&settings).unwrap());
+                assert!(
+                    value["capabilities"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("durability.status.v1"))
+                );
+            }
+            let standalone = copy_report(
+                CopyCommand::Clone,
+                None,
+                "streaming",
+                &serde_json::json!({}),
+                Some(&settings),
+            )
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&standalone).unwrap();
+            assert_eq!(value["settings"], serde_json::to_value(&settings).unwrap());
+            for name in ["work", "capabilities", "protocol_version", "engine_version"] {
+                assert!(value.get(name).is_none());
+            }
+        }
+        assert!(
+            copy_report(
+                CopyCommand::Clone,
+                Some(&operator),
+                "streaming",
+                &serde_json::json!({}),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            report(
+                "stream cleanup",
+                "cleanup.v1",
+                Some(&operator),
+                Phase::Completed,
+                &serde_json::json!({}),
+                Some(&m9_settings(crate::contracts::DurabilityMode::Durable))
+            )
+            .is_err()
+        );
+        let mut invalid = m9_settings(crate::contracts::DurabilityMode::Durable);
+        invalid.apply_group_txns = 0;
+        assert!(
+            copy_report(
+                CopyCommand::Progress,
+                Some(&operator),
+                "streaming",
+                &serde_json::json!({}),
+                Some(&invalid)
+            )
+            .is_err()
+        );
+        assert!(
+            !serde_json::to_value(Version::current()).unwrap()["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("durability.status.v1"))
+        );
+    }
+
+    fn m9_operator() -> OperatorIdentity {
+        let mut operator = operator_identity(&environment()).unwrap().unwrap();
+        operator.migration_uid = "07070707-0707-0707-0707-070707070707".into();
+        operator.run = crate::identity::RunId([7; 16]);
+        operator.workdir_id = "11112222-3333-4444-aaaa-bbbbccccdddd".into();
+        operator
+    }
+
+    fn m9_endpos(
+        completed: &crate::apply::checkpoint::CompletedFollow,
+    ) -> crate::state::EndposRequest {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "stream": completed.target().intent.binding.stream,
+            "copy_generation": 1,
+            "slot_nonce": vec![1u8; 16],
+            "target_nonce": vec![2u8; 16],
+            "end_lsn": completed.end(),
+            "sealed": true,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn m9_follow_status_uses_stored_settings() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/native/v1/payloads");
+        let operator = m9_operator();
+        let completed = crate::apply::checkpoint::completed_for_test();
+        let request = m9_endpos(&completed);
+        let copy = serde_json::json!({
+            "tables": {"total":3,"done":3}, "indexes":{"total":1,"done":1}, "bytes":{"total":9,"done":9},
+        });
+        for (mode, name) in [
+            (crate::contracts::DurabilityMode::Durable, "durable"),
+            (crate::contracts::DurabilityMode::ReplaySafe, "replay-safe"),
+        ] {
+            let settings = m9_settings(mode);
+            let outputs = [
+                (
+                    "clone-streaming",
+                    copy_report(
+                        CopyCommand::Clone,
+                        Some(&operator),
+                        "streaming",
+                        &copy,
+                        Some(&settings),
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "clone-completed",
+                    completed_follow_report(Some(&operator), &copy, &completed, &settings).unwrap(),
+                ),
+                (
+                    "progress",
+                    copy_report(
+                        CopyCommand::Progress,
+                        Some(&operator),
+                        "streaming",
+                        &copy,
+                        Some(&settings),
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "sentinel-get",
+                    replication_report(
+                        StreamReportCommand::Get,
+                        Some(&operator),
+                        Some(&request),
+                        completed.snapshot_for_test(),
+                        Some(&completed),
+                        &settings,
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "sentinel-set",
+                    replication_report(
+                        StreamReportCommand::SetEndpos,
+                        Some(&operator),
+                        Some(&request),
+                        completed.snapshot_for_test(),
+                        Some(&completed),
+                        &settings,
+                    )
+                    .unwrap(),
+                ),
+            ];
+            for (command, output) in outputs {
+                let path = root.join(format!("m9-{name}-{command}.json"));
+                assert_eq!(
+                    output.strip_prefix("native-report: ").unwrap().as_bytes(),
+                    std::fs::read(&path).unwrap(),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m9_startup_uses_stored_settings() {
+        let settings = m9_settings(crate::contracts::DurabilityMode::ReplaySafe);
+        let startup = FollowLog::startup(&settings).document();
+        assert_eq!(
+            startup["limits"],
+            serde_json::to_value(settings.limits).unwrap()
+        );
+        assert_eq!(startup["apply_group_txns"], 23);
+        assert_eq!(startup.as_object().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn m9_settings_never_substitute_for_proof() {
+        let operator = operator_identity(&environment()).unwrap().unwrap();
+        let completed = crate::apply::checkpoint::completed_for_test();
+        let settings = m9_settings(crate::contracts::DurabilityMode::ReplaySafe);
+        assert!(
+            completed_follow_report(
+                Some(&operator),
+                &serde_json::json!({}),
+                &completed,
+                &settings
+            )
+            .is_err()
+        );
+        let matching_operator = m9_operator();
+        let request = m9_endpos(&completed);
+        for mode in [
+            crate::contracts::DurabilityMode::Durable,
+            crate::contracts::DurabilityMode::ReplaySafe,
+        ] {
+            let settings = m9_settings(mode);
+            assert!(
+                replication_report(
+                    StreamReportCommand::Get,
+                    Some(&matching_operator),
+                    Some(&request),
+                    completed.snapshot_for_test(),
+                    None,
+                    &settings
+                )
+                .is_err()
+            );
+            assert!(
+                replication_report(
+                    StreamReportCommand::Get,
+                    Some(&matching_operator),
+                    None,
+                    completed.snapshot_for_test(),
+                    Some(&completed),
+                    &settings
+                )
+                .is_err()
+            );
+            assert!(
+                replication_report(
+                    StreamReportCommand::Get,
+                    Some(&operator),
+                    Some(&request),
+                    completed.snapshot_for_test(),
+                    Some(&completed),
+                    &settings
+                )
+                .is_err()
+            );
+        }
+        let output = copy_report(
+            CopyCommand::Clone,
+            Some(&operator),
+            "streaming",
+            &serde_json::json!({}),
+            Some(&settings),
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(output.strip_prefix("native-report: ").unwrap()).unwrap();
+        for name in ["replication", "drain_proof", "complete", "checkpoint_id"] {
+            assert!(value.get(name).is_none());
+        }
+    }
+
+    #[test]
+    fn m9_plain_outputs_unchanged() {
+        let operator = operator_identity(&environment()).unwrap().unwrap();
+        let copy = serde_json::json!({"tables":{"total":2}});
+        let output =
+            copy_report(CopyCommand::Clone, Some(&operator), "copying", &copy, None).unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "native-report: {{\"protocol_version\":1,\"engine_version\":\"{}\",\"command\":\"clone\",\"capabilities\":[\"clone.single_db\"],\"work\":{},\"phase\":\"copying\",\"copy\":{}}}\n",
+                env!("CARGO_PKG_VERSION"),
+                work(Some(&operator)).unwrap(),
+                copy
+            )
+        );
+        let cleanup = serde_json::json!({"cleanup":{"complete":false,"resources":[]}});
+        let output = report(
+            "stream cleanup",
+            "cleanup.v1",
+            Some(&operator),
+            Phase::Suspended,
+            &cleanup,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "native-report: {{\"protocol_version\":1,\"engine_version\":\"{}\",\"command\":\"stream cleanup\",\"capabilities\":[\"cleanup.v1\"],\"work\":{},\"phase\":\"suspended\",\"cleanup\":{{\"complete\":false,\"resources\":[]}}}}\n",
+                env!("CARGO_PKG_VERSION"),
+                work(Some(&operator)).unwrap()
+            )
+        );
+    }
 
     #[test]
     fn replication_serialization_retains_measured_zero_and_omits_unknowns() {
@@ -543,6 +903,7 @@ mod tests {
             None,
             Phase::Draining,
             &payload,
+            None,
         )
         .unwrap();
         assert!(!output.starts_with("native-report: "));
@@ -557,6 +918,7 @@ mod tests {
             Some(&operator),
             Phase::Draining,
             &payload,
+            None,
         )
         .unwrap();
         let bound: serde_json::Value =
@@ -720,7 +1082,7 @@ mod tests {
             (CopyCommand::Clone, "clone", "clone.single_db"),
             (CopyCommand::Progress, "list progress", "progress.v1"),
         ] {
-            let output = copy_report(command, Some(&operator), "completed", &copy).unwrap();
+            let output = copy_report(command, Some(&operator), "completed", &copy, None).unwrap();
             let value: serde_json::Value =
                 serde_json::from_str(output.strip_prefix("native-report: ").unwrap()).unwrap();
             assert_eq!(
@@ -740,6 +1102,7 @@ mod tests {
             None,
             "copying",
             &serde_json::json!({"tables":{"total":2}}),
+            None,
         )
         .unwrap();
         assert!(!output.starts_with("native-report: "));
@@ -748,7 +1111,16 @@ mod tests {
             value,
             serde_json::json!({"command":"list progress","phase":"copying","copy":{"tables":{"total":2}}})
         );
-        assert!(copy_report(CopyCommand::Clone, None, "complete", &serde_json::json!({})).is_err());
+        assert!(
+            copy_report(
+                CopyCommand::Clone,
+                None,
+                "complete",
+                &serde_json::json!({}),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -763,6 +1135,7 @@ mod tests {
                 "indexes":{"total":0,"done":0},
                 "bytes":{"total":4,"done":4},
             }),
+            Some(&m9_settings(crate::contracts::DurabilityMode::Durable)),
         )
         .unwrap();
         let value: serde_json::Value =
@@ -774,7 +1147,7 @@ mod tests {
         assert!(value.get("drain_proof").is_none());
         assert_eq!(
             value["capabilities"],
-            serde_json::json!(["clone.single_db"])
+            serde_json::json!(["clone.single_db", "durability.status.v1"])
         );
     }
 
@@ -799,7 +1172,13 @@ mod tests {
         else {
             panic!("expected follow")
         };
-        let startup = FollowLog::startup(&options).document();
+        let settings = EffectiveFollowSettings {
+            durability: crate::contracts::DurabilityMode::Durable,
+            barrier_interval_ms: None,
+            apply_group_txns: options.apply_group_txns.unwrap_or(100),
+            limits: options.limits,
+        };
+        let startup = FollowLog::startup(&settings).document();
         assert_eq!(startup["event"], "follow.startup");
         assert_eq!(startup["error_severity"], "INFO");
         assert_eq!(startup["apply_group_txns"], 100);

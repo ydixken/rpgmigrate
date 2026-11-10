@@ -2,7 +2,8 @@ use super::{Checkpoint, CommitOutcome, ControlRow, Frontier, TargetCommit, metad
 use crate::catalog::{command, configure_durability, confirm_durability};
 use crate::cdc::contracts::Event;
 use crate::contracts::{
-    CopyReport, Error, ErrorKind, FollowBinding, IoControl, OwnedCopyTable, Result, SnapshotAnchor,
+    CopyReport, DurabilityMode, Error, ErrorKind, FollowBinding, IoControl, OwnedCopyTable, Result,
+    SnapshotAnchor,
 };
 use crate::identity::{SourceEndLsn, StreamId};
 use crate::pg::{CommitObservation, PgConnection, PgParam, PgResult, TransactionStatus};
@@ -129,6 +130,11 @@ pub(crate) struct CompletedFollow {
 }
 
 impl CompletedFollow {
+    #[cfg(test)]
+    pub(crate) fn snapshot_for_test(&self) -> &DurableFollowSnapshot {
+        &self.snapshot
+    }
+
     pub(crate) fn end(&self) -> SourceEndLsn {
         self.drain.end
     }
@@ -191,6 +197,23 @@ pub(crate) fn completed_for_test() -> CompletedFollow {
 pub(crate) fn feedback_for_test(stream: StreamId, end: SourceEndLsn) -> SafeFeedback {
     assert_ne!(end.0, 0);
     SafeFeedback { stream, end }
+}
+
+#[cfg(test)]
+pub(crate) fn proof_for_test(checkpoint: Checkpoint) -> DurableProof {
+    let (mut authority, _) = tests::disconnected_authority();
+    authority.provenance.intent.binding.stream = checkpoint.stream;
+    DurableProof {
+        evidence: Box::new(ProofEvidence {
+            stream: checkpoint.stream,
+            through: Some(checkpoint.applied),
+            barrier_epoch: checkpoint.barrier_epoch,
+            barrier_counter: checkpoint.barrier_counter,
+            target: authority.provenance,
+            certified_lsn: None,
+            follow: true,
+        }),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -269,19 +292,15 @@ impl DurableProof {
             })
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn stream(&self) -> StreamId {
         self.evidence.stream
     }
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn frontier(&self) -> Option<&Frontier> {
         self.evidence.through.as_ref()
     }
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn barrier_epoch(&self) -> u64 {
         self.evidence.barrier_epoch
     }
-    #[cfg_attr(not(test), expect(dead_code, reason = "E3 serial consumer is pending"))]
     pub(crate) fn barrier_counter(&self) -> u64 {
         self.evidence.barrier_counter
     }
@@ -1125,7 +1144,6 @@ impl TargetAuthority {
         }
         let required = self.session.synchronous_commit;
         confirm_durability(self.session.connection()?, required, io)?;
-        #[cfg(test)]
         if mode == TargetCommit::Asynchronous {
             command(
                 self.session.connection()?,
@@ -1276,6 +1294,7 @@ impl TargetTxn<'_> {
 
     pub(crate) fn commit_pipeline(
         mut self,
+        durability: DurabilityMode,
         io: &IoControl,
         send: impl FnOnce(&mut crate::pg::Pipeline<'_>) -> Result<()>,
         validate: impl FnMut(usize, PgResult) -> Result<()>,
@@ -1290,9 +1309,11 @@ impl TargetTxn<'_> {
         next = increment_barrier(next, epoch)?;
         self.pipeline_window(io, send, validate, Some(&next))?;
         self.failed = true;
-        let result = self
-            .authority
-            .finish_inner(next, TargetCommit::Synchronous, true, io)?;
+        let mode = match durability {
+            DurabilityMode::Durable => TargetCommit::Synchronous,
+            DurabilityMode::ReplaySafe => TargetCommit::Asynchronous,
+        };
+        let result = self.authority.finish_inner(next, mode, true, io)?;
         self.finished = true;
         match result {
             CommitReceipt::Acknowledged(durable) => Ok(CommitOutcome::Acknowledged {
@@ -2139,6 +2160,64 @@ mod tests {
         );
         assert!(matches!(authority.session.phase, Phase::Poisoned));
         assert_eq!(authority.row, cached);
+    }
+
+    #[test]
+    fn pipeline_commit_refuses_unsealed_groups_in_both_durability_modes() {
+        for durability in [DurabilityMode::Durable, DurabilityMode::ReplaySafe] {
+            let (mut authority, io) = disconnected_authority();
+            let cached = authority.row.clone();
+            let tx = TargetTxn {
+                authority: &mut authority,
+                next: None,
+                failed: false,
+                finished: false,
+            };
+            let error = tx
+                .commit_pipeline(
+                    durability,
+                    &io,
+                    |_| panic!("unsealed group reached pipeline dispatch"),
+                    |_, _| panic!("unsealed group reached result validation"),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                "target-authority: group has no sealed source transaction"
+            );
+            assert!(matches!(authority.session.phase, Phase::Poisoned));
+            assert_eq!(authority.row, cached);
+        }
+    }
+
+    #[test]
+    fn pipeline_commit_cannot_clear_an_earlier_validation_failure() {
+        for durability in [DurabilityMode::Durable, DurabilityMode::ReplaySafe] {
+            let (mut authority, io) = disconnected_authority();
+            let cached = authority.row.clone();
+            let mut tx = TargetTxn {
+                authority: &mut authority,
+                next: Some(frontier(1, 100, 120)),
+                failed: false,
+                finished: false,
+            };
+            assert!(tx.advance(frontier(3, 100, 120)).is_err());
+            assert!(tx.failed);
+            let error = tx
+                .commit_pipeline(
+                    durability,
+                    &io,
+                    |_| panic!("poisoned group reached pipeline dispatch"),
+                    |_, _| panic!("poisoned group reached result validation"),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                "target-authority: transaction poisoned by an earlier DML error"
+            );
+            assert!(matches!(authority.session.phase, Phase::Poisoned));
+            assert_eq!(authority.row, cached);
+        }
     }
 
     #[test]

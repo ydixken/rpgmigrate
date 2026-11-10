@@ -7,9 +7,9 @@ use clap::parser::ValueSource;
 
 use crate::cli::{CommandPath, Environment, Parser};
 use crate::contracts::{
-    CloneOptions, Conninfo, EndposSource, Error, ErrorKind, FollowLimits, FollowOptions,
-    Invocation, RestorePolicy, Result, SentinelField, StateAction, StateRequest, StreamCommand,
-    StreamOptions,
+    CloneOptions, Conninfo, DurabilityMode, EndposSource, Error, ErrorKind, FollowLimits,
+    FollowOptions, Invocation, RestorePolicy, Result, SentinelField, StateAction, StateRequest,
+    StreamCommand, StreamOptions,
 };
 
 const COMMON_ENV: &[(&str, &str, bool)] = &[
@@ -381,7 +381,7 @@ impl Settings {
         if native_route {
             let options = self.clone_options(env, operator, !clone_route && !follow, follow)?;
             if follow {
-                return self.follow_options(options, apply_group.unwrap_or(100));
+                return self.follow_options(options, apply_group);
             }
             return Ok(if clone_route {
                 Invocation::Clone(options)
@@ -613,12 +613,22 @@ impl Settings {
         })
     }
 
-    fn follow_options(&self, clone: CloneOptions, apply_group_txns: u64) -> Result<Invocation> {
-        for (name, admitted) in [("plugin", "pgoutput"), ("durability", "durable")] {
-            if self.text(name).is_some_and(|value| value != admitted) {
-                return Err(unsupported_option(name));
-            }
+    fn follow_options(
+        &self,
+        clone: CloneOptions,
+        apply_group_txns: Option<u64>,
+    ) -> Result<Invocation> {
+        if self.text("plugin").is_some_and(|value| value != "pgoutput") {
+            return Err(unsupported_option("plugin"));
         }
+        let durability = self
+            .text("durability")
+            .map(|value| match value.to_str() {
+                Some("durable") => Ok(DurabilityMode::Durable),
+                Some("replay-safe") => Ok(DurabilityMode::ReplaySafe),
+                _ => Err(unsupported_option("durability")),
+            })
+            .transpose()?;
         let name = |option: &str| -> Result<Option<String>> {
             self.text(option)
                 .map(|value| {
@@ -650,6 +660,7 @@ impl Settings {
             slot_name: name("slot-name")?.unwrap_or_default(),
             publication_name: name("publication")?.unwrap_or_default(),
             origin_name: name("origin")?,
+            durability,
             apply_group_txns,
             limits: FollowLimits::default(),
         }))

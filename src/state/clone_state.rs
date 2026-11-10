@@ -50,6 +50,13 @@ pub(crate) struct CloneInspection {
     pub(crate) clone_state: CloneState,
     pub(crate) provenance: ConfirmedProvenance,
     pub(crate) follow: Option<FollowControl>,
+    effective_settings: Option<EffectiveFollowSettings>,
+}
+
+impl CloneInspection {
+    pub(crate) fn effective_follow_settings(&self) -> Option<&EffectiveFollowSettings> {
+        self.effective_settings.as_ref()
+    }
 }
 
 pub(super) fn check_io(io: &IoControl) -> Result<()> {
@@ -185,6 +192,10 @@ pub(crate) fn inspect_clone(
             origin_name: follow.origin_name.clone(),
         })
     });
+    let effective_settings = manifest
+        .follow_state
+        .as_ref()
+        .and_then(|follow| follow.effective_settings.clone());
     let clone_state = manifest
         .clone_state
         .ok_or_else(|| bad_state("state-clone: native clone binding is absent"))?;
@@ -205,6 +216,7 @@ pub(crate) fn inspect_clone(
         clone_state,
         provenance,
         follow,
+        effective_settings,
     })
 }
 

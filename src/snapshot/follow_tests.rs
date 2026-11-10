@@ -151,6 +151,9 @@ impl PendingFixture {
             &IoControl::unbounded(Arc::new(AtomicBool::new(false))),
         )
         .unwrap();
+        native
+            .resolve_follow_settings(None, None, FollowLimits::default())
+            .unwrap();
         let mut plan = ClonePlan {
             source: crate::contracts::CloneSource {
                 identity: SourceId {
@@ -476,16 +479,20 @@ impl Fixture {
             slot_name: String::new(),
             publication_name: String::new(),
             origin_name: Some("legacy_unowned_origin".into()),
-            apply_group_txns: 100,
+            durability: None,
+            apply_group_txns: Some(100),
             limits: FollowLimits::default(),
         };
-        let native = crate::state::open_follow(
+        let mut native = crate::state::open_follow(
             &options.clone.state,
             None,
             options.origin_name.as_deref(),
             &io,
         )
         .unwrap();
+        native
+            .resolve_follow_settings(options.durability, options.apply_group_txns, options.limits)
+            .unwrap();
         Self {
             admin,
             source,
