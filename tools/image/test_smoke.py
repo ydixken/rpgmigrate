@@ -80,7 +80,8 @@ class SmokeTests(unittest.TestCase):
                        "packages": packages, "python_license": {"path": "/usr/share/doc/libpython3.13-stdlib/copyright",
                                                               "sha256": "d" * 64},
                        "dependency_notices": {"unicode-ident-1.0.27/LICENSE-UNICODE": "f" * 64},
-                       "notice_sha256": hashlib.sha256((PATH.parents[2] / "NOTICE").read_bytes()).hexdigest()}
+                       "notice_sha256": hashlib.sha256((PATH.parents[2] / "NOTICE").read_bytes()).hexdigest(),
+                       "license_sha256": hashlib.sha256((PATH.parents[2] / "LICENSE").read_bytes()).hexdigest()}
         self.observed["python"] = json.dumps(self.python)
         self.calls = []
         self.fail_at = None
@@ -239,7 +240,7 @@ class SmokeTests(unittest.TestCase):
         dockerfile = (PATH.parents[2] / "Dockerfile").read_text()
         instructions = [line for line in dockerfile.replace("\\\n", "").splitlines()
                         if line.strip() and not line.lstrip().startswith("#")]
-        supported = {"FROM", "RUN", "WORKDIR", "COPY", "ENV", "USER", "CMD"}
+        supported = {"FROM", "RUN", "WORKDIR", "COPY", "ENV", "USER", "CMD", "ARG", "LABEL"}
         self.assertTrue(all(line.split()[0] in supported for line in instructions),
                         "generator must remain inside one continued Dockerfile RUN for older Buildah")
         commands = [line[4:] for line in instructions if line.startswith("RUN ") and "/usr/bin/python3 -I -B" in line]
@@ -327,6 +328,23 @@ class SmokeTests(unittest.TestCase):
                 observed = {**self.python, "metadata": {**self.python["metadata"], key: value}}
                 with self.assertRaises(RuntimeError):
                     self.smoke.validate_python(observed, "arm64", self.package, 180001)
+
+    def test_project_license_is_shipped_hashed_and_checked_exactly(self):
+        root = PATH.parents[2]
+        expected = hashlib.sha256((root / "LICENSE").read_bytes()).hexdigest()
+        self.assertIn("  LICENSE\n", self.smoke.source_manifest())
+        self.assertIn("!LICENSE", (root / ".dockerignore").read_text().splitlines())
+        dockerfile = (root / "Dockerfile").read_text()
+        self.assertIn("COPY --from=builder /build/LICENSE /usr/share/rpgmigrate/LICENSE", dockerfile)
+        self.assertIn("LICENSE NOTICE Dockerfile", dockerfile)
+        self.assertIn("org.opencontainers.image.licenses=", dockerfile)
+        self.assertIn("org.opencontainers.image.revision=", dockerfile)
+        self.assertIn("license_sha256", self.smoke.PYTHON_RUNTIME)
+        value = {**self.python, "license_sha256": expected}
+        self.assertEqual(self.smoke.validate_python(value, "arm64", self.package, 180001)["license_sha256"], expected)
+        for digest in ("0" * 64, "", None):
+            with self.subTest(digest=digest), self.assertRaises(RuntimeError):
+                self.smoke.validate_python({**value, "license_sha256": digest}, "arm64", self.package, 180001)
 
     def test_source_manifest_binds_contents_and_not_only_digest(self):
         self.observed["inputs_manifest"] += "\n" + "0" * 64 + "  foreign"

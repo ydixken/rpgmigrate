@@ -8,9 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && apt-get update && apt-get install -y --no-install-recommends 'libpq-dev=18.*' \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY Cargo.toml Cargo.lock build.rs NOTICE Dockerfile .dockerignore ./
+COPY Cargo.toml Cargo.lock build.rs LICENSE NOTICE Dockerfile .dockerignore ./
 COPY src/ ./src/
-RUN find Cargo.toml Cargo.lock build.rs NOTICE Dockerfile .dockerignore src -type f -print0 \
+RUN find Cargo.toml Cargo.lock build.rs LICENSE NOTICE Dockerfile .dockerignore src -type f -print0 \
     | LC_ALL=C sort -z | xargs -0 sha256sum > /build-inputs.sha256
 RUN CARGO_BUILD_JOBS=2 cargo build --locked --release
 RUN set -eu; mkdir /dependency-notices; \
@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o 65532 -g 65532 -m 0700 /work
 COPY --from=builder /build/target/release/rpgmigrate /usr/local/bin/rpgmigrate
+COPY --from=builder /build/LICENSE /usr/share/rpgmigrate/LICENSE
 COPY --from=builder /build/NOTICE /usr/share/rpgmigrate/NOTICE
 COPY --from=builder /build-inputs.sha256 /usr/share/rpgmigrate/build-inputs.sha256
 COPY --from=builder /dependency-notices/ /usr/share/rpgmigrate/dependency-notices/
@@ -79,6 +80,10 @@ RUN printf '%s\n' \
     'os.chown(path, 0, 0)' \
     'os.chmod(path, 0o444)' \
     | /usr/bin/python3 -I -B
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/ydixken/rpgmigrate" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
 ENV PATH="/usr/local/bin:/usr/lib/postgresql/18/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 USER 65532:65532
 WORKDIR /work

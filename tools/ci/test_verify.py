@@ -24,7 +24,7 @@ CONTENT = "import unittest\nclass Tests(unittest.TestCase):\n    def test_requir
 class VerificationTests(unittest.TestCase):
     def test_inventory_contains_each_retained_suite_once(self):
         self.assertEqual(runner.HARNESS_SUITES, HARNESS)
-        self.assertEqual(runner.CI_SUITES, ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/e2e/test_cutover.py", "tools/image/test_smoke.py", *HARNESS))
+        self.assertEqual(runner.CI_SUITES, ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/e2e/test_cutover.py", "tools/image/test_smoke.py", "tools/image/test_dev_publish.py", *HARNESS))
         self.assertEqual(len(set(runner.CI_SUITES)), len(runner.CI_SUITES))
 
     def populate(self, root):

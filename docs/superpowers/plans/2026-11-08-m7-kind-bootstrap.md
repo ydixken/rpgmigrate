@@ -13,6 +13,32 @@ The bootstrap slice uses the legacy engine; native execution waits for M3, M4, M
 
 **Spec:** [Approved design](../specs/2026-11-06-rpgmigrate-design.md), [roadmap M7](../../roadmap.md), [M5 plan](2026-11-08-m5-packaging-ci.md), and [M6 plan](2026-11-08-m6-native-adapter.md).
 
+## Public registry transport amendment, 2026-11-10
+
+The user-approved public GHCR direction supersedes this plan's archive/import/alias and local-manager transport instructions.
+Historical failed receipts and old RUN evidence retain their original identities; they do not qualify the successor transport.
+Publish only the exact manager and native development packages with no-overwrite `dev-<full-40-hex-commit>-<arm64|amd64>` tags.
+Ordinary publication runs in the exact admitted feature-branch workflow.
+The separately approved first native-package bootstrap is an explicit exception, not a manager or general local publisher.
+Publicity-pending receipts cannot qualify a lock, and visibility continuation checks the original digest without rebuilding or pushing.
+
+Keep the tracked upstream catalog static and generate a private schema 2 public-registry lock from exact source and publication receipts.
+Every selected Linux image binds its original public repository, runnable manifest, optional index, config, architecture, variant, and typed public provenance.
+PostgreSQL retains the major tag with the digest for CNPG major discovery.
+The suite input is schema 2 and requires `image_lock_sha256`, the SHA-256 of the exact lock copied to `RUN/image-lock.json`.
+The Go side independently validates the bytes and source identities before workloads start.
+The source packet, selected images, per-node CRI bindings, ownership, original clocks, caps, and cleanup authority must all agree.
+Reject archive fields, imports, retagging, aliases, local registry references, and schema 1 on this route.
+
+The guarded prepare command requires explicit `RUN_DIR`, `IMAGE_LOCK`, and `RECEIPT_DIR` through its Task target.
+Use `pull` after guarded UP; the old `load` target refuses without effects.
+The legacy Task selects only the positive bootstrap case inventory and fails when it is empty.
+The native Task retains its refusal until its runtime gates pass.
+The private M6 runtime driver Task interface remains an integration dependency until its owner freezes the exact source and CLI; tracked commands must not embed private source paths.
+Hosted offline contract CI is separate from publication and runtime qualification.
+Hosted kind runtime activation requires the bounded Linux-native-host transport follow-up because the Guard currently uses a Podman VM.
+M6–M10 remain open; no production native admission, release, or benchmark gate closes from this source amendment.
+
 ## Global Constraints
 
 - Implement operator files only in the leader-assigned feature checkout and freeze its complete source inventory before each authorized manager build.
