@@ -584,3 +584,21 @@ Check requested `HostConfig` limits before container start.
 Effective cgroups exist only after start, so observe them at the earliest bounded post-start check, approximately five seconds later.
 Require that check before qualification or profile acceptance.
 A post-start probe does not prove pre-execution enforcement.
+
+## Name the exact durability comparator, 2026-11-10
+
+Check the pinned fork `86bf908` default `clone --follow` path before describing the benchmark baseline.
+Its grouped CDC uses synchronous commit with 100-transaction, 10000-row, and 200-ms caps, while COPY uses asynchronous commit.
+Conditional replay-file asynchronous settings do not describe default grouped catch-up.
+Native `durable` is stronger than native `replay-safe`, without a blanket claim about fork default CDC.
+
+## Separate fixed fuzz algorithms from executed mutation identity, 2026-11-10
+
+Record exact selectors and bounded case counts for the CLI/state campaign.
+State cases depend on temporary-directory device/inode values, so a fixed RNG seed and normalized seed hash do not prove identical executed bytes across hosts.
+
+## Preserve expired lease refusal after bootstrap success, 2026-11-10
+
+Keep the original wall lease when wall and monotonic clocks diverge.
+A stored Ready receipt grants no live authority after its supervisor expires.
+Record the discontinuity without assigning an unproven cause, and require fresh admission rather than renewing authority from historical success.

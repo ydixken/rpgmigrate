@@ -173,8 +173,27 @@ Private lock: `/private/tmp/rpgmigrate-m7-arm64-public-lock-20261110-build-a7f2/
 The canonical M6 private-envelope rebind manifest is `b293524d39398576cb3a02f13d709221edc3cbb2c909ed021debf29760a8b4c5`, with status `UNBOUND`.
 The sealed canonical supervisor packet retains status `UNBOUND`.
 Supervisor packet: `/private/var/tmp/rpgmigrate-m7-ghcr-registry-supervisors-canonical29ed-20261110/source-packet.json`, SHA-256 `ced1a9dea61f033729bbea7cc6df956d9eeaf2573471a4d9798d57ba0909410b`.
-Fresh kind admission checks remain open.
-The kind admission worker performs read-only checks, without PREPARE or UP execution.
+The canonical source `29ed`, native runner `abd1`, and exact twelve-role lock passed actual PREPARE/CHECK and UP/CHECK.
+PREPARE took 34.151 seconds and its CHECK took 1.034 seconds.
+UP took 83.445 seconds and its CHECK took 10.388 seconds.
+The three owned nodes reached Ready with actual two-CPU, 4-GiB, zero-swap limits and matching API/provider identities.
+First Ready proof: `/private/var/tmp/rpgmigrate-m7-canonical29ed-admission-20261110-72d46c83/runtime-supervisors/s1-evidence/first-up-ready-proof.json`, SHA-256 `cc51c796918f48ec963ea75431d463d42a10f7d8b0427928e65234a66147fc7f`.
+The later S2 one-shot refused admission because the original wall lease expired.
+Wall time advanced 15869.021 seconds against 775.494 monotonic seconds, leaving an unattributed 15093.528-second discontinuity.
+The cause remains unresolved.
+S1 expired or became absent, and the stored Ready receipt grants no live authority.
+No persistent S2, handover, PULL, or MigrationSpec execution followed.
+S2 refusal proof: `/private/var/tmp/rpgmigrate-m7-canonical29ed-admission-20261110-72d46c83/S2-failed-admission-proof.json`, SHA-256 `b658467f23a6d544a5605d6b1201f567289c17c3b8cb02a2101b8ee158049e3b`.
+Independent retirement verified absence of all three exact owned node containers, their PIDs, and their cgroups, then released the window.
+All 425 image IDs, associations, and history remain preserved.
+All 209 volumes remain retained, including the original 206 and three new volumes.
+The four original and four external containers, both networks, 716 source paths, RUN evidence, and S2 refusal evidence remain preserved.
+The kind network is empty.
+The only known unrelated delta is the default network creation timestamp.
+Retirement proof: `/private/var/tmp/rpgmigrate-m7-canonical29ed-admission-20261110-72d46c83/retirement-preservation-release-proof.json`, SHA-256 `6829508641cb6f208e68014925a9fa40acb29e8b7983800289ba1486c469f4dc`.
+No new parent lease exists at this checkpoint.
+Bootstrap passed, while native E2E and migration execution remain open.
+No renewal or new parent lease follows from the first Ready receipt.
 
 The signed isolated M8 candidate `ea51e2375e51adc3d42115c588f5d3b23ea6d4a6`, tree `70198152465b405002ec4bf95d68775fa7342ed1`, composes Apache/GHCR changes without changing the M8 core and passed 398 portable tests.
 Composition proof: `/tmp/rpgmigrate-m8-primary-source-composition-20261110/signed-checkpoint.json`, SHA-256 `51f840b0fcc65eac496ddd93c1f2ab209f1571e7c0f68ecfb100076ee962a39a`.
@@ -197,7 +216,10 @@ The new owned `b32` image remains retained, making the next inventory 425 image 
 Release proof: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-16-16-successor-0b65b7a1/independent-successor-failure-preservation-release-proof.json`, SHA-256 `86b5fa4cb4d50acbfacac02d2f3ffc64642f0720921f4cb3b0c4c80523e6f25c`.
 The engine uses extended-query `PQsendQueryParams` framing, while the observer recognizes COPY only through simple-query `Q` messages.
 An in-memory reproduction accepts simple-query COPY and rejects the actual extended Parse/Bind/Describe/Execute/Sync framing.
-The observer fix remains source work, without a runtime pass or weaker COPY evidence requirements.
+The two-file extended-COPY observer fix passed 31 in-memory wire checks, with four native extended-query cases failing against the original observer.
+Frozen patch: `/private/tmp/rpgmigrate-m8-extended-copy-wire-20261110-d418a2fe/extended-copy-wire.patch`, SHA-256 `5aacc3e9ba6ec280ed19105c3c3440c8f5a921d007d7550dc51cc72fa6f45646`.
+Bounded COPY-feature failure capture remains source work.
+No live qualification or weaker COPY evidence requirement follows.
 The format 9 / metadata 7 candidate remains separate from the primary format 8 / metadata 6 baseline, without capability activation.
 
 The final private M9 plan passed review and its interfaces are frozen.
@@ -210,6 +232,11 @@ Coherent live replay proof remains open.
 Production discovery remains on HOLD.
 `REPLAY_SAFE_BARRIER_INTERVAL_MS` remains `None`, release mode is unavailable, and no measured cadence or benchmark result exists.
 Benchmark execution remains on HOLD.
+The pinned fork `86bf908` default `clone --follow` path uses synchronous grouped CDC with 100-transaction, 10000-row, and 200-ms caps.
+Its COPY path uses asynchronous commit.
+Conditional asynchronous replay-file settings do not describe default grouped catch-up.
+Native `durable` is stronger than native `replay-safe`, without a blanket comparison against fork default CDC.
+The formal forty-child A/A campaign remains unapproved, with no measured speedup.
 
 The approved M9 implementation clarification follows the actual public CLI, which has no limit options.
 Compiled default limits represent omission on resume and restore the persisted effective limits.
@@ -218,13 +245,19 @@ Test omission and compiled defaults through the real CLI path instead of passing
 
 M10 source-tool preparation is committed at `81c5b8c035806e4934806caec4d41e7dcd85d660`: nine tooling files and three portable-suite registrations passed 439 tests across twenty suites with zero skips.
 Integration proof: `/private/tmp/rpgmigrate-m10-tool-integration-evidence-jckqtq98/integration-evidence.json`, SHA-256 `591d5168b9475370f918cbedbff1e79fc0abe219d908842fe82ffec62ccf1337`; commit/fast-forward proof SHA-256 `526aedfc157eb9257c28ea0063b268baac15c4ad29e9566f3ef0a462eafdcd14`.
-Signed isolated M10 phase-one source `41a80ad9d63711c365522cd46e5c0b01881fe766` passed 22 portable ASAN controls.
-The real toolchain remains unqualified, and the public ASAN manifest refuses execution.
-Signed isolated guide source `6732d800f01e02de85c5c9f6a78c1fda930ad1e5`, tree `a00969a8fcadd81def41ccf8b21de8a3e093fbfb`, passed focused Markdown and hard structural STE checks with zero findings.
-The actual same-source ten-guide gate remains pending, so draft checks do not qualify the documentation suite.
-The pinned ASAN manifest refuses execution until the binary, symbolizer, complete build-std dependency graph, and native runtime are qualified.
+We integrated signed ASAN commit `0b8ba467f2090375b970ac9fa419d2b1a1e326f5` and guide commit `75b8ff2cadf70833473f8188546487863c88adcc` on the engine feature branch.
+The actual same-source ten-guide checker passed with Task 3.54.0, 46 discovered tasks, and binary SHA-256 `0531da02f2155eb041df101e08fee3f2004b8032f1eecfdf390fa6625d53d8c2`.
+Signed checkpoint: `/Users/ydixken/.codex/tmp/rpgmigrate-m10-docs-asan-proof-fj1326j8/signed-checkpoint.json`, SHA-256 `d06947ab5c422aaae9713fa990e50484dd40868199c29687d92228807e858ecd`.
+The built-in guide checker does not enforce capability fixtures.
+A separate read-only observation found the capability-fixture check positive.
+The 22 portable ASAN controls qualify source preparation only.
+The real toolchain remains unqualified, and the public ASAN manifest refuses execution until the binary, symbolizer, build-std graph, and native runtime qualify.
 LLVM tools contain no symbolizer, and the project `Cargo.lock` alone does not describe the complete build-std graph.
-No actual ASAN, fuzz, or runtime qualification follows from this source preparation.
+Signed isolated fuzz source `24783f717ed2a121388aec171afab64c8d7f14e6` on the M9 core base passed five exact CLI/state selectors and strict Clippy.
+Its bounded campaign recorded 6686 cases in seven seconds, preserving frozen metadata and pgoutput.
+State mutation bytes and positions depend on the actual temporary-directory device/inode despite the fixed RNG seed.
+The algorithm and exact selectors are reproducible, while a normalized seed hash does not prove byte-identical executed mutations across hosts.
+No actual ASAN or runtime qualification follows from these source and bounded-fuzz checks.
 Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
 The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
 Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
@@ -679,12 +712,16 @@ The [ledger](../tasks/todo.md#m8-feature-widening-each-item-enables-its-capabili
 The approved [M9 implementation plan](superpowers/plans/2026-11-09-m9-durability-performance.md) follows M8 with native format 10 / metadata 7 and the settings/status capability extension; no ACK may derive from a volatile frontier, and cadence is selected from later measurements.
 Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized.
 M10 remains open.
-Initial-copy planning keeps fork async and native per-table durability enabled; a planned full-clone final flush barrier may match end-state durability without equating crash contracts.
+Initial-copy planning keeps fork COPY async and native per-table durability enabled.
+A planned full-clone final flush barrier may match end-state durability without equating crash contracts.
 The reviewed private final plan and frozen interfaces permit source A/B work.
 The checkpoint above records focused packet tests, the approved CLI omission clarification, pending coherent live proof, unavailable release mode, and benchmark HOLD.
 
 - [ ] `replay-safe` barrier cadence chosen from benchmarks; effective values in help and status; `relaxed` only if the measured gain exists.
-- [ ] Benchmark harness: A/A noise runs first, then interleaved randomized pairs in fresh processes; report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables; compare fork default against `replay-safe` and label `durable` as the stronger contract.
+- [ ] Benchmark harness: Run A/A noise checks, then interleaved randomized pairs in fresh processes.
+  Report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables.
+  Compare fork default against native `replay-safe`.
+  Label native `durable` as stronger than native `replay-safe`.
 - [ ] `docs/durability.md` crash matrix per mode: process kill, host power loss, target crash, target failover with and without a synchronous standby, source WAL retention.
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
@@ -693,7 +730,8 @@ The checkpoint above records focused packet tests, the approved CLI omission cla
 The approved [M10 implementation plan](superpowers/plans/2026-11-09-m10-release-readiness.md) uses bounded mutation tests, native Linux ASAN with its nightly still unverified, STE source/license provenance, and exact production OCI artifacts for the final matrix.
 These preparation decisions close no release or runtime gate.
 The reviewed structural STE script, exact MIT license, and [provenance](../tools/docs/provenance.md) are now vendored unchanged, reusing the same-input self-test, ten CLI controls, and provenance checks.
-The source-tool checkpoint above adds the checked inventory and portable registrations; actual documentation and ASAN qualification remain open.
+The source-tool checkpoint above adds the checked inventory and portable registrations.
+The integrated ten-guide checker passed as recorded above, while actual ASAN and runtime qualification remain open.
 
 - [x] Vendor the reviewed STE script, license, and provenance as preparation only.
 - [x] Commit M10 source tooling and register its three portable suites, retaining actual docs/ASAN/fuzz/runtime qualification as open gates.
