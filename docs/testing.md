@@ -37,6 +37,25 @@ Test discovery must be nonempty.
 Missing tests or skipped required cases are failures.
 Plain CI runs this local gate with stock PGDG libpq 18 development files, prints actual versions, and builds no custom libpq or runner image.
 
+## Native ASAN preparation
+
+Check the current Python executable and required ELF tools against the selected native architecture.
+Run the stock `ldd` script through its checked Bash interpreter.
+We require a complete `binfmt_misc` snapshot before the first child starts.
+Each registration must use magic at offset zero that contradicts the ELF prefix under its mask.
+Treat an absent mask as exact matching.
+Accept only known flags and documented record shapes.
+Handler names grant no exception.
+Check disabled registrations in the same way.
+Missing inspection, extension registrations, unsupported records, and exceeded limits fail admission.
+The snapshot allows at most 64 handlers, 4096 bytes per record, and 256 KiB in total.
+An admitted snapshot cannot prevent later privileged changes.
+
+Retain full toolchain notices, up to 16 MiB per file and 32 MiB per preparation run.
+The separate Debian notice limit is 2 MiB.
+Keep each product's documentation under the private prefix with the official component installer's default documentation paths.
+Preparation receipts do not qualify ASAN coverage or native database runtime.
+
 ## Isolated database checks
 
 The retained `tools/test-db.py` harness owns disposable PostgreSQL clusters and checks test receipts and independent SQL fingerprints.

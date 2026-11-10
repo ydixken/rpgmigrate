@@ -618,6 +618,8 @@ class PreparationTests(unittest.TestCase):
             def text(path, *args, **kwargs):
                 return 'ID=ubuntu\nVERSION_ID="24.04"\n' if str(path) == "/etc/os-release" else f"MemAvailable: {memory_kib} kB\n"
             with patch.object(self.prep.asan, "native_target"), patch.object(self.prep.os, "getuid", return_value=1000), \
+                    patch.object(self.prep, "check_native_tools"), \
+                    patch.object(self.prep, "inspect_binfmt", return_value={"inspection": "complete-snapshot"}), \
                     patch.object(self.prep.Path, "read_text", autospec=True, side_effect=text), \
                     patch.object(self.prep.Path, "is_dir", return_value=False), \
                     patch.object(self.prep.shutil, "disk_usage", return_value=SimpleNamespace(free=free)), \
@@ -722,6 +724,16 @@ class PreparationTests(unittest.TestCase):
             stack.enter_context(patch.object(self.prep, "reject_overrides"))
             stack.enter_context(patch.object(self.prep.asan, "load_pin", return_value=pin))
             stack.enter_context(patch.object(self.prep.asan, "native_target", side_effect=native))
+            stack.enter_context(patch.object(self.prep, "check_native_tools"))
+            def binfmt():
+                if refusal == "binfmt":
+                    raise RuntimeError("binfmt-possible-elf-handler")
+                if refusal == "binfmt-exception":
+                    raise RuntimeError("binfmt-lookup-failed")
+                if refusal == "binfmt-unknown":
+                    raise RuntimeError(CANARY)
+                return {"inspection": "complete-snapshot"}
+            stack.enter_context(patch.object(self.prep, "inspect_binfmt", side_effect=binfmt))
             stack.enter_context(patch.object(self.prep, "admit", side_effect=admission))
             stack.enter_context(patch.object(self.prep, "sha256", side_effect=digest))
             stack.enter_context(patch.object(self.prep.Path, "read_text", autospec=True, side_effect=read))
@@ -762,21 +774,285 @@ class PreparationTests(unittest.TestCase):
             with self.subTest(refusal=refusal):
                 self.assertEqual(self.admission_attempt(refusal).get("admission_substage"), expected)
 
-    def test_attempt_schema_two_requires_nullable_closed_admission_substage(self):
+    def test_attempt_schema_three_requires_nullable_closed_admission_operation_details(self):
         self.assertEqual(self.prep.ADMISSION_SUBSTAGES,
                          ("uid", "native-architecture", "dpkg-architecture", "os-release", "binfmt", "project-lock",
                           "public-pin", "runner-image", "scratch-disk", "available-memory", "core-limit", "complete"))
         attempt = self.prep.new_attempt(TARGET)
-        self.assertEqual(attempt["schema_version"], 2)
+        self.assertEqual(attempt["schema_version"], 3)
         self.assertIn("admission_substage", attempt)
         self.assertIsNone(attempt["admission_substage"])
+        self.assertIsNone(attempt["admission_detail"])
+        self.assertEqual(self.prep.BINFMT_DETAILS, ("binfmt-lookup-failed", "binfmt-enumeration-failed", "binfmt-entry-read-failed",
+                         "binfmt-entry-invalid", "binfmt-budget-exceeded", "binfmt-possible-elf-handler"))
         self.prep.validate_attempt(attempt)
         for change in ({"admission_substage": CANARY}, {"admission_substage": 1},
-                       {"admission_substage": []}, {"schema_version": 1}, {"admission_substage": "uid"}):
+                       {"admission_substage": []}, {"schema_version": 1}, {"schema_version": 2}, {"admission_substage": "uid"},
+                       {"admission_detail": CANARY}, {"admission_detail": []}, {"admission_detail": "binfmt-entry-invalid"}):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 self.prep.validate_attempt({**attempt, **change})
-        del attempt["admission_substage"]
-        with self.assertRaises(RuntimeError):
+        for missing in ("admission_substage", "admission_detail"):
+            changed = dict(attempt)
+            del changed[missing]
+            with self.assertRaises(RuntimeError):
+                self.prep.validate_attempt(changed)
+
+    def binfmt_record(self, *, magic="cb0d0d0a", mask=None, state="enabled", flags="", offset=0):
+        text = f"{state}\ninterpreter /{CANARY}/python\nflags: {flags}\noffset {offset}\nmagic {magic}\n"
+        return (text + (f"mask {mask}\n" if mask is not None else "")).encode()
+
+    def binfmt_directory(self, root, records=()):
+        root.mkdir()
+        (root / "register").write_bytes(b"")
+        (root / "status").write_bytes(b"enabled\n")
+        for index, record in enumerate(records):
+            (root / f"{CANARY}-{index}").write_bytes(record)
+        return root
+
+    def test_disjoint_synthetic_registration_admits_both_native_targets(self):
+        pin = self.prep.asan.load_pin(SCRIPT.with_name("ffi_asan_toolchain.toml"))
+        real_dir, real_iter = Path.is_dir, Path.iterdir
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = self.binfmt_directory(Path(temporary) / "registry", [self.binfmt_record()])
+            for target, (_, _, architecture) in self.prep.asan.TARGETS.items():
+                def is_dir(path):
+                    return True if str(path) == "/proc/sys/fs/binfmt_misc" else real_dir(path)
+                def iterdir(path):
+                    return real_iter(registry) if str(path) == "/proc/sys/fs/binfmt_misc" else real_iter(path)
+                def text(path, *args, **kwargs):
+                    return 'ID=ubuntu\nVERSION_ID="24.04"\n' if str(path) == "/etc/os-release" else f"MemAvailable: {7 * 1024 ** 2} kB\n"
+                events = []
+                real_inspect = self.prep.inspect_binfmt
+                def inspect():
+                    value = real_inspect()
+                    events.append("binfmt-complete")
+                    return value
+                def command(argv):
+                    self.assertEqual(events, ["native-elf", "binfmt-complete"])
+                    return subprocess.CompletedProcess(argv, 0, architecture + "\n", "")
+                supervisor = SimpleNamespace(run_dir=Path(temporary), run=command)
+                attempt = self.prep.new_attempt(target)
+                with patch.object(self.prep, "BINFMT_ROOT", registry, create=True), \
+                        patch.object(self.prep, "check_native_tools", side_effect=lambda target: events.append("native-elf")), \
+                        patch.object(self.prep, "inspect_binfmt", side_effect=inspect), \
+                        patch.object(self.prep.asan, "native_target"), patch.object(self.prep.os, "getuid", return_value=1000), \
+                        patch.object(self.prep.Path, "is_dir", autospec=True, side_effect=is_dir), \
+                        patch.object(self.prep.Path, "iterdir", autospec=True, side_effect=iterdir), \
+                        patch.object(self.prep.Path, "read_text", autospec=True, side_effect=text), \
+                        patch.object(self.prep.shutil, "disk_usage", return_value=SimpleNamespace(free=13 * self.prep.GIB)), \
+                        patch.object(self.prep.resource, "getrlimit", return_value=(0, 0)):
+                    try:
+                        value = self.prep.admit(supervisor, target, {"ImageOS": "ubuntu24", "ImageVersion": "20261101.360.1"}, pin, attempt)
+                    except RuntimeError:
+                        value = None
+                self.assertIsNotNone(value, "a strict offset-zero pyc-like magic cannot match either native ELF")
+                self.assertEqual(value["binfmt"], {"inspection": "complete-snapshot", "handlers_examined": 1,
+                    "elf_disjoint_magic_handlers": 1, "enabled_handlers": 1, "disabled_handlers": 0, "registry_state": "enabled"})
+                self.assertNotIn(CANARY, json.dumps(value))
+
+    def test_binfmt_parser_requires_first_four_byte_masked_elf_disjointness(self):
+        for record in (self.binfmt_record(), self.binfmt_record(mask="ffffffff"),
+                       self.binfmt_record(magic="80", mask="80", state="disabled", flags="POCF")):
+            self.assertIn(self.prep.parse_binfmt_record(record), ("enabled", "disabled"))
+        for machine in (62, 183):
+            header = bytearray(20)
+            header[:6] = b"\x7fELF\x02\x01"
+            header[18:20] = machine.to_bytes(2, "little")
+            self.assertTrue(any((header[index] ^ value) & 255 for index, value in enumerate(bytes.fromhex("cb0d0d0a"))))
+        for record in (self.binfmt_record(magic="7f454c46"), self.binfmt_record(mask="00000000"),
+                       self.binfmt_record(magic="7f454c4601"), self.binfmt_record(magic="7f454c4601", state="disabled")):
+            with self.subTest(record=record[:8]), self.assertRaisesRegex(RuntimeError, "binfmt-possible-elf-handler"):
+                self.prep.parse_binfmt_record(record)
+
+    def test_binfmt_parser_refuses_extensions_offsets_unknown_flags_and_malformed_fields(self):
+        invalid = [b"enabled\ninterpreter /python\nflags: \nextension .pyc\n", self.binfmt_record(offset=1),
+                   self.binfmt_record(flags="Q"), self.binfmt_record(flags="PP"), self.binfmt_record(flags="OP"),
+                   self.binfmt_record(mask="ff"), self.binfmt_record(magic="abc"), self.binfmt_record(magic=""),
+                   self.binfmt_record().replace(b"enabled", b"unknown"), self.binfmt_record() + b"unknown value\n",
+                   self.binfmt_record().replace(b"interpreter /", b"interpreter relative/")]
+        for record in invalid:
+            with self.subTest(record=record[:16]), self.assertRaisesRegex(RuntimeError, "binfmt-entry-invalid"):
+                self.prep.parse_binfmt_record(record)
+
+    def test_binfmt_snapshot_refuses_missing_unreadable_incomplete_and_over_budget_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(RuntimeError, "binfmt-lookup-failed"):
+                self.prep.inspect_binfmt(root / "missing")
+            registry = self.binfmt_directory(root / "registry", [self.binfmt_record(state="disabled")])
+            summary = self.prep.inspect_binfmt(registry)
+            self.assertEqual(summary["disabled_handlers"], 1)
+            self.assertEqual(summary["inspection"], "complete-snapshot")
+            self.assertNotIn(CANARY, json.dumps(summary))
+            (registry / "register").rename(registry / "missing-control")
+            with self.assertRaisesRegex(RuntimeError, "binfmt-lookup-failed"):
+                self.prep.inspect_binfmt(registry)
+            (registry / "missing-control").rename(registry / "register")
+            real_iter = Path.iterdir
+            with patch.object(self.prep.Path, "iterdir", autospec=True, side_effect=PermissionError(CANARY)):
+                with self.assertRaisesRegex(RuntimeError, "binfmt-enumeration-failed") as error:
+                    self.prep.inspect_binfmt(registry)
+                self.assertNotIn(CANARY, str(error.exception))
+            with patch.object(self.prep.os, "open", side_effect=PermissionError(CANARY)):
+                with self.assertRaisesRegex(RuntimeError, "binfmt-lookup-failed"):
+                    self.prep.inspect_binfmt(registry)
+            handler = next(path for path in real_iter(registry) if path.name not in ("register", "status"))
+            real_open = os.open
+            def open_file(path, *args, **kwargs):
+                if Path(path) == handler:
+                    raise FileNotFoundError(CANARY)
+                return real_open(path, *args, **kwargs)
+            with patch.object(self.prep.os, "open", side_effect=open_file):
+                with self.assertRaisesRegex(RuntimeError, "binfmt-entry-read-failed"):
+                    self.prep.inspect_binfmt(registry)
+            handler.write_bytes(b"x" * 4097)
+            with self.assertRaisesRegex(RuntimeError, "binfmt-budget-exceeded"):
+                self.prep.inspect_binfmt(registry)
+            handler.write_bytes(self.binfmt_record())
+            for index in range(64):
+                (registry / f"extra-{index}").write_bytes(self.binfmt_record())
+            with self.assertRaisesRegex(RuntimeError, "binfmt-budget-exceeded"):
+                self.prep.inspect_binfmt(registry)
+
+    def test_binfmt_total_budget_and_no_handler_name_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = self.binfmt_directory(Path(temporary) / "registry", [self.binfmt_record()])
+            for name in ("python", "qemu-aarch64", CANARY):
+                existing = next(path for path in registry.iterdir() if path.name not in ("register", "status"))
+                existing.rename(registry / name)
+                self.assertEqual(self.prep.inspect_binfmt(registry)["handlers_examined"], 1)
+            with patch.object(self.prep, "BINFMT_TOTAL_LIMIT", 8):
+                with self.assertRaisesRegex(RuntimeError, "binfmt-budget-exceeded"):
+                    self.prep.inspect_binfmt(registry)
+            (registry / CANARY).write_bytes(self.binfmt_record(magic="7f454c46"))
+            (registry / "status").write_bytes(b"disabled\n")
+            with self.assertRaisesRegex(RuntimeError, "binfmt-possible-elf-handler"):
+                self.prep.inspect_binfmt(registry)
+
+    def test_native_tools_check_self_and_bash_without_treating_ldd_script_as_elf(self):
+        checked = []
+        with patch.object(self.prep.Path, "is_file", return_value=True), patch.object(self.prep.Path, "is_symlink", return_value=False), \
+                patch.object(self.prep, "native_elf", side_effect=lambda path, target: checked.append(str(path))), \
+                patch.object(self.prep.Path, "open", return_value=io.BytesIO(b"#!/bin/bash\npublic script\n")):
+            self.prep.check_native_tools(TARGET)
+        self.assertEqual(checked[0], "/proc/self/exe")
+        self.assertIn("/bin/bash", checked)
+        self.assertNotIn("/usr/bin/ldd", checked)
+        tree = ast.parse(SCRIPT.read_text())
+        argv = [node.args[0] for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run" and node.args and isinstance(node.args[0], ast.List)]
+        self.assertTrue(any([getattr(value, "value", None) for value in node.elts[:2]] == ["/bin/bash", "/usr/bin/ldd"] for node in argv))
+        with patch.object(self.prep.Path, "is_file", return_value=True), patch.object(self.prep.Path, "is_symlink", return_value=False), \
+                patch.object(self.prep, "native_elf"), patch.object(self.prep.Path, "open", return_value=io.BytesIO(b"#!/usr/bin/env bash\n")):
+            with self.assertRaises(RuntimeError):
+                self.prep.check_native_tools(TARGET)
+
+    def test_current_self_machine_mismatch_refuses_before_any_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "self"
+            header = bytearray(20)
+            header[:6] = b"\x7fELF\x02\x01"
+            header[18:20] = (183).to_bytes(2, "little")
+            binary.write_bytes(header)
+            real_elf = self.prep.native_elf
+            checked = []
+            def native(path, target):
+                checked.append(str(path))
+                return real_elf(binary, target)
+            with patch.object(self.prep, "native_elf", side_effect=native), patch.object(self.prep.subprocess, "Popen") as child:
+                with self.assertRaisesRegex(RuntimeError, "admission"):
+                    self.prep.check_native_tools(TARGET)
+                child.assert_not_called()
+            self.assertEqual(checked, ["/proc/self/exe"])
+
+    def toolchain_notice_fixture(self, root, records):
+        for name in ("downloads", "components", "prefix"):
+            (root / name).mkdir()
+        calls, notices = [], []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            raise RuntimeError("fixture-installer-stop")
+        supervisor = SimpleNamespace(run_dir=root, remaining=lambda: 60, check_scratch=lambda: None, run=run)
+        def download(_, url, path, checksum, **kwargs):
+            path.write_text("")
+            return {"sha256": checksum, "bytes": 1}
+        def extract(archive, directory, supervisor):
+            component = archive.name.removesuffix(".tar.xz")
+            distribution = directory / "distribution"
+            distribution.mkdir(parents=True)
+            (distribution / "install.sh").write_text("fixture")
+            for name, data in records.get(component, [("LICENSE-APACHE", b"notice\n")]):
+                (distribution / name).write_bytes(data)
+            return directory
+        return supervisor, calls, notices, download, extract
+
+    def test_observed_toolchain_notice_sizes_preserve_all_text_before_first_installer(self):
+        records = {"rustc": [("COPYRIGHT.html", b"A" * 15119285), ("COPYRIGHT-library.html", b"B" * 2599602)]}
+        for component, count, total in (("rustc", 3, 12362), ("cargo", 6, 160626), ("rust-src", 78, 442901),
+                                         ("rust-std", 3, 12362), ("llvm-tools-preview", 1, 15141)):
+            quotient, remainder = divmod(total, count)
+            records.setdefault(component, []).extend((f"LICENSE-{index}.txt", b"L" * (quotient + (index < remainder))) for index in range(count))
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor, calls, notices, download, extract = self.toolchain_notice_fixture(Path(temporary), records)
+            pin = self.prep.asan.load_pin(SCRIPT.with_name("ffi_asan_toolchain.toml"))
+            with patch.object(self.prep, "download", side_effect=download), patch.object(self.prep, "validate_component_manifest"), \
+                    patch.object(self.prep, "extract_component", side_effect=extract):
+                with self.assertRaisesRegex(RuntimeError, "fixture-installer-stop"):
+                    self.prep.prepare_toolchain(supervisor, pin, TARGET, notices=notices)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(notices), 93)
+            self.assertEqual(sum(len(item["text"].encode()) for item in notices), 18362279)
+            expected = {(component, name): data for component, entries in records.items() for name, data in entries}
+            for item in notices:
+                data = expected[(item["component"], item["source"])]
+                self.assertEqual(item["text"].encode(), data)
+                self.assertEqual(item["sha256"], hashlib.sha256(data).hexdigest())
+
+    def test_toolchain_notice_file_and_aggregate_caps_refuse_before_any_installer(self):
+        pin = self.prep.asan.load_pin(SCRIPT.with_name("ffi_asan_toolchain.toml"))
+        for entries in ([("COPYRIGHT.html", b"X" * (16 * 1024 ** 2 + 1))],
+                        [("LICENSE-a", b"X" * (16 * 1024 ** 2)), ("LICENSE-b", b"Y" * (16 * 1024 ** 2)), ("LICENSE-c", b"Z")]):
+            with tempfile.TemporaryDirectory() as temporary:
+                supervisor, calls, notices, download, extract = self.toolchain_notice_fixture(Path(temporary), {"rustc": entries})
+                with patch.object(self.prep, "download", side_effect=download), patch.object(self.prep, "validate_component_manifest"), \
+                        patch.object(self.prep, "extract_component", side_effect=extract):
+                    with self.assertRaisesRegex(RuntimeError, "toolchain"):
+                        self.prep.prepare_toolchain(supervisor, pin, TARGET, notices=notices)
+                self.assertEqual(calls, [])
+
+    def test_official_installer_uses_distinct_product_docs_below_private_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor, calls, notices, download, extract = self.toolchain_notice_fixture(root, {})
+            pin = self.prep.asan.load_pin(SCRIPT.with_name("ffi_asan_toolchain.toml"))
+            with patch.object(self.prep, "download", side_effect=download), patch.object(self.prep, "validate_component_manifest"), \
+                    patch.object(self.prep, "extract_component", side_effect=extract):
+                with self.assertRaisesRegex(RuntimeError, "fixture-installer-stop"):
+                    self.prep.prepare_toolchain(supervisor, pin, TARGET, notices=notices)
+            options = dict(value[2:].split("=", 1) for value in calls[0] if value.startswith("--") and "=" in value)
+            self.assertNotIn("docdir", options)
+            self.assertEqual(set(options), {"prefix", "sysconfdir", "bindir", "libdir", "datadir", "mandir"})
+            self.assertTrue(all(Path(value).is_relative_to(root / "prefix") for value in options.values()))
+            self.assertIn("--disable-ldconfig", calls[0])
+            rust = Path(options["datadir"]) / "doc/rust/README.md"
+            cargo = Path(options["datadir"]) / "doc/cargo/README.md"
+            self.assertNotEqual(rust, cargo)
+
+    def test_binfmt_operation_details_stay_closed_and_failed_admission_runs_nothing_later(self):
+        for refusal, expected in (("binfmt", "binfmt-possible-elf-handler"), ("binfmt-exception", "binfmt-lookup-failed"),
+                                  ("binfmt-unknown", "binfmt-entry-invalid")):
+            with self.subTest(refusal=refusal):
+                attempt = self.admission_attempt(refusal)
+                self.assertEqual(attempt["schema_version"], 3)
+                self.assertEqual(attempt["admission_substage"], "binfmt")
+                self.assertEqual(attempt["admission_detail"], expected)
+                self.prep.validate_attempt(attempt)
+        for detail in self.prep.BINFMT_DETAILS:
+            attempt = self.prep.new_attempt(TARGET)
+            attempt["admission_substage"] = "binfmt"
+            attempt["admission_detail"] = detail
+            attempt["stages"]["admission"] = {"status": "failed", "reason": "admission"}
+            attempt["first_failure"] = {"stage": "admission", "reason": "admission"}
             self.prep.validate_attempt(attempt)
 
     def test_workflow_is_feature_only_fixed_native_readonly_and_failure_preserving(self):

@@ -13,6 +13,7 @@ import resource
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -32,6 +33,14 @@ SYMBOLIZER = Path("/usr/lib/llvm-18/bin/llvm-symbolizer")
 STAGES = ("admission", "toolchain", "graphs", "symbolizer", "control", "retention", "bindings")
 ADMISSION_SUBSTAGES = ("uid", "native-architecture", "dpkg-architecture", "os-release", "binfmt", "project-lock",
                       "public-pin", "runner-image", "scratch-disk", "available-memory", "core-limit", "complete")
+BINFMT_DETAILS = ("binfmt-lookup-failed", "binfmt-enumeration-failed", "binfmt-entry-read-failed", "binfmt-entry-invalid",
+                  "binfmt-budget-exceeded", "binfmt-possible-elf-handler")
+BINFMT_ROOT = Path("/proc/sys/fs/binfmt_misc")
+BINFMT_HANDLER_LIMIT = 64
+BINFMT_RECORD_LIMIT = 4096
+BINFMT_TOTAL_LIMIT = 256 * 1024
+TOOLCHAIN_NOTICE_FILE_LIMIT = 16 * 1024 ** 2
+TOOLCHAIN_NOTICE_TOTAL_LIMIT = 32 * 1024 ** 2
 GIB = 1024 ** 3
 HEX = re.compile(r"[0-9a-f]{64}")
 PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?::(?:amd64|arm64))?")
@@ -325,7 +334,7 @@ def prepare_toolchain(supervisor, pin, target, report=None, notices=None):
         components.append({"component": name, "archive": archive, "identity": identity})
     # All archives must match the dated manifest before any bundled installer runs.
     report["components"] = [{"component": item["component"], **item["identity"]} for item in components]
-    installers, scripts = [], []
+    installers, scripts, notice_bytes = [], [], 0
     for entry in components:
         directory = extract_component(entry["archive"], run / "components" / entry["component"], supervisor)
         roots = list(directory.iterdir())
@@ -343,8 +352,14 @@ def prepare_toolchain(supervisor, pin, target, report=None, notices=None):
                 if path.suffix == ".sh" or path.name in ("components", "manifest.in", "rust-installer-version"):
                     scripts.append({"component": entry["component"], "source": relative, "sha256": sha256(path)})
                 if re.search(r"(?:^|/)(?:LICENSE|COPYRIGHT|COPYING|NOTICE)(?:[.-]|$)", relative, re.IGNORECASE):
-                    require(path.stat().st_size <= 2 * 1024 ** 2, "toolchain")
-                    notices.append({"component": entry["component"], "source": relative, "sha256": sha256(path), "text": path.read_text()})
+                    size = path.stat().st_size
+                    require(size <= TOOLCHAIN_NOTICE_FILE_LIMIT and notice_bytes + size <= TOOLCHAIN_NOTICE_TOTAL_LIMIT, "toolchain")
+                    notice_bytes += size
+                    with path.open("rb") as original:
+                        data = original.read(TOOLCHAIN_NOTICE_FILE_LIMIT + 1)
+                    require(len(data) == size, "toolchain")
+                    notices.append({"component": entry["component"], "source": relative,
+                                    "sha256": hashlib.sha256(data).hexdigest(), "text": data.decode("utf-8")})
         require(len(notices) > notice_start, "toolchain")
     require(scripts and notices, "toolchain")
     report.update(installation="verified-official-component-install.sh", installer_sources=scripts)
@@ -352,7 +367,7 @@ def prepare_toolchain(supervisor, pin, target, report=None, notices=None):
     require(not any(prefix.iterdir()), "toolchain")
     for install in installers:
         directories = {"prefix": prefix, "sysconfdir": prefix / "etc", "bindir": prefix / "bin", "libdir": prefix / "lib",
-                       "datadir": prefix / "share", "mandir": prefix / "share/man", "docdir": prefix / "share/doc/rust"}
+                       "datadir": prefix / "share", "mandir": prefix / "share/man"}
         supervisor.run(["/bin/bash", str(install), *["--" + key + "=" + str(value) for key, value in directories.items()],
                         "--disable-ldconfig"], timeout=300)
     rustc, cargo = prefix / "bin/rustc", prefix / "bin/cargo"
@@ -801,7 +816,7 @@ def authenticate_symbolizer(supervisor, target):
         require(len(interpreters) <= 1, "symbolizer")
         pending.extend(Path(value).resolve() for value in interpreters)
     require(len(bindings) > 1, "symbolizer")
-    listed = supervisor.run(["/usr/bin/ldd", str(SYMBOLIZER)]).stdout
+    listed = supervisor.run(["/bin/bash", "/usr/bin/ldd", str(SYMBOLIZER)]).stdout
     require("not found" not in listed, "symbolizer")
     loaded = {Path(path).resolve().as_posix() for path in re.findall(r"(?:=>\s+|^\s*)(/[^\s]+)\s+\(", listed, re.MULTILINE)}
     expected = {entry["path"] for entry in bindings if entry["path"] != SYMBOLIZER.as_posix()}
@@ -847,9 +862,9 @@ def run_controls(supervisor, target):
 
 def new_attempt(target):
     require(target in asan.TARGETS)
-    return {"schema_version": 2, "kind": "rpgmigrate-asan-preparation", "scope": "native-inventory-and-symbolization-control",
+    return {"schema_version": 3, "kind": "rpgmigrate-asan-preparation", "scope": "native-inventory-and-symbolization-control",
             "qualification": "not-assessed", "target": target, "status": "failed",
-            "admission_substage": None,
+            "admission_substage": None, "admission_detail": None,
             "stages": {name: {"status": "not-run", "reason": "none"} for name in STAGES},
             "owned_children_reaped": False, "public_pin_unchanged": False, "artifacts": {},
             "first_failure": {"stage": "none", "reason": "none"}}
@@ -857,12 +872,14 @@ def new_attempt(target):
 
 def validate_attempt(attempt):
     require(type(attempt) is dict and set(attempt) == set(new_attempt(next(iter(asan.TARGETS)))))
-    require(type(attempt["schema_version"]) is int and attempt["schema_version"] == 2 and
+    require(type(attempt["schema_version"]) is int and attempt["schema_version"] == 3 and
             attempt["kind"] == "rpgmigrate-asan-preparation" and attempt["scope"] == "native-inventory-and-symbolization-control" and
             attempt["qualification"] == "not-assessed" and attempt["target"] in asan.TARGETS and attempt["status"] == "failed")
     require(type(attempt["owned_children_reaped"]) is bool and type(attempt["public_pin_unchanged"]) is bool)
     substage = attempt["admission_substage"]
     require(substage is None or (type(substage) is str and substage in ADMISSION_SUBSTAGES))
+    detail = attempt["admission_detail"]
+    require(detail is None or (type(detail) is str and detail in BINFMT_DETAILS))
     require(type(attempt["first_failure"]) is dict and set(attempt["first_failure"]) == {"stage", "reason"} and
             attempt["first_failure"]["stage"] in (*STAGES, "none") and attempt["first_failure"]["reason"] in CODES | {"none"})
     require(type(attempt["stages"]) is dict and set(attempt["stages"]) == set(STAGES))
@@ -876,6 +893,8 @@ def validate_attempt(attempt):
     failures = [name for name in STAGES if attempt["stages"][name]["status"] in ("failed", "incomplete")]
     expected_failure = {"stage": failures[0], "reason": attempt["stages"][failures[0]]["reason"]} if failures else {"stage": "none", "reason": "none"}
     require(attempt["first_failure"] == expected_failure)
+    require(detail is None or (substage == "binfmt" and attempt["stages"]["admission"]["status"] == "failed" and
+                               attempt["first_failure"] == {"stage": "admission", "reason": "admission"}))
     require(not attempt["public_pin_unchanged"] or attempt["stages"]["bindings"]["status"] == "passed")
     require(type(attempt["artifacts"]) is dict and set(attempt["artifacts"]) <= {"graphs.json", "provenance.json", "third-party-licenses.json", "public-provenance.json", "public-provenance.tar"})
     require(all(type(value) is str and HEX.fullmatch(value) for value in attempt["artifacts"].values()))
@@ -900,21 +919,100 @@ def source_binding(supervisor):
     return {"commit": commit, "tree": tree, "files": files}
 
 
+def parse_binfmt_record(record):
+    require(type(record) is bytes and len(record) <= BINFMT_RECORD_LIMIT, "binfmt-budget-exceeded")
+    require(record.endswith(b"\n"), "binfmt-entry-invalid")
+    lines = record.split(b"\n")[:-1]
+    require(len(lines) in (5, 6) and lines[0] in (b"enabled", b"disabled") and
+            re.fullmatch(rb"interpreter /[^\x00-\x20\x7f]+", lines[1]) and
+            re.fullmatch(rb"flags: P?O?C?F?", lines[2]) and lines[3] == b"offset 0" and
+            re.fullmatch(rb"magic (?:[0-9a-f]{2}){1,256}", lines[4]), "binfmt-entry-invalid")
+    magic = bytes.fromhex(lines[4][6:].decode("ascii"))
+    mask = bytes([255]) * len(magic)
+    if len(lines) == 6:
+        require(re.fullmatch(rb"mask (?:[0-9a-f]{2}){1,256}", lines[5]), "binfmt-entry-invalid")
+        mask = bytes.fromhex(lines[5][5:].decode("ascii"))
+        require(len(mask) == len(magic), "binfmt-entry-invalid")
+    # Every ELF shares these bytes, so later offsets and handler names grant no exception.
+    require(any((elf ^ value) & bits for elf, value, bits in zip(b"\x7fELF", magic, mask)), "binfmt-possible-elf-handler")
+    return "enabled" if lines[0] == b"enabled" else "disabled"
+
+
+def read_binfmt_record(path, failure):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as handle:
+            require(stat.S_ISREG(os.fstat(handle.fileno()).st_mode), "binfmt-entry-invalid")
+            data = handle.read(BINFMT_RECORD_LIMIT + 1)
+    except OSError:
+        raise RuntimeError(failure) from None
+    require(len(data) <= BINFMT_RECORD_LIMIT, "binfmt-budget-exceeded")
+    return data
+
+
+def inspect_binfmt(directory=None):
+    directory = BINFMT_ROOT if directory is None else Path(directory)
+    try:
+        require(directory.is_dir() and not directory.is_symlink(), "binfmt-lookup-failed")
+    except OSError:
+        raise RuntimeError("binfmt-lookup-failed") from None
+    entries = []
+    try:
+        for path in directory.iterdir():
+            entries.append(path)
+            require(len(entries) <= BINFMT_HANDLER_LIMIT + 2, "binfmt-budget-exceeded")
+    except OSError:
+        raise RuntimeError("binfmt-enumeration-failed") from None
+    names = {path.name for path in entries}
+    require(len(names) == len(entries), "binfmt-enumeration-failed")
+    require({"register", "status"} <= names, "binfmt-lookup-failed")
+    status = read_binfmt_record(directory / "status", "binfmt-lookup-failed")
+    require(status in (b"enabled\n", b"disabled\n"), "binfmt-entry-invalid")
+    total, enabled, disabled = len(status), 0, 0
+    require(total <= BINFMT_TOTAL_LIMIT, "binfmt-budget-exceeded")
+    for path in entries:
+        if path.name in ("register", "status"):
+            continue
+        record = read_binfmt_record(path, "binfmt-entry-read-failed")
+        total += len(record)
+        require(total <= BINFMT_TOTAL_LIMIT, "binfmt-budget-exceeded")
+        state = parse_binfmt_record(record)
+        enabled += state == "enabled"
+        disabled += state == "disabled"
+    return {"inspection": "complete-snapshot", "handlers_examined": enabled + disabled,
+            "elf_disjoint_magic_handlers": enabled + disabled, "enabled_handlers": enabled, "disabled_handlers": disabled,
+            "registry_state": "enabled" if status == b"enabled\n" else "disabled"}
+
+
+def check_native_tools(target):
+    for path in ("/proc/self/exe", "/usr/bin/dpkg", "/usr/bin/git", "/usr/bin/curl", "/bin/bash", "/usr/bin/apt-get",
+                 "/usr/bin/dpkg-query", "/usr/bin/dpkg-deb", "/usr/bin/readelf", "/usr/bin/gpgv", "/sbin/ldconfig"):
+        native_elf(path, target)
+    script = Path("/usr/bin/ldd")
+    require(script.is_file() and not script.is_symlink(), "admission")
+    with script.open("rb") as handle:
+        require(handle.readline(256) == b"#!/bin/bash\n", "admission")
+
+
 def admit(supervisor, target, parent, pin, attempt):
+    attempt["admission_detail"] = None
     attempt["admission_substage"] = "uid"
     require(os.getuid() != 0, "admission")
     attempt["admission_substage"] = "native-architecture"
     asan.native_target(target)
+    check_native_tools(target)
+    attempt["admission_substage"] = "binfmt"
+    try:
+        binfmt = inspect_binfmt()
+    except RuntimeError as error:
+        attempt["admission_detail"] = str(error) if str(error) in BINFMT_DETAILS else "binfmt-entry-invalid"
+        raise RuntimeError("admission") from None
     attempt["admission_substage"] = "dpkg-architecture"
     architecture = supervisor.run(["/usr/bin/dpkg", "--print-architecture"]).stdout.strip()
     require(architecture == asan.TARGETS[target][2], "admission")
     attempt["admission_substage"] = "os-release"
     release = Path("/etc/os-release").read_text()
     require(re.search(r"^ID=ubuntu$", release, re.MULTILINE) and re.search(r'^VERSION_ID="24\.04"$', release, re.MULTILINE), "admission")
-    attempt["admission_substage"] = "binfmt"
-    binfmt = Path("/proc/sys/fs/binfmt_misc")
-    entries = [path for path in binfmt.iterdir() if path.name not in ("register", "status")] if binfmt.is_dir() else []
-    require(not entries, "admission")
     attempt["admission_substage"] = "project-lock"
     require(sha256(ROOT / "Cargo.lock") == pin["compatibility"]["lockfile_sha256"], "admission")
     attempt["admission_substage"] = "public-pin"
@@ -932,7 +1030,7 @@ def admit(supervisor, target, parent, pin, attempt):
     require(resource.getrlimit(resource.RLIMIT_CORE)[0] == 0, "admission")
     attempt["admission_substage"] = "complete"
     return {"machine": asan.TARGETS[target][0], "dpkg_architecture": architecture,
-            "runner_image": image, "binfmt": "no-registered-interpreters", "core_limit_bytes": 0,
+            "runner_image": image, "binfmt": binfmt, "core_limit_bytes": 0,
             "host_available_memory_bytes": int(memory[1]) * 1024,
             "scratch": {"free_bytes_at_admission": free, "minimum_free_bytes": 12 * GIB,
                         "growth_stop_bytes": 12 * GIB, "free_floor_bytes": 2 * GIB,
