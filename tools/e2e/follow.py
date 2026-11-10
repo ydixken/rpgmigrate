@@ -4,6 +4,7 @@
 import argparse
 from contextlib import ExitStack
 import ctypes
+import copy
 import datetime
 import hashlib
 import json
@@ -20,7 +21,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import clone
-from follow_wire import WireGate
+from follow_wire import AckOracle, WireGate
 sys.path.insert(0, str(clone.ROOT / "tests/support"))
 from follow_snapshot_fixture import validate_identity_modes
 
@@ -63,6 +64,188 @@ def lsn(value):
     return high * 2**32 + low
 
 
+def validate_settings(settings):
+    if not isinstance(settings, dict) or set(settings) != {"durability", "barrier_interval_ms", "apply_group_txns", "limits"}:
+        raise RuntimeError("follow settings inventory differs")
+    mode, interval, group = (settings[key] for key in ("durability", "barrier_interval_ms", "apply_group_txns"))
+    if (type(group) is not int or not 0 < group < 2**64
+            or not (mode == "durable" and interval is None or mode == "replay-safe" and type(interval) is int and 0 < interval < 2**64)):
+        raise RuntimeError("follow settings durability or cadence differs")
+    limits = settings["limits"]
+    maxima = {"channel_bytes": 8388608, "channel_messages": 1024, "max_message_bytes": 16777216, "group_rows": 10000, "group_bytes": 8388608}
+    if (not isinstance(limits, dict) or set(limits) != set(maxima)
+            or any(type(limits[key]) is not int or not 0 < limits[key] <= maximum for key, maximum in maxima.items())):
+        raise RuntimeError("follow settings limits differ")
+    return settings
+
+
+def follow_profile(profile=None, *, candidate=False):
+    if profile not in (None, "legacy-m3", "m9") or candidate and profile == "m9":
+        raise RuntimeError("independent follow profile differs")
+    return profile or "legacy-m3"
+
+
+def validate_follow_report(raw, binding, command, completed, *, profile=None, phases=("planning", "copying", "finalizing", "completed")):
+    if follow_profile(profile) != "m9":
+        return clone.validate_operator_report(raw, binding, command, completed, phases=phases)
+    report = json.loads(raw, object_pairs_hook=clone.unique_object)
+    capability = {"clone": "clone.single_db", "list progress": "progress.v1"}[command]
+    if not isinstance(report, dict) or report.get("capabilities") != [capability, "durability.status.v1"]:
+        raise RuntimeError("M9 report settings capability differs")
+    settings = validate_settings(report.get("settings"))
+    legacy = {key: value for key, value in report.items() if key != "settings"}
+    legacy["capabilities"] = [capability]
+    clone.validate_operator_report(json.dumps(legacy), binding, command, completed, phases=phases)
+    return {**legacy, "capabilities": report["capabilities"], "settings": settings}
+
+
+def bind_m9_owned(database, name, state, work, oracle):
+    before = (state / "manifest.json").read_bytes()
+    row = database.authority(name, state, work, profile="m9")
+    if row is None:
+        raise RuntimeError("M9 independent owned target binding is absent")
+    if before != (state / "manifest.json").read_bytes():
+        return False
+    native = json.loads(before)
+    binding = native["target_provenance"][0]["record"]["intent"]["binding"]
+    table = clone.quote(binding["schema_name"]) + "." + clone.quote(binding["table_name"])
+    oracle.bind({**row, "table": table}, validate_settings(native["follow_state"].get("effective_settings")))
+    return True
+
+
+def bind_m9_after_copy(process, wire, database, name, state, work, oracle):
+    deadline = time.monotonic() + 60
+    def held():
+        if process.poll() is not None:
+            raise RuntimeError("M9 follow exited before its owned COPY binding event")
+        return wire.copy_held.is_set()
+    try:
+        clone.wait_for(held, "M9 exact source COPY hold before anchor", timeout=60)
+        clone.wait_for(lambda: bind_m9_owned(database, name, state, work, oracle), "M9 coherent independent owned binding", timeout=max(0, deadline - time.monotonic()))
+    finally:
+        wire.copy_release.set()
+
+
+M9_INPUT_FIELDS = {"binary_sha256", "source_tree_sha256", "source_commit", "source_git_tree", "runner_image_id",
+                   "server_image_ids", "servers", "run", "settings_sha256", "fixture_sha256"}
+
+
+def m9_settings_sha256(settings):
+    return hashlib.sha256(json.dumps(validate_settings(settings), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def m9_fixture_sha256(root):
+    entries = []
+    for name in ("clone/cases.json", "clone/schema.sql", "follow/cases.json", "follow/schema.sql"):
+        path = root / "tests/fixtures" / name
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 1024 * 1024:
+            raise RuntimeError("M9 exact fixture input is absent or replaced")
+        entries.append(["tests/fixtures/" + name, hashlib.sha256(path.read_bytes()).hexdigest()])
+    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
+
+
+def m9_artifact_binding(binary, settings, servers, *, packet=Path("/diagnostics/m9-input.json"), source_root=clone.ROOT):
+    import cutover
+    if (packet.is_symlink() or not packet.is_file() or not 0 < packet.stat().st_size <= 65536
+            or binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK)):
+        raise RuntimeError("M9 private candidate artifact packet or executable is absent")
+    value = json.loads(packet.read_bytes(), object_pairs_hook=clone.unique_object)
+    if not isinstance(value, dict) or set(value) != M9_INPUT_FIELDS:
+        raise RuntimeError("M9 private artifact packet inventory differs")
+    if (any(not isinstance(value[key], str) or not re.fullmatch(r"[a-f0-9]{64}", value[key]) for key in
+            ("binary_sha256", "source_tree_sha256", "settings_sha256", "fixture_sha256"))
+            or any(not isinstance(value[key], str) or not re.fullmatch(r"[a-f0-9]{40}", value[key]) for key in ("source_commit", "source_git_tree"))
+            or not isinstance(value["run"], str) or not re.fullmatch(r"[a-f0-9]{32}", value["run"]) or value["run"] == "0" * 32):
+        raise RuntimeError("M9 private artifact digest identity differs")
+    images = value["server_image_ids"]
+    if (not isinstance(images, list) or len(images) != 2
+            or any(not isinstance(image, str) or not re.fullmatch(r"(?:sha256:)?[a-f0-9]{64}", image) for image in [value["runner_image_id"], *images])):
+        raise RuntimeError("M9 private artifact image identities differ")
+    identities = value["servers"]
+    keys = {"system_identifier", "version", "data_directory", "wal_level", "id", "image", "role", "started_at", "pgdata_permissions"}
+    if not isinstance(identities, list) or len(identities) != 2 or len(servers) != 2:
+        raise RuntimeError("M9 private artifact server inventory differs")
+    for index, (expected, observed) in enumerate(zip(identities, servers)):
+        if (not isinstance(expected, dict) or set(expected) != keys or expected["role"] != ("source", "target")[index]
+                or expected["image"] != images[index] or expected["pgdata_permissions"] != "700|postgres"
+                or not isinstance(expected["id"], str) or not re.fullmatch(r"[a-f0-9]{64}", expected["id"])
+                or not isinstance(expected["started_at"], str) or not re.fullmatch(r"[0-9T:.+Z-]{20,64}", expected["started_at"])
+                or any(expected[key] != observed.get(key) for key in ("system_identifier", "version", "data_directory", "wal_level"))
+                or expected["wal_level"] != "logical"):
+            raise RuntimeError("M9 private artifact observed server identity differs")
+    actual = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "source_tree_sha256": cutover.source_inventory(source_root)["sha256"],
+              "settings_sha256": m9_settings_sha256(settings), "fixture_sha256": m9_fixture_sha256(source_root)}
+    if any(value[key] != observed for key, observed in actual.items()):
+        raise RuntimeError("M9 private candidate artifact inputs differ")
+    return {"input": value, "input_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
+            "schema_sha256": hashlib.sha256(json.dumps(sorted(M9_INPUT_FIELDS), separators=(",", ":")).encode()).hexdigest()}
+
+
+def m9_async_visible_ack_oracle(source, target, srcname, dstname, state, driver, process, wire, fault, manifest):
+    if (getattr(driver, "profile", None) != "m9" or driver.m9_settings["durability"] != "replay-safe"
+            or fault.mode != "before_sync_commit" or fault.ack_oracle is not wire.ack_oracle
+            or fault.side != "target" or wire.side != "source"):
+        raise RuntimeError("M9 async-visible oracle requires its exact private replay-safe gates")
+    m9_artifact_binding(driver.binary, driver.m9_settings, driver.m9_servers)
+    baseline = wire.evidence()
+    if synchronous_feedback(baseline) is None:
+        raise RuntimeError("M9 async-visible oracle lacks a positive synchronous baseline")
+    prefix = baseline["ack_oracle"]["proofs"][-1]["prefix"]
+    previous = target.authority(dstname, state, driver.work[state], profile="m9")
+    fault.arm()
+    try:
+        source.sql(srcname, 'UPDATE "M2 space".wide SET changed=changed+1 WHERE id=1;')
+        def held():
+            if process.poll() is not None:
+                raise RuntimeError("M9 async-visible process exited before the synchronous request hold")
+            return fault.held.is_set()
+        clone.wait_for(held, "M9 classified synchronous request held after async COMMIT", timeout=60)
+        row = target.authority(dstname, state, driver.work[state], profile="m9")
+        observed = wire.evidence()
+        ahead = authority_frontier(row)
+        commits = [commit for commit in observed["ack_oracle"]["commits"] if commit["mode"] == "async" and commit["writing"] and commit["warning_free"] and commit["prefix"] >= ahead]
+        if (fault.hits != 1 or row["applied_order"] <= previous["applied_order"] or ahead <= prefix or not commits
+                or observed["ack_oracle"]["proofs"][-1]["prefix"] != prefix):
+            raise RuntimeError("M9 async-visible event did not precede its held synchronous proof")
+        expected = source.fingerprint(srcname, manifest)
+        clone.require_equal(expected, target.fingerprint(dstname, manifest))
+        streams = observed["logical"]["streams"]
+        if not streams or not streams[-1]["confirmed"]:
+            raise RuntimeError("M9 async-visible source stream is absent")
+        probe = wire.ack_oracle.probe_status(streams[-1]["connection"], (ahead, ahead, ahead))
+        if not require_feedback(probe, row, ahead):
+            raise RuntimeError("M9 async-visible negative control did not exercise the legacy visibility shortcut")
+        try:
+            require_feedback(probe, row, ahead, profile="m9")
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("M9 oracle accepted synthetic over-ACK before synchronous proof")
+    finally:
+        fault.release.set()
+    def covered():
+        if process.poll() is not None:
+            raise RuntimeError("M9 async-visible process exited before real post-barrier feedback")
+        current = target.authority(dstname, state, driver.work[state], profile="m9")
+        evidence = wire.evidence()
+        return evidence if current is not None and require_feedback(evidence, current, ahead, profile="m9") else None
+    real = clone.wait_for(covered, "M9 real synchronous proof and post-proof forwarded ACK", timeout=60)
+    retro = copy.deepcopy(probe)
+    retro["ack_oracle"]["proofs"] = real["ack_oracle"]["proofs"]
+    retro["ack_oracle"]["ordinal"] = real["ack_oracle"]["ordinal"]
+    try:
+        require_feedback(retro, row, ahead, profile="m9")
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("M9 later synchronous proof retroactively covered synthetic early feedback")
+    clone.require_equal(expected, target.fingerprint(dstname, manifest))
+    return {"observed": True, "async_commit": commits[-1], "visible_frontier": ahead, "prior_synchronous_prefix": prefix,
+            "synthetic_scope": "oracle_only_no_source_feedback", "legacy_shortcut_detected": True,
+            "early_ack_rejected": True, "no_retroactive_coverage": True, "real_postproof_ack": True,
+            "feedback": {key: real[key] for key in ("statuses", "ack_oracle")}, "fingerprints": expected}
+
+
 def validate_drain_row(row):
     names = ("drain_end_lsn", "drain_witness_lsn", "drain_kind", "follow_completed")
     if not set(names) <= row.keys() or type(row["follow_completed"]) is not bool:
@@ -93,7 +276,51 @@ def authority_frontier(row):
     return max(applied, certified)
 
 
-def require_feedback(evidence, row, goal, start=0):
+def synchronous_feedback(evidence):
+    try:
+        oracle = evidence["ack_oracle"]
+        if (oracle["profile"] != "m9" or oracle["bound"] is not True or oracle["invalid"] is not False
+                or oracle["overflow"] is not False or type(oracle["ordinal"]) is not int
+                or not 0 <= oracle["ordinal"] < 2**64 or not 0 < len(oracle["proofs"]) <= 256
+                or not 0 < len(oracle["statuses"]) <= 10000):
+            return None
+        proofs, previous = {}, 0
+        for proof in oracle["proofs"]:
+            ordinal, prefix = proof["ordinal"], proof["prefix"]
+            if (any(type(proof[key]) is not int for key in ("ordinal", "prefix", "connection", "backend_pid"))
+                    or not previous < ordinal <= oracle["ordinal"] or not 0 < prefix < 2**64
+                    or not 0 < proof["connection"] <= 64 or not 0 < proof["backend_pid"] < 2**31):
+                return None
+            proofs[ordinal], previous = prefix, ordinal
+        statuses, previous, floors = [], 0, {}
+        for status in oracle["statuses"]:
+            ordinal, connection, positions = status["ordinal"], status["connection"], status["positions"]
+            prefix, proof = status["prefix"], status["proof_ordinal"]
+            if (type(ordinal) is not int or not previous < ordinal <= oracle["ordinal"]
+                    or type(connection) is not int or not 0 < connection <= 64 or len(positions) != 3
+                    or any(type(value) is not int or not 0 <= value < 2**64 for value in positions)
+                    or type(prefix) is not int or not 0 <= prefix < 2**64
+                    or type(status["safe"]) is not bool or type(status["forwarded"]) is not bool):
+                return None
+            write, flush, apply = positions
+            covered = prefix == 0 and proof is None and flush == 0 or type(proof) is int and proof < ordinal and proofs.get(proof) == prefix
+            if (not status["safe"] or write != flush or flush != apply or flush > prefix
+                    or flush < floors.get(connection, 0) or not covered):
+                raise RuntimeError("standby status lacks a prior covering synchronous COMMIT proof")
+            if not status["forwarded"]:
+                return None
+            statuses.append(tuple(positions))
+            floors[connection], previous = flush, ordinal
+        if statuses != [tuple(value) for value in evidence["statuses"]]:
+            return None
+        return statuses
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def require_feedback(evidence, row, goal, start=0, *, profile=None):
+    if follow_profile(profile) == "m9" and synchronous_feedback(evidence) is None:
+        return False
     frontier = authority_frontier(row)
     statuses = evidence["statuses"][start:]
     if not frontier or frontier < goal or not statuses or statuses[-1][1] < goal:
@@ -106,7 +333,7 @@ def require_feedback(evidence, row, goal, start=0):
     return True
 
 
-def checkpoint_observation(row):
+def checkpoint_observation(row, *, profile=None):
     if row is None:
         return {"status": "missing"}
     if not {"source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "last_xid", "begin_ordinal"} <= row.keys():
@@ -125,7 +352,7 @@ def checkpoint_observation(row):
         if type(value) is not int or not minimum <= value < bound:
             raise RuntimeError("checkpoint observation numeric identity or counter is invalid")
         result[key] = value
-    if result["version"] != 6:
+    if result["version"] != (7 if follow_profile(profile) == "m9" else 6):
         raise RuntimeError("checkpoint observation metadata version differs")
     for key in ("source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "drain_end_lsn", "drain_witness_lsn"):
         result[key] = lsn(row[key]) if row.get(key) is not None else None
@@ -134,12 +361,19 @@ def checkpoint_observation(row):
     return result
 
 
-def failure_feedback_consistency(evidence, observation, initial):
+def failure_feedback_consistency(evidence, observation, initial, *, profile=None):
     def verdict(status, reason):
         result = {"scope": "visible-observation", "status": status, "reason": reason}
         if status == "consistent":
             result["meaning"] = "consistent with observed wire/checkpoint frontiers"
         return result
+
+    if follow_profile(profile) == "m9":
+        try:
+            if synchronous_feedback(evidence) is None:
+                return verdict("unavailable", "missing_positive_synchronous_feedback_proof")
+        except RuntimeError:
+            return verdict("inconsistent", "feedback_lacks_prior_synchronous_proof")
 
     def integer(value, bound=2**64, minimum=0):
         if type(value) is not int or not minimum <= value < bound:
@@ -155,7 +389,7 @@ def failure_feedback_consistency(evidence, observation, initial):
             if number is not None:
                 integer(number)
                 row[key] = f"{number >> 32:X}/{number & 0xffffffff:X}"
-        return checkpoint_observation(row)
+        return checkpoint_observation(row, profile=profile)
 
     try:
         if observation["scope"] != "visible-observation" or initial["scope"] != "visible-observation":
@@ -168,6 +402,13 @@ def failure_feedback_consistency(evidence, observation, initial):
             raise ValueError
         floor = integer(initial["slot"]["confirmed_flush_lsn"])
         confirmed = integer(observation["slot"]["confirmed_flush_lsn"])
+        if profile == "m9":
+            prefix = integer(initial["durable_prefix"], minimum=1)
+            proof_ordinal = integer(initial["proof_ordinal"], minimum=1)
+            if not any(proof["ordinal"] == proof_ordinal and proof["prefix"] == prefix for proof in evidence["ack_oracle"]["proofs"]):
+                raise ValueError
+            if floor > prefix or confirmed > evidence["ack_oracle"]["proofs"][-1]["prefix"]:
+                return verdict("inconsistent", "source_confirmed_exceeds_synchronous_proof")
         applied, certified = target["source_end_lsn"] or 0, target["certified_lsn"] or 0
         anchor = baseline["copy_consistent_point"] or 0
         baseline_frontier = max(baseline["source_end_lsn"] or 0, baseline["certified_lsn"] or 0)
@@ -237,8 +478,8 @@ def failure_feedback_consistency(evidence, observation, initial):
         return verdict("unavailable", "missing_incomplete_or_malformed_evidence")
 
 
-def require_failure_feedback(evidence, observation, initial):
-    result = failure_feedback_consistency(evidence, observation, initial)
+def require_failure_feedback(evidence, observation, initial, *, profile=None):
+    result = failure_feedback_consistency(evidence, observation, initial, profile=profile)
     if result["status"] == "inconsistent":
         raise RuntimeError("follow feedback observation is inconsistent: " + result["reason"])
     return result["status"] == "consistent"
@@ -263,6 +504,21 @@ def bounded_wire_observation(evidence):
     try:
         result = {key: number(evidence[key]) for key in ("hits", "data_bytes", "begins", "commits")}
         result.update(status_count=len(evidence["statuses"]), statuses=positions(evidence["statuses"][-32:]))
+        if "ack_oracle" in evidence:
+            oracle = evidence["ack_oracle"]
+            if oracle["profile"] != "m9" or any(type(oracle[key]) is not bool for key in ("bound", "invalid", "overflow")):
+                raise ValueError
+            retained = {key: oracle[key] for key in ("profile", "bound", "invalid", "overflow")}
+            retained.update(ordinal=number(oracle["ordinal"]), proofs=[], statuses=[])
+            retained["overflow"] |= len(oracle["proofs"]) > 32 or len(oracle["statuses"]) > 32
+            for proof in oracle["proofs"][-32:]:
+                retained["proofs"].append({key: number(proof[key]) for key in ("ordinal", "prefix", "connection", "backend_pid")})
+            for status in oracle["statuses"][-32:]:
+                if any(type(status[key]) is not bool for key in ("safe", "forwarded")):
+                    raise ValueError
+                retained["statuses"].append({**{key: number(status[key], key == "proof_ordinal") for key in ("ordinal", "connection", "prefix", "proof_ordinal")},
+                                             "positions": positions([status["positions"]])[0], "safe": status["safe"], "forwarded": status["forwarded"]})
+            result["ack_oracle"] = retained
         if "logical" not in evidence:
             return result
         logical = evidence["logical"]
@@ -422,7 +678,18 @@ def require_data_fault(initial, current, fault, previous, work, session):
         raise RuntimeError("held COMMIT is not the newly forwarded fixture DATA transaction") from None
 
 
-def validate_receipt(report, manifest, *, diagnostic_case=None):
+def validate_receipt(report, manifest, *, diagnostic_case=None, profile=None):
+    profile = follow_profile(profile)
+    if profile == "m9":
+        artifact = report.get("artifact", {})
+        settings = validate_settings(report.get("settings"))
+        packet = artifact.get("input", {})
+        if (report.get("profile") != "m9" or not isinstance(packet, dict) or set(packet) != M9_INPUT_FIELDS
+                or packet.get("settings_sha256") != m9_settings_sha256(settings)
+                or packet.get("fixture_sha256") != m9_fixture_sha256(clone.ROOT)
+                or artifact.get("schema_sha256") != hashlib.sha256(json.dumps(sorted(M9_INPUT_FIELDS), separators=(",", ":")).encode()).hexdigest()
+                or not isinstance(artifact.get("input_sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", artifact["input_sha256"])):
+            raise RuntimeError("M9 receipt lacks exact private candidate artifact binding")
     scope = report.get("receipt_scope", "full")
     if diagnostic_case is not None:
         if diagnostic_case != "before_commit_rollback" or scope != "diagnostic" or report.get("diagnostic_case") != diagnostic_case:
@@ -442,7 +709,9 @@ def validate_receipt(report, manifest, *, diagnostic_case=None):
             or scope == "smoke" and len(records) != 1 or scope == "diagnostic" and len(records) != 2):
         raise RuntimeError("actual bound follow startup report validation is absent")
     for record in records:
-        clone.validate_operator_report(record["raw_json"], record["binding"], "clone", False, phases=("streaming",))
+        checked_report = validate_follow_report(record["raw_json"], record["binding"], "clone", False, profile=profile, phases=("streaming",))
+        if profile == "m9" and checked_report["settings"] != report["settings"]:
+            raise RuntimeError("M9 receipt startup settings differ from its artifact")
         if record.get("probe_checked") is not (mode == "operator_go_parse_report"):
             raise RuntimeError("selected authoritative follow report probe coverage is absent")
     runs = {record["binding"]["work"]["run_id"] for record in records}
@@ -450,6 +719,9 @@ def validate_receipt(report, manifest, *, diagnostic_case=None):
         if name in report["cases"]:
             validate_data_fault(report["cases"][name].get("data_fault", {}), boundary, runs)
     for name, value in report["cases"].items():
+        if profile == "m9" and name in ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_oids", "repeated_restart", "before_commit_rollback", "after_commit_before_feedback", "partial_receive_transaction", "backpressure"):
+            if synchronous_feedback(value.get("feedback")) is None:
+                raise RuntimeError("M9 case lacks complete independent synchronous ACK evidence")
         if name in ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_oids", "repeated_restart") or name == diagnostic_case:
             if type(value.get("frontier")) is not int or value["frontier"] <= 0 or value.get("feedback_observed") is not True:
                 raise RuntimeError("follow data case lacks independent applied/certified authority and feedback")
@@ -591,7 +863,7 @@ class Database(clone.Database):
                 self._observation_deadline = previous
 
     def observe_checkpoint(self, name, state, work):
-        return self._observe(lambda: checkpoint_observation(self.authority(name, state, work)))
+        return self._observe(lambda: checkpoint_observation(self.authority(name, state, work), profile=getattr(self, "profile", None)))
 
     def observe_slot(self, name, state):
         def read():
@@ -700,7 +972,8 @@ class Database(clone.Database):
             raise RuntimeError("exact owned follow slot binding or WAL differs")
         return row
 
-    def authority(self, name, state, work, *, candidate=False):
+    def authority(self, name, state, work, *, candidate=False, profile=None):
+        profile = follow_profile(profile if profile is not None else getattr(self, "profile", None), candidate=candidate)
         path = state / "manifest.json"
         if not path.is_file():
             return None
@@ -709,8 +982,10 @@ class Database(clone.Database):
         binding = native.get("follow_state", {}).get("binding")
         if not records or not binding or records[0].get("phase") != "confirmed":
             return None
-        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != (9 if candidate else 8):
+        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != (10 if profile == "m9" else 9 if candidate else 8):
             raise RuntimeError("independent follow native identity/version differs")
+        if profile == "m9":
+            validate_settings(native["follow_state"].get("effective_settings"))
         try:
             validate_identity_modes(native["clone_state"]["plan"])
             for owned in native["clone_state"]["owned_tables"]:
@@ -744,7 +1019,7 @@ class Database(clone.Database):
                                     or any(type(value) is not bool for value in cleanup.values())):
             raise RuntimeError("independent native follow cleanup receipt differs")
         stream = expected["stream"]
-        same = {"magic": "rpgmigrate", "version": 7 if candidate else 6, "run_id": "\\x" + bytes(stream["run"]).hex(),
+        same = {"magic": "rpgmigrate", "version": 7 if candidate or profile == "m9" else 6, "run_id": "\\x" + bytes(stream["run"]).hex(),
                 "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(), "source_system": stream["source"]["system_identifier"],
                 "source_database": stream["source"]["database_oid"], "generation": stream["generation"],
                 "target_system": expected["target_system_identifier"], "target_database": expected["target_database_oid"],
@@ -761,7 +1036,7 @@ class Database(clone.Database):
             raise RuntimeError("independent target primary identity/durability policy is absent")
         owned_oids = [record["table_oid"], record["marker_table_oid"], record["marker_index_oid"]]
         kinds = ["r", "r", "i"]
-        if candidate:
+        if candidate or profile == "m9":
             if expected.get("metadata_version") != 7:
                 raise RuntimeError("candidate metadata version differs")
             owned_oids += [record["large_object_table_oid"], record["large_object_index_oid"]]
@@ -775,7 +1050,15 @@ class Database(clone.Database):
 
 class Driver(clone.Driver):
     def start(self, source, target, state, *arguments, gate=None):
-        return super().start(source, target, state, "--follow", "--plugin", "pgoutput", *arguments, gate=gate)
+        profile = follow_profile(getattr(self, "profile", None))
+        durability = getattr(self, "durability", None)
+        if durability is not None:
+            if profile != "m9" or durability not in ("durable", "replay-safe"):
+                raise RuntimeError("explicit harness durability requires M9")
+            arguments = ("--durability", durability, *arguments)
+        process = super().start(source, target, state, "--follow", "--plugin", "pgoutput", *arguments, gate=gate)
+        process.follow_state = state
+        return process
 
     @staticmethod
     def capture_startup(process, phase, *, deadline=None):
@@ -901,7 +1184,7 @@ class Driver(clone.Driver):
             initial = getattr(process, "follow_initial_observation", None)
             if initial is not None:
                 details["initial_follow_observation"] = initial
-            details["feedback_consistency"] = failure_feedback_consistency(details.get("wire"), observation, initial)
+            details["feedback_consistency"] = failure_feedback_consistency(details.get("wire"), observation, initial, profile=getattr(self, "profile", None))
             metadata = clone.private_failure("engine-follow-observation", status, json.dumps(details).encode(),
                                              process.environment, last.tb_frame, last.tb_lineno)
             if isinstance(error, clone.SubprocessFailure):
@@ -914,6 +1197,9 @@ class Driver(clone.Driver):
 
     def ready(self, process):
         deadline = time.monotonic() + 60
+        bind = getattr(process, "follow_bind", None)
+        if bind is not None:
+            bind()
         sampled = False
         def observed():
             nonlocal sampled
@@ -934,7 +1220,13 @@ class Driver(clone.Driver):
                 raise RuntimeError("follow startup report cardinality differs")
             raw = framed[0]
             binding = json.loads(process.binding.read_text())
-            report = clone.validate_operator_report(raw, binding, "clone", False, phases=("streaming",))
+            report = validate_follow_report(raw, binding, "clone", False, profile=getattr(self, "profile", None), phases=("streaming",))
+            if getattr(self, "profile", None) == "m9":
+                native = json.loads((process.follow_state / "manifest.json").read_text())
+                if native.get("format_version") != 10 or report["settings"] != validate_settings(native["follow_state"].get("effective_settings")):
+                    raise RuntimeError("M9 startup settings differ from persisted native settings")
+                self.m9_artifact = m9_artifact_binding(self.binary, report["settings"], self.m9_servers)
+                self.m9_settings = report["settings"]
             checked = False
             if self.report_probe is not None:
                 raw_path = process.binding.with_suffix(".report")
@@ -948,21 +1240,46 @@ class Driver(clone.Driver):
             self.reports.append({"binding": binding, "raw_json": raw.decode("utf-8"), "probe_checked": checked})
             return report
         report = clone.wait_for(observed, "positive follow startup", timeout=max(0, deadline - time.monotonic()))
+        proof = None
+        if getattr(self, "profile", None) == "m9":
+            def positive_sync():
+                if process.poll() is not None:
+                    raise RuntimeError("M9 follow exited before positive synchronous startup proof")
+                wire_evidence = process.follow_wire.evidence()
+                evidence = wire_evidence["ack_oracle"]
+                if evidence["invalid"] or evidence["overflow"] or any(not status["safe"] for status in evidence["statuses"]):
+                    raise RuntimeError("M9 startup ACK observation is unsafe or incomplete")
+                streams = wire_evidence["logical"]["streams"]
+                return evidence["proofs"][-1] if evidence["proofs"] and streams and streams[-1]["confirmed"] else None
+            proof = clone.wait_for(positive_sync, "M9 postbind positive synchronous startup proof", timeout=max(0, deadline - time.monotonic()))
         capture = getattr(process, "follow_observe", None)
         if capture is not None:
             try:
                 initial = capture()
                 wire = getattr(process, "follow_wire", None)
                 if wire is not None:
-                    streams = wire.evidence()["logical"]["streams"]
+                    captured_wire = wire.evidence()
+                    streams = captured_wire["logical"]["streams"]
                     if streams:
                         initial.update(connection=streams[-1]["connection"], status_start=len(streams[-1]["statuses"]))
+                if proof is not None:
+                    current = captured_wire["ack_oracle"]
+                    if current["invalid"] or current["overflow"] or not current["proofs"] or any(not status["safe"] for status in current["statuses"]):
+                        raise RuntimeError("M9 startup feedback lost its complete synchronous proof")
+                    proof = current["proofs"][-1]
+                    initial.update(durable_prefix=proof["prefix"], proof_ordinal=proof["ordinal"])
+                    if initial["slot"]["status"] != "observed" or initial["slot"]["confirmed_flush_lsn"] > proof["prefix"]:
+                        raise RuntimeError("M9 startup slot floor exceeds its observed synchronous proof")
             except Exception:
+                if getattr(self, "profile", None) == "m9":
+                    raise RuntimeError("M9 startup observation is incomplete") from None
                 initial = {"scope": "visible-observation", "target": {"status": "unavailable"}, "slot": {"status": "unavailable"}}
             process.follow_initial_observation = initial
         return report
 
     def stop(self, process, *, crash=False):
+        if getattr(self, "profile", None) == "m9" and getattr(process, "follow_wire", None) is not None:
+            process.follow_wire.copy_release.set()
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL if crash else signal.SIGTERM)
         try:
@@ -977,6 +1294,7 @@ class Driver(clone.Driver):
 
 
 def inner(args):
+    profile = follow_profile(getattr(args, "profile", None))
     diagnostic_case = getattr(args, "diagnostic_case", None)
     cutover_mode = getattr(args, "cutover", False)
     if cutover_mode:
@@ -986,6 +1304,7 @@ def inner(args):
     environment = {key: value for key, value in os.environ.items() if not key.startswith(("PG", "RPGMIGRATE_"))}
     environment.update(PGPASSWORD=os.environ["PGPASSWORD"], PG_BINDIR=str(bindir), PATH=str(bindir) + os.pathsep + os.environ["PATH"], LC_ALL="C.UTF-8")
     source, target = (Database(host, bindir, environment) for host in ("source", "target"))
+    source.profile = target.profile = profile
     binary = Path(args.binary)
     linked_path = re.search(r"libpq\.so\.5 => (\S+)", clone.run(["ldd", str(binary)]).decode())
     if not linked_path:
@@ -1000,10 +1319,15 @@ def inner(args):
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-m3-") as temporary, ExitStack() as cleanup:
         root = Path(temporary)
         driver = Driver(binary, environment, root, mode="operator", report_probe=args.report_probe)
+        driver.profile, driver.durability = profile, getattr(args, "durability", None)
+        if profile == "m9":
+            query = ("SELECT json_build_object('system_identifier',(SELECT system_identifier::text FROM pg_catalog.pg_control_system()),"
+                     "'version',split_part(current_setting('server_version'),' ',1),'data_directory',current_setting('data_directory'),'wal_level',current_setting('wal_level')); ")
+            driver.m9_servers = [json.loads(database.sql("postgres", query)) for database in (source, target)]
         def case(name):
             srcname, dstname = "src_" + name, "dst_" + name
             return srcname, dstname, source.create(srcname, True), target.create(dstname), root / name
-        def launch(src, dst, state, *arguments, gate=None, wire=None, source_name=None, target_name=None):
+        def launch(src, dst, state, *arguments, gate=None, wire=None, target_wire=None, source_name=None, target_name=None):
             source_name = srcname if source_name is None else source_name
             target_name = dstname if target_name is None else target_name
             if "--resume" in arguments:
@@ -1016,9 +1340,30 @@ def inner(args):
                              if isinstance(removed, dict) and removed.get("slot_removed") is True
                              else f"SELECT NOT active FROM pg_replication_slots WHERE slot_name='{name}';")
                     clone.wait_for(lambda: source.sql(source_name, query).strip() == b"t", "old owned source walsender closed or confirmed removed")
+            oracle, fresh_bind = None, False
+            if profile == "m9":
+                oracle = AckOracle(profile)
+                wire = cleanup.enter_context(WireGate("source", "observe")) if wire is None else wire
+                target_wire = cleanup.enter_context(WireGate("target", "observe")) if target_wire is None else target_wire
+                wire.attach_ack_oracle(oracle, "source")
+                target_wire.attach_ack_oracle(oracle, "target")
+                src, dst = wire.connection(src), target_wire.connection(dst)
+                resume_native = json.loads((state / "manifest.json").read_text()) if "--resume" in arguments and state.is_dir() else None
+                if (resume_native is not None and resume_native.get("clone_state", {}).get("phase") == "analyzing"
+                        and target.authority(target_name, state, driver.work[state], profile=profile) is not None):
+                    if not bind_m9_owned(target, target_name, state, driver.work[state], oracle):
+                        raise RuntimeError("M9 resume binding changed before launch")
+                else:
+                    wire.hold_copy(["M2 space", "rows"])
+                    cleanup.callback(wire.copy_release.set)
+                    fresh_bind = True
             process = driver.start(src, dst, state, *arguments, gate=gate)
             if wire is not None:
                 process.follow_wire = wire
+            if oracle is not None:
+                process.follow_ack_oracle, process.follow_target_wire = oracle, target_wire
+                if fresh_bind:
+                    process.follow_bind = lambda: bind_m9_after_copy(process, wire, target, target_name, state, driver.work[state], oracle)
             def observe(srcname=source_name, dstname=target_name):
                 deadline = getattr(process, "follow_capture_deadline", None)
                 previous = {database: getattr(database, "_observation_deadline", None) for database in (source, target)}
@@ -1043,7 +1388,9 @@ def inner(args):
             receipt["report_validation"] = {"mode": "operator_go_parse_report" if args.report_probe is not None else "local_m3_contract", "reports": driver.reports}
             if args.report_probe is not None:
                 receipt["report_validation"]["probe_sha256"] = hashlib.sha256(Path(args.report_probe).read_bytes()).hexdigest()
-            validate_receipt(receipt, manifest, diagnostic_case=diagnostic_case)
+            if profile == "m9":
+                receipt.update(profile=profile, artifact=driver.m9_artifact, settings=driver.m9_settings)
+            validate_receipt(receipt, manifest, diagnostic_case=diagnostic_case, profile=profile)
             with Path(args.receipt).open("x" if diagnostic_case else "w") as stream:
                 stream.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 
@@ -1055,8 +1402,8 @@ def inner(args):
                     raise RuntimeError("follow exited before positive target/feedback predicate")
                 row = target.authority(dstname, state, driver.work[state])
                 if row:
-                    process.follow_last_observation = {"scope": "visible-observation", "target": checkpoint_observation(row)}
-                if row and require_feedback(wire.evidence(), row, goal):
+                    process.follow_last_observation = {"scope": "visible-observation", "target": checkpoint_observation(row, profile=profile)}
+                if row and require_feedback(wire.evidence(), row, goal, profile=profile):
                     slot = source.slot(srcname, state)
                     process.follow_last_observation["slot"] = {"status": "observed", "confirmed_flush_lsn": lsn(slot["confirmed_flush_lsn"])}
                     if slot["active"] is True and lsn(slot["confirmed_flush_lsn"]) >= goal:
@@ -1065,7 +1412,13 @@ def inner(args):
             row = clone.wait_for(applied, "applied/certified target authority and observed feedback", timeout=90)
             expected = source.fingerprint(srcname, manifest)
             clone.require_equal(expected, target.fingerprint(dstname, manifest))
-            return {"observed": True, "frontier": authority_frontier(row), "feedback_observed": True, "fingerprints": expected}
+            result = {"observed": True, "frontier": authority_frontier(row), "feedback_observed": True, "fingerprints": expected}
+            if profile == "m9":
+                evidence = wire.evidence()
+                if synchronous_feedback(evidence) is None:
+                    raise RuntimeError("M9 converged feedback lost its complete synchronous proof")
+                result["feedback"] = {key: evidence[key] for key in ("statuses", "ack_oracle")}
+            return result
         if cutover_mode:
             receipt["cases"] = cutover.run(args, source, target, manifest, case, launch, driver)
             receipt.update(mode="cutover", successful_follow_exit=True, receipt_scope="engine_producer", probe_checked=False,
@@ -1117,7 +1470,8 @@ def inner(args):
             srcname, dstname, src, dst, state = case(name)
             fault = cleanup.enter_context(WireGate(side, mode))
             observed = fault if side == "source" else cleanup.enter_context(WireGate("source", "observe"))
-            process = launch(observed.connection(src), fault.connection(dst) if side == "target" else dst, state, wire=observed)
+            process = launch(observed.connection(src), fault.connection(dst) if side == "target" else dst, state,
+                             wire=observed, target_wire=fault if side == "target" else None)
             if side == "target":
                 process.follow_target_wire = fault
             driver.ready(process)
@@ -1243,7 +1597,7 @@ def inner(args):
         srcname, dstname, src, dst, state = case("backpressure")
         fault = cleanup.enter_context(WireGate("target", "before_commit"))
         observed = cleanup.enter_context(WireGate("source", "observe"))
-        process = launch(observed.connection(src), fault.connection(dst), state, wire=observed)
+        process = launch(observed.connection(src), fault.connection(dst), state, wire=observed, target_wire=fault)
         driver.ready(process)
         source.sql(srcname, 'UPDATE "M2 space".wide SET changed=1 WHERE id=1;')
         converge(srcname, dstname, state, observed, process)
@@ -1352,9 +1706,13 @@ def main():
     selection.add_argument("--diagnostic-case", choices=("before_commit_rollback",), help="run one separately scoped fault diagnostic; requires a new explicit receipt path")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--binary", default="/build/debug/rpgmigrate")
+    parser.add_argument("--profile", choices=("legacy-m3", "m9"), default="legacy-m3")
+    parser.add_argument("--durability", choices=("durable", "replay-safe"))
     parser.add_argument("--receipt")
     parser.add_argument("--report-probe", default=os.environ.get("RPGMIGRATE_E2E_REPORT_PROBE"))
     args = parser.parse_args()
+    if args.durability is not None and args.profile != "m9":
+        parser.error("--durability requires --profile=m9")
     if args.cutover and args.report_probe is not None:
         parser.error("--cutover requires the qualified independent M6 reader; omit the clone-only --report-probe")
     if args.diagnostic_case and not args.receipt:
@@ -1373,7 +1731,7 @@ def main():
             validator = lambda report, manifest: cutover.validate_receipt(report, manifest, require_images=True)
         else:
             manifest = load_manifest()
-            validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case)
+            validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case, profile=args.profile)
         clone.outer(args, program="follow", manifest=manifest,
                     receipt_validator=validator,
                     server_arguments=("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s"))

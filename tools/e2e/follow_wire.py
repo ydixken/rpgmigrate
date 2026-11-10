@@ -3,12 +3,14 @@
 import re
 import select
 import hashlib
+import json
 import socket
 import struct
 import sys
 from pathlib import Path
 import threading
 import time
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests/support"))
 from protocol_fault import packet
@@ -207,6 +209,609 @@ class CommitProtocol:
             active, tags, protocol = self.completed
         return {"begin_observed": active, "command_tags": tags, "protocol": protocol,
                 "overflow": self.overflow, "classification_invalid": self.invalid}
+
+
+class AckOracle:
+    COLUMNS = tuple(zip(
+        "magic version run_id nonce source_system source_database generation target_system target_database owner_oid schema_oid table_oid applied_order last_xid begin_ordinal source_commit_lsn source_end_lsn barrier_epoch barrier_counter copy_snapshot_token copy_consistent_point copy_plan_nonce clone_state certified_lsn follow_binding drain_end_lsn drain_witness_lsn drain_kind follow_completed".split(),
+        "text int4 bytea bytea numeric oid numeric numeric oid oid oid oid numeric oid numeric pg_lsn pg_lsn numeric numeric text pg_lsn bytea text pg_lsn text pg_lsn pg_lsn text bool".split()))
+    LIMIT = 256
+
+    def __init__(self, profile):
+        if profile != "m9":
+            raise ValueError("independent ACK oracle requires M9")
+        self.lock = threading.RLock()
+        self.ordinal = 0
+        self.bound = self.invalid = self.overflow = False
+        self.connections = {"source": 0, "target": 0}
+        self.targets, self.transactions, self.keepalives, self.proofs, self.statuses, self.commits = {}, [], [], [], [], []
+        self.head = self.table_hash = self.guard_hash = None
+        self.target_transactions = 0
+
+    def step(self):
+        if self.ordinal == 2**64 - 1:
+            self.refuse(True)
+        self.ordinal += 1
+        return self.ordinal
+
+    def refuse(self, overflow=False):
+        self.invalid = True
+        self.overflow |= overflow
+        raise ValueError("incomplete or invalid independent ACK observation")
+
+    @classmethod
+    def metadata_sql(cls, table):
+        assignments = ", ".join(f"{name} = ${index + 1}::pg_catalog.{kind}" for index, (name, kind) in enumerate(cls.COLUMNS) if index >= 12)
+        identity = [f"{name} IS NOT DISTINCT FROM ${index + 1}::pg_catalog.{kind}" for index, (name, kind) in enumerate(cls.COLUMNS[:12])]
+        predecessor = [f"{name} IS NOT DISTINCT FROM ${index + 30}::pg_catalog.{kind}" for index, (name, kind) in enumerate(cls.COLUMNS[12:])]
+        return f"UPDATE ONLY {table} SET {assignments} WHERE " + " AND ".join(identity + predecessor)
+
+    @staticmethod
+    def guard_sql(run):
+        slot = zlib.crc32(bytes.fromhex(run[2:]))
+        return ("SELECT pg_catalog.pg_backend_pid() = $1::integer\n"
+                "            AND (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()) = $2::oid\n"
+                "            AND (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER) = $3::oid\n"
+                "            AND NOT pg_catalog.pg_is_in_recovery()\n"
+                "            AND pg_catalog.current_setting('transaction_read_only') = 'off'\n"
+                "            AND pg_catalog.current_setting('fsync') = 'on'\n"
+                "            AND pg_catalog.current_setting('full_page_writes') = 'on'\n"
+                "            AND pg_catalog.current_setting('search_path') = 'pg_catalog'\n"
+                "            AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory'\n"
+                f"                AND database = $2::oid AND pid = $1::integer AND classid = {0x5250474d}::oid\n"
+                f"                AND objid = {slot}::oid AND objsubid = 2 AND mode = 'ExclusiveLock' AND granted)")
+
+    def project(self, values):
+        if len(values) != 29:
+            self.refuse()
+        result = []
+        for (name, kind), value in zip(self.COLUMNS, values):
+            if value is None:
+                if name not in {"target_system", "last_xid", "begin_ordinal", "source_commit_lsn", "source_end_lsn", "copy_snapshot_token", "copy_consistent_point", "copy_plan_nonce", "clone_state", "certified_lsn", "follow_binding", "drain_end_lsn", "drain_witness_lsn", "drain_kind"}:
+                    self.refuse()
+                result.append(None)
+            elif kind in ("numeric", "oid", "int4"):
+                if not re.fullmatch(rb"0|[1-9][0-9]{0,19}", value):
+                    self.refuse()
+                number = int(value)
+                minimum = 0 if name in ("applied_order", "barrier_epoch") else 1
+                if not minimum <= number < (2**32 if kind in ("oid", "int4") else 2**64):
+                    self.refuse()
+                result.append(number)
+            elif kind == "pg_lsn":
+                if not re.fullmatch(rb"[0-9A-F]{1,8}/[0-9A-F]{1,8}", value):
+                    self.refuse()
+                high, low = value.split(b'/')
+                number = (int(high, 16) << 32) + int(low, 16)
+                if not number:
+                    self.refuse()
+                result.append(number)
+            elif name == "follow_completed":
+                if value not in (b't', b'f'):
+                    self.refuse()
+                result.append(value == b't')
+            elif name == "drain_kind":
+                if value not in (b'keepalive', b'later_begin'):
+                    self.refuse()
+                result.append(value.decode())
+            else:
+                if len(value) > (262144 if name == "follow_binding" else 4096) or b'\0' in value:
+                    self.refuse()
+                if kind == "bytea" and (not re.fullmatch(rb"\\x[0-9a-f]{32}", value) or value == b'\\x' + b'00' * 16):
+                    self.refuse()
+                try:
+                    value.decode("utf-8")
+                except UnicodeError:
+                    self.refuse()
+                if name == "magic" and value != b'rpgmigrate':
+                    self.refuse()
+                result.append(hashlib.sha256(value).hexdigest())
+        row = dict(zip((name for name, _ in self.COLUMNS), result))
+        if row["version"] != 7:
+            self.refuse()
+        applied = [row[key] for key in ("last_xid", "begin_ordinal", "source_commit_lsn", "source_end_lsn")]
+        if (row["applied_order"] == 0 and any(value is not None for value in applied)
+                or row["applied_order"] > 0 and (any(value is None for value in applied) or not 3 <= row["last_xid"] < 2**32
+                or row["begin_ordinal"] != row["source_commit_lsn"] or row["source_end_lsn"] < row["source_commit_lsn"])):
+            self.refuse()
+        anchor = [row[key] for key in ("copy_snapshot_token", "copy_consistent_point", "copy_plan_nonce")]
+        if any(value is not None for value in anchor):
+            if any(value is None for value in anchor) or values[22] is None or values[24] is None:
+                self.refuse()
+            try:
+                follow, clone = json.loads(values[24])["binding"], json.loads(values[22])
+                slot = follow["slot"]
+                if (values[19].decode() != slot["snapshot_token"] or row["copy_consistent_point"] != slot["consistent_point"]
+                        or values[21] != ("\\x" + bytes(slot["intent"]["nonce"]).hex()).encode()
+                        or clone["phase"] != "analyzing" or clone["generation"] != follow["copy_generation"]
+                        or clone["source_timeline"] != follow["source_timeline"] or clone["snapshot_token"] != slot["snapshot_token"]):
+                    self.refuse()
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                self.refuse()
+        elif row["applied_order"] or row["certified_lsn"] is not None:
+            self.refuse()
+        drain = [row[key] for key in ("drain_end_lsn", "drain_witness_lsn", "drain_kind")]
+        if any(value is not None for value in drain):
+            if (any(value is None for value in drain) or row["copy_consistent_point"] is None
+                    or row["drain_witness_lsn"] < row["drain_end_lsn"] or row["copy_consistent_point"] > row["drain_end_lsn"]
+                    or row["drain_kind"] == "later_begin" and row["drain_witness_lsn"] == row["drain_end_lsn"]
+                    or row["drain_kind"] == "keepalive" and (row["certified_lsn"] or 0) < row["drain_witness_lsn"]):
+                self.refuse()
+        elif row["follow_completed"]:
+            self.refuse()
+        return tuple(result)
+
+    def bind(self, owned, settings):
+        from follow import validate_settings
+        with self.lock:
+            self.step()
+            if self.bound:
+                self.refuse()
+            validate_settings(settings)
+            table = owned["table"]
+            if not isinstance(table, str) or not re.fullmatch(r'"(?:[^"\x00]|"")+"\."(?:[^"\x00]|"")+"', table) or len(table.encode()) > 512:
+                self.refuse()
+            values = [None if owned[name] is None else ("t" if owned[name] is True else "f" if owned[name] is False else str(owned[name])).encode() for name, _ in self.COLUMNS]
+            self.head = self.project(values)
+            self.table_hash = hashlib.sha256(table.encode()).digest()
+            self.guard_hash = hashlib.sha256(self.guard_sql(owned["run_id"]).encode()).digest()
+            self.bound = True
+
+    def connection(self, side):
+        with self.lock:
+            self.step()
+            if side not in self.connections or self.connections[side] == 64:
+                self.refuse(True)
+            self.connections[side] += 1
+            connection = self.connections[side]
+            if side == "target":
+                self.targets[connection] = AckTargetProtocol(self, connection)
+            return connection
+
+    def target_frontend(self, connection, kind, payload):
+        with self.lock:
+            self.step()
+            return self.targets[connection].frontend(kind, payload)
+
+    def target_backend(self, connection, kind, payload):
+        with self.lock:
+            self.step()
+            return self.targets[connection].backend(kind, payload)
+
+    def synchronous_request(self, connection, token):
+        with self.lock:
+            target = self.targets[connection]
+            return (self.bound and not self.invalid and not self.overflow and token is not None and token["kind"] == "commit" and target.active
+                    and target.next is not None and target.checked in ("on", "remote_apply")
+                    and not target.local_off and not target.warned and target.warning_visibility)
+
+    def forwarded(self, token):
+        if token is None:
+            return
+        with self.lock:
+            ordinal = self.step()
+            if token["forwarded"]:
+                self.refuse()
+            token["forwarded"] = True
+            if token.get("event") == "ready":
+                self.targets[token["connection"]].publish(token["terminal"], ordinal)
+
+    def source_transaction(self, tx):
+        with self.lock:
+            self.step()
+            if len(self.transactions) == self.LIMIT:
+                self.refuse(True)
+            if tx.get("complete") is not True or tx.get("begin_forwarded") is not True or tx.get("commit_forwarded") is not True:
+                self.refuse()
+            if (any(type(tx.get(key)) is not int for key in ("connection", "final_lsn", "commit_lsn", "end_lsn", "xid"))
+                    or not 0 < tx["connection"] <= self.connections["source"] or not 3 <= tx["xid"] < 2**32
+                    or not 0 < tx["final_lsn"] == tx["commit_lsn"] <= tx["end_lsn"] < 2**64
+                    or any(old["connection"] == tx["connection"] and old["end_lsn"] >= tx["end_lsn"] for old in self.transactions)):
+                self.refuse()
+            self.transactions.append({key: tx[key] for key in ("connection", "final_lsn", "commit_lsn", "end_lsn", "xid")})
+
+    def source_keepalive(self, record):
+        with self.lock:
+            self.step()
+            if len(self.keepalives) == self.LIMIT:
+                self.refuse(True)
+            if (type(record.get("connection")) is not int or not 0 < record["connection"] <= self.connections["source"]
+                    or type(record.get("lsn")) is not int or not 0 < record["lsn"] < 2**64
+                    or type(record.get("idle")) is not bool or record.get("forwarded") is not True):
+                self.refuse()
+            self.keepalives.append({key: record[key] for key in ("connection", "lsn", "idle", "forwarded")})
+
+    def source_status(self, connection, positions):
+        with self.lock:
+            ordinal = self.step()
+            if len(self.statuses) == 10000:
+                self.refuse(True)
+            if len(positions) != 3 or any(type(value) is not int or not 0 <= value < 2**64 for value in positions):
+                self.refuse()
+            if type(connection) is not int or not 0 < connection <= self.connections["source"]:
+                self.refuse()
+            proof = self.proofs[-1] if self.proofs else None
+            prefix = proof["prefix"] if proof else 0
+            previous = next((record["positions"][1] for record in reversed(self.statuses) if record["connection"] == connection), 0)
+            record = {"ordinal": ordinal, "connection": connection, "positions": tuple(positions), "prefix": prefix,
+                      "proof_ordinal": proof["ordinal"] if proof else None,
+                      "safe": positions[0] == positions[1] == positions[2] and previous <= positions[1] <= prefix,
+                      "forwarded": False}
+            self.statuses.append(record)
+            return record
+
+    def probe_status(self, connection, positions):
+        with self.lock:
+            probe = AckOracle("m9")
+            probe.ordinal, probe.bound, probe.invalid, probe.overflow = self.ordinal, self.bound, self.invalid, self.overflow
+            probe.connections = dict(self.connections)
+            probe.proofs = [dict(record) for record in self.proofs]
+            probe.statuses = [dict(record) for record in self.statuses]
+            probe.forwarded(probe.source_status(connection, positions))
+            evidence = probe.evidence()
+            return {"statuses": [tuple(record["positions"]) for record in evidence["statuses"] if record["forwarded"]], "ack_oracle": evidence}
+
+    def close(self, side, connection, *, incomplete=False):
+        with self.lock:
+            self.step()
+            self.invalid |= incomplete
+            if side == "target":
+                target = self.targets[connection]
+                self.invalid |= target.active or target.terminal is not None or bool(target.expected) or target.delivery is not None
+
+    def evidence(self):
+        with self.lock:
+            return {"profile": "m9", "bound": self.bound, "invalid": self.invalid, "overflow": self.overflow,
+                    "ordinal": self.ordinal, "proofs": [dict(record) for record in self.proofs],
+                    "commits": [dict(record) for record in self.commits],
+                    "statuses": [{**record, "positions": tuple(record["positions"])} for record in self.statuses]}
+
+
+class AckTargetProtocol(CommitProtocol):
+    def __init__(self, oracle, connection):
+        super().__init__()
+        self.oracle, self.connection = oracle, connection
+        self.expected, self.pid, self.terminal = [], None, None
+        self.delivery = None
+        self.initial_ready = False
+        self.next = self.checked = self.setting = None
+        self.local_off = self.warned = self.warning_visibility = False
+
+    def fail(self, overflow=False):
+        self.invalid = True
+        self.oracle.refuse(overflow)
+
+    def classify(self, sql):
+        exact = {b'BEGIN': "begin", b'BEGIN ISOLATION LEVEL READ COMMITTED': "begin", b'COMMIT': "commit", b'ROLLBACK': "rollback",
+                 b'SHOW synchronous_commit': "show", b'SET LOCAL synchronous_commit = off': "off",
+                 b'SET LOCAL client_min_messages = warning': "warning_guard"}
+        if sql in exact:
+            return exact[sql], None
+        setting = re.fullmatch(rb"SET synchronous_commit TO '(on|remote_apply|off|local|remote_write)'", sql)
+        if setting:
+            return "setting", setting[1].decode()
+        table = re.match(rb'UPDATE ONLY ("(?:[^"\x00]|"")+"\."(?:[^"\x00]|"")+") SET ', sql)
+        if table:
+            try:
+                if sql == self.oracle.metadata_sql(table[1].decode()).encode():
+                    return "metadata", hashlib.sha256(table[1]).digest()
+            except UnicodeError:
+                self.fail()
+        return "other", hashlib.sha256(sql).digest()
+
+    def queue(self, value):
+        if len(self.expected) == 4096:
+            self.fail(True)
+        self.expected.append(value)
+
+    def operation(self, classification, values):
+        kind, detail = classification
+        if kind == "other" and detail == self.oracle.guard_hash:
+            kind = "guard"
+        op = {"kind": kind, "detail": detail, "values": values, "forwarded": False, "rows": 0, "value": None, "description": None, "columns": None}
+        if self.active and kind not in ("commit", "show", "setting", "off", "warning_guard", "guard"):
+            self.checked = None
+        self.queue(op)
+        return op
+
+    def frontend(self, kind, payload):
+        if kind == b'P':
+            name, offset = self.name(payload)
+            sql, offset = self.string(payload, offset, 65536)
+            count, offset = self.short(payload, offset)
+            if count > self.PARAM_LIMIT or len(payload) != offset + count * 4:
+                self.fail(count > self.PARAM_LIMIT)
+            self.store(self.statements, name, self.classify(sql))
+            self.queue(b'1')
+        elif kind == b'B':
+            portal, offset = self.name(payload)
+            statement, offset = self.name(payload, offset)
+            count, offset = self.short(payload, offset)
+            if count > self.PARAM_LIMIT or offset + count * 2 > len(payload):
+                self.fail(count > self.PARAM_LIMIT)
+            formats = [struct.unpack_from("!H", payload, offset + 2 * index)[0] for index in range(count)]
+            offset += count * 2
+            number, offset = self.short(payload, offset)
+            if number > self.PARAM_LIMIT or count not in (0, 1, number) or any(value not in (0, 1) for value in formats):
+                self.fail(number > self.PARAM_LIMIT)
+            values = []
+            for _ in range(number):
+                if offset + 4 > len(payload):
+                    self.fail()
+                length = struct.unpack_from("!i", payload, offset)[0]
+                offset += 4
+                if length < -1 or length > len(payload) - offset:
+                    self.fail()
+                values.append(None if length == -1 else payload[offset:offset + length])
+                offset += max(0, length)
+            results, offset = self.formats(payload, offset)
+            if offset != len(payload) or statement not in self.statements:
+                self.fail()
+            classification = self.statements[statement]
+            if classification[0] == "metadata":
+                if number != 46 or any(formats) or results not in (0, 1):
+                    self.fail()
+                values = (self.oracle.project(values[:29]), self.oracle.project(values[:12] + values[29:]))
+            elif classification[0] == "other" and classification[1] == self.oracle.guard_hash:
+                if number != 3 or any(formats):
+                    self.fail()
+                values = tuple(hashlib.sha256(value).digest() if value is not None else None for value in values)
+            else:
+                if classification[0] != "other" and number:
+                    self.fail()
+                values = None
+            self.store(self.portals, portal, (classification, values))
+            self.queue(b'2')
+        elif kind == b'E':
+            portal, offset = self.name(payload)
+            if len(payload) != offset + 4 or portal not in self.portals or struct.unpack_from("!I", payload, offset)[0]:
+                self.fail()
+            return self.operation(*self.portals[portal])
+        elif kind in (b'D', b'C'):
+            if payload[:1] not in (b'S', b'P'):
+                self.fail()
+            name, offset = self.name(payload, 1)
+            mapping = self.statements if payload[:1] == b'S' else self.portals
+            if offset != len(payload) or name not in mapping:
+                self.fail()
+            if kind == b'C':
+                mapping.pop(name)
+                self.queue(b'3')
+            else:
+                if payload[:1] == b'S':
+                    self.queue(b't')
+                self.queue(b'description')
+        elif kind == b'Q':
+            sql, offset = self.string(payload, 0, 65536)
+            if offset != len(payload):
+                self.fail()
+            self.statements.pop(b'', None)
+            self.portals.pop(b'', None)
+            op = self.operation(self.classify(sql), None)
+            op["simple"] = True
+            self.queue(b'Z')
+            return op
+        elif kind == b'S':
+            if payload:
+                self.fail()
+            self.queue(b'Z')
+        elif kind == b'H':
+            if payload:
+                self.fail()
+        elif kind not in (b'p', b'd', b'c', b'f', b'X'):
+            self.fail()
+        return None
+
+    def command(self, op, tag):
+        kind = op["kind"]
+        if not op["forwarded"]:
+            self.fail()
+        if kind == "begin":
+            if tag != b'BEGIN\0' or self.active:
+                self.fail()
+            self.active = True
+            self.next = self.checked = self.setting = None
+            self.local_off = self.warned = self.warning_visibility = False
+        elif kind == "metadata":
+            if not self.active or tag != b'UPDATE 1\0' or op["values"] is None:
+                self.fail()
+            next_row, old = op["values"]
+            if self.oracle.bound:
+                previous = self.next if self.next is not None else self.oracle.head
+                if op["detail"] != self.oracle.table_hash or next_row[:12] != previous[:12] or old != previous or next_row[24] != previous[24] or next_row[18] != previous[18] + 1 or next_row[17] < previous[17]:
+                    self.fail()
+                if next_row[12] < old[12] or (next_row[16] or 0) < (old[16] or 0) or (next_row[23] or 0) < (old[23] or 0):
+                    self.fail()
+                if (any(value is not None for value in old[19:22]) and next_row[19:22] != old[19:22]
+                        or old[25] is not None and next_row[25:28] != old[25:28] or old[28] and next_row != old):
+                    self.fail()
+                if next_row[12] > old[12]:
+                    covered = [tx for tx in self.oracle.transactions if (old[16] or 0) < tx["end_lsn"] <= next_row[16]]
+                    if (len(covered) != next_row[12] - old[12] or not covered or (covered[-1]["xid"], covered[-1]["final_lsn"], covered[-1]["commit_lsn"], covered[-1]["end_lsn"]) != next_row[13:17]):
+                        self.fail()
+                elif next_row[12:17] != old[12:17]:
+                    self.fail()
+                if (next_row[23] or 0) > (old[23] or 0) and not any(record["idle"] and record["forwarded"] and record["lsn"] >= next_row[23] for record in self.oracle.keepalives):
+                    self.fail()
+                self.next = next_row
+        elif kind in ("setting", "off", "warning_guard"):
+            if tag != b'SET\0':
+                self.fail()
+            if kind == "setting":
+                self.setting, self.checked = op["detail"], None
+            elif kind == "off":
+                if not self.active:
+                    self.fail()
+                self.local_off, self.checked = True, None
+            else:
+                self.warning_visibility = self.active
+        elif kind == "show":
+            if tag != b'SHOW\0' or op["rows"] != 1 or op["description"] != (b'synchronous_commit', 25, 0) or op["value"] not in (b'on', b'remote_apply', b'off', b'local', b'remote_write'):
+                self.fail()
+            self.checked = op["value"].decode() if self.active and op["value"].decode() == self.setting and not self.local_off else None
+        elif kind == "guard":
+            expected = (self.pid, self.oracle.head[8], self.oracle.head[9]) if self.oracle.bound else ()
+            wanted = tuple(hashlib.sha256(str(value).encode()).digest() for value in expected)
+            if tag != b'SELECT 1\0' or op["values"] != wanted or op["rows"] != 1 or op["value"] != b't' or op["description"] != (b'?column?', 16, 0):
+                self.checked = None
+        elif kind == "commit":
+            if tag != b'COMMIT\0' or not self.active:
+                self.next = None
+            self.terminal = {"next": self.next, "sync": self.checked in ("on", "remote_apply") and not self.local_off,
+                             "mode": "async" if self.local_off else "sync" if self.checked in ("on", "remote_apply") else "unproven",
+                             "begin": self.active, "clean": self.active and not self.warned and self.warning_visibility, "tag": {"forwarded": False}}
+            self.active = False
+            return self.terminal["tag"]
+        elif kind == "rollback" or tag == b'ROLLBACK\0':
+            self.active, self.next, self.checked, self.terminal = False, None, None, None
+        return None
+
+    def backend(self, kind, payload):
+        if kind == b'K':
+            if (len(payload) != 8 or self.pid is not None or not 0 < struct.unpack_from("!I", payload)[0] < 2**31
+                    or any(target is not self and target.pid == struct.unpack_from("!I", payload)[0] for target in self.oracle.targets.values())):
+                self.fail()
+            self.pid = struct.unpack_from("!I", payload)[0]
+            return None
+        if kind == b'N':
+            self.warned = True
+            if self.terminal is not None:
+                self.terminal["clean"] = False
+            return None
+        if kind == b'E':
+            self.oracle.invalid = True
+            self.active, self.next, self.terminal = False, None, None
+            self.expected.clear()
+            return None
+        if kind == b'R':
+            if self.initial_ready or self.active or self.expected or len(payload) < 4:
+                self.fail()
+            return None
+        if kind == b'S':
+            name, offset = self.string(payload, 0, 128)
+            _, offset = self.string(payload, offset, 4096)
+            if offset != len(payload):
+                self.fail()
+            if name == b'synchronous_commit':
+                self.checked = None
+            return None
+        if not self.expected:
+            if kind == b'Z' and payload == b'I' and not self.initial_ready and not self.active and self.terminal is None:
+                self.initial_ready = True
+                return None
+            self.fail()
+        expected = self.expected[0]
+        op = next((item for item in self.expected if isinstance(item, dict)), None)
+        if kind in (b'T', b'n'):
+            if expected != b'description' and not isinstance(expected, dict):
+                self.fail()
+            if kind == b'n':
+                if payload:
+                    self.fail()
+            else:
+                count, offset = self.short(payload, 0)
+                if count > 1600 or op is None:
+                    self.fail(count > 1600)
+                op["columns"] = count
+                for _ in range(count):
+                    name, offset = self.string(payload, offset, 1024)
+                    if len(payload) < offset + 18:
+                        self.fail()
+                    table, attr, oid, width, modifier, form = struct.unpack_from("!IhIhih", payload, offset)
+                    offset += 18
+                    if not oid or form not in (0, 1):
+                        self.fail()
+                    if op["kind"] in ("show", "guard"):
+                        if count != 1 or table or attr or modifier != -1 or form != 0 or width != (-1 if op["kind"] == "show" else 1):
+                            self.fail()
+                        op["description"] = name, oid, form
+                if offset != len(payload):
+                    self.fail()
+            if expected == b'description':
+                self.expected.pop(0)
+        elif kind == b'D':
+            if not isinstance(expected, dict):
+                self.fail()
+            count, offset = self.short(payload, 0)
+            if count != expected["columns"]:
+                self.fail()
+            for _ in range(count):
+                if len(payload) < offset + 4:
+                    self.fail()
+                length = struct.unpack_from("!i", payload, offset)[0]
+                offset += 4
+                if length < -1 or length > len(payload) - offset:
+                    self.fail()
+                offset += max(0, length)
+            if offset != len(payload):
+                self.fail()
+            expected["rows"] += 1
+            if expected["kind"] in ("show", "guard"):
+                if expected["rows"] != 1 or len(payload) < 6 or payload[:2] != b'\0\1' or struct.unpack_from("!i", payload, 2)[0] != len(payload) - 6 or len(payload) > 32:
+                    self.fail()
+                expected["value"] = payload[6:]
+        elif kind == b'C':
+            if not isinstance(expected, dict) or not payload.endswith(b'\0') or payload.count(b'\0') != 1:
+                self.fail()
+            if expected["kind"] == "other" and expected.get("simple"):
+                expected["rows"], expected["columns"] = 0, None
+                return None
+            self.expected.pop(0)
+            return self.command(expected, payload)
+        elif kind == b'Z':
+            if isinstance(expected, dict) and expected["kind"] == "other" and expected.get("simple"):
+                self.expected.pop(0)
+                expected = self.expected[0] if self.expected else None
+                if payload == b'I':
+                    self.active, self.next, self.checked = False, None, None
+            if expected != b'Z' or payload != (b'T' if self.active else b'I'):
+                self.fail()
+            self.expected.pop(0)
+            self.initial_ready = True
+            if not self.active:
+                self.portals.clear()
+                self.local_off, self.checked = False, None
+            if self.terminal is not None:
+                terminal, self.terminal = self.terminal, None
+                self.delivery = {"event": "ready", "connection": self.connection, "terminal": terminal, "forwarded": False}
+                return self.delivery
+        elif kind in (b'1', b'2', b'3', b't'):
+            if expected != kind or kind != b't' and payload:
+                self.fail()
+            if kind == b't':
+                count, offset = self.short(payload, 0)
+                if count > self.PARAM_LIMIT or len(payload) != offset + count * 4:
+                    self.fail(count > self.PARAM_LIMIT)
+            self.expected.pop(0)
+        elif kind in (b'G', b'H', b'd', b'c') and isinstance(expected, dict) and expected["kind"] == "other":
+            return None
+        else:
+            self.fail()
+        return None
+
+    def publish(self, terminal, ordinal):
+        self.delivery = None
+        if self.oracle.invalid or self.oracle.overflow:
+            return
+        if terminal["begin"] and terminal["tag"]["forwarded"]:
+            if self.oracle.target_transactions == self.oracle.LIMIT:
+                self.fail(True)
+            self.oracle.target_transactions += 1
+            self.oracle.commits.append({"ordinal": ordinal, "connection": self.connection, "backend_pid": self.pid,
+                                        "mode": terminal["mode"], "writing": terminal["next"] is not None, "warning_free": terminal["clean"],
+                                        "prefix": max(terminal["next"][16] or 0, terminal["next"][20] or 0, terminal["next"][23] or 0) if terminal["next"] is not None else 0})
+        next_row = terminal["next"]
+        if not self.oracle.bound or next_row is None or not terminal["tag"]["forwarded"] or self.pid is None:
+            return
+        self.oracle.head = next_row
+        if not terminal["sync"] or not terminal["clean"]:
+            return
+        prefix = max(next_row[16] or 0, next_row[20] or 0, next_row[23] or 0)
+        if not prefix:
+            return
+        if len(self.oracle.proofs) == self.oracle.LIMIT:
+            self.fail(True)
+        self.oracle.proofs.append({"ordinal": ordinal, "connection": self.connection, "backend_pid": self.pid, "prefix": prefix})
 
 
 class PgoutputObservation:
@@ -470,10 +1075,13 @@ class PgoutputObservation:
 
 
 class WireGate:
-    def __init__(self, host, mode):
-        if mode not in ("observe", "before_commit", "after_commit", "after_begin", "later_begin_only", "completed_resume_close"):
+    def __init__(self, host, mode, *, ack_oracle=None, side=None):
+        if mode not in ("observe", "before_commit", "after_commit", "before_sync_commit", "after_begin", "later_begin_only", "completed_resume_close"):
             raise ValueError("unknown follow wire gate")
+        if ack_oracle is not None and (not isinstance(ack_oracle, AckOracle) or side not in ("source", "target")) or ack_oracle is None and side is not None:
+            raise ValueError("ACK wire observation requires an exact shared oracle and side")
         self.host, self.mode = host, mode
+        self.ack_oracle, self.side = ack_oracle, side
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
@@ -500,8 +1108,14 @@ class WireGate:
     def connection(self, connection):
         return connection.replace("host=" + self.host, "host=127.0.0.1 port=" + str(self.port))
 
+    def attach_ack_oracle(self, oracle, side):
+        if not isinstance(oracle, AckOracle) or side not in ("source", "target"):
+            raise ValueError("ACK wire observation requires an exact shared oracle and side")
+        with self.lock:
+            self.ack_oracle, self.side = oracle, side
+
     def hold_copy(self, relation):
-        if self.mode != "observe" or self.copy_relation is not None or not isinstance(relation, list) or len(relation) != 2:
+        if self.mode not in ("observe", "after_begin") or self.copy_relation is not None or not isinstance(relation, list) or len(relation) != 2:
             raise RuntimeError("COPY hold needs one exact relation on an observation gate")
         self.copy_relation = list(relation)
 
@@ -691,6 +1305,9 @@ class WireGate:
     def new_observation(self):
         with self.lock:
             observation = PgoutputObservation(len(self.observers) + 1)
+            observation.ack_oracle, observation.ack_side = self.ack_oracle, self.side
+            if self.ack_oracle is not None:
+                observation.connection = self.ack_oracle.connection(self.side)
             if self.mode == "completed_resume_close":
                 observation.close_commits = 0
                 observation.close_pending = False
@@ -733,29 +1350,47 @@ class WireGate:
             while not self.stopping.is_set():
                 self.trace(observation, "client", "frame_wait")
                 kind, frame, payload = self.close_packet(client, observation) if self.mode == "completed_resume_close" else packet(client)
+                ack_token = status_token = None
+                oracle = getattr(observation, "ack_oracle", None)
+                if oracle is not None:
+                    if observation.ack_side == "target":
+                        ack_token = oracle.target_frontend(observation.connection, kind, payload)
+                    elif observation.copy_active and kind == b'd' and payload[:1] == b'r':
+                        if len(payload) != 34 or payload[-1] not in (0, 1):
+                            raise ValueError("invalid standby status frame")
+                        status_token = oracle.source_status(observation.connection, struct.unpack("!QQQ", payload[1:25]))
                 self.trace(observation, "client", "received", kind)
                 status = commit = False
                 if observation is not None:
                     with self.lock:
                         observation.copy_frontend(kind, payload)
+                        if oracle is not None:
+                            with oracle.lock:
+                                oracle.invalid |= observation.copy_invalid
+                                oracle.overflow |= observation.copy_overflow
                         if kind == b'Q':
                             observation.query(payload)
                         status = observation.copy_active and kind == b'd' and payload[:1] == b'r'
                         if self.mode == "completed_resume_close" and self.close_frontend(observation, kind, payload):
                             return
-                        if self.mode in ("before_commit", "after_commit"):
+                        if self.mode in ("before_commit", "after_commit", "before_sync_commit"):
                             commit = observation.commit_protocol.frontend(kind, payload)
                 if status:
                     if len(payload) != 34:
                         raise ValueError("invalid standby status frame")
-                if self.armed.is_set() and self.mode == "before_commit" and commit:
+                sync_commit = (self.mode == "before_sync_commit" and oracle is not None and observation.ack_side == "target"
+                               and oracle.synchronous_request(observation.connection, ack_token))
+                if self.armed.is_set() and (self.mode == "before_commit" and commit or sync_commit):
                     self.trace(observation, "client", "gate_wait")
-                    held = self.hold(observation, "before_commit", "simple" if kind == b'Q' else "extended")
+                    held = self.hold(observation, self.mode, "simple" if kind == b'Q' else "extended")
                     with self.lock:
                         if held and self.abort_requested.is_set():
                             return
                 self.trace(observation, "client", "forwarding")
                 server.sendall(frame)
+                if oracle is not None:
+                    oracle.forwarded(ack_token)
+                    oracle.forwarded(status_token)
                 self.trace(observation, "client", "forwarded", kind)
                 if status:
                     with self.lock:
@@ -798,10 +1433,16 @@ class WireGate:
                     with self.lock:
                         observation.invalid |= observation.copy_active
                     raise
+                oracle = getattr(observation, "ack_oracle", None)
+                ack_token = oracle.target_backend(observation.connection, kind, payload) if oracle is not None and observation.ack_side == "target" else None
                 with self.lock:
                     token = observation.received(kind, payload)
                     observation.wire_event("server", "received", kind, payload)
-                    if self.mode in ("before_commit", "after_commit", "completed_resume_close"):
+                    if oracle is not None:
+                        with oracle.lock:
+                            oracle.invalid |= observation.copy_invalid
+                            oracle.overflow |= observation.copy_overflow
+                    if self.mode in ("before_commit", "after_commit", "before_sync_commit", "completed_resume_close"):
                         observation.commit_protocol.backend(kind, payload)
                     close_ready = self.close_backend(observation, kind, frame, payload) if self.mode == "completed_resume_close" else False
                     logical_wal = observation.copy_active and kind == b'd' and payload[:1] == b'w'
@@ -855,9 +1496,17 @@ class WireGate:
                     self.hold(observation, "after_commit", "backend")
                 self.trace(observation, "server", "forwarding")
                 client.sendall(frame)
+                if oracle is not None:
+                    oracle.forwarded(ack_token)
                 self.trace(observation, "server", "forwarded", kind)
                 with self.lock:
                     observation.forwarded(token)
+                    if oracle is not None and observation.ack_side == "source" and token is not None:
+                        record, field = token
+                        if field == "commit_forwarded":
+                            oracle.source_transaction(record)
+                        elif field == "forwarded":
+                            oracle.source_keepalive(record)
         except (EOFError, OSError) as error:
             if self.mode == "completed_resume_close" and isinstance(error, TimeoutError) and not self.stopping.is_set():
                 self.errors.append(type(error).__name__)
@@ -866,6 +1515,10 @@ class WireGate:
             self.errors.append(type(error).__name__)
             self.trace(observation, "server", "closed", closure="protocol_error")
         finally:
+            oracle = getattr(observation, "ack_oracle", None)
+            if oracle is not None:
+                oracle.close(observation.ack_side, observation.connection,
+                             incomplete=observation.ack_side == "source" and (observation.invalid or observation.overflow or observation.active is not None))
             self.trace(observation, "server", "closed", closure="proxy_shutdown")
             for stream in (client, server):
                 try:
@@ -917,11 +1570,14 @@ class WireGate:
         try:
             if self.errors:
                 raise RuntimeError("follow wire observer failed")
+            oracle = self.ack_oracle.evidence() if self.ack_oracle is not None else None
+            observers = [observer for observer in self.observers if oracle is None or observer.ack_oracle is self.ack_oracle]
             return {"hits": self.hits, "data_bytes": self.data_bytes, "begins": self.begins,
-                    "commits": self.commits, "statuses": list(self.statuses),
+                    "commits": self.commits, "statuses": list(self.statuses) if oracle is None else [tuple(status["positions"]) for status in oracle["statuses"] if status["forwarded"]],
+                    **({"ack_oracle": oracle} if oracle is not None else {}),
                     **({"dropped_keepalives": self.dropped_keepalives} if self.mode == "later_begin_only" else {}),
                     "logical": {"overflow": self.observer_overflow,
-                                "streams": [observer.evidence() for observer in self.observers if observer.start_lsn is not None]}}
+                                "streams": [observer.evidence() for observer in observers if observer.start_lsn is not None]}}
         finally:
             self.lock.release()
 

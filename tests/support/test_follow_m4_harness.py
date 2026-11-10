@@ -1,9 +1,12 @@
 """Negative controls for the cutover component qualification inventory."""
 
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stderr
+import io
 import json
+import os
 from pathlib import Path
 import runpy
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -52,6 +55,12 @@ AUTHORITY_ADDITIONS = tuple("apply::checkpoint::live_tests::" + name for name in
     "follow_observation_unknown_commit_needs_new_barrier",
     "follow_cancelled_sync_wait_never_proves_drain_completion_or_observation",
 ))
+AUTHORITY_M9_ADDITIONS = tuple("apply::checkpoint::live_tests::" + name for name in (
+    "follow_m9_async_group_visible_without_safe_feedback",
+    "follow_m9_barrier_covers_async_checkpoint",
+    "follow_m9_unknown_async_commit_requires_recovery",
+    "follow_m9_sync_warning_never_proves_prefix",
+))
 
 SOURCE_BASELINE = (
     "snapshot::follow_tests::live_follow_slot_snapshot_preserves_initial_boundary_and_exporter_lifetime",
@@ -90,7 +99,8 @@ class FollowM4HarnessTests(unittest.TestCase):
 
     def test_authority_fault_inventories_preserve_legacy_and_require_each_cutover_stage(self):
         self.assertEqual(authority_fault.FAULT_CASES, ("lost_commit_reply", "provisioning_recovery"))
-        self.assertEqual(authority_fault.FOLLOW_FAULT_CASES, ("follow_drain", "follow_completion", "follow_observation"))
+        self.assertEqual(authority_fault.FOLLOW_FAULT_CASES,
+                         ("follow_drain", "follow_completion", "follow_observation", "follow_m9_async_commit"))
         with tempfile.TemporaryDirectory() as directory:
             context = {"root": directory, "token": "owned"}
             for case in authority_fault.FOLLOW_FAULT_CASES:
@@ -105,6 +115,14 @@ class FollowM4HarnessTests(unittest.TestCase):
                 path.unlink()
                 with self.subTest(case=case), self.assertRaises(AssertionError):
                     authority.validate_authority_faults(context, follow=True)
+                path.write_text(original)
+                for changes in ({"case": "other"}, {"status": "pending"}, {"fault_hits": 0},
+                                {"fault_hits": True}, {"commit_tag": "ROLLBACK"}, {"backend_pid": 0},
+                                {"held_fence_observed": False}, {"released_fence_observed": False},
+                                {"backend_connection_closed": False}, {"holding_backend": True}):
+                    path.write_text(json.dumps({**json.loads(original), **changes}))
+                    with self.subTest(case=case, changes=changes), self.assertRaises(AssertionError):
+                        authority.validate_authority_faults(context, follow=True)
                 path.write_text(original)
             with self.assertRaises(AssertionError):
                 authority.validate_authority_faults(context)
@@ -125,11 +143,54 @@ class FollowM4HarnessTests(unittest.TestCase):
                 (Path(directory) / f"authority-fault-{case}.json").write_text(json.dumps(value))
             validate("FollowAuthority", cases, output, context)
             for case in cases:
-                with self.subTest(case=case), self.assertRaises(AssertionError):
-                    validate("FollowAuthority", cases, output.replace(f"test {case} ... ok\n", ""), context)
+                record = f"test {case} ... ok\n"
+                for bad in (output.replace(record, ""), output + record,
+                            output.replace(record, record.replace("ok", "ignored")),
+                            output.replace(record, record.replace("ok", "FAILED"))):
+                    with self.subTest(case=case), self.assertRaises(AssertionError):
+                        validate("FollowAuthority", cases, bad, context)
 
-    def test_authority_inventory_preserves_eleven_and_requires_six_cutover_cases(self):
-        self.assertEqual(module_cases({}, "FollowAuthority"), [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS])
+    def test_authority_inventory_preserves_seventeen_and_requires_four_m9_cases(self):
+        self.assertEqual(module_cases({}, "FollowAuthority"),
+                         [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS, *AUTHORITY_M9_ADDITIONS])
+
+    def test_m9_fault_selector_uses_distinct_receipt_and_refuses_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory, "token": "owned", "port": 25432, "socket_dir": directory}
+            (Path(directory) / ".e1-owner").write_text(context["token"])
+            context_path = Path(directory) / "context.json"
+            context_path.write_text(json.dumps(context))
+            receipt = Path(directory) / "authority-fault-follow_m9_async_commit.json"
+            legacy = Path(directory) / "authority-fault-lost_commit_reply.json"
+            legacy.write_text("retained legacy receipt")
+            with patch.dict(os.environ, {"RPGMIGRATE_TEST_CONTEXT": str(context_path)}), \
+                    patch.object(sys, "argv", ["authority_fault.py", "--case", "follow_m9_async_commit"]), \
+                    patch("db_harness.psql", return_value=context["token"]), \
+                    patch.object(authority_fault, "ProtocolFault", side_effect=RuntimeError("before relay startup")) as relay:
+                with self.assertRaisesRegex(RuntimeError, "before relay startup"):
+                    authority_fault.main()
+                relay.assert_called_once_with(context, "commit_hold")
+                self.assertTrue(receipt.is_file())
+                self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+                receipt.write_text("retained M9 receipt")
+                relay.reset_mock()
+                with self.assertRaises(FileExistsError):
+                    authority_fault.main()
+                relay.assert_not_called()
+            self.assertEqual(receipt.read_text(), "retained M9 receipt")
+            self.assertEqual(legacy.read_text(), "retained legacy receipt")
+
+    def test_wrong_m9_selector_refuses_before_fixture_or_receipt(self):
+        for case in ("follow_m9_async", "follow_m9_barrier_commit"):
+            with self.subTest(case=case), redirect_stderr(io.StringIO()), \
+                    patch.object(sys, "argv", ["authority_fault.py", "--case", case]), \
+                    patch.object(authority_fault, "assert_identity") as identity, \
+                    patch.object(authority_fault, "ProtocolFault") as relay:
+                with self.assertRaises(SystemExit) as failure:
+                    authority_fault.main()
+                self.assertEqual(failure.exception.code, 2)
+                identity.assert_not_called()
+                relay.assert_not_called()
 
     def test_source_inventory_preserves_seven_and_requires_five_cleanup_cases(self):
         self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS])
