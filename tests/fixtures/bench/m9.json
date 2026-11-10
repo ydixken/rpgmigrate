@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "kind": "m9-benchmark-fixture",
+  "schema": {
+    "path": "schema.sql",
+    "sha256": "425b161df86c85bf8f65aca147c51bce82c01cff9aacc627768188a21812b61c"
+  },
+  "seed": {
+    "path": "seed.sql",
+    "sha256": "25cdc51381fee55d2c09e0e5d3c08c661b67314e91f8ad33ccddb626c38b10b7"
+  },
+  "shapes": {
+    "narrow": {
+      "tables": 16,
+      "rows_per_table": 65536,
+      "text_bytes_per_row": 96
+    },
+    "wide": {
+      "tables": 4,
+      "rows_per_table": 4096,
+      "text_bytes_per_row": 8192
+    }
+  },
+  "probe": {
+    "table": "probe",
+    "id": 1,
+    "initial_value": 0
+  },
+  "oracle": {
+    "max_rows_per_table": 100000,
+    "max_bytes_per_table": 67108864
+  }
+}

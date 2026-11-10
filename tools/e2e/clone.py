@@ -629,7 +629,7 @@ GIB = 1024 ** 3
 
 
 def server_start_arguments(profile, arguments):
-    if profile == "m8":
+    if profile in ("m8", "m9"):
         if arguments and tuple(arguments) != LOGICAL_SERVER_ARGUMENTS:
             raise RuntimeError("candidate logical server startup arguments conflict")
         return LOGICAL_SERVER_ARGUMENTS
@@ -1266,11 +1266,38 @@ def directory_identity(path):
     return identity
 
 
+def validate_outer_profile(args, program):
+    profile = getattr(args, "profile", "disabled" if program == "clone" else "legacy-m3")
+    durability = getattr(args, "durability", None)
+    if program not in ("clone", "follow") or profile not in ({"disabled", "m8"} if program == "clone" else {"legacy-m3", "m9"}):
+        raise RuntimeError("outer qualification profile differs from its program")
+    if durability not in (None, "durable", "replay-safe") or durability is not None and profile != "m9":
+        raise RuntimeError("outer durability requires the M9 follow profile")
+    if profile == "m9":
+        if getattr(args, "cutover", False):
+            raise RuntimeError("M9 cutover profile is not supported")
+        if args.report_probe is not None or os.environ.get("RPGMIGRATE_E2E_REPORT_PROBE") is not None:
+            raise RuntimeError("M9 profile cannot use the old Go report probe")
+        if durability == "replay-safe":
+            raise RuntimeError("M9 ReplaySafe requires a qualified private candidate bundle")
+    return profile
+
+
+def m9_outer_settings():
+    import follow
+    return follow.validate_settings({"durability": "durable", "barrier_interval_ms": None, "apply_group_txns": 100,
+                                     "limits": {"channel_bytes": 8388608, "channel_messages": 1024, "max_message_bytes": 16777216,
+                                                "group_rows": 10000, "group_bytes": 8388608}})
+
+
 def outer(args, *, program="clone", manifest=None, receipt_validator=validate_receipt, server_arguments=()):
+    profile = validate_outer_profile(args, program)
+    server_arguments = server_start_arguments(profile, server_arguments)
     manifest = load_manifest() if manifest is None else manifest
     diagnostic_case = getattr(args, "diagnostic_case", None)
     cutover_mode = getattr(args, "cutover", False)
-    feature_mode = getattr(args, "profile", "disabled") == "m8"
+    feature_mode = profile == "m8"
+    m9_mode = profile == "m9"
     if feature_mode:
         if program != "clone" or args.report_probe is not None:
             raise RuntimeError("candidate M8 direct CLI profile requires clone without the old Go report probe")
@@ -1290,11 +1317,11 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     runtime = os.environ.get("CONTAINER_RUNTIME", "podman")
     if not shutil.which(runtime):
         raise RuntimeError("required container runtime unavailable")
-    token = "rpgmigrate-" + ("m8" if feature_mode else "m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex
+    token = "rpgmigrate-" + ("m8" if feature_mode else "m9" if m9_mode else "m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex
     label = "io.rpgmigrate.e2e=" + token
     image = "localhost/" + token + ":dev"
     output = Path(args.receipt).absolute() if args.receipt else ROOT / "target/e2e" / (("clone-m8-" if feature_mode else "" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
-    if output.is_symlink() or (diagnostic_case or feature_mode) and output.exists():
+    if output.is_symlink() or (diagnostic_case or feature_mode or m9_mode) and output.exists():
         raise RuntimeError("explicit diagnostic/candidate receipt already exists or is replaced")
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     output = output.parent.resolve() / output.name
@@ -1318,7 +1345,6 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     guard.ledger["private_absent_before"] = True
     guard.ledger["private_identity"] = private_identity
     guard.persist()
-    server_arguments = server_start_arguments(getattr(args, "profile", "disabled"), server_arguments)
     guard.ledger["server_arguments"] = list(server_arguments)
     server_images, server_identities = [], []
     try:
@@ -1335,6 +1361,12 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
         source_tree = cutover.source_inventory(source_context)
         source_identity["inventory"] = source_tree
         guard.ledger["source"] = source_identity
+        if m9_mode:
+            import follow
+            settings = m9_outer_settings()
+            fixture_sha256 = follow.m9_fixture_sha256(source_context)
+            if fixture_sha256 != "6bad6653c290767a48d7aa2f3e35f399a9fc5a6664fdb80260206fa2b16ffb32":
+                raise RuntimeError("M9 exported fixture inputs differ from the reviewed inventory")
         cache, cargo_cache = private / "build", private / "cargo"
         for path in (cache, cargo_cache):
             path.mkdir(mode=0o700)
@@ -1401,6 +1433,9 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                                   {"kind": "container", "role": role, "image": image_id, "name": name, "mounts": mounts,
                                    "memory": memory, "network": None if role == "build" else {"name": token, "id": network_id}})
             cid = entry["id"]
+            if m9_mode and role == "build":
+                guard.ledger["m9_build"].update(container_id=cid)
+                guard.persist()
             if timeout is None:
                 guard.execute([runtime, "start", cid])
                 return entry
@@ -1416,9 +1451,30 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                  "--volume", str(source_context) + ":/workspace:ro", "--volume", str(cache) + ":/build", "--volume", str(cargo_cache) + ":/cargo", image_id, "cargo", "build", "--locked"]
         guard.ledger["stage"] = "cargo_build"
         guard.persist()
-        owned_container(fetch, timeout=1200, role="build", image_id=image_id, mounts=build_mounts, memory=4*GIB)
+        if m9_mode:
+            guard.ledger["m9_build"] = {"source": source_identity, "argv": fetch, "image_id": image_id,
+                                        "settings": settings, "settings_sha256": follow.m9_settings_sha256(settings),
+                                        "fixture_sha256": fixture_sha256, "returncode": None}
+            guard.persist()
+        try:
+            owned_container(fetch, timeout=1200, role="build", image_id=image_id, mounts=build_mounts, memory=4*GIB)
+        except SubprocessFailure as error:
+            if m9_mode:
+                guard.ledger["m9_build"]["returncode"] = error.metadata.get("returncode")
+                guard.persist()
+            raise
+        else:
+            if m9_mode:
+                guard.ledger["m9_build"]["returncode"] = 0
+                guard.persist()
         if cutover.source_inventory(source_context) != source_identity["inventory"]:
             raise RuntimeError("source changed during source-bound debug build")
+        if m9_mode:
+            binary = cache / "debug/rpgmigrate"
+            if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+                raise RuntimeError("M9 source-bound debug executable is absent or replaced")
+            guard.ledger["m9_build"]["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+            guard.persist()
         if guard.exists("network", token):
             raise RuntimeError("fresh network name already exists")
         network = guard._create([runtime, "network", "create", "--internal", "--label", label, token], {"kind": "network", "name": token})
@@ -1451,7 +1507,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                 if (details.get("data_directory") != data_directory or permissions != b"700|postgres"
                         or not re.fullmatch(r"[0-9]{19,20}", details.get("system_identifier", ""))
                         or details["system_identifier"] in {"7705796426308472853", "7705919902701522967", *(row["system_identifier"] for row in server_identities)}
-                        or feature_mode and (details.get("version") != {"16": "16.15", "18": "18.6"}[major] or details.get("wal_level") != "logical")
+                        or (feature_mode or m9_mode) and (details.get("version") != {"16": "16.15", "18": "18.6"}[major] or details.get("wal_level") != "logical")
                         or role not in network.get("Aliases", []) or network.get("NetworkID") != network_id):
                     raise RuntimeError("actual fresh server identity, startup settings, alias or PGDATA differ")
                 guard.observe_caps(entry, actual)
@@ -1476,6 +1532,20 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             (receipt_dir / "m8-input.json").write_text(json.dumps(feature_binding))
             guard.ledger["binding"] = feature_binding
             guard.persist()
+        if m9_mode:
+            m9_input = {"binary_sha256": guard.ledger["m9_build"]["binary_sha256"], "source_tree_sha256": source_tree["sha256"],
+                        "source_commit": source_identity["commit"], "source_git_tree": source_identity["git_tree"],
+                        "runner_image_id": image_id, "server_image_ids": server_images, "servers": server_identities,
+                        "run": token.rsplit("-", 1)[1], "settings_sha256": follow.m9_settings_sha256(settings), "fixture_sha256": fixture_sha256}
+            if set(m9_input) != follow.M9_INPUT_FIELDS:
+                raise RuntimeError("M9 outer artifact field inventory differs")
+            packet = diagnostics / "m9-input.json"
+            with packet.open("x") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                json.dump(m9_input, stream, sort_keys=True, separators=(",", ":"))
+            artifact = follow.m9_artifact_binding(binary, settings, server_identities, packet=packet, source_root=source_context)
+            guard.ledger["m9_artifact"] = artifact
+            guard.persist()
         command = ["--network", token, "--label", label, "--memory", "4g", "--cpus", "2", "--env-file", str(envfile),
                    "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--volume", str(source_context) + ":/workspace:ro",
                    "--volume", str(cache) + ":/build", "--volume", str(cargo_cache) + ":/cargo", "--volume", str(receipt_dir) + ":/receipt", "--volume", str(diagnostics) + ":/diagnostics"]
@@ -1489,10 +1559,13 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                       "--binary", "/build/debug/rpgmigrate", "--receipt", "/receipt/result.json",
                       *(["--report-probe", "/report-probe"] if args.report_probe is not None else []),
                       *(["--profile", "m8", "--feature-binding", "/receipt/m8-input.json"] if feature_mode else []),
+                      *(["--profile", "m9"] if m9_mode else []),
+                      *(["--durability", args.durability] if m9_mode and getattr(args, "durability", None) is not None else []),
                       *(["--smoke"] if getattr(args, "smoke", False) else []), *(["--cutover"] if cutover_mode else []),
                       *(["--diagnostic-case", diagnostic_case] if diagnostic_case else [])], timeout=1200, role="runner", image_id=image_id, mounts=mounts, memory=4*GIB)
         report = json.loads((receipt_dir / "result.json").read_text())
-        report.update(runner_image_id=image_id, server_image_ids=server_images)
+        if not m9_mode:
+            report.update(runner_image_id=image_id, server_image_ids=server_images)
         if (cutover.source_inventory(source_context) != source_identity["inventory"] or guard.execute(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).decode().strip() != source_identity["commit"]
                 or guard.execute(["git", "-C", str(ROOT), "status", "--porcelain"])):
             raise RuntimeError("actual workflow source changed during qualification")
@@ -1504,6 +1577,14 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             copy_features.validate_receipt(report, manifest, binding=feature_binding)
         else:
             receipt_validator(report, manifest)
+        if m9_mode:
+            if (report.get("profile") != "m9" or report.get("settings") != settings or report.get("artifact") != artifact
+                    or report.get("runner_image_id", image_id) != image_id or report.get("server_image_ids", server_images) != server_images):
+                raise RuntimeError("M9 returned artifact binding, settings, or runtime identity differs")
+            validate_runtime(report)
+            if follow.m9_artifact_binding(binary, settings, server_identities, packet=packet, source_root=source_context) != artifact:
+                raise RuntimeError("M9 workflow artifact inputs changed")
+            report.update(runner_image_id=image_id, server_image_ids=server_images)
         guard.ledger["expected_roles_verified"] = sorted(entry["role"] for entry in guard.ledger["containers"]) == ["build", "runner", "source", "target"]
         if not guard.ledger["expected_roles_verified"] or not all(entry.get("cgroup_verified") is True for entry in guard.ledger["containers"]):
             raise RuntimeError("four exact owned runtime roles and effective cgroup caps were not observed")
@@ -1553,7 +1634,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     if feature_mode and (guard.ledger.get("build_smoke_unavailable") or guard.ledger.get("build_smoke") != report.get("build_smoke") or not guard.ledger.get("build_smoke")):
         raise RuntimeError("source-bound pre-workflow debug smoke is missing or differs; inspect " + str(ledger_path))
     report["runtime_ledger"] = str(ledger_path)
-    with output.open("x" if diagnostic_case or feature_mode else "w") as stream:
+    with output.open("x" if diagnostic_case or feature_mode or m9_mode else "w") as stream:
         stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(result.decode(), end="")
     print(program + " receipt: " + str(output))

@@ -5,6 +5,7 @@ import copy
 from contextlib import closing, contextmanager, ExitStack
 from datetime import datetime, timezone
 import json
+import hashlib
 import sqlite3
 import stat
 from pathlib import Path
@@ -253,6 +254,7 @@ def pasta_placeholder():
 class ModelRuntime:
     def __init__(self, root, fault=None):
         self.root, self.fault, self.commands, self.removed = root, fault, [], []
+        self.receipt_change = None
         self.containers = {}
         self.networks = {}
         self.images = {}
@@ -269,16 +271,23 @@ class ModelRuntime:
         self.commands.append(list(argv))
         if argv[0] == "git":
             if argv[-1] == "--porcelain" and self.fault == "dirty": return b" M tracked-source\n"
-            source = self.root / "tools/e2e/Containerfile"
-            data = source.read_bytes()
+            names = ["tools/e2e/Containerfile", *["tests/fixtures/" + name for name in
+                     ("clone/cases.json", "clone/schema.sql", "follow/cases.json", "follow/schema.sql")
+                     if (self.root / "tests/fixtures" / name).is_file()]]
             if "ls-tree" in argv:
-                blob = __import__("hashlib").sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
-                return ("100644 blob " + blob + " " + str(len(data)) + "\ttools/e2e/Containerfile\0").encode()
+                records = []
+                for name in names:
+                    data = (self.root / name).read_bytes()
+                    blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+                    records.append("100644 blob " + blob + " " + str(len(data)) + "\t" + name + "\0")
+                return "".join(records).encode()
             if "archive" in argv:
                 stream = io.BytesIO()
                 with tarfile.open(fileobj=stream, mode="w") as archive:
-                    entry = tarfile.TarInfo("tools/e2e/Containerfile"); entry.mode = 0o644; entry.size = len(data)
-                    archive.addfile(entry, io.BytesIO(data))
+                    for name in names:
+                        data = (self.root / name).read_bytes()
+                        entry = tarfile.TarInfo(name); entry.mode = 0o644; entry.size = len(data)
+                        archive.addfile(entry, io.BytesIO(data))
                 return stream.getvalue()
             return b"1"*40 + b"\n" if argv[-1] == "HEAD" else b"2"*40 + b"\n" if argv[-1] == "HEAD^{tree}" else b"feat/model\n" if argv[-1] == "--show-current" else b""
         args = argv[1:]
@@ -370,8 +379,16 @@ class ModelRuntime:
             cid = args[-1]; actual = self.containers[cid]; role = actual["model_role"]
             actual["State"].update(Running=True, Status="running", Pid=42, StartedAt=datetime.fromtimestamp(harness.time.time(), timezone.utc).isoformat())
             if role == "build":
+                if self.fault == "build_failure": raise harness.SubprocessFailure({"returncode": 42})
                 cache = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/build"))
                 (cache / "debug").mkdir(); (cache / "debug/rpgmigrate").write_bytes(b"debug executable"); (cache / "debug/rpgmigrate").chmod(0o700)
+                source = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/workspace"))
+                if self.fault == "source_after_build": (source / "tools/e2e/Containerfile").write_text("changed")
+                if self.fault == "fixture_symlink":
+                    fixture = source / "tests/fixtures/follow/schema.sql"
+                    fixture.unlink(); fixture.symlink_to(self.root / "tests/fixtures/follow/schema.sql")
+                if self.fault == "binary_symlink":
+                    (cache / "debug/rpgmigrate").unlink(); (cache / "debug/rpgmigrate").symlink_to(self.root / "tools/e2e/Containerfile")
             if role == "runner":
                 receipt = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/receipt"))
                 binding = json.loads((receipt / "m8-input.json").read_text()) if (receipt / "m8-input.json").exists() else None
@@ -384,8 +401,31 @@ class ModelRuntime:
                              "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
                              "version_text": "rpgmigrate 0.1.0\nlibpq 180006\n"}
                     (receipt / "m8-smoke.json").write_text(json.dumps(smoke)); (receipt / "m8-smoke.json").chmod(0o600)
+                diagnostics = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/diagnostics"))
+                packet = diagnostics / "m9-input.json"
+                if packet.exists():
+                    self.m9_packet = packet.read_bytes()
+                    self.m9_packet_mode = stat.S_IMODE(packet.stat().st_mode)
+                    self.m9_start_ledger = json.loads(self.build_ledger_path.read_text())
+                    value = json.loads(self.m9_packet)
+                    report = {"pair": "16-16", "profile": "m9", "settings": {"durability": "durable", "barrier_interval_ms": None,
+                              "apply_group_txns": 100, "limits": {"channel_bytes": 8388608, "channel_messages": 1024,
+                              "max_message_bytes": 16777216, "group_rows": 10000, "group_bytes": 8388608}},
+                              "server_versions": ["16.15", "16.15"], "client_versions": dict.fromkeys(("pg_dump", "pg_restore", "psql"), "16.15"),
+                              "linked_libpq": 180006, "artifact": {"input": value, "input_sha256": hashlib.sha256(self.m9_packet).hexdigest(),
+                              "schema_sha256": "854b9be475b9503cd268929e6c8fcdf5c23c13896cad0ba938a744da0d0a2ac8"}}
+                    if self.receipt_change: self.receipt_change(report)
+                else:
+                    report = {"pair": "16-16", "binding": binding, "build_smoke": smoke}
                 if self.fault == "runner": raise RuntimeError("modeled runner failure")
-                (receipt / "result.json").write_text(json.dumps({"pair": "16-16", "binding": binding, "build_smoke": smoke}))
+                (receipt / "result.json").write_text(json.dumps(report))
+                if self.fault == "binary_after_workflow":
+                    cache = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/build"))
+                    (cache / "debug/rpgmigrate").write_bytes(b"substituted executable")
+                if self.fault == "packet_after_workflow": packet.write_bytes(self.m9_packet + b" ")
+                if self.fault == "source_after_workflow":
+                    source = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/workspace"))
+                    (source / "tools/e2e/Containerfile").write_text("changed")
                 if self.fault == "foreign_private":
                     private = receipt.parent
                     private.rename(private.with_name(private.name + ".retained"))
@@ -807,6 +847,241 @@ class PendingCreationTests(unittest.TestCase):
             sys.path.pop(0)
 
 
+class M9OuterProfileTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        self.addCleanup(sys.path.pop, 0)
+
+    def setup_runtime(self, temporary, *, durability=None, fault=None, **selectors):
+        root = Path(temporary).resolve()
+        (root / "tools/e2e").mkdir(parents=True)
+        (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
+        for name in ("clone/cases.json", "clone/schema.sql", "follow/cases.json", "follow/schema.sql"):
+            path = root / "tests/fixtures" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((ROOT / "tests/fixtures" / name).read_bytes())
+        model = ModelRuntime(root, fault)
+        args = types.SimpleNamespace(pair="16-16", receipt=str(root / "result.json"), report_probe=None,
+                                     profile="m9", durability=durability, **selectors)
+        return root, model, args
+
+    def run_outer(self, root, model, args, *, validator=lambda *_: None, server_arguments=()):
+        def execute(guard, command, **kwargs):
+            guard.checkpoint()
+            result = model.call(command, **kwargs)
+            if command[1] == "start" and "--attach" in command: guard.sample()
+            return result
+        with patch.object(harness, "ROOT", root), patch.object(harness, "DIAGNOSTIC_ROOT", root / "diagnostics"), \
+                patch.object(harness.shutil, "which", return_value="/fake/podman"), \
+                patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*1024**3)), \
+                patch.object(harness, "run", side_effect=model.call), patch.object(harness.subprocess, "run", side_effect=model.subprocess), \
+                patch.object(harness.RuntimeGuard, "execute", execute):
+            harness.outer(args, program="follow", receipt_validator=validator, server_arguments=server_arguments)
+
+    def test_m9_follow_forwards_profile_and_explicit_durable(self):
+        for selectors in ({}, {"smoke": True}, {"diagnostic_case": "before_commit_rollback"}):
+            with self.subTest(selectors=selectors), tempfile.TemporaryDirectory() as temporary:
+                root, model, args = self.setup_runtime(temporary, durability="durable", **selectors)
+                self.run_outer(root, model, args)
+                runner = next(argv for argv in model.commands if len(argv)>1 and argv[1] == "create" and "tools/e2e/follow.py" in argv)
+                inner = runner[runner.index("python3"):]
+                expected = ["python3", "tools/e2e/follow.py", "--inside", "--pair", "16-16", "--binary", "/build/debug/rpgmigrate",
+                            "--receipt", "/receipt/result.json", "--profile", "m9", "--durability", "durable"]
+                if selectors.get("smoke"): expected += ["--smoke"]
+                if selectors.get("diagnostic_case"): expected += ["--diagnostic-case", "before_commit_rollback"]
+                self.assertEqual(inner, expected)
+                for argv in model.commands:
+                    if len(argv)>1 and argv[1] == "create" and any(value.endswith(("-source", "-target")) for value in argv):
+                        self.assertEqual(tuple(argv[-8:]), harness.LOGICAL_SERVER_ARGUMENTS)
+                self.assertNotIn("build_smoke", json.loads(Path(args.receipt).read_text()))
+
+    def test_m9_follow_omitted_durability_stays_omitted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary)
+            self.run_outer(root, model, args, server_arguments=harness.LOGICAL_SERVER_ARGUMENTS)
+            runner = next(argv for argv in model.commands if "tools/e2e/follow.py" in argv)
+            self.assertIn("--profile", runner); self.assertNotIn("--durability", runner)
+            self.assertEqual(json.loads(Path(args.receipt).read_text())["settings"], harness.m9_outer_settings())
+
+    def test_m9_packet_matches_frozen_schema_and_actual_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary)
+            self.run_outer(root, model, args)
+            packet = json.loads(model.m9_packet)
+            self.assertEqual(set(packet), {"binary_sha256", "fixture_sha256", "run", "runner_image_id", "server_image_ids", "servers",
+                                           "settings_sha256", "source_commit", "source_git_tree", "source_tree_sha256"})
+            self.assertEqual(model.m9_packet_mode, 0o600)
+            self.assertEqual(packet["fixture_sha256"], "6bad6653c290767a48d7aa2f3e35f399a9fc5a6664fdb80260206fa2b16ffb32")
+            self.assertEqual(packet["binary_sha256"], hashlib.sha256(b"debug executable").hexdigest())
+            self.assertEqual(packet["source_commit"], "1"*40); self.assertEqual(packet["source_git_tree"], "2"*40)
+            self.assertEqual(packet["runner_image_id"], "sha256:" + "5"*64)
+            self.assertEqual(packet["server_image_ids"], ["sha256:" + "1"*64]*2)
+            self.assertEqual(packet["source_tree_sha256"], model.m9_start_ledger["source"]["inventory"]["sha256"])
+            self.assertEqual(packet["run"], model.m9_start_ledger["run"].rsplit("-", 1)[1])
+            for server, role in zip(packet["servers"], ("source", "target")):
+                self.assertEqual(set(server), {"system_identifier", "version", "data_directory", "wal_level", "id", "image", "role", "started_at", "pgdata_permissions"})
+                self.assertEqual(server["role"], role); self.assertEqual(server["wal_level"], "logical")
+            retained = model.m9_start_ledger["m9_artifact"]
+            self.assertEqual(retained["input"], packet)
+            self.assertEqual(retained["input_sha256"], hashlib.sha256(model.m9_packet).hexdigest())
+            self.assertEqual(retained["schema_sha256"], "854b9be475b9503cd268929e6c8fcdf5c23c13896cad0ba938a744da0d0a2ac8")
+            import follow
+            self.assertEqual(packet["settings_sha256"], follow.m9_settings_sha256(harness.m9_outer_settings()))
+            build = model.m9_start_ledger["m9_build"]
+            self.assertEqual(build["argv"][-3:], ["cargo", "build", "--locked"])
+            self.assertEqual(build["container_id"], "c"*64); self.assertEqual(build["image_id"], packet["runner_image_id"])
+            self.assertEqual(build["returncode"], 0); self.assertEqual(build["binary_sha256"], packet["binary_sha256"])
+            self.assertEqual(build["settings"], harness.m9_outer_settings())
+            ledger = json.loads(model.build_ledger_path.read_text())
+            self.assertEqual(ledger["m9_artifact"], retained)
+            self.assertTrue(ledger["cleanup_complete"]); self.assertTrue(ledger["private_removed"])
+
+    def test_m9_fixture_or_source_substitution_refuses(self):
+        for fault in ("missing", "empty", "changed", "symlink", "source_after_build", "source_after_workflow", "dirty", "binary_symlink", "binary_after_workflow", "packet_after_workflow"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                root, model, args = self.setup_runtime(temporary, fault=fault)
+                path = root / "tests/fixtures/follow/schema.sql"
+                if fault == "missing": path.unlink()
+                if fault == "empty": path.write_bytes(b"")
+                if fault == "changed": path.write_bytes(path.read_bytes() + b"\n-- substituted\n")
+                if fault == "symlink":
+                    path.unlink(); path.symlink_to(ROOT / "tests/fixtures/follow/schema.sql")
+                    # The source model exports regular blobs, so exercise a replaced export at build completion.
+                    model.fault = "fixture_symlink"
+                with self.assertRaisesRegex(RuntimeError, "fixture|source changed|clean committed|executable|workflow source|replaced regular file|M9.*(artifact|inputs)"):
+                    self.run_outer(root, model, args)
+                self.assertFalse(Path(args.receipt).exists())
+                self.assertFalse(model.containers); self.assertFalse(model.networks)
+
+    def test_m9_returned_artifact_cannot_self_assert_identity(self):
+        mutations = [("profile", lambda r: r.update(profile="legacy-m3")),
+                     ("settings", lambda r: r["settings"].update(apply_group_txns=1)),
+                     ("packet_hash", lambda r: r["artifact"].update(input_sha256="0"*64)),
+                     ("schema_hash", lambda r: r["artifact"].update(schema_sha256="0"*64)),
+                     ("runner_outer", lambda r: r.update(runner_image_id="sha256:" + "0"*64)),
+                     ("servers_outer", lambda r: r.update(server_image_ids=["sha256:" + "0"*64]*2)),
+                     ("runtime_client", lambda r: r.update(client_versions={})),
+                     ("runtime_libpq", lambda r: r.update(linked_libpq=None))]
+        for field in ("binary_sha256", "fixture_sha256", "run", "runner_image_id", "server_image_ids", "servers", "settings_sha256", "source_commit", "source_git_tree", "source_tree_sha256"):
+            mutations.append((field, lambda r, field=field: r["artifact"]["input"].update({field: "wrong"})))
+        for name, change in mutations:
+            with self.subTest(field=name), tempfile.TemporaryDirectory() as temporary:
+                root, model, args = self.setup_runtime(temporary)
+                model.receipt_change = change
+                with self.assertRaisesRegex(RuntimeError, "M9.*(binding|identity|settings|artifact)|actual client|actual linked"):
+                    self.run_outer(root, model, args)
+                self.assertFalse(Path(args.receipt).exists())
+                ledger = json.loads(model.build_ledger_path.read_text())
+                self.assertTrue(ledger["cleanup_complete"]); self.assertTrue(ledger["private_removed"])
+                self.assertIn("m9_artifact", ledger)
+
+    def test_m9_missing_artifact_and_old_native_receipts_refuse(self):
+        import follow
+        for old in (False, True):
+            with self.subTest(old=old), tempfile.TemporaryDirectory() as temporary:
+                root, model, args = self.setup_runtime(temporary)
+                if old:
+                    def change(report):
+                        report.update(mode="ongoing_follow", successful_follow_exit=False, cases={name: {"observed": True} for name in follow.CASES})
+                        report["report_validation"] = {"mode": "local_m3_contract", "reports": [{"raw_json": json.dumps({"capabilities": ["clone.single_db"]}), "binding": {}}]}
+                    model.receipt_change = change
+                    validator = lambda report, manifest: follow.validate_receipt(report, follow.load_manifest(), profile="m9")
+                    message = "M9 report settings capability"
+                else:
+                    model.receipt_change = lambda report: report.pop("artifact")
+                    validator = lambda *_: None
+                    message = "M9.*artifact"
+                with self.assertRaisesRegex(RuntimeError, message): self.run_outer(root, model, args, validator=validator)
+                self.assertFalse(Path(args.receipt).exists())
+
+    def test_m9_failure_retains_build_binding_and_checked_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary, fault="runner")
+            with self.assertRaisesRegex(RuntimeError, "modeled runner failure"): self.run_outer(root, model, args)
+            ledger = json.loads(model.build_ledger_path.read_text())
+            self.assertTrue(ledger["cleanup_complete"]); self.assertTrue(ledger["private_removed"])
+            self.assertEqual(ledger["failure"]["stage"], "profiles")
+            self.assertEqual(ledger["m9_artifact"]["input"], json.loads(model.m9_packet))
+            self.assertEqual(ledger["m9_build"]["returncode"], 0)
+            self.assertNotIn("build_smoke", ledger); self.assertNotIn("build_smoke_unavailable", ledger)
+
+    def test_m9_server_failure_retains_successful_build_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary, fault="data_directory")
+            with self.assertRaisesRegex(RuntimeError, "server identity"): self.run_outer(root, model, args)
+            ledger = json.loads(model.build_ledger_path.read_text())
+            self.assertEqual(ledger["m9_build"]["returncode"], 0)
+            self.assertEqual(ledger["m9_build"]["binary_sha256"], hashlib.sha256(b"debug executable").hexdigest())
+            self.assertTrue(ledger["cleanup_complete"]); self.assertTrue(ledger["private_removed"])
+            self.assertNotIn("m9_artifact", ledger)
+
+    def test_m9_build_failure_retains_nonzero_exit_and_checked_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary, fault="build_failure")
+            with self.assertRaises(harness.SubprocessFailure): self.run_outer(root, model, args)
+            ledger = json.loads(model.build_ledger_path.read_text())
+            self.assertEqual(ledger["m9_build"]["returncode"], 42)
+            self.assertNotIn("binary_sha256", ledger["m9_build"])
+            self.assertTrue(ledger["cleanup_complete"]); self.assertTrue(ledger["private_removed"])
+
+    def test_m9_candidate_receipt_publication_race_is_no_clobber(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary)
+            model.receipt_change = lambda _: Path(args.receipt).write_text("preserve raced receipt")
+            with self.assertRaises(FileExistsError): self.run_outer(root, model, args)
+            self.assertEqual(Path(args.receipt).read_text(), "preserve raced receipt")
+            ledger = json.loads(model.build_ledger_path.read_text())
+            self.assertTrue(ledger["cleanup_complete"]); self.assertTrue(ledger["private_removed"])
+
+    def test_m9_candidate_receipt_is_no_clobber(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, model, args = self.setup_runtime(temporary)
+            Path(args.receipt).write_text("preserve existing")
+            with self.assertRaisesRegex(RuntimeError, "receipt already exists"): self.run_outer(root, model, args)
+            self.assertEqual(Path(args.receipt).read_text(), "preserve existing")
+            self.assertFalse(model.commands)
+
+    def test_unsupported_routes_refuse_before_any_external_or_filesystem_effect(self):
+        cases = [("clone", "m9", None, {}), ("clone", "disabled", "durable", {}),
+                 ("clone", "m8", "durable", {}), ("follow", "legacy-m3", "durable", {}),
+                 ("follow", "unknown", None, {}), ("follow", "m9", "unknown", {}),
+                 ("follow", "m9", "replay-safe", {}), ("follow", "m9", None, {"cutover": True}),
+                 ("follow", "m9", None, {"report_probe": "/missing/probe"}), ("follow", "m9", None, {"probe_environment": "/missing/probe"})]
+        for program, profile, durability, changes in cases:
+            with self.subTest(program=program, profile=profile, durability=durability, changes=changes), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "untouched"
+                args = types.SimpleNamespace(pair="16-16", receipt=str(root / "result.json"), report_probe=None,
+                                             profile=profile, durability=durability, **{key: value for key, value in changes.items() if key not in ("report_probe", "probe_environment")})
+                if "report_probe" in changes: args.report_probe = changes["report_probe"]
+                with patch.dict(harness.os.environ, {"RPGMIGRATE_E2E_REPORT_PROBE": changes["probe_environment"]} if "probe_environment" in changes else {}), \
+                        patch.object(harness, "ROOT", root), patch.object(harness.shutil, "which", return_value=None) as which, \
+                        patch.object(harness, "RuntimeGuard", side_effect=AssertionError("unexpected runtime guard")) as guard, \
+                        patch.object(harness, "run", side_effect=AssertionError("unexpected external command")), \
+                        patch.object(harness.subprocess, "run", side_effect=AssertionError("unexpected subprocess")), \
+                        patch.object(harness.subprocess, "Popen", side_effect=AssertionError("unexpected process")), \
+                        patch.object(harness, "materialize_source", side_effect=AssertionError("unexpected source export")), \
+                        patch.object(Path, "mkdir", side_effect=AssertionError("unexpected directory creation")), \
+                        patch.object(harness, "load_manifest") as manifest, \
+                        self.assertRaisesRegex(RuntimeError, "profile|durability|ReplaySafe|cutover|report probe"):
+                    harness.outer(args, program=program)
+                self.assertFalse(root.exists())
+                which.assert_not_called(); guard.assert_not_called(); manifest.assert_not_called()
+
+    def test_m9_logical_argument_conflict_refuses_before_effects(self):
+        args = types.SimpleNamespace(pair="16-16", receipt=None, report_probe=None, profile="m9", durability=None)
+        with patch.object(harness, "load_manifest") as manifest, patch.object(harness.shutil, "which", return_value=None) as which, \
+                patch.object(harness, "RuntimeGuard", side_effect=AssertionError("unexpected runtime guard")), \
+                patch.object(harness, "run", side_effect=AssertionError("unexpected external command")), \
+                patch.object(harness.subprocess, "run", side_effect=AssertionError("unexpected subprocess")), \
+                patch.object(harness.subprocess, "Popen", side_effect=AssertionError("unexpected process")), \
+                patch.object(harness, "materialize_source", side_effect=AssertionError("unexpected source export")), \
+                patch.object(Path, "mkdir", side_effect=AssertionError("unexpected directory creation")), \
+                self.assertRaisesRegex(RuntimeError, "startup arguments conflict"):
+            harness.outer(args, program="follow", server_arguments=("-c", "wal_level=replica"))
+        manifest.assert_not_called(); which.assert_not_called()
+        self.assertEqual(harness.server_start_arguments("m9", ()), harness.LOGICAL_SERVER_ARGUMENTS)
+
+
 class RuntimeOwnershipTests(unittest.TestCase):
     def test_server_arguments_enable_logical_only_for_m8(self):
         self.assertTrue(callable(getattr(harness, "server_start_arguments", None)), "missing reviewed startup selection")
@@ -998,6 +1273,15 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     self.assertIn("--cpu-quota", builds[0])
                     creates = [argv for argv in model.commands if len(argv)>1 and argv[1] == "create"]
                     self.assertTrue(creates)
+                    runner = next((argv for argv in creates if "tools/e2e/clone.py" in argv), None)
+                    if fault == "data_directory":
+                        self.assertIsNone(runner)
+                    else:
+                        self.assertIsNotNone(runner)
+                        inner = runner[runner.index("python3"):]
+                        expected = ["python3", "tools/e2e/clone.py", "--inside", "--pair", "16-16", "--binary", "/build/debug/rpgmigrate", "--receipt", "/receipt/result.json"]
+                        if profile == "m8": expected += ["--profile", "m8", "--feature-binding", "/receipt/m8-input.json"]
+                        self.assertEqual(inner, expected)
                     for argv in creates:
                         self.assertIn("--image-volume=ignore", argv)
                         self.assertNotIn("--privileged", argv)
