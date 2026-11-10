@@ -704,7 +704,7 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### Evidence checkpoint, 2026-11-10
 
 Production native admission still returns `UnsupportedEngine`; no actual native operator workflow is qualified.
-The accepted operator source checkpoint is `f8214a63db1f7e421157f3024aa2afb394621ffe`, tree `5e071d1f79a67579c701598c464e7363c596f1d8`, with clean authoritative and isolated checkouts recorded in its proof.
+The accepted operator source checkpoint is `0346f9e8534174243f2d07470afcec5d8275e6de`, tree `1eb28adac4088756694e56006edf3240fbb6a8d0`; the conditional fast-forward from `f8214a6` verified a clean authoritative checkout before and after integration.
 Five signed completion commits add helper receipts (`30686fa`), evidence retention (`50be291`), cleaned completion (`d937958`), follow/E/ACK dependency composition (`d87c920`), and plain-clone completion/verification (`6a27266`).
 Each prefix compiled and passed scoped lint with zero findings, with byte-identical qualified final-tree evidence reused where recorded.
 Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json`, SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
@@ -716,9 +716,12 @@ These are source/component checkpoints; no broad Go suite, whole-M6 review, actu
 The root-approved completion-rejoin amendment requires separate partial-cleanup admission for flags `00`, `10`, and `01`, with actual target-row completion authority and completion-only credential-free version discovery.
 Ordinary active admission and the fully cleaned predicate remain unchanged; status and resource inventory cannot authorize completion.
 Private plan: `/tmp/rpgmigrate-m6-completion-rejoin-plan-20261110/2026-11-10-m6-completion-rejoin-amendment.md`, SHA-256 `1b4dfa9c7051a4037c92be38520d09bbcf4ce52f0e8a7e3f6d2fe5d9fd294dbf`.
-The preceding 46-path completion/rejoin/finalization/disposition join is frozen at tree `1eb28adac4088756694e56006edf3240fbb6a8d0`; its actual production `./cmd` build, four-package compilation, and scoped lint passed with zero findings.
+The 46-path completion/rejoin/finalization/disposition join is signed in API checkpoint `3ef73545c9f074e1a50cd2c042132977ef170055`, native checkpoint `1d0d67b5001aae48774998f8f4bf5861e5fbceea`, and controller checkpoint `0346f9e8534174243f2d07470afcec5d8275e6de`, tree `1eb28adac4088756694e56006edf3240fbb6a8d0`.
+Its actual production/controller builds, four-package compilation, 807 named/154 top-level focused race checks, and scoped lint passed with zero failures, skips, or lint findings.
 Joined proof: `/tmp/m6-joined-integration-20261110/preceding-source-manifest.json`, SHA-256 `9c41fcd8591b4b5b04ec64a109ec9ec30990f19ae14c7c44fcc840b08ab5cb5b`.
-Its signed checkpoint groups and the separate five-path main dispatch packet still require their final recorded checks and integration.
+Qualified checkpoint proof: `/tmp/m6-joined-integration-20261110/preceding-qualified-manifest.json`, SHA-256 `763e07330ce704bddbe0097fe0d4f287ef7c6d5ca0bd9a0c37f666517fc7281f`.
+Authoritative integration proof: `/tmp/m6-joined-integration-20261110/preceding-authoritative-ff-receipt.json`, SHA-256 `2f086dfe7a569725792b0e005b96e476a090e88701e10aa014fd1e98ec45e807`.
+The separate five-path main dispatch packet passed its actual build and 71 focused race checks; its final lint and integration remain open.
 The finalizer successor includes the production constant-build repair and stale-failed-condition repair; its actual production build, 39 affected race checks, and scoped lint passed with zero findings.
 Its older 335-race-check packet retains separate provenance and is not relabeled as qualification of the repaired successor.
 Finalizer proof: `/tmp/m6-clone-stale-failure-repair-export-20261110/manifest.json`, SHA-256 `3dfc5322c44bb678da6d966621a2b91a495bc86590099ce0646d2bbf75b1525c`.
@@ -962,7 +965,10 @@ Independent pure-data replay accepted the retained actual Pod data under `b5` wh
 Replay proof: `/private/var/tmp/rpgmigrate-m7-declared-imageid-data-proof-m7umsaqh/pure-data-result.json`, SHA-256 `978118f6bcf93701055aae19fd9dcd5f0c426b015067036a34b4c3e601cab8d3`.
 Six old unused kind volumes have independent read-only candidate proof and approved cleanup scope; deletion has not executed.
 Proof: `/private/var/tmp/rpgmigrate-m7-unused-volume-safety-c3anxbon/final-candidate-proof.json`, SHA-256 `06fe68baef50633e019b070f32605ebdb4f39b9eaeea4ee4f426b2bc09428f12`.
-The failed `f59a7f4b` nodes and S2 still require exact retirement; volume removal must wait for that retirement and revalidate the exact sealed ownership/reference barrier immediately before non-force removal.
+Exact retirement of the failed `f59a7f4b` S2 and three nodes passed, including process/cgroup absence, preservation of all 212 volumes and 395 preexisting images, and protection of four original services.
+The narrow retirement-only exception preserved the historical sticky handoff event and grants no runtime-health adoption.
+Any separate six-volume removal must revalidate the exact sealed ownership/reference barrier immediately before non-force removal; fresh `b5` workflow acceptance remains open.
+Retirement proof: `/private/var/tmp/rpgmigrate-m7-f59-retirement-ty2tj0zn/retirement-handoff-manifest.json`, SHA-256 `14d39880a80841fbaf452a14a0f4346fdb5769eccec93a280abffe7a89726de1`.
 
 The M7 `c275` source passed fresh UP/CHECK and qualified supervisor handover after its retained PREPARE/CHECK success.
 Its first LOAD pair FAILED: default `ctr images tag` dropped labels and CRI retargeted the existing config-ID key from the prepared child manifest to its one-child archive index.
