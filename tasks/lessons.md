@@ -498,3 +498,8 @@ Before granting a source-file lease, the leader MUST receive and verify a distin
 The authoritative checkout MUST NOT be an implementation destination.
 If owned edits reach the wrong checkout, first preserve an exact sealed copy in the isolated worktree, then reverse only the owned verified patch while preserving all other work.
 Do not use `reset --hard`, `clean`, or broad restoration to recover isolation.
+
+## Bind OCI descriptors to their actual media types, 2026-11-10
+
+Check each descriptor media type before calling a digest a manifest.
+The retained multiarch node `099e` is an index and ARM child `10210` is the archive manifest; preserve older evidence and do not invent a conversion.

@@ -276,7 +276,7 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 #### Evidence checkpoint, 2026-11-10
 
 Production native admission still returns `UnsupportedEngine`; no actual native operator workflow is qualified.
-The accepted operator source checkpoint is `0346f9e8534174243f2d07470afcec5d8275e6de`, tree `1eb28adac4088756694e56006edf3240fbb6a8d0`; the conditional fast-forward from `f8214a6` verified a clean authoritative checkout before and after integration.
+The accepted operator source checkpoint is signed `cf22e84d15002f272715707b8ed6d7d89b9ddf5f`, tree `c66790dbdefe997103352f19e36217e518641dbd`; its conditional fast-forward from `0346f9e` verified a clean authoritative checkout before and after integration.
 Five signed completion commits add helper receipts (`30686fa`), evidence retention (`50be291`), cleaned completion (`d937958`), follow/E/ACK dependency composition (`d87c920`), and plain-clone completion/verification (`6a27266`).
 Each prefix compiled and passed scoped lint with zero findings, with byte-identical qualified final-tree evidence reused where recorded.
 Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json`, SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
@@ -291,16 +291,21 @@ Private plan: `/tmp/rpgmigrate-m6-completion-rejoin-plan-20261110/2026-11-10-m6-
 The 46-path completion/rejoin/finalization/disposition join is signed in API checkpoint `3ef73545c9f074e1a50cd2c042132977ef170055`, native checkpoint `1d0d67b5001aae48774998f8f4bf5861e5fbceea`, and controller checkpoint `0346f9e8534174243f2d07470afcec5d8275e6de`, tree `1eb28adac4088756694e56006edf3240fbb6a8d0`.
 Its actual production/controller builds, four-package compilation, 807 named/154 top-level focused race checks, and scoped lint passed with zero failures, skips, or lint findings.
 The [ledger](../tasks/todo.md#evidence-checkpoint-2026-11-10) binds the immutable source and qualification proofs.
-The separate five-path main dispatch packet passed its actual build and 71 focused race checks; its final lint and integration remain open.
+The five-path main dispatcher is integrated in `cf22e84`; its actual production/controller builds, 71 focused race checks, and scoped lint passed, with production admission still closed.
 The finalizer successor includes the production constant-build repair and stale-failed-condition repair; its actual production build, 39 affected race checks, and scoped lint passed with zero findings.
 Its older 335-race-check packet retains separate provenance and is not relabeled as qualification of the repaired successor.
 Finalizer proof: `/tmp/m6-clone-stale-failure-repair-export-20261110/manifest.json`, SHA-256 `3dfc5322c44bb678da6d966621a2b91a495bc86590099ce0646d2bbf75b1525c`.
-Main/recovery dispatch integration and terminal replay after helper disposal remain open, with the latter requiring its policy plan.
+Dispatcher source integration does not qualify terminal replay after helper disposal; exact-UID disposal and terminal replay still require composed lifecycle qualification.
 The root-approved interface freeze retains atomic known-create `nativeJobUID`/`nativePVCUID` receipts, refusal to adopt absent receipts, invocation-bound Pod identity, worker TTL retention, and independently observed quiescence after TERM.
 Native evidence-bearing helper retention is checkpointed; exact-UID disposal and terminal replay still require composed lifecycle qualification.
 Native runner-profile Task 1/Task 2 packets are frozen with passing component checks; actual NSS, authentication/TLS, PVC/provider behavior, and canonical runtime admission remain unqualified.
 Canonical NSS/resolver guards and `UnsupportedEngine` remain closed; production runner-profile qualification, three-pair native acceptance, broad Go gates, and the whole-M6 review remain open.
 Actual Kubernetes TERM and the full native lifecycle remain unqualified.
+
+The canonical policy preparation retains a resolver parameter and refuses nonempty `sslkeylogfile`; 57 Python tests, focused Go race checks, and scoped lint passed.
+This export is not integrated, and its resolver policy still unconditionally refuses.
+A separate active-CRI metadata candidate replaces disk-dump authority in source work only; no positive authentication/runtime proof or NRI/configuration change follows.
+The [ledger](../tasks/todo.md#evidence-checkpoint-2026-11-10) binds the preparatory export.
 
 The bounded actual metadata probe refused before Jobs: `containerd config dump` exited zero with 394 stderr bytes, and the frozen metadata policy rejected any stderr before parsing.
 Exactly one owned namespace was removed and verified absent; no Jobs, Pods, or Secrets were created, and authentication/TLS Step 2 remained unstarted.
@@ -389,11 +394,12 @@ The private declared-imageID fix has source inventory SHA-256 `b5da9c9aa6a0142fd
 It changes five paths, preserves 527 peers, and passed one full 259-test Python run, thirty top-level/186 named focused Go checks, and zero scoped lint findings.
 Independent pure-data replay accepted the retained actual Pod data under `b5` while `f59` refused it, and rejected all eleven negative controls; fresh workflow acceptance remains pending, and the retained `f59a7f4b` gate remains failed.
 The [ledger](../tasks/todo.md#evidence-checkpoint-2026-11-10-1) binds this data-only proof.
-Six old unused kind volumes have independent read-only candidate proof and approved cleanup scope; deletion has not executed.
+Exactly six approved old kind volumes were removed after fresh ownership/reference barriers; the cleanup preserved four original services, 206 protected volumes, and 395 images.
 Proof: `/private/var/tmp/rpgmigrate-m7-unused-volume-safety-c3anxbon/final-candidate-proof.json`, SHA-256 `06fe68baef50633e019b070f32605ebdb4f39b9eaeea4ee4f426b2bc09428f12`.
 Exact retirement of the failed `f59a7f4b` S2 and three nodes passed, including process/cgroup absence, preservation of all 212 volumes and 395 preexisting images, and protection of four original services.
 The narrow retirement-only exception preserved the historical sticky handoff event and grants no runtime-health adoption.
-Any separate six-volume removal must revalidate the exact sealed ownership/reference barrier immediately before non-force removal; fresh `b5` workflow acceptance remains open.
+The separate six-volume cleanup passed without force or generic pruning; its exact final proof retains the bounded implicit-network metadata exception.
+A fresh `b5` RUN has started under the fixed 2026-11-10 06:30:27.495346–08:30:27.495346 UTC lease; LOAD and subsequent legacy/native workflow acceptance remain open.
 
 The M7 `c275` source passed fresh UP/CHECK and qualified supervisor handover after its retained PREPARE/CHECK success.
 Its first LOAD pair FAILED: default `ctr images tag` dropped labels and CRI retargeted the existing config-ID key from the prepared child manifest to its one-child archive index.
@@ -500,8 +506,15 @@ No manual proof JSON or lease renewal is allowed.
 The approved [M8 implementation plan](superpowers/plans/2026-11-09-m8-feature-widening.md) targets fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative whole-table binary fallback, and exact mandatory large-object comparison with the unchanged array contract plus a proven-empty inventory guard.
 These are implementation decisions, without format/runtime qualification or capability activation.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
-Task 1 is assigned for an isolated contract/state proposal; dependent implementation awaits that freeze.
-Keep the live format 8 / metadata 6 profile separate from candidate format 9 / metadata 7; neither candidate source nor an interface proposal qualifies runtime compatibility.
+The root approved the Task 1 interface freeze; isolated state/CLI, catalog, authority, COPY/large-object, and phase/recovery owners are building against it.
+The first state patch passed formatting and Python compilation only; joined constructor integration and Rust qualification remain open.
+Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; PostgreSQL 18 nonbootstrap dependency-class assertions remain unqualified.
+Keep the live format 8 / metadata 6 profile separate from candidate format 9 / metadata 7; no integrated M8 source or passing joined Rust result is recorded.
+The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
+A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
+A new-generation restart requires positive own-resource absence and a fresh resolved profile.
+The approved `sha2` 0.11.1 dependency disables default features; pinned cargo-deny 0.20.2 passed actual-graph license, advisory, and yank gates against the 2026-11-09 database, while known-vector compilation remains pending.
+The [ledger](../tasks/todo.md#m8-feature-widening-each-item-enables-its-capability) binds the approved interface.
 
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
 - [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
