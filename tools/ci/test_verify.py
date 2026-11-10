@@ -24,7 +24,7 @@ CONTENT = "import unittest\nclass Tests(unittest.TestCase):\n    def test_requir
 class VerificationTests(unittest.TestCase):
     def test_inventory_contains_each_retained_suite_once(self):
         self.assertEqual(runner.HARNESS_SUITES, HARNESS)
-        self.assertEqual(runner.CI_SUITES, ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/e2e/test_cutover.py", "tools/image/test_smoke.py", "tools/image/test_dev_publish.py", *HARNESS))
+        self.assertEqual(runner.CI_SUITES, ("tools/ci/test_verify.py", "tools/ci/test_workflow.py", "tests/test_taskfile.py", "tests/test_native_fixtures.py", "tools/e2e/test_clone.py", "tools/e2e/test_follow.py", "tools/e2e/test_follow_wire_protocol.py", "tools/e2e/test_cutover.py", "tools/image/test_smoke.py", "tools/image/test_dev_publish.py", "tools/image/test_candidate.py", "tools/ci/test_ffi_asan.py", "tools/docs/test_check.py", *HARNESS))
         self.assertEqual(len(set(runner.CI_SUITES)), len(runner.CI_SUITES))
 
     def populate(self, root):
@@ -32,6 +32,15 @@ class VerificationTests(unittest.TestCase):
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(CONTENT)
+
+    def test_inventory_counts_actual_test_methods_without_importing_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.populate(root)
+            for name in runner.CI_SUITES:
+                (root / name).write_text("raise RuntimeError('must not import')\n" + CONTENT
+                                        + "    def test_second(self): pass\n    def helper(self): pass\n")
+            self.assertEqual(runner.ci_unit_inventory(root), dict.fromkeys(runner.CI_SUITES, 2))
 
     def test_inventory_refuses_missing_invalid_and_empty_sources(self):
         with tempfile.TemporaryDirectory() as temporary:

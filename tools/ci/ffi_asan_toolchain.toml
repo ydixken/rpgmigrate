@@ -1,0 +1,59 @@
+# Distribution fields generated from the dated official manifest; qualification fields are maintained by the owner.
+schema_version = 1
+toolchain = "nightly-2026-11-09"
+manifest_url = "https://static.rust-lang.org/dist/2026-11-09/channel-rust-nightly.toml"
+manifest_sha256 = "61ad7ceb52dafd0ef49bfe0a379259d2587039e840986021c49df008640e0d23"
+rustc_version = "1.102.0-nightly (5b7b37aef 2026-11-08)"
+cargo_distribution_version = "0.102.0-nightly (c07ac2c4d 2026-11-06)"
+compiler_commit = "5b7b37aefcb5b2fba3c2392bc9065b9e4602d494"
+sanitizer_documentation = "https://doc.rust-lang.org/unstable-book/compiler-flags/sanitizer.html"
+
+[compatibility]
+root_rust_version = "1.99.1"
+edition = "2024"
+lockfile_sha256 = "8308302054d40756e64e235b45e2c97c547b15266d04d900c9560cb2b20d8ce2"
+declared_dependency_msrv_max = "1.89.0"
+verified_registry_archive_count = 30
+compilation_status = "pending"
+license_security_review = "required-before-installation"
+
+[external_symbolizer]
+status = "qualification-required"
+reason = "Rust llvm-tools-preview does not contain llvm-symbolizer; qualify native path, version, package, package_version, architecture and SHA-256 before execution."
+coverage = "Instrumented Rust wrapper and standard library; stock libpq and bundled native dependencies remain uninstrumented."
+
+[components."rustc"."x86_64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/rustc-nightly-x86_64-unknown-linux-gnu.tar.xz"
+sha256 = "b81f26aaa2c30ffef13c586201c2123eb39069f3ffe32d9e44c0f281ed69d858"
+
+[components."rustc"."aarch64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/rustc-nightly-aarch64-unknown-linux-gnu.tar.xz"
+sha256 = "487a12788d26ffce91ed3096a2d1931e4af5a9a6d6522507ce0149e9ddf2a291"
+
+[components."cargo"."x86_64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/cargo-nightly-x86_64-unknown-linux-gnu.tar.xz"
+sha256 = "e1ef4fe55261a52233900764007b5f62046afbbe7a441bf347654578f5e70c18"
+
+[components."cargo"."aarch64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/cargo-nightly-aarch64-unknown-linux-gnu.tar.xz"
+sha256 = "d6d1f613d45fe172ed1a77dbd4ff4ba568e0f17a5b7fe20674ad29443905ecac"
+
+[components."rust-src"."*"]
+url = "https://static.rust-lang.org/dist/2026-11-09/rust-src-nightly.tar.xz"
+sha256 = "68598aa23a0fe6699b6da875656f2f9ec78bb810bfb75c645505f74abf03e77f"
+
+[components."rust-std"."x86_64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/rust-std-nightly-x86_64-unknown-linux-gnu.tar.xz"
+sha256 = "c790651617e998ddde02f794efa86eab8bcc1f0a328028942c30c8e05da9d764"
+
+[components."rust-std"."aarch64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/rust-std-nightly-aarch64-unknown-linux-gnu.tar.xz"
+sha256 = "1997b7805ae93beb5fe04a62752d2c904ace93044d61fed341d47ecf8265deba"
+
+[components."llvm-tools-preview"."x86_64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/llvm-tools-nightly-x86_64-unknown-linux-gnu.tar.xz"
+sha256 = "359241a9b267d84ff6bf945f905378b902bf19f17f48f7dddea09955ee816222"
+
+[components."llvm-tools-preview"."aarch64-unknown-linux-gnu"]
+url = "https://static.rust-lang.org/dist/2026-11-09/llvm-tools-nightly-aarch64-unknown-linux-gnu.tar.xz"
+sha256 = "4d2aeb2745201c13f939d82f7448131b191066ec127b69a11a1a5e17388ce994"
