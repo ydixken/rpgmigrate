@@ -32,7 +32,9 @@ pub(crate) struct CloneSnapshot {
 }
 
 mod follow;
-pub(crate) use follow::{FollowSnapshot, recover_follow_binding};
+pub(crate) use follow::{
+    FollowSnapshot, PendingFollowPublicationAbsence, PendingFollowSlotAbsence,
+};
 
 impl CloneSnapshot {
     pub(crate) fn export(

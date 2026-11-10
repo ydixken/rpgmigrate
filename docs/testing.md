@@ -129,6 +129,19 @@ Snapshot tests compare the target with the source fingerprint captured before co
 Utility wrappers delegate actual matching-major tools and record observed synchronization points before a controlled kill; the data-phase restart waits on the exact owned `LOCK TABLE ONLY` statement in ACCESS EXCLUSIVE mode, blocked by a harness-owned target SHARE lock after seven other tables committed.
 This kills a partially completed COPY phase; it does not claim a pause inside the blocked table's COPY stream.
 
+### M8 component profile
+
+`task test-clone`, also called by `task test-db`, requires exactly ten named component tests and a matching libtest summary with no ignored or failed cases.
+The profile retains the seven clone snapshot, COPY, and marker cases and adds actual binary COPY row counts for empty, single-row, and multiple-row streams, split-part row preservation, and initial large-object copying with empty, binary, multi-chunk, and sparse objects.
+The Rust tests use the existing disposable empty source/target databases and construct their own fixtures.
+The split component case checks complete row and distinct-key counts; it does not prove simultaneous workers or the operator's 536870912-byte split threshold.
+The large-object component case checks initial content and retry; final re-sync, metadata policies, comparison, fault recovery, and cleanup need their separate runtime receipts.
+
+> [!IMPORTANT]
+> Wiring component tests does not qualify the M8 workflow or activate `copy.binary_fallback`, `copy.split`, or `copy.large_objects`.
+> Qualification requires the admitted 16:16, 18:18, and 16:18 matrix, including operator defaults and independent fault observations.
+> Preserve the historical M2/M4/M7 receipts and their formats separately from fresh M8 native format 9 / metadata 7 inputs.
+
 ### Plain clone admission and recovery
 
 The M2 implementation targets primary source/target databases on 16 or 18 with source major no greater than target major, and matching-target-major pg_dump/pg_restore.
@@ -143,8 +156,8 @@ Resume on an absent or empty path refuses; a resource-free native INIT state may
 The admitted profile uses logged heap tables, inheritance children, and partition leaves exactly once, preserves explicit identity values, and computes generated columns on the target.
 Generated output must match canonical source bytes under the imported snapshot before the table marker and COMMIT; a mismatch refuses and rolls back.
 The 16 MiB row cap applies to the complete qualification row, including generated output.
-Foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables are preflight refusals.
-Binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip policies remain explicit refusals.
+The historical M2 profile refuses foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables during preflight.
+Its binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip-policy cases remain refusal checks; the M8 component profile above covers the candidate implementation separately.
 The separate follow profile below controls `clone --follow` qualification.
 Table and post-data jobs default to four; explicitly conflicting index/restore job counts fail instead of ignoring a setting.
 No-owner, no-ACL, no-comments, and no-tablespaces policies are passed through to the schema utilities.

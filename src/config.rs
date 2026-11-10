@@ -529,6 +529,10 @@ impl Settings {
                             | "no-comments"
                             | "no-tablespaces"
                             | "skip-large-objects"
+                            | "large-objects-jobs"
+                            | "use-copy-binary"
+                            | "split-tables-larger-than"
+                            | "split-max-parts"
                     ))
                 || (follow
                     && matches!(
@@ -592,16 +596,24 @@ impl Settings {
                 no_tablespaces: self.enabled("no-tablespaces"),
             },
             not_consistent: self.enabled("not-consistent"),
+            use_copy_binary: self.enabled("use-copy-binary"),
+            split_tables_larger_than: self
+                .text("split-tables-larger-than")
+                .and_then(OsStr::to_str)
+                .and_then(parse_bytes)
+                .unwrap_or(0),
+            split_max_parts: self
+                .text("split-max-parts")
+                .and_then(OsStr::to_str)
+                .and_then(parse_integer)
+                .and_then(|parts| u32::try_from(parts).ok())
+                .unwrap_or(8),
+            skip_large_objects: self.enabled("skip-large-objects"),
+            large_objects_jobs: jobs("large-objects-jobs").unwrap_or(4),
         })
     }
 
     fn follow_options(&self, clone: CloneOptions, apply_group_txns: u64) -> Result<Invocation> {
-        if !self.enabled("skip-large-objects") {
-            return Err(Error::new(
-                ErrorKind::BadConfig,
-                "follow requires explicit --skip-large-objects; no database or state action was started",
-            ));
-        }
         for (name, admitted) in [("plugin", "pgoutput"), ("durability", "durable")] {
             if self.text(name).is_some_and(|value| value != admitted) {
                 return Err(unsupported_option(name));

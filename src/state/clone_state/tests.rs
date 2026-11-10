@@ -38,6 +38,17 @@ fn plan() -> ClonePlan {
         }],
         sequences: vec![],
         policy: RestorePolicy::default(),
+        copy_policy: crate::contracts::CloneCopyPolicy::default(),
+        copy_tables: vec![crate::contracts::CloneTableCopy {
+            source_oid: 5,
+            format: crate::contracts::CopyFormat::Text,
+            parts: vec![crate::contracts::CopyPart {
+                number: 1,
+                count: 1,
+                start_block: 0,
+                end_block: None,
+            }],
+        }],
     }
 }
 fn ticket(plan: &ClonePlan) -> SnapshotTicket {
@@ -45,6 +56,148 @@ fn ticket(plan: &ClonePlan) -> SnapshotTicket {
         token: "000001-00002-1".into(),
         source: plan.source.clone(),
         generation: plan.generation,
+    }
+}
+
+#[test]
+fn required_copy_profile_round_trips_separately_from_source_catalog() {
+    let mut value = serde_json::to_value(plan()).unwrap();
+    value["copy_policy"] = serde_json::json!({
+        "use_copy_binary": true,
+        "split_tables_larger_than": 536870912_u64,
+        "split_max_parts": 8,
+        "skip_large_objects": false,
+    });
+    value["copy_tables"] = serde_json::json!([{
+        "source_oid": 5,
+        "format": "binary",
+        "parts": [{"number": 1, "count": 1, "start_block": 0, "end_block": null}],
+    }]);
+    let restored: ClonePlan = serde_json::from_value(value.clone()).unwrap();
+    validate_plan(&restored).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), value);
+    assert!(value["tables"][0].get("format").is_none());
+}
+
+fn split_plan() -> ClonePlan {
+    let mut plan = plan();
+    plan.copy_policy.split_tables_larger_than = 1;
+    plan.copy_tables[0].parts = vec![
+        crate::contracts::CopyPart {
+            number: 1,
+            count: 2,
+            start_block: 0,
+            end_block: Some(10),
+        },
+        crate::contracts::CopyPart {
+            number: 2,
+            count: 2,
+            start_block: 10,
+            end_block: None,
+        },
+    ];
+    plan
+}
+
+#[test]
+fn copy_profile_refuses_gaps_overlaps_incomplete_sets_and_policy_mismatch() {
+    validate_plan(&split_plan()).unwrap();
+    for variant in 0..13 {
+        let mut plan = split_plan();
+        match variant {
+            0 => plan.copy_tables.clear(),
+            1 => plan.copy_tables.push(plan.copy_tables[0].clone()),
+            2 => plan.copy_tables[0].source_oid = 6,
+            3 => plan.copy_tables[0].parts[0].start_block = 1,
+            4 => plan.copy_tables[0].parts[0].end_block = Some(0),
+            5 => plan.copy_tables[0].parts[0].end_block = None,
+            6 => plan.copy_tables[0].parts[1].start_block = 9,
+            7 => plan.copy_tables[0].parts[1].start_block = 11,
+            8 => plan.copy_tables[0].parts[1].number = 1,
+            9 => plan.copy_tables[0].parts[1].count = 3,
+            10 => plan.copy_tables[0].parts[1].end_block = Some(11),
+            11 => plan.copy_policy.split_tables_larger_than = 0,
+            _ => plan.copy_tables[0].format = crate::contracts::CopyFormat::Binary,
+        }
+        assert!(validate_plan(&plan).is_err(), "variant {variant}");
+    }
+    for maximum in [0, 1, u32::MAX] {
+        let mut plan = split_plan();
+        plan.copy_policy.split_max_parts = maximum;
+        assert!(validate_plan(&plan).is_err(), "maximum {maximum}");
+    }
+}
+
+#[test]
+fn copy_profile_requires_nullable_bounds_and_all_selected_policy_keys() {
+    for key in ["copy_tables", "copy_policy"] {
+        let mut value = serde_json::to_value(split_plan()).unwrap();
+        value.as_object_mut().unwrap().remove(key);
+        assert!(serde_json::from_value::<ClonePlan>(value).is_err(), "{key}");
+    }
+    for key in [
+        "use_copy_binary",
+        "split_tables_larger_than",
+        "split_max_parts",
+        "skip_large_objects",
+    ] {
+        let mut value = serde_json::to_value(split_plan()).unwrap();
+        value["copy_policy"].as_object_mut().unwrap().remove(key);
+        assert!(serde_json::from_value::<ClonePlan>(value).is_err(), "{key}");
+    }
+    let mut value = serde_json::to_value(split_plan()).unwrap();
+    value["copy_tables"][0]["parts"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("end_block");
+    assert!(serde_json::from_value::<ClonePlan>(value).is_err());
+}
+
+#[test]
+fn copy_profile_enforces_actual_part_bound_without_multiplying_selector_limits() {
+    for count in [4096_u32, 4097] {
+        let mut plan = split_plan();
+        plan.copy_policy.split_max_parts = i32::MAX as u32;
+        plan.copy_tables[0].parts = (0..count)
+            .map(|index| crate::contracts::CopyPart {
+                number: index + 1,
+                count,
+                start_block: index,
+                end_block: (index + 1 < count).then_some(index + 1),
+            })
+            .collect();
+        assert_eq!(validate_plan(&plan).is_ok(), count == 4096);
+    }
+}
+
+#[test]
+fn execution_entries_require_canonical_oid_order_even_when_catalog_order_differs() {
+    let mut plan = plan();
+    let mut second = plan.tables[0].clone();
+    second.source_oid = 6;
+    second.name.table = "other".into();
+    plan.tables.insert(0, second);
+    let mut second_copy = plan.copy_tables[0].clone();
+    second_copy.source_oid = 6;
+    plan.copy_tables.push(second_copy);
+    validate_plan(&plan).unwrap();
+    plan.copy_tables.reverse();
+    assert!(validate_plan(&plan).is_err());
+}
+
+#[test]
+fn same_generation_binding_cannot_change_copy_policy_or_resolved_profile() {
+    let (_tmp, mut state, _) = start();
+    let saved = state.checked_clone().unwrap().unwrap();
+    for variant in 0..3 {
+        let mut changed = saved.plan.clone();
+        match variant {
+            0 => changed.copy_policy.use_copy_binary = true,
+            1 => changed.copy_policy.skip_large_objects = true,
+            _ => changed.copy_policy.split_max_parts = 1,
+        }
+        assert!(state.bind_clone(&changed, &saved.ticket).is_err());
+        assert_eq!(state.checked_clone().unwrap().unwrap(), saved);
     }
 }
 
@@ -149,7 +302,9 @@ fn identity_evidence_round_trips_exactly_through_owned_restart() {
         state.bind_clone(&plan, &ticket(&plan)).unwrap();
         state.begin_pre_data().unwrap();
         let (objects, tables) = inventory(&plan);
-        state.confirm_pre_data(objects, tables.clone()).unwrap();
+        state
+            .confirm_pre_data(&plan, objects, tables.clone())
+            .unwrap();
         drop(state);
         let before = fs::read(tmp.path().join("manifest.json")).unwrap();
         for action in [StateAction::Resume, StateAction::Restart] {
@@ -194,7 +349,7 @@ fn ownership_and_existing_plan_require_both_identity_vectors_to_match() {
         } else {
             tables[0].table.identity_modes = vec![b'd'];
         }
-        let error = state.confirm_pre_data(objects, tables).unwrap_err();
+        let error = state.confirm_pre_data(&plan, objects, tables).unwrap_err();
         assert!(error.message.starts_with("state-ownership:"), "{error:?}");
         assert_eq!(fs::read(tmp.path().join("manifest.json")).unwrap(), before);
     }
@@ -297,6 +452,9 @@ fn inventory(plan: &ClonePlan) -> (Vec<OwnedObject>, Vec<OwnedCopyTable>) {
     )
 }
 fn start() -> (super::super::tests::TempDir, NativeState, ClonePlan) {
+    start_with_plan(plan())
+}
+fn start_with_plan(plan: ClonePlan) -> (super::super::tests::TempDir, NativeState, ClonePlan) {
     let tmp = super::super::tests::TempDir::new();
     let mut state = open_clone(
         &StateRequest {
@@ -307,28 +465,145 @@ fn start() -> (super::super::tests::TempDir, NativeState, ClonePlan) {
         &control(),
     )
     .unwrap();
-    let plan = plan();
     state.bind_clone(&plan, &ticket(&plan)).unwrap();
     (tmp, state, plan)
+}
+
+#[test]
+fn pre_data_handoff_resolves_the_original_snapshot_profile_atomically_once() {
+    let mut provisional = split_plan();
+    provisional.copy_tables[0].parts = plan().copy_tables[0].parts.clone();
+    let (tmp, mut state, _) = start_with_plan(provisional.clone());
+    state.begin_pre_data().unwrap();
+    let resolved = split_plan();
+    let (objects, tables) = inventory(&resolved);
+    state.confirm_pre_data(&resolved, objects, tables).unwrap();
+    let saved = state.checked_clone().unwrap().unwrap();
+    assert_eq!(saved.plan, resolved);
+    assert_eq!(saved.ticket, ticket(&provisional));
+    assert_eq!(saved.phase, ClonePhase::Copying);
+    assert_eq!(saved.owned_tables.len(), 1);
+    let before = fs::read(tmp.path().join("manifest.json")).unwrap();
+    let (objects, tables) = inventory(&provisional);
+    assert!(
+        state
+            .confirm_pre_data(&provisional, objects, tables)
+            .is_err()
+    );
+    assert_eq!(fs::read(tmp.path().join("manifest.json")).unwrap(), before);
+}
+
+#[test]
+fn pre_data_profile_handoff_refuses_changed_bindings_without_mutation() {
+    for field in 0..9 {
+        let mut provisional = split_plan();
+        provisional.copy_tables[0].parts = plan().copy_tables[0].parts.clone();
+        let (tmp, mut state, _) = start_with_plan(provisional.clone());
+        state.begin_pre_data().unwrap();
+        let before = fs::read(tmp.path().join("manifest.json")).unwrap();
+        let mut resolved = split_plan();
+        match field {
+            0 => resolved.source.timeline += 1,
+            1 => resolved.target.identity.database_oid += 1,
+            2 => resolved.generation = CopyGeneration(2),
+            3 => resolved.policy.no_owner = true,
+            4 => resolved.copy_policy.use_copy_binary = true,
+            5 => resolved.copy_policy.skip_large_objects = true,
+            6 => resolved.tables[0].source_oid += 1,
+            7 => resolved.copy_tables[0].parts[1].start_block += 1,
+            _ => resolved.sequences.push(QualifiedTable {
+                schema: "public".into(),
+                table: "new_sequence".into(),
+            }),
+        }
+        let (objects, tables) = inventory(&provisional);
+        assert!(
+            state.confirm_pre_data(&resolved, objects, tables).is_err(),
+            "field {field}"
+        );
+        assert_eq!(fs::read(tmp.path().join("manifest.json")).unwrap(), before);
+    }
+}
+
+#[test]
+fn fresh_generation_replaces_bounds_but_preserves_selected_policy_and_owned_identity() {
+    let (_tmp, mut state, previous) = start_with_plan(split_plan());
+    state.begin_pre_data().unwrap();
+    let (objects, tables) = inventory(&previous);
+    state.confirm_pre_data(&previous, objects, tables).unwrap();
+    let mut next = previous.clone();
+    next.generation = CopyGeneration(2);
+    next.copy_tables[0].parts[0].end_block = Some(20);
+    next.copy_tables[0].parts[1].start_block = 20;
+    let mut next_ticket = ticket(&next);
+    next_ticket.token = "fresh-layout".into();
+    let saved = state.checked_clone().unwrap().unwrap();
+    let mut wrong_policy = next.clone();
+    wrong_policy.copy_policy.use_copy_binary = true;
+    assert!(
+        state
+            .advance_copy_generation(&wrong_policy, &next_ticket)
+            .is_err()
+    );
+    assert_eq!(state.checked_clone().unwrap().unwrap(), saved);
+    state.advance_copy_generation(&next, &next_ticket).unwrap();
+    let current = state.checked_clone().unwrap().unwrap();
+    assert_eq!(current.plan, next);
+    assert_eq!(current.ticket, next_ticket);
+    assert_eq!(current.owned_objects, saved.owned_objects);
+    assert_eq!(
+        current.owned_tables[0].target_oid,
+        saved.owned_tables[0].target_oid
+    );
+    assert_eq!(current.owned_tables[0].generation, CopyGeneration(2));
+    assert!(state.bind_clone(&previous, &ticket(&previous)).is_err());
 }
 #[test]
 fn marker_generations_cannot_reuse_snapshot_bound_owned_tables() {
     let (_tmp, mut state, plan) = start();
     state.begin_pre_data().unwrap();
     let (objects, tables) = inventory(&plan);
-    state.confirm_pre_data(objects, tables).unwrap();
+    state.confirm_pre_data(&plan, objects, tables).unwrap();
     let mut next = ticket(&plan);
     next.generation = CopyGeneration(2);
     next.token = "new".into();
-    state.advance_copy_generation(&next).unwrap();
+    state
+        .advance_copy_generation(
+            &ClonePlan {
+                generation: next.generation,
+                ..plan.clone()
+            },
+            &next,
+        )
+        .unwrap();
     assert_eq!(
         state.owned_copy_tables().unwrap()[0].generation,
         CopyGeneration(2)
     );
-    assert!(state.advance_copy_generation(&next).is_err());
+    assert!(
+        state
+            .advance_copy_generation(
+                &ClonePlan {
+                    generation: next.generation,
+                    ..plan.clone()
+                },
+                &next
+            )
+            .is_err()
+    );
     state.mark_stage(ClonePhase::PostDataPending).unwrap();
     next.generation = CopyGeneration(3);
-    assert!(state.advance_copy_generation(&next).is_err());
+    assert!(
+        state
+            .advance_copy_generation(
+                &ClonePlan {
+                    generation: next.generation,
+                    ..plan.clone()
+                },
+                &next
+            )
+            .is_err()
+    );
 }
 #[test]
 fn unknown_predata_never_adopts_objects_or_skips_handoff() {
@@ -338,7 +613,7 @@ fn unknown_predata_never_adopts_objects_or_skips_handoff() {
     assert!(state.mark_stage(ClonePhase::PostDataPending).is_err());
     let (objects, mut tables) = inventory(&plan);
     tables[0].target_oid = 99;
-    assert!(state.confirm_pre_data(objects, tables).is_err());
+    assert!(state.confirm_pre_data(&plan, objects, tables).is_err());
     assert_eq!(
         state.checked_clone().unwrap().unwrap().phase,
         ClonePhase::PreDataPending
@@ -382,6 +657,8 @@ fn inspection_overlaps_owner_without_lock_or_write() {
             table_oid: 12,
             marker_table_oid: 13,
             marker_index_oid: 14,
+            large_object_table_oid: 15,
+            large_object_index_oid: 16,
         })
         .unwrap();
     let before = fs::read(tmp.path().join("manifest.json")).unwrap();
@@ -418,7 +695,7 @@ fn clone_rejects_old_formats_unknown_fields_and_inventory_overflow() {
     drop(state);
     let path = tmp.path().join("manifest.json");
     let bytes = fs::read(&path).unwrap();
-    for version in [1, 2, 3, 4, 5, 6, 7, 9] {
+    for version in [1, 2, 3, 4, 5, 6, 7, 8, 10] {
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         value["format_version"] = version.into();
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -889,7 +1166,7 @@ fn existing_partial_and_completed_clone_state_is_loaded_without_reset() {
         state.begin_pre_data().unwrap();
         if complete {
             let (objects, tables) = inventory(&plan);
-            state.confirm_pre_data(objects, tables).unwrap();
+            state.confirm_pre_data(&plan, objects, tables).unwrap();
             for phase in [
                 ClonePhase::PostDataPending,
                 ClonePhase::PostDataComplete,

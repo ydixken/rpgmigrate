@@ -9,12 +9,12 @@ use crate::apply::checkpoint::{CompletedFollow, TargetAuthority};
 use crate::catalog;
 use crate::contracts::{
     ClonePlan, CopyGeneration, Error, ErrorKind, FollowBinding, FollowOptions, IoControl,
-    RestorePolicy, Result, SnapshotTicket, StateAction,
+    RestorePolicy, Result, StateAction,
 };
 use crate::pg::{PgConnection, operation_control};
 use crate::snapshot::{CloneSnapshot, FollowSnapshot};
 use crate::state::ControlHandle;
-use crate::state::{self, ClonePhase, CloneState, NativeState, SourceSlotProvenance};
+use crate::state::{self, ClonePhase, CloneState, NativeState};
 
 pub(crate) mod channel;
 
@@ -56,6 +56,11 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
     )?;
     let saved = native.checked_clone()?;
     if let Some(saved) = &saved {
+        if options.clone.copy_policy() != saved.plan.copy_policy {
+            return Err(refusal(
+                "follow: selected COPY policy differs from the native binding",
+            ));
+        }
         if options.clone.policy != RestorePolicy::default()
             && options.clone.policy != saved.plan.policy
         {
@@ -139,6 +144,7 @@ fn fresh(
         &mut target_sql,
         CopyGeneration(1),
         options.clone.policy,
+        options.clone.copy_policy(),
         &[],
         &[],
         io,
@@ -159,7 +165,7 @@ fn fresh(
     native.bind_follow(&plan, snapshot.snapshot_mut().ticket(), &binding)?;
     let coordinator = target(options, io)?;
     let mut authority = CloneAuthority::acquire(coordinator, native, &plan, io)?;
-    copy_initial(
+    let plan = copy_initial(
         options,
         &plan,
         snapshot,
@@ -187,23 +193,10 @@ fn recopy(
         if restart.new_bound {
             authority.advance_generation(native, io)?;
             native.finish_follow_restart()?;
-        } else if restart.slot_absent
-            && restart.publication_absent
-            && matches!(native.checked_source_slot()?, Some(SourceSlotProvenance::Confirmed(ref receipt))
-                if receipt.intent.binding.catalog_epoch() == restart.next_generation.0)
-        {
+        } else if restart.slot_absent && restart.publication_absent {
             let mut next = saved.plan.clone();
             next.generation = restart.next_generation;
-            let binding = crate::snapshot::recover_follow_binding(options, &next, native, io)?;
-            // This token reconciles the lost generation; COPY gets a fresh capability below.
-            let ticket = SnapshotTicket {
-                token: binding.slot.snapshot_token.clone(),
-                source: next.source.clone(),
-                generation: next.generation,
-            };
-            native.bind_follow(&next, &ticket, &binding)?;
-            authority.advance_generation(native, io)?;
-            native.finish_follow_restart()?;
+            FollowSnapshot::retire_unbound(options, &next, native, io)?;
         }
     }
     let saved = native
@@ -215,11 +208,12 @@ fn recopy(
     plan.generation = restart.next_generation;
     let mut snapshot = FollowSnapshot::restart(options, &plan, native, io)?;
     let binding = snapshot.binding().clone();
+    plan = crate::clone::resolve_copy_profile(snapshot.snapshot_mut(), &mut target, &plan, io)?;
     native.bind_follow(&plan, snapshot.snapshot_mut().ticket(), &binding)?;
     authority.advance_generation(native, io)?;
     native.finish_follow_restart()?;
     authority.truncate_follow_workset(native, io)?;
-    copy_initial(
+    let plan = copy_initial(
         options,
         &plan,
         snapshot,
@@ -246,11 +240,12 @@ fn restart_plan(
         target,
         saved.plan.generation,
         options.clone.policy,
+        options.clone.copy_policy(),
         &metadata,
         &saved.owned_objects,
         io,
     )?;
-    crate::clone::require_same_plan(&saved.plan, &checked)?;
+    crate::clone::require_same_catalog(&saved.plan, &checked)?;
     crate::clone::require_pre_data_match(crate::schema::compare_pre_data(
         &options.clone,
         snapshot.ticket(),
@@ -271,9 +266,10 @@ fn copy_initial(
     fresh: bool,
     target: &mut PgConnection,
     io: &IoControl,
-) -> Result<()> {
+) -> Result<ClonePlan> {
     let binding = snapshot.binding().clone();
     let exporter_pid = snapshot.exporter_pid();
+    let mut execution = plan.clone();
     with_source_health(options, plan, &binding, Some(exporter_pid), io, || {
         let ticket = snapshot.snapshot_mut().ticket().clone();
         let archive = crate::schema::dump(&options.clone, &ticket, native, io)?;
@@ -281,14 +277,23 @@ fn copy_initial(
             let owned = crate::schema::restore_pre(&options.clone, plan, &archive, native, io)?;
             authority.mark_stage(ClonePhase::PreDataPending, io)?;
             let tables = catalog::reconcile_clone_tables(target, plan, &owned, io)?;
-            native.confirm_pre_data(owned, tables)?;
+            execution =
+                crate::clone::resolve_copy_profile(snapshot.snapshot_mut(), target, plan, io)?;
+            native.confirm_pre_data(&execution, owned, tables)?;
             authority.bind_tables(native, io)?;
         }
         crate::copy::run_tables(
             &options.clone,
-            plan,
+            &execution,
             snapshot.snapshot_mut(),
             native,
+            authority,
+            io,
+        )?;
+        crate::large_objects::run_initial(
+            &options.clone,
+            &execution,
+            snapshot.snapshot_mut(),
             authority,
             io,
         )?;
@@ -302,17 +307,17 @@ fn copy_initial(
         catalog::sync_clone_sequences(
             snapshot.snapshot_mut().connection()?,
             target,
-            plan,
+            &execution,
             &saved.owned_objects,
             io,
         )?;
         crate::clone::positive(native, authority, ClonePhase::SequencesComplete, io)?;
         crate::clone::pending(native, authority, ClonePhase::Analyzing, io)?;
-        catalog::analyze_clone(target, plan, &native.owned_copy_tables()?, io)?;
+        catalog::analyze_clone(target, &execution, &native.owned_copy_tables()?, io)?;
         let receipt = snapshot.receipt().clone();
         snapshot.finish(io)?;
         authority.install_follow_anchor(native, &receipt, io)?;
-        Ok(())
+        Ok(execution)
     })
 }
 

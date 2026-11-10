@@ -144,7 +144,7 @@ fn copy_sql(connection: &mut PgConnection, table: &CopyTable, direction: &str) -
     ))
 }
 
-fn check_control(io: &IoControl) -> Result<()> {
+pub(crate) fn check_control(io: &IoControl) -> Result<()> {
     if io.cancelled.load(Ordering::Acquire) {
         return Err(failure(
             ErrorKind::Pgsql,

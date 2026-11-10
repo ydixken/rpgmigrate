@@ -1014,8 +1014,13 @@ copy_request(relay)
 
     def test_clone_inventory_refuses_missing_or_unrelated_success(self):
         cases = module_cases(load_manifest(), "Clone")
-        self.assertEqual(len(cases), 7)
-        self.assertEqual(len(set(cases)), 7)
+        self.assertEqual(len(cases), 10)
+        self.assertEqual(len(set(cases)), 10)
+        self.assertEqual(set(cases[-3:]), {
+            "copy::live_tests::live_binary_copy_counts_empty_single_and_multiple_rows_from_command_results",
+            "copy::live_tests::live_split_copy_retains_every_part_without_freeze_or_worker_truncate",
+            "copy::live_tests::live_large_object_initial_copy_preserves_empty_binary_multichunk_and_sparse_objects",
+        })
         self.assertTrue(all(name.startswith(("snapshot::clone_tests::", "copy::live_tests::", "apply::checkpoint::clone_marker_tests::")) for name in cases))
         good = "".join(f"test {name} ... ok\n" for name in cases)
         validate_libtest_output(cases, good)
@@ -1025,6 +1030,20 @@ copy_request(relay)
         for output in ("", good + "test unrelated ... ok\n", good.replace(" ... ok", " ... ignored", 1)):
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate_libtest_output(cases, output)
+
+    def test_clone_receipt_requires_all_ten_cases_and_one_exact_summary(self):
+        cases = module_cases(load_manifest(), "Clone")
+        validate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "tools/test-db.py"))["validate_module_receipt"]
+        records = "".join(f"test {name} ... ok\n" for name in cases)
+        summary = "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
+        validate("Clone", cases, records + summary, {})
+        invalid = ["", summary, records, records + summary + summary,
+                   records + summary.replace("10 passed", "7 passed"),
+                   records + summary.replace("0 ignored", "1 ignored")]
+        invalid += [records.replace(f"test {name} ... ok\n", "") + summary for name in cases]
+        for output in invalid:
+            with self.subTest(output=output), self.assertRaises(AssertionError):
+                validate("Clone", cases, output, {})
 
     def test_schema_inventory_requires_three_exact_cases_and_summary(self):
         cases = module_cases(load_manifest(), "Schema")

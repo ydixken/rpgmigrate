@@ -77,6 +77,9 @@ def module_cases(manifest, profile):
             "copy::live_tests::live_clone_established_empty_inventory_returns_zero_receipt",
             "copy::live_tests::live_clone_rejects_replaced_snapshot_in_same_generation_before_copy",
             "apply::checkpoint::clone_marker_tests::live_markers_commit_atomically_and_refuse_stale_generation_and_foreign_metadata",
+            "copy::live_tests::live_binary_copy_counts_empty_single_and_multiple_rows_from_command_results",
+            "copy::live_tests::live_split_copy_retains_every_part_without_freeze_or_worker_truncate",
+            "copy::live_tests::live_large_object_initial_copy_preserves_empty_binary_multichunk_and_sparse_objects",
         ]
     if profile == "Transport":
         return manifest["transport_cases"]

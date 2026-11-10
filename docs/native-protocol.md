@@ -56,6 +56,10 @@ Discovery supplies configuration-assessment input; production `UnsupportedEngine
 Fresh ARM image packaging and exact-image three-pair M6 runtime checks remain required.
 AMD64 packaging evidence alone cannot qualify native database runtime; M10 retains that architecture gate.
 
+M8 candidate execution uses fresh native format 9 / metadata 7 while preserving protocol v1 and the existing output DTOs.
+Its binary COPY, split, and large-object implementations do not activate their reserved capabilities before the corresponding runtime qualification receipts pass.
+The existing format 8 / metadata 6 workflow retains its own artifacts and receipts; no conversion or adoption is permitted.
+
 ## Operational transport and document rules
 
 Operational framing requires the validated four-field operator identity bound to stored native state.

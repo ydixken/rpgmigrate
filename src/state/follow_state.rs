@@ -100,6 +100,7 @@ fn same_plan(a: &ClonePlan, b: &ClonePlan) -> bool {
         && a.tables == b.tables
         && a.sequences == b.sequences
         && a.policy == b.policy
+        && a.copy_policy == b.copy_policy
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -370,21 +371,20 @@ impl NativeState {
         if let Some(plan) = follow.preliminary {
             return Ok(Some(plan));
         }
-        Ok(manifest.clone_state.map(|saved| {
-            let mut plan = saved.plan;
-            if let Some(restart) = follow.restart
-                && !restart.new_bound
-            {
-                plan.generation = restart.next_generation;
-            }
-            plan
-        }))
+        Ok(manifest.clone_state.map(|saved| saved.plan))
     }
 
     pub(crate) fn prepare_follow_source(&mut self, plan: &ClonePlan) -> Result<()> {
         clone_state::validate_plan(plan)?;
         if let Some(existing) = self.checked_follow_source()? {
-            if existing != *plan {
+            let restarting = self.checked_follow_restart()?.is_some_and(|restart| {
+                restart.slot_absent
+                    && restart.publication_absent
+                    && !restart.new_bound
+                    && restart.next_generation == plan.generation
+                    && same_plan(&existing, plan)
+            });
+            if existing != *plan && !restarting {
                 return Err(bad_state(
                     "state-follow: preliminary source plan cannot be replaced",
                 ));
@@ -396,7 +396,10 @@ impl NativeState {
             .follow_state
             .as_mut()
             .ok_or_else(|| bad_state("state-follow: native state is not a follow run"))?;
-        if follow.publication.is_some() || next.source_slot.is_some() || next.clone_state.is_some()
+        if plan.generation != CopyGeneration(1)
+            || follow.publication.is_some()
+            || next.source_slot.is_some()
+            || next.clone_state.is_some()
         {
             return Err(bad_state(
                 "state-follow: source plan must precede every resource intent",
@@ -564,6 +567,48 @@ impl NativeState {
         self.replace_manifest(next)
     }
 
+    pub(crate) fn confirm_pending_follow_slot_absent(
+        &mut self,
+        proof: &crate::snapshot::PendingFollowSlotAbsence,
+    ) -> Result<()> {
+        let mut next = self.checked_manifest()?;
+        require_pending_resource_retirement(&next, proof.restart())?;
+        let receipt = proof.receipt();
+        if receipt.intent.binding.stream() != proof.restart().previous.stream()
+            || receipt.intent.binding.catalog_epoch() != proof.restart().next_generation.0
+            || receipt.intent.binding.plugin() != Plugin::Pgoutput
+            || next.source_slot != Some(SourceSlotProvenance::Confirmed(receipt.clone()))
+        {
+            return Err(bad_state(
+                "state-follow: pending slot absence has a different exact receipt",
+            ));
+        }
+        next.source_slot = None;
+        self.replace_manifest(next)
+    }
+
+    pub(crate) fn confirm_pending_follow_publication_absent(
+        &mut self,
+        proof: &crate::snapshot::PendingFollowPublicationAbsence,
+    ) -> Result<()> {
+        let mut next = self.checked_manifest()?;
+        require_pending_resource_retirement(&next, proof.restart())?;
+        let follow = next.follow_state.as_mut().expect("checked follow state");
+        if next.source_slot.is_some()
+            || follow
+                .publication
+                .as_ref()
+                .and_then(PublicationProvenance::confirmed)
+                != Some(proof.receipt())
+        {
+            return Err(bad_state(
+                "state-follow: pending publication absence has a different exact receipt or surviving slot",
+            ));
+        }
+        follow.publication = None;
+        self.replace_manifest(next)
+    }
+
     pub(crate) fn finish_follow_restart(&mut self) -> Result<()> {
         let mut next = self.checked_manifest()?;
         let follow = next
@@ -690,7 +735,12 @@ impl NativeState {
         binding: &FollowBinding,
     ) -> Result<()> {
         validate_follow_binding(binding)?;
-        if self.checked_follow_source()?.as_ref() != Some(plan) {
+        clone_state::validate_plan(plan)?;
+        let preliminary = self.checked_follow_source()?;
+        if preliminary
+            .as_ref()
+            .is_none_or(|saved| !same_plan(saved, plan))
+        {
             return Err(bad_state(
                 "state-follow: snapshot plan differs from preliminary source authority",
             ));
@@ -719,7 +769,11 @@ impl NativeState {
                 && r.next_generation == plan.generation
                 && follow.binding.as_ref() == Some(&r.previous)
         });
-        if follow.binding.is_some() && !restarting
+        if (!restarting
+            && preliminary
+                .as_ref()
+                .is_none_or(|saved| saved.generation != plan.generation))
+            || follow.binding.is_some() && !restarting
             || follow
                 .publication
                 .as_ref()
@@ -778,6 +832,32 @@ impl NativeState {
         follow.preliminary = None;
         self.replace_manifest(next)
     }
+}
+
+fn require_pending_resource_retirement(
+    manifest: &Manifest,
+    expected: &FollowRestart,
+) -> Result<()> {
+    let saved = manifest.clone_state.as_ref().ok_or_else(|| {
+        bad_state("state-follow: pending resource retirement lacks owned copy state")
+    })?;
+    let follow = manifest
+        .follow_state
+        .as_ref()
+        .ok_or_else(|| bad_state("state-follow: pending resource retirement lacks follow state"))?;
+    if follow.restart.as_ref() != Some(expected)
+        || expected.new_bound
+        || !expected.slot_absent
+        || !expected.publication_absent
+        || follow.binding.as_ref() != Some(&expected.previous)
+        || saved.phase != ClonePhase::Copying
+        || saved.plan.generation != expected.previous.copy_generation
+    {
+        return Err(bad_state(
+            "state-follow: pending resource retirement differs from its unbound restart intent",
+        ));
+    }
+    Ok(())
 }
 
 impl FollowState {
@@ -1019,6 +1099,8 @@ mod tests {
             tables: Vec::new(),
             sequences: Vec::new(),
             policy: crate::contracts::RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
+            copy_tables: Vec::new(),
         }
     }
 
@@ -1109,6 +1191,8 @@ mod tests {
             tables: Vec::new(),
             sequences: Vec::new(),
             policy: crate::contracts::RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
+            copy_tables: Vec::new(),
         };
         let binding = create_resources(&mut native, &plan, 10);
         let ticket = SnapshotTicket {
@@ -1118,7 +1202,9 @@ mod tests {
         };
         native.bind_follow(&plan, &ticket, &binding).unwrap();
         native.begin_pre_data().unwrap();
-        native.confirm_pre_data(Vec::new(), Vec::new()).unwrap();
+        native
+            .confirm_pre_data(&plan, Vec::new(), Vec::new())
+            .unwrap();
         (tmp, native, plan, binding)
     }
 
@@ -1166,6 +1252,74 @@ mod tests {
             copy_generation: plan.generation,
             source_types: Vec::new(),
         }
+    }
+
+    #[test]
+    fn first_snapshot_replans_parts_but_repeated_binding_requires_exact_profile() {
+        use crate::contracts::{CloneTable, CloneTableCopy, CopyFormat, CopyPart, QualifiedTable};
+        let tmp = super::super::tests::TempDir::new();
+        let mut native = open_follow(
+            &StateRequest {
+                path: tmp.path(),
+                action: StateAction::Create,
+            },
+            None,
+            None,
+            &control(),
+        )
+        .unwrap();
+        let mut preliminary = empty_plan();
+        preliminary.copy_policy.split_tables_larger_than = 1;
+        preliminary.tables.push(CloneTable {
+            source_oid: 42,
+            name: QualifiedTable {
+                schema: "public".into(),
+                table: "items".into(),
+            },
+            writable_columns: vec!["id".into()],
+            all_columns: vec!["id".into()],
+            identity_modes: vec![0],
+            partition_identity_modes: None,
+        });
+        preliminary.copy_tables.push(CloneTableCopy {
+            source_oid: 42,
+            format: CopyFormat::Text,
+            parts: vec![CopyPart {
+                number: 1,
+                count: 1,
+                start_block: 0,
+                end_block: None,
+            }],
+        });
+        let binding = create_resources(&mut native, &preliminary, 10);
+        let mut snapshot_plan = preliminary.clone();
+        snapshot_plan.copy_tables[0].parts = vec![
+            CopyPart {
+                number: 1,
+                count: 2,
+                start_block: 0,
+                end_block: Some(10),
+            },
+            CopyPart {
+                number: 2,
+                count: 2,
+                start_block: 10,
+                end_block: None,
+            },
+        ];
+        let ticket = SnapshotTicket {
+            token: binding.slot.snapshot_token.clone(),
+            source: snapshot_plan.source.clone(),
+            generation: snapshot_plan.generation,
+        };
+        native
+            .bind_follow(&snapshot_plan, &ticket, &binding)
+            .unwrap();
+        assert_eq!(native.checked_clone().unwrap().unwrap().plan, snapshot_plan);
+        assert!(native.bind_follow(&preliminary, &ticket, &binding).is_err());
+        native
+            .bind_follow(&snapshot_plan, &ticket, &binding)
+            .unwrap();
     }
 
     fn cleanup_target_binding(plan: &ClonePlan, binding: &FollowBinding) -> TargetBinding {
@@ -1229,6 +1383,8 @@ mod tests {
                 table_oid: 12,
                 marker_table_oid: 13,
                 marker_index_oid: 14,
+                large_object_table_oid: 15,
+                large_object_index_oid: 16,
             })
             .unwrap();
         let mut wrong_target = native.checked_manifest().unwrap();
@@ -1330,6 +1486,10 @@ mod tests {
         let (tmp, mut native, mut plan, old) = bound_follow();
         let restart = native.begin_follow_restart(&old, &plan).unwrap();
         assert_eq!(restart.next_generation, CopyGeneration(2));
+        assert_eq!(
+            native.checked_follow_source().unwrap().unwrap().generation,
+            CopyGeneration(1)
+        );
         assert!(native.begin_publication("replacement").is_err());
         native.confirm_follow_slot_absent(&restart).unwrap();
         assert!(native.begin_publication("replacement").is_err());

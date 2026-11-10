@@ -13,7 +13,8 @@ use crate::contracts::SnapshotAnchor;
 use crate::identity::{CommitLsn, SourceEndLsn, StreamId, TxId, TxSeq};
 use checkpoint::DurableProof;
 pub(crate) use checkpoint::{
-    CloneAuthority, CopyCommitOutcome, CopyPermit, CopyTxn, metadata_inventory,
+    CloneAuthority, CopyCommitOutcome, CopyPermit, CopyTxn, LargeObjectDone, LargeObjectPermit,
+    LargeObjectPhase, LargeObjectTxn, metadata_inventory,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

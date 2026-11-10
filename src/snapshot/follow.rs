@@ -10,65 +10,181 @@ pub(crate) struct FollowSnapshot {
     exporter_pid: i32,
 }
 
-pub(crate) fn recover_follow_binding(
-    options: &FollowOptions,
-    plan: &ClonePlan,
-    native: &NativeState,
-    io: &IoControl,
-) -> Result<FollowBinding> {
-    let restart = native.checked_follow_restart()?.ok_or_else(|| {
-        follow_refusal("follow-restart: binding reconstruction lacks a durable restart intent")
-    })?;
-    let previous = native
-        .checked_clone()?
-        .ok_or_else(|| follow_refusal("follow-restart: prior owned plan is missing"))?;
-    require_restart_plan(&previous.plan, plan, restart.next_generation)?;
-    if restart.new_bound || !restart.slot_absent || !restart.publication_absent {
-        return Err(follow_refusal(
-            "follow-restart: reconstruction requires confirmed old-resource absence and an unbound new generation",
-        ));
+pub(crate) struct PendingFollowSlotAbsence {
+    pub(super) restart: crate::state::FollowRestart,
+    pub(super) receipt: SourceSlotReceipt,
+}
+
+impl PendingFollowSlotAbsence {
+    pub(crate) fn restart(&self) -> &crate::state::FollowRestart {
+        &self.restart
     }
-    let publication = native
-        .checked_publication()?
-        .and_then(|provenance| provenance.confirmed().cloned())
-        .ok_or_else(|| follow_refusal("follow-restart: new publication creation is unproven"))?;
-    let Some(crate::state::SourceSlotProvenance::Confirmed(slot)) = native.checked_source_slot()?
-    else {
-        return Err(follow_refusal(
-            "follow-restart: new source slot creation is unproven",
-        ));
-    };
-    if slot.intent.binding.stream() != restart.previous.stream()
-        || slot.intent.binding.catalog_epoch() != plan.generation.0
-        || slot.intent.binding.plugin() != crate::cdc::contracts::Plugin::Pgoutput
-    {
-        return Err(follow_refusal(
-            "follow-restart: new source slot belongs to a different stream or copy generation",
-        ));
+
+    pub(crate) fn receipt(&self) -> &SourceSlotReceipt {
+        &self.receipt
     }
-    let binding = FollowBinding {
-        slot,
-        publication,
-        source_timeline: plan.source.timeline,
-        copy_generation: plan.generation,
-        source_types: restart.previous.source_types,
-    };
-    crate::state::validate_follow_binding(&binding)?;
-    let mut source = PgConnection::connect(&options.clone.source, io)?;
-    catalog::configure_session(&mut source, io)?;
-    catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
-    if catalog::follow_confirmed_flush(&mut source, plan, &binding, None, io)?
-        != binding.slot.consistent_point
-    {
-        return Err(follow_refusal(
-            "follow-restart: unanchored source slot has advanced beyond its creation receipt",
-        ));
+}
+
+pub(crate) struct PendingFollowPublicationAbsence {
+    pub(super) restart: crate::state::FollowRestart,
+    pub(super) receipt: crate::contracts::PublicationReceipt,
+}
+
+impl PendingFollowPublicationAbsence {
+    pub(crate) fn restart(&self) -> &crate::state::FollowRestart {
+        &self.restart
     }
-    // The persisted token is for generation reconciliation only; no live snapshot is reconstructed.
-    Ok(binding)
+
+    pub(crate) fn receipt(&self) -> &crate::contracts::PublicationReceipt {
+        &self.receipt
+    }
 }
 
 impl FollowSnapshot {
+    pub(crate) fn retire_unbound(
+        options: &FollowOptions,
+        plan: &ClonePlan,
+        native: &mut NativeState,
+        io: &IoControl,
+    ) -> Result<()> {
+        let restart = native.checked_follow_restart()?.ok_or_else(|| {
+            follow_refusal("follow-restart: pending resource retirement lacks its durable intent")
+        })?;
+        let previous = native.checked_clone()?.ok_or_else(|| {
+            follow_refusal("follow-restart: pending resource retirement lacks its owned plan")
+        })?;
+        require_restart_plan(&previous.plan, plan, restart.next_generation)?;
+        if restart.new_bound || !restart.slot_absent || !restart.publication_absent {
+            return Err(follow_refusal(
+                "follow-restart: only an unbound replacement after old-resource absence can retire",
+            ));
+        }
+        let publication = native
+            .checked_publication()?
+            .map(|p| {
+                p.confirmed().cloned().ok_or_else(|| {
+                    follow_refusal("follow-restart: pending publication creation is unproven")
+                })
+            })
+            .transpose()?;
+        let slot = match native.checked_source_slot()? {
+            Some(crate::state::SourceSlotProvenance::Confirmed(slot))
+                if slot.intent.binding.stream() == restart.previous.stream()
+                    && slot.intent.binding.catalog_epoch() == restart.next_generation.0
+                    && slot.intent.binding.plugin() == crate::cdc::contracts::Plugin::Pgoutput
+                    && publication.is_some() =>
+            {
+                Some(slot)
+            }
+            None => None,
+            _ => {
+                return Err(follow_refusal(
+                    "follow-restart: pending source slot lacks its exact new-generation receipt",
+                ));
+            }
+        };
+        let mut source = PgConnection::connect(&options.clone.source, io)?;
+        catalog::configure_session(&mut source, io)?;
+        catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
+        if let Some(publication) = &publication {
+            pending_publication_present(&mut source, publication, plan, io)?;
+        }
+        if let Some(receipt) = slot {
+            let name = source.quote_literal(receipt.intent.binding.slot_name())?;
+            let present = source.query(&format!(
+                "SELECT plugin,datoid,temporary,active_pid,confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"
+            ), io)?;
+            if present.columns()? != 5 || present.rows() > 1 {
+                return Err(follow_refusal(
+                    "follow-restart: pending slot inventory is invalid",
+                ));
+            }
+            if present.rows() == 1 {
+                let point = format!(
+                    "{:X}/{:X}",
+                    receipt.consistent_point.0 >> 32,
+                    receipt.consistent_point.0 as u32
+                );
+                if present.cell(0, 0)? != Some(b"pgoutput")
+                    || present.cell(0, 1)?
+                        != Some(plan.source.identity.database_oid.to_string().as_bytes())
+                    || present.cell(0, 2)? != Some(b"f")
+                    || present.cell(0, 3)?.is_some()
+                    || present.cell(0, 4)? != Some(point.as_bytes())
+                {
+                    return Err(follow_refusal(
+                        "follow-restart: pending slot differs from its inactive creation receipt",
+                    ));
+                }
+                let dropped = source.query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({name})"),
+                    io,
+                )?;
+                if dropped.rows() != 1
+                    || dropped.columns()? != 1
+                    || dropped.command_tag()? != "SELECT 1"
+                {
+                    return Err(follow_refusal(
+                        "follow-restart: pending slot removal is unconfirmed",
+                    ));
+                }
+            }
+            let absent = source.query(
+                &format!("SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"),
+                io,
+            )?;
+            if absent.columns()? != 1 || absent.rows() != 0 {
+                return Err(follow_refusal(
+                    "follow-restart: pending slot remains after removal",
+                ));
+            }
+            native.confirm_pending_follow_slot_absent(&PendingFollowSlotAbsence {
+                restart: restart.clone(),
+                receipt,
+            })?;
+        }
+        if let Some(receipt) = publication {
+            if pending_publication_present(&mut source, &receipt, plan, io)? {
+                let required = catalog::configure_durability(&mut source, io)?;
+                catalog::command(&mut source, "BEGIN", "BEGIN", io)?;
+                let name = source.quote_identifier(&receipt.name)?;
+                catalog::command(
+                    &mut source,
+                    &format!("DROP PUBLICATION {name}"),
+                    "DROP PUBLICATION",
+                    io,
+                )?;
+                catalog::command(
+                    &mut source,
+                    "SET CONSTRAINTS ALL IMMEDIATE",
+                    "SET CONSTRAINTS",
+                    io,
+                )?;
+                catalog::confirm_durability(&mut source, required, io)?;
+                if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
+                    return Err(follow_refusal(
+                        "follow-restart: pending publication removal outcome is unknown",
+                    ));
+                }
+            }
+            let name = source.quote_literal(&receipt.name)?;
+            let absent = source.query(
+                &format!("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname={name}"),
+                io,
+            )?;
+            if absent.columns()? != 1 || absent.rows() != 0 {
+                return Err(follow_refusal(
+                    "follow-restart: pending publication remains after removal",
+                ));
+            }
+            native.confirm_pending_follow_publication_absent(&PendingFollowPublicationAbsence {
+                restart,
+                receipt,
+            })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn restart(
         options: &FollowOptions,
         plan: &ClonePlan,
@@ -513,12 +629,41 @@ pub(super) fn require_restart_plan(
         || previous.tables != next.tables
         || previous.sequences != next.sequences
         || previous.policy != next.policy
+        || previous.copy_policy != next.copy_policy
     {
         return Err(follow_refusal(
             "follow-restart: source/target plan, ownership, or copy generation changed",
         ));
     }
     Ok(())
+}
+
+fn pending_publication_present(
+    source: &mut PgConnection,
+    receipt: &crate::contracts::PublicationReceipt,
+    plan: &ClonePlan,
+    io: &IoControl,
+) -> Result<bool> {
+    let name = source.quote_literal(&receipt.name)?;
+    let present = source.query(
+        &format!("SELECT oid,pubowner FROM pg_catalog.pg_publication WHERE pubname={name}"),
+        io,
+    )?;
+    if present.columns()? != 2 || present.rows() > 1 {
+        return Err(follow_refusal(
+            "follow-restart: pending publication inventory is invalid",
+        ));
+    }
+    if present.rows() == 0 {
+        return Ok(false);
+    }
+    if catalog::follow::publication_receipt(source, &receipt.name, io)? != *receipt {
+        return Err(follow_refusal(
+            "follow-restart: pending publication was replaced",
+        ));
+    }
+    catalog::follow::publication_membership(source, receipt, &plan.tables, io)?;
+    Ok(true)
 }
 
 fn configure_follow_exporter(

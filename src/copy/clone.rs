@@ -5,8 +5,8 @@ use std::sync::atomic::Ordering;
 use crate::apply::{CloneAuthority, CopyCommitOutcome, CopyPermit, CopyTxn};
 use crate::catalog::{command, configure_session, qualified};
 use crate::contracts::{
-    CloneOptions, ClonePlan, CopyReport, Error, ErrorKind, IoControl, OwnedCopyTable, Result,
-    SnapshotTicket,
+    CloneOptions, ClonePlan, CopyFormat, CopyPart, CopyReport, Error, ErrorKind, IoControl,
+    OwnedCopyTable, Result, SnapshotTicket,
 };
 use crate::pg::PgConnection;
 use crate::snapshot::{self, CloneSnapshot};
@@ -17,6 +17,7 @@ const MAX_COPY_ROW_BYTES: usize = 16 * 1024 * 1024;
 
 struct TableReceipt {
     index: usize,
+    part: CopyPart,
     report: CopyReport,
     outcome: CopyCommitOutcome,
 }
@@ -35,6 +36,11 @@ pub(crate) fn run_tables(
             "clone-copy: table jobs must be between one and 128",
         ));
     }
+    if options.copy_policy() != plan.copy_policy || options.policy != plan.policy {
+        return Err(refusal(
+            "clone-copy: selected copy and restore policy changed",
+        ));
+    }
     snapshot.connection()?;
     let ticket = snapshot.ticket().clone();
     let saved = state
@@ -50,14 +56,23 @@ pub(crate) fn run_tables(
     }
     let owned = saved.owned_tables;
     validate_workset(plan, &owned, &ticket)?;
-    let tasks = owned
-        .iter()
-        .enumerate()
-        .map(|(index, table)| Ok((index, authority.permit(table)?)))
-        .collect::<Result<Vec<_>>>()?;
+    authority.prepare_split_tables(state, io)?;
+    let mut tasks = Vec::new();
+    for (index, table) in owned.iter().enumerate() {
+        let execution = execution(plan, table.table.source_oid)?;
+        for part in &execution.parts {
+            tasks.push((
+                index,
+                execution.format,
+                *part,
+                authority.permit(table, part)?,
+            ));
+        }
+    }
+    let task_count = tasks.len();
     let queue = Mutex::new(tasks.into_iter());
     let failure = Mutex::new(None);
-    let workers = options.table_jobs.min(owned.len());
+    let workers = options.table_jobs.min(task_count);
     let receipts = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
@@ -85,7 +100,7 @@ pub(crate) fn run_tables(
                 }
             }));
         }
-        let mut receipts = Vec::with_capacity(owned.len());
+        let mut receipts = Vec::with_capacity(task_count);
         for handle in handles {
             match handle.join() {
                 Ok(worker) => receipts.extend(worker),
@@ -106,7 +121,7 @@ pub(crate) fn run_tables(
     }
     super::check_control(io)?;
     snapshot.connection()?;
-    if receipts.len() != owned.len() {
+    if receipts.len() != task_count {
         return Err(refusal("clone-copy: a table completion result is missing"));
     }
     let mut seen = BTreeSet::new();
@@ -117,13 +132,13 @@ pub(crate) fn run_tables(
     };
     // Every worker session has closed before uncertain commits are read back under the fence.
     for receipt in receipts {
-        if !seen.insert(receipt.index) {
+        if !seen.insert((receipt.index, receipt.part.number)) {
             return Err(refusal("clone-copy: duplicate table completion result"));
         }
         let committed = match receipt.outcome {
             CopyCommitOutcome::Durable => receipt.report,
             CopyCommitOutcome::Unknown => {
-                let durable = authority.resolve_unknown(&owned[receipt.index], io)?
+                let durable = authority.resolve_unknown(&owned[receipt.index], &receipt.part, io)?
                     .ok_or_else(|| refusal("commit-outcome-unknown: COPY marker is absent; restart the copy generation"))?;
                 if durable != receipt.report {
                     return Err(refusal(
@@ -133,10 +148,29 @@ pub(crate) fn run_tables(
                 durable
             }
         };
-        report.tables = super::add(report.tables, committed.tables)?;
+        if committed.tables != u64::from(receipt.part.count == 1) {
+            return Err(refusal("clone-copy: part result has invalid table count"));
+        }
         report.rows = super::add(report.rows, committed.rows)?;
         report.bytes = super::add(report.bytes, committed.bytes)?;
     }
+    if owned.iter().any(|table| {
+        table.table.all_columns != table.table.writable_columns
+            && execution(plan, table.table.source_oid).is_ok_and(|profile| profile.parts.len() > 1)
+    }) {
+        let mut source = PgConnection::connect(&options.source, io)?;
+        snapshot::import(&mut source, &ticket, io)?;
+        let mut target = PgConnection::connect(&options.target, io)?;
+        for table in &owned {
+            if table.table.all_columns != table.table.writable_columns
+                && execution(plan, table.table.source_oid)?.parts.len() > 1
+            {
+                crate::compare::verify_generated_rows(&mut source, &mut target, &table.table, io)?;
+            }
+        }
+        command(&mut source, "COMMIT", "COMMIT", io)?;
+    }
+    report.tables = owned.len().try_into().map_err(|_| super::overflow())?;
     Ok(report)
 }
 
@@ -154,7 +188,7 @@ fn run_worker(
     options: &CloneOptions,
     ticket: &SnapshotTicket,
     owned: &[OwnedCopyTable],
-    queue: &Mutex<std::vec::IntoIter<(usize, CopyPermit)>>,
+    queue: &Mutex<std::vec::IntoIter<(usize, CopyFormat, CopyPart, CopyPermit)>>,
     io: &IoControl,
 ) -> Result<Vec<TableReceipt>> {
     let mut source = PgConnection::connect(&options.source, io)?;
@@ -166,7 +200,9 @@ fn run_worker(
             .lock()
             .map_err(|_| refusal("clone-copy: worker queue is unavailable"))?
             .next();
-        let Some((index, permit)) = task else { break };
+        let Some((index, format, part, permit)) = task else {
+            break;
+        };
         let mut target = PgConnection::connect(&options.target, io)?;
         configure_session(&mut target, io)?;
         let mut transaction = CopyTxn::begin(target, permit, io)?;
@@ -174,11 +210,14 @@ fn run_worker(
             &mut source,
             transaction.connection_mut()?,
             &owned[index],
+            format,
+            &part,
             io,
         )?;
         let outcome = transaction.mark_and_commit(report.rows, report.bytes, io)?;
         receipts.push(TableReceipt {
             index,
+            part,
             report,
             outcome,
         });
@@ -191,6 +230,8 @@ fn transfer_clone_table(
     source: &mut PgConnection,
     target: &mut PgConnection,
     owned: &OwnedCopyTable,
+    format: CopyFormat,
+    part: &CopyPart,
     io: &IoControl,
 ) -> Result<CopyReport> {
     let table = &owned.table;
@@ -223,25 +264,29 @@ fn transfer_clone_table(
     if resolved.rows() != 1 || resolved.cell(0, 0)? != Some(expected_oid.as_bytes()) {
         return Err(refusal("clone-copy: source table identity changed"));
     }
-    target.start_copy_in(
-        &format!(
-            "COPY {target_name} ({target_columns}) FROM STDIN WITH (FORMAT text, FREEZE true)"
-        ),
-        io,
+    if format == CopyFormat::Binary
+        && !crate::catalog::binary_copy_compatible(source, target, table, io)?
+    {
+        return Err(refusal(
+            "clone-copy: recorded binary format is no longer compatible",
+        ));
+    }
+    let (source_sql, target_sql) = clone_copy_sql(
+        &source_name,
+        &target_name,
+        &source_columns,
+        &target_columns,
+        format,
+        part,
     )?;
-    source.start_copy_out(
-        &format!(
-            "COPY (SELECT {source_columns} FROM ONLY {source_name}) TO STDOUT WITH (FORMAT text)"
-        ),
-        io,
-    )?;
+    target.start_copy_in(&target_sql, io)?;
+    source.start_copy_out(&source_sql, io)?;
     let mut report = CopyReport {
-        tables: 1,
+        tables: u64::from(part.count == 1),
         rows: 0,
         bytes: 0,
     };
     while let Some(buffer) = source.read_copy_bounded(MAX_COPY_ROW_BYTES, io)? {
-        report.rows = super::add(report.rows, 1)?;
         report.bytes = super::add(
             report.bytes,
             buffer
@@ -254,16 +299,58 @@ fn transfer_clone_table(
             target.write_copy(chunk, io)?;
         }
     }
-    let actual_rows = target.finish_copy_in(io)?;
-    if actual_rows != report.rows {
-        return Err(refusal(
-            "clone-copy: source and target COPY row counts disagree",
-        ));
-    }
-    if table.all_columns != table.writable_columns {
+    // Binary headers and trailers are buffers too; only the command result counts rows.
+    report.rows = target.finish_copy_in(io)?;
+    if part.count == 1 && table.all_columns != table.writable_columns {
         crate::compare::verify_generated_rows(source, target, table, io)?;
     }
     Ok(report)
+}
+
+fn execution(plan: &ClonePlan, oid: u32) -> Result<&crate::contracts::CloneTableCopy> {
+    plan.copy_tables
+        .binary_search_by_key(&oid, |entry| entry.source_oid)
+        .map(|index| &plan.copy_tables[index])
+        .map_err(|_| refusal("clone-copy: execution profile is missing"))
+}
+
+fn clone_copy_sql(
+    source: &str,
+    target: &str,
+    source_columns: &str,
+    target_columns: &str,
+    format: CopyFormat,
+    part: &CopyPart,
+) -> Result<(String, String)> {
+    if part.count == 0
+        || part.number == 0
+        || part.number > part.count
+        || (part.number == 1 && part.start_block != 0)
+        || part.end_block.is_some_and(|end| end <= part.start_block)
+        || (part.end_block.is_none() != (part.number == part.count))
+    {
+        return Err(refusal("clone-copy: invalid part descriptor"));
+    }
+    let format = match format {
+        CopyFormat::Text => "text",
+        CopyFormat::Binary => "binary",
+    };
+    let predicate = if part.count == 1 {
+        String::new()
+    } else {
+        let mut predicate = format!(" WHERE ctid >= '({},0)'::pg_catalog.tid", part.start_block);
+        if let Some(end) = part.end_block {
+            predicate.push_str(&format!(" AND ctid < '({end},0)'::pg_catalog.tid"));
+        }
+        predicate
+    };
+    let freeze = if part.count == 1 { ", FREEZE true" } else { "" };
+    Ok((
+        format!(
+            "COPY (SELECT {source_columns} FROM ONLY {source}{predicate}) TO STDOUT WITH (FORMAT {format})"
+        ),
+        format!("COPY {target} ({target_columns}) FROM STDIN WITH (FORMAT {format}{freeze})"),
+    ))
 }
 
 fn validate_workset(
@@ -280,6 +367,42 @@ fn validate_workset(
         return Err(refusal(
             "clone-copy: snapshot, generation, and owned inventory must match",
         ));
+    }
+    if plan.copy_tables.len() != plan.tables.len()
+        || plan
+            .copy_tables
+            .windows(2)
+            .any(|pair| pair[0].source_oid >= pair[1].source_oid)
+    {
+        return Err(refusal(
+            "clone-copy: execution profile inventory is invalid",
+        ));
+    }
+    let mut actual_parts = 0usize;
+    for table in &plan.tables {
+        let profile = execution(plan, table.source_oid)?;
+        let count: u32 = profile
+            .parts
+            .len()
+            .try_into()
+            .map_err(|_| super::overflow())?;
+        if count == 0 {
+            return Err(refusal("clone-copy: execution profile has no parts"));
+        }
+        let mut start = 0;
+        for (index, part) in profile.parts.iter().enumerate() {
+            if part.number != index as u32 + 1 || part.count != count || part.start_block != start {
+                return Err(refusal("clone-copy: execution profile parts disagree"));
+            }
+            clone_copy_sql("s", "t", "c", "c", profile.format, part)?;
+            start = part.end_block.unwrap_or(0);
+        }
+        actual_parts = actual_parts
+            .checked_add(profile.parts.len())
+            .ok_or_else(super::overflow)?;
+        if actual_parts > MAX_COPY_TABLES {
+            return Err(refusal("clone-copy: actual part bound exceeded"));
+        }
     }
     let mut source_tables = BTreeMap::new();
     let mut source_names = BTreeSet::new();
@@ -365,9 +488,20 @@ mod tests {
                     major: 18,
                 },
                 generation,
-                tables: vec![table],
+                tables: vec![table.clone()],
                 sequences: vec![],
                 policy: RestorePolicy::default(),
+                copy_policy: crate::contracts::CloneCopyPolicy::default(),
+                copy_tables: vec![crate::contracts::CloneTableCopy {
+                    source_oid: table.source_oid,
+                    format: CopyFormat::Text,
+                    parts: vec![CopyPart {
+                        number: 1,
+                        count: 1,
+                        start_block: 0,
+                        end_block: None,
+                    }],
+                }],
             },
             vec![owned],
             SnapshotTicket {
@@ -418,7 +552,87 @@ mod tests {
         owned.clear();
         assert!(validate_workset(&plan, &owned, &ticket).is_err());
         plan.tables.clear();
+        plan.copy_tables.clear();
         validate_workset(&plan, &owned, &ticket).unwrap();
+    }
+
+    #[test]
+    fn split_sql_has_half_open_ctid_bounds_without_freeze() {
+        let first = CopyPart {
+            number: 1,
+            count: 2,
+            start_block: 0,
+            end_block: Some(7),
+        };
+        let (source, target) =
+            clone_copy_sql("s", "t", "c", "c", CopyFormat::Binary, &first).unwrap();
+        assert!(
+            source.contains("ctid >= '(0,0)'::pg_catalog.tid AND ctid < '(7,0)'::pg_catalog.tid")
+        );
+        assert!(source.ends_with("WITH (FORMAT binary)"));
+        assert!(!target.contains("FREEZE"));
+        let last = CopyPart {
+            number: 2,
+            count: 2,
+            start_block: 7,
+            end_block: None,
+        };
+        let (source, _) = clone_copy_sql("s", "t", "c", "c", CopyFormat::Text, &last).unwrap();
+        assert!(source.contains("ctid >= '(7,0)'::pg_catalog.tid"));
+        assert!(!source.contains("ctid <"));
+    }
+
+    #[test]
+    fn unsplit_sql_preserves_freeze_and_rejects_malformed_parts() {
+        let part = CopyPart {
+            number: 1,
+            count: 1,
+            start_block: 0,
+            end_block: None,
+        };
+        let (source, target) = clone_copy_sql("s", "t", "c", "c", CopyFormat::Text, &part).unwrap();
+        assert!(!source.contains("WHERE"));
+        assert!(target.ends_with("WITH (FORMAT text, FREEZE true)"));
+        for bad in [
+            CopyPart { count: 0, ..part },
+            CopyPart {
+                start_block: 1,
+                ..part
+            },
+            CopyPart {
+                end_block: Some(1),
+                ..part
+            },
+        ] {
+            assert!(clone_copy_sql("s", "t", "c", "c", CopyFormat::Text, &bad).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_workset_refuses_gaps_missing_parts_and_oversized_inventory() {
+        let (mut plan, owned, ticket) = workset();
+        plan.copy_tables.clear();
+        assert!(validate_workset(&plan, &owned, &ticket).is_err());
+        let (mut plan, owned, ticket) = workset();
+        plan.copy_tables[0].parts = vec![
+            CopyPart {
+                number: 1,
+                count: 2,
+                start_block: 0,
+                end_block: Some(7),
+            },
+            CopyPart {
+                number: 2,
+                count: 2,
+                start_block: 8,
+                end_block: None,
+            },
+        ];
+        assert!(validate_workset(&plan, &owned, &ticket).is_err());
+        plan.copy_tables[0].parts[1].start_block = 7;
+        validate_workset(&plan, &owned, &ticket).unwrap();
+        plan.copy_tables[0].parts[0].end_block = None;
+        assert!(validate_workset(&plan, &owned, &ticket).is_err());
     }
 
     #[test]

@@ -158,7 +158,7 @@ tasks:
         --skip catalog::tests::live_source_identity_ --skip catalog::tests::live_preflight_
 
   test-clone:
-    desc: Run the seven exact isolated native clone component cases
+    desc: Run the ten exact isolated native clone component cases
     cmds:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --clone -- {{.CARGO_COMMAND}}

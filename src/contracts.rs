@@ -17,6 +17,7 @@ use connection_files::ConnectionFiles;
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const MAX_SNAPSHOT_TOKEN_BYTES: usize = 1024;
+pub(crate) const MAX_COPY_PARTS: usize = 4096;
 
 #[derive(Debug)]
 pub(crate) struct Error {
@@ -138,13 +139,10 @@ pub(crate) struct QualifiedTable {
     pub(crate) table: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CopyFormat {
     Text,
-    #[allow(
-        dead_code,
-        reason = "The shared contract retains binary COPY; E1 accepts only text."
-    )]
     Binary,
 }
 
@@ -286,6 +284,63 @@ pub(crate) struct ClonePlan {
     pub(crate) tables: Vec<CloneTable>,
     pub(crate) sequences: Vec<QualifiedTable>,
     pub(crate) policy: RestorePolicy,
+    pub(crate) copy_policy: CloneCopyPolicy,
+    pub(crate) copy_tables: Vec<CloneTableCopy>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneCopyPolicy {
+    pub(crate) use_copy_binary: bool,
+    pub(crate) split_tables_larger_than: u64,
+    pub(crate) split_max_parts: u32,
+    pub(crate) skip_large_objects: bool,
+}
+
+impl Default for CloneCopyPolicy {
+    fn default() -> Self {
+        Self {
+            use_copy_binary: false,
+            split_tables_larger_than: 0,
+            split_max_parts: 8,
+            skip_large_objects: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CloneTableCopy {
+    pub(crate) source_oid: u32,
+    pub(crate) format: CopyFormat,
+    pub(crate) parts: Vec<CopyPart>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CopyPart {
+    pub(crate) number: u32,
+    pub(crate) count: u32,
+    pub(crate) start_block: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) end_block: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LargeObjectCompletion {
+    pub(crate) objects: u64,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LargeObjectControl {
+    pub(crate) generation: CopyGeneration,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) initial: Option<LargeObjectCompletion>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) final_sync: Option<LargeObjectCompletion>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +353,22 @@ pub(crate) struct CloneOptions {
     pub(crate) post_data_jobs: usize,
     pub(crate) policy: RestorePolicy,
     pub(crate) not_consistent: bool,
+    pub(crate) use_copy_binary: bool,
+    pub(crate) split_tables_larger_than: u64,
+    pub(crate) split_max_parts: u32,
+    pub(crate) skip_large_objects: bool,
+    pub(crate) large_objects_jobs: usize,
+}
+
+impl CloneOptions {
+    pub(crate) fn copy_policy(&self) -> CloneCopyPolicy {
+        CloneCopyPolicy {
+            use_copy_binary: self.use_copy_binary,
+            split_tables_larger_than: self.split_tables_larger_than,
+            split_max_parts: self.split_max_parts,
+            skip_large_objects: self.skip_large_objects,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -448,6 +519,18 @@ pub(crate) enum Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_object_completion_fields_are_required_even_when_empty() {
+        let value = serde_json::json!({"generation": 1, "initial": null, "final_sync": null});
+        let control: LargeObjectControl = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(control).unwrap(), value);
+        for field in ["initial", "final_sync"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<LargeObjectControl>(missing).is_err());
+        }
+    }
 
     #[test]
     fn follow_limits_admit_one_bounded_oversize_message() {

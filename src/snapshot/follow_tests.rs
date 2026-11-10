@@ -1,7 +1,7 @@
 use super::*;
 use crate::contracts::{
     CloneOptions, ClonePlan, CloneTarget, Conninfo, CopyGeneration, FollowLimits, FollowOptions,
-    RestorePolicy, StateAction, StateRequest,
+    RestorePolicy, SnapshotTicket, StateAction, StateRequest,
 };
 use crate::pg::CommitObservation;
 use std::path::PathBuf;
@@ -96,14 +96,16 @@ fn restart_requires_the_same_plan_and_exact_next_copy_generation() {
             major: 18,
         },
         generation: CopyGeneration(1),
+        copy_tables: Vec::new(),
         tables: Vec::new(),
         sequences: Vec::new(),
         policy: RestorePolicy::default(),
+        copy_policy: crate::contracts::CloneCopyPolicy::default(),
     };
     let mut next = previous.clone();
     next.generation = CopyGeneration(2);
     super::follow::require_restart_plan(&previous, &next, CopyGeneration(2)).unwrap();
-    for field in 0..6 {
+    for field in 0..7 {
         let mut wrong = next.clone();
         match field {
             0 => wrong.source.timeline += 1,
@@ -114,10 +116,266 @@ fn restart_requires_the_same_plan_and_exact_next_copy_generation() {
                 schema: "public".into(),
                 table: "extra".into(),
             }),
-            _ => wrong.source.identity.database_oid += 1,
+            5 => wrong.source.identity.database_oid += 1,
+            _ => wrong.copy_policy.skip_large_objects = true,
         }
         assert!(super::follow::require_restart_plan(&previous, &wrong, CopyGeneration(2)).is_err());
     }
+}
+
+struct PendingFixture {
+    root: PathBuf,
+    native: NativeState,
+    plan: ClonePlan,
+    restart: crate::state::FollowRestart,
+    binding: crate::contracts::FollowBinding,
+}
+
+impl PendingFixture {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "rpgmigrate-pending-source-{}-{}",
+            std::process::id(),
+            CASE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut native = crate::state::open_follow(
+            &StateRequest {
+                path: root.join("state"),
+                action: StateAction::Create,
+            },
+            None,
+            None,
+            &IoControl::unbounded(Arc::new(AtomicBool::new(false))),
+        )
+        .unwrap();
+        let mut plan = ClonePlan {
+            source: crate::contracts::CloneSource {
+                identity: SourceId {
+                    system_identifier: 7,
+                    database_oid: 23,
+                },
+                timeline: 1,
+                major: 16,
+            },
+            target: CloneTarget {
+                identity: SourceId {
+                    system_identifier: 8,
+                    database_oid: 24,
+                },
+                major: 18,
+            },
+            generation: CopyGeneration(1),
+            tables: Vec::new(),
+            sequences: Vec::new(),
+            policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
+            copy_tables: Vec::new(),
+        };
+        let binding = Self::resources(&mut native, &plan, 10);
+        let ticket = SnapshotTicket {
+            token: binding.slot.snapshot_token.clone(),
+            source: plan.source.clone(),
+            generation: plan.generation,
+        };
+        native.bind_follow(&plan, &ticket, &binding).unwrap();
+        native.begin_pre_data().unwrap();
+        native
+            .confirm_pre_data(&plan, Vec::new(), Vec::new())
+            .unwrap();
+        let restart = native.begin_follow_restart(&binding, &plan).unwrap();
+        native.confirm_follow_slot_absent(&restart).unwrap();
+        native.confirm_follow_publication_absent(&restart).unwrap();
+        let restart = native.checked_follow_restart().unwrap().unwrap();
+        plan.generation = restart.next_generation;
+        let binding = Self::resources(&mut native, &plan, 20);
+        Self {
+            root,
+            native,
+            plan,
+            restart,
+            binding,
+        }
+    }
+
+    fn resources(
+        native: &mut NativeState,
+        plan: &ClonePlan,
+        point: u64,
+    ) -> crate::contracts::FollowBinding {
+        native.prepare_follow_source(plan).unwrap();
+        let intent = native.begin_publication("pending_source").unwrap();
+        let publication = crate::contracts::PublicationReceipt {
+            name: intent.name.clone(),
+            oid: point as u32,
+            owner_oid: 7,
+        };
+        native
+            .record_publication_created(&intent, &publication)
+            .unwrap();
+        native.confirm_publication(&intent, &publication).unwrap();
+        let slot_intent = native
+            .begin_source_slot(
+                &SourceSlotBinding::new(
+                    crate::identity::StreamId {
+                        run: native.identity().run,
+                        source: plan.source.identity,
+                        generation: 1,
+                    },
+                    "pending_source".into(),
+                    crate::cdc::contracts::Plugin::Pgoutput,
+                    plan.generation.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let slot = native
+            .confirm_source_slot(
+                &slot_intent,
+                CreatedSlotData {
+                    consistent_point: crate::identity::SourceEndLsn(point),
+                    snapshot_name: format!("snapshot-{point}"),
+                },
+            )
+            .unwrap();
+        crate::contracts::FollowBinding {
+            slot,
+            publication,
+            source_timeline: plan.source.timeline,
+            copy_generation: plan.generation,
+            source_types: Vec::new(),
+        }
+    }
+
+    fn manifest(&self) -> Vec<u8> {
+        std::fs::read(self.root.join("state/manifest.json")).unwrap()
+    }
+}
+
+impl Drop for PendingFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+
+#[test]
+fn pending_source_retirement_rejects_foreign_stale_or_bound_proofs_without_mutation() {
+    let mut fixture = PendingFixture::new();
+    let before = fixture.manifest();
+    for field in 0..4 {
+        let mut proof = super::follow::PendingFollowSlotAbsence {
+            restart: fixture.restart.clone(),
+            receipt: fixture.binding.slot.clone(),
+        };
+        match field {
+            0 => proof.receipt.intent.nonce[0] ^= 1,
+            1 => proof.restart.next_generation.0 += 1,
+            2 => proof.restart.new_bound = true,
+            _ => proof.restart.slot_absent = false,
+        }
+        assert!(
+            fixture
+                .native
+                .confirm_pending_follow_slot_absent(&proof)
+                .is_err(),
+            "field {field}"
+        );
+        assert_eq!(fixture.manifest(), before);
+    }
+    let mut proof = super::follow::PendingFollowPublicationAbsence {
+        restart: fixture.restart.clone(),
+        receipt: fixture.binding.publication.clone(),
+    };
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_publication_absent(&proof)
+            .is_err()
+    );
+    assert_eq!(fixture.manifest(), before);
+    fixture
+        .native
+        .confirm_pending_follow_slot_absent(&super::follow::PendingFollowSlotAbsence {
+            restart: fixture.restart.clone(),
+            receipt: fixture.binding.slot.clone(),
+        })
+        .unwrap();
+    let before = fixture.manifest();
+    proof.receipt.oid += 1;
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_publication_absent(&proof)
+            .is_err()
+    );
+    assert_eq!(fixture.manifest(), before);
+}
+
+#[test]
+fn lost_unbound_snapshot_retires_receipts_without_binding_an_old_execution_profile() {
+    let mut fixture = PendingFixture::new();
+    let saved = fixture.native.checked_clone().unwrap().unwrap();
+    let slot = super::follow::PendingFollowSlotAbsence {
+        restart: fixture.restart.clone(),
+        receipt: fixture.binding.slot.clone(),
+    };
+    fixture
+        .native
+        .confirm_pending_follow_slot_absent(&slot)
+        .unwrap();
+    assert!(fixture.native.checked_source_slot().unwrap().is_none());
+    assert_eq!(fixture.native.checked_clone().unwrap().unwrap(), saved);
+    assert_eq!(
+        fixture.native.checked_follow_restart().unwrap(),
+        Some(fixture.restart.clone())
+    );
+    let publication = super::follow::PendingFollowPublicationAbsence {
+        restart: fixture.restart.clone(),
+        receipt: fixture.binding.publication.clone(),
+    };
+    fixture
+        .native
+        .confirm_pending_follow_publication_absent(&publication)
+        .unwrap();
+    assert!(fixture.native.checked_publication().unwrap().is_none());
+    assert_eq!(fixture.native.checked_clone().unwrap().unwrap(), saved);
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_slot_absent(&slot)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_publication_absent(&publication)
+            .is_err()
+    );
+    let fresh = PendingFixture::resources(&mut fixture.native, &fixture.plan, 30);
+    assert_ne!(fresh.slot.intent.nonce, fixture.binding.slot.intent.nonce);
+    assert_eq!(fresh.copy_generation, fixture.restart.next_generation);
+    assert_eq!(fixture.native.checked_clone().unwrap().unwrap(), saved);
+    let ticket = SnapshotTicket {
+        token: fresh.slot.snapshot_token.clone(),
+        source: fixture.plan.source.clone(),
+        generation: fixture.plan.generation,
+    };
+    fixture
+        .native
+        .bind_follow(&fixture.plan, &ticket, &fresh)
+        .unwrap();
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_slot_absent(&slot)
+            .is_err()
+    );
+    assert_eq!(
+        fixture.native.checked_clone().unwrap().unwrap().plan,
+        fixture.plan
+    );
 }
 
 struct Fixture {
@@ -190,9 +448,11 @@ impl Fixture {
             source: source_id,
             target,
             generation: CopyGeneration(1),
+            copy_tables: catalog::provisional_copy_tables(&tables).unwrap(),
             tables,
             sequences: Vec::new(),
             policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
         };
         let options = FollowOptions {
             clone: CloneOptions {
@@ -207,6 +467,11 @@ impl Fixture {
                 post_data_jobs: 4,
                 policy: RestorePolicy::default(),
                 not_consistent: false,
+                use_copy_binary: false,
+                split_tables_larger_than: 0,
+                split_max_parts: 8,
+                skip_large_objects: false,
+                large_objects_jobs: 4,
             },
             slot_name: String::new(),
             publication_name: String::new(),

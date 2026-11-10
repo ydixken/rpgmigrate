@@ -10,6 +10,7 @@ mod contracts;
 mod copy;
 mod follow;
 mod identity;
+mod large_objects;
 mod pg;
 mod progress;
 mod protocol;
