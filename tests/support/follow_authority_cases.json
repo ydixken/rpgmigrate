@@ -15,5 +15,9 @@
   "apply::checkpoint::live_tests::follow_drain_completion_syncs_final_sequences_and_is_immutable",
   "apply::checkpoint::live_tests::follow_drain_recovery_reproves_original_witness",
   "apply::checkpoint::live_tests::follow_observation_unknown_commit_needs_new_barrier",
-  "apply::checkpoint::live_tests::follow_cancelled_sync_wait_never_proves_drain_completion_or_observation"
+  "apply::checkpoint::live_tests::follow_cancelled_sync_wait_never_proves_drain_completion_or_observation",
+  "apply::checkpoint::live_tests::follow_m9_async_group_visible_without_safe_feedback",
+  "apply::checkpoint::live_tests::follow_m9_barrier_covers_async_checkpoint",
+  "apply::checkpoint::live_tests::follow_m9_unknown_async_commit_requires_recovery",
+  "apply::checkpoint::live_tests::follow_m9_sync_warning_never_proves_prefix"
 ]

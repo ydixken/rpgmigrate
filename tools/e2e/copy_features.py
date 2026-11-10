@@ -2,6 +2,10 @@
 
 import hashlib
 import json
+import os
+import sys
+import tempfile
+import time
 from pathlib import Path
 import re
 
@@ -343,6 +347,156 @@ def native_compare(driver, source, target, srcname, dstname, state, lo_verified)
     return inventories, {"before": inventories, "after": after}
 
 
+def progress_unavailable():
+    try:
+        print('m8-progress: {"status":"unavailable","reason":"capture_or_bound_failure"}', file=sys.stderr)
+    except Exception:
+        pass
+
+
+class ProfileProgress:
+    LIMIT = 262144
+    STAGES = {"initializing", "fixture", "clone_start", "clone_running", "startup_observed", "initial_oracles", "drain",
+              "final_oracles", "wire_validation", "lo_mismatch", "wire_cleanup", "case_complete", "receipt_validation", "completed"}
+
+    def __init__(self, path, binding, pair):
+        validate_artifact_binding(binding)
+        if pair not in clone.PAIRS or path.exists() or path.is_symlink() or path.parent.is_symlink() or not path.parent.is_dir():
+            raise RuntimeError("fresh M8 progress destination or pair is unavailable")
+        self.path, self.binding, self.pair = path, binding, pair
+        self.latest, self.failure_attempted = None, False
+
+    @staticmethod
+    def uint(value):
+        return type(value) is int and 0 <= value <= 2**64 - 1
+
+    @classmethod
+    def wire(cls, gate):
+        try:
+            copy = gate.copy_evidence(timeout=.02)
+            wire = gate.snapshot(timeout=.02)
+            if wire.get("status") != "observed":
+                raise ValueError
+            records, connections = copy["records"], wire["connections"]
+            if len(records) > 256 or len(connections) > 64 or type(copy["invalid"]) is not bool or type(copy["overflow"]) is not bool or type(wire["overflow"]) is not bool:
+                raise ValueError
+            selected = []
+            for row in records:
+                keys = ("relation", "direction", "range", "format", "connection", "backend_pid", "columns", "rows", "data_frames", "eof", "complete", "held", "released")
+                if (row["relation"] not in (["public", "m8_safe"], ["public", "m8_fallback"], ["public", "m8_split"])
+                        or row["direction"] not in ("in", "out") or row["format"] not in ("text", "binary")
+                        or not isinstance(row["range"], list) or len(row["range"]) != 2 or any(value is not None and not cls.uint(value) for value in row["range"])
+                        or any(not cls.uint(row[key]) for key in ("connection", "backend_pid", "columns", "data_frames"))
+                        or not 0 < row["connection"] <= 64 or not 0 < row["backend_pid"] < 2**31 or row["columns"] > 1600
+                        or row["rows"] is not None and not cls.uint(row["rows"])
+                        or any(type(row[key]) is not bool for key in ("eof", "complete", "held", "released"))):
+                    raise ValueError
+                selected.append({key: row[key] for key in keys})
+            safe_connections = []
+            for row in connections:
+                if (not cls.uint(row["connection"]) or not 0 < row["connection"] <= 64
+                        or row["backend_pid"] is not None and (not cls.uint(row["backend_pid"]) or not 0 < row["backend_pid"] < 2**31)
+                        or row["mode"] not in ("ordinary", "copy_in", "copy_out", "logical", "unknown")
+                        or any(type(row[key]) is not bool for key in ("unknown", "overflow"))):
+                    raise ValueError
+                directions, counts = {}, {}
+                for side in ("client", "server"):
+                    state = row["directions"][side]
+                    if (state["stage"] not in ("startup_wait", "connect_wait", "frame_wait", "received", "forwarding", "forwarded", "gate_wait", "closed")
+                            or state["closure"] not in ("open", "eof", "socket_error", "protocol_error", "proxy_shutdown", "connect_error") or not cls.uint(state["last_age_ms"])):
+                        raise ValueError
+                    directions[side] = {key: state[key] for key in ("stage", "closure", "last_age_ms")}
+                    counts[side] = {}
+                    for event in ("received", "forwarded"):
+                        values = row["counts"][side][event]
+                        if any((key not in ("startup", "other") and (len(key) != 1 or key not in "QPBDECSpdcfXRAKZN123tTGHWVsnI")) or not cls.uint(value) for key, value in values.items()):
+                            raise ValueError
+                        counts[side][event] = dict(values)
+                safe_connections.append({**{key: row[key] for key in ("connection", "backend_pid", "mode", "unknown", "overflow")}, "directions": directions, "counts": counts})
+            gates = {key: wire["gates"][key] for key in ("armed", "held", "released", "abort_requested", "stopping")}
+            if any(type(value) is not bool for value in gates.values()):
+                raise ValueError
+            return {"status": "observed", "copy": {"invalid": copy["invalid"], "overflow": copy["overflow"], "records": selected},
+                    "wire": {"overflow": wire["overflow"], "gates": gates, "connections": safe_connections}}
+        except Exception:
+            return {"status": "unavailable", "reason": "observer_unavailable_or_invalid"}
+
+    def document(self, case, stage, cases, driver, wires, failed):
+        if case is not None and case not in CASES or stage not in self.STAGES or list(cases) != list(CASES[:len(cases)]) or len(cases) > 6 or len(driver.reports) > 9:
+            raise ValueError
+        reports = []
+        for record in driver.reports:
+            if set(record) != {"binding", "raw_json", "probe_checked"} or record["probe_checked"] is not False or not isinstance(record["raw_json"], str) or len(record["raw_json"].encode()) > 65536:
+                raise ValueError
+            binding, raw = record["binding"], json.loads(record["raw_json"], object_pairs_hook=clone.unique_object)
+            work = binding["work"]
+            if (set(binding) != {"command", "work"} or set(work) != {"migration_uid", "run_id", "workdir_id", "checkpoint_generation"}
+                    or not re.fullmatch(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", work["migration_uid"])
+                    or work["run_id"] != work["migration_uid"].replace("-", "") or not re.fullmatch(r"m2-pvc-[a-f0-9]{32}", work["workdir_id"])
+                    or type(work["checkpoint_generation"]) is not int or work["checkpoint_generation"] != 1 or raw.get("phase") not in ("streaming", "completed")
+                    or not isinstance(raw.get("engine_version"), str) or len(raw["engine_version"]) > 64 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?", raw["engine_version"])):
+                raise ValueError
+            clone.validate_operator_report(record["raw_json"], binding, "clone", raw["phase"] == "completed", phases=(raw["phase"],))
+            owners = [path.name for path, value in driver.work.items() if value == work]
+            if len(owners) != 1 or owners[0] not in CASES:
+                raise ValueError
+            reports.append({"case": owners[0], **record})
+        if len(wires) not in (0, 2):
+            raise ValueError
+        observed = {role: self.wire(gate) for role, gate in zip(("source", "target"), wires)} if wires else None
+        return {"version": 1, "scope": "m8_profile_diagnostic", "binding": self.binding, "pair": self.pair,
+                "recorded_at_unix_ns": time.time_ns(), "status": "failed" if failed else "completed" if stage == "completed" else "running",
+                "capture_status": "partial" if observed and any(value["status"] != "observed" for value in observed.values()) else "available",
+                "current": {"case": case, "ordinal": CASES.index(case) + 1 if case is not None else None, "stage": stage},
+                "completed_case_ids": list(cases), "producer_report_count": len(reports), "producer_reports": reports, "wire": observed}
+
+    def publish(self, value):
+        raw = json.dumps(value, sort_keys=True, allow_nan=False).encode() + b"\n"
+        if len(raw) > self.LIMIT:
+            raise ValueError("M8 progress output exceeded its bound")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=self.path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            descriptor = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def capture(self, case, stage, cases, driver, wires=(), *, failed=False):
+        self.latest = (case, stage, cases, driver, wires)
+        self.failure_attempted |= failed
+        try:
+            self.publish(self.document(case, stage, cases, driver, wires, failed))
+            return True
+        except Exception:
+            value = {"version": 1, "scope": "m8_profile_diagnostic", "binding": self.binding, "pair": self.pair,
+                     "capture_status": "unavailable", "reason": "capture_or_bound_failure", "status": "failed" if failed else "running",
+                     "current": {"case": case if isinstance(case, str) and case in CASES else None, "ordinal": CASES.index(case) + 1 if isinstance(case, str) and case in CASES else None, "stage": stage if isinstance(stage, str) and stage in self.STAGES else "unavailable"},
+                     "completed_case_ids": None, "producer_report_count": None, "producer_reports": None, "wire": None}
+            try:
+                self.publish(value)
+            except Exception:
+                pass
+            progress_unavailable()
+            if not failed:
+                raise RuntimeError("M8 progress capture is unavailable") from None
+            return False
+
+    def failure(self):
+        if self.latest is not None and not self.failure_attempted:
+            self.capture(*self.latest, failed=True)
+
+
 def database_identity(database, name):
     return json.loads(database.sql(name, "SELECT json_build_object('name',current_database(),'oid',(SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname=current_database()),'system_identifier',(SELECT system_identifier::text FROM pg_catalog.pg_control_system()));"), object_pairs_hook=clone.unique_object)
 
@@ -363,12 +517,14 @@ def validate_database_identities(cases, binding):
             seen.add(actual["oid"])
 
 
-def run_profiles(source, target, driver, root, manifest):
+def run_profiles(source, target, driver, root, manifest, *, progress=None):
     import cutover
     cases = {}
     for database in (source, target):
         database.sql("postgres", "CREATE ROLE m8_source_owner; CREATE ROLE m8_reader;")
     for case in CASES:
+        if progress is not None:
+            progress.capture(case, "fixture", cases, driver)
         srcname, dstname = "src_m8_" + case, "dst_m8_" + case
         src, dst = source.create(srcname), target.create(dstname)
         databases = {"source": database_identity(source, srcname), "target": database_identity(target, dstname)}
@@ -393,9 +549,15 @@ def run_profiles(source, target, driver, root, manifest):
         with WireGate(source.host, "observe") as wire, WireGate(target.host, "observe") as target_wire:
             if case == "split_default":
                 wire.hold_copy(["public", "m8_split"])
-            worker = driver.start(wire.connection(src), target_wire.connection(dst), state,
-                                  *(["--follow", "--plugin", "pgoutput"] if has_lo else []), *flags, skip_large_objects=False)
+            worker, stage, wires = None, "clone_start", (wire, target_wire)
             try:
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
+                worker = driver.start(wire.connection(src), target_wire.connection(dst), state,
+                                      *(["--follow", "--plugin", "pgoutput"] if has_lo else []), *flags, skip_large_objects=False)
+                stage = "clone_running"
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
                 sessions = ()
                 if case == "split_default":
                     sessions = clone.wait_for(lambda: simultaneous_workers(source, srcname, wire, ["public", "m8_split"]), "simultaneous actual default-threshold COPY workers", timeout=45)
@@ -404,10 +566,19 @@ def run_profiles(source, target, driver, root, manifest):
                     ready_follow(driver, worker)
                 else:
                     driver.finish(worker)
+                stage = "startup_observed"
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
                 initial = observe_large_objects(source, target, srcname, dstname, policy, has_lo=has_lo)
                 target_inventory = physical_inventory(target, dstname, state=state)
                 require_table_fingerprints(expected_tables, table_fingerprint(target, dstname, target_inventory, manifest), inventory, target_inventory)
+                stage = "initial_oracles"
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
                 if has_lo:
+                    stage = "drain"
+                    if progress is not None:
+                        progress.capture(case, stage, cases, driver, wires)
                     source.sql(srcname, (FIXTURES / "m8-large-objects-final.sql").read_text())
                     end = cutover.frozen_end(source, srcname)
                     result, _ = cutover.stream(driver, state, ("stream", "sentinel", "set", "endpos"), end, source=src, target=dst)
@@ -418,9 +589,15 @@ def run_profiles(source, target, driver, root, manifest):
                     completed_row = target.authority(dstname, state, driver.work[state], candidate=True)
                     if completed_row is None or completed_row["follow_completed"] is not True or completed_row["drain_end_lsn"] != end:
                         raise RuntimeError("candidate target did not durably complete the exact final LO boundary")
+                stage = "final_oracles"
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
                 final = observe_large_objects(source, target, srcname, dstname, policy, has_lo=has_lo, final=has_lo)
                 inventories, boundary = native_compare(driver, source, target, srcname, dstname, state, final["lo_verified"])
                 require_table_fingerprints(expected_tables, table_fingerprint(target, dstname, inventories["target"], manifest), inventory, inventories["target"])
+                stage = "wire_validation"
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
                 evidence, target_evidence = wire.copy_evidence(), target_wire.copy_evidence()
                 branches = {}
                 for relation in inventory:
@@ -438,12 +615,28 @@ def run_profiles(source, target, driver, root, manifest):
                     value.update(heap_bytes=heap, threshold=DEFAULT_THRESHOLD)
                 if has_lo:
                     value["final_end_lsn"] = end
+                    stage = "lo_mismatch"
+                    if progress is not None:
+                        progress.capture(case, stage, cases, driver, wires)
                     value["lo_mismatch_refusal"] = lo_mismatch_refusal(driver, source, target, srcname, dstname, state, policy, final, expected_tables, manifest, inventories["target"])
                 if databases != {"source": database_identity(source, srcname), "target": database_identity(target, dstname)}:
                     raise RuntimeError("fresh profile database identity changed during the oracle boundary")
-                cases[case] = value
+                stage = "wire_cleanup"
+                if progress is not None:
+                    progress.capture(case, stage, cases, driver, wires)
+            except Exception:
+                if progress is not None:
+                    try:
+                        progress.capture(case, stage, cases, driver, wires, failed=True)
+                    except Exception:
+                        progress_unavailable()
+                raise
             finally:
-                driver.kill(worker)
+                if worker is not None:
+                    driver.kill(worker)
+        cases[case] = value
+        if progress is not None:
+            progress.capture(case, "case_complete", cases, driver, wires)
     return cases
 
 
@@ -513,9 +706,9 @@ def validate_receipt(report, manifest, *, binding):
 
 def inner(args):
     import ctypes
-    import os
-    import tempfile
     import cutover
+    # The CLI script and imported clone module have separate globals.
+    clone.DIAGNOSTIC_ROOT = Path("/diagnostics")
     manifest = load_manifest()
     if not args.feature_binding or args.report_probe is not None:
         raise RuntimeError("candidate profile requires independent artifact inputs without the old Go probe")
@@ -566,10 +759,21 @@ def inner(args):
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-m8-") as temporary:
         root = Path(temporary)
         driver = clone.Driver(binary, environment, root, mode="operator")
-        report["cases"] = run_profiles(source, target, driver, root, manifest)
-        report["report_validation"] = {"mode": "local_m8_direct_cli", "reports": driver.reports}
-        validate_receipt(report, manifest, binding=binding)
-        Path(args.receipt).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        progress = ProfileProgress(clone.DIAGNOSTIC_ROOT / "m8-progress.json", binding, args.pair)
+        try:
+            progress.capture(None, "initializing", {}, driver)
+            report["cases"] = run_profiles(source, target, driver, root, manifest, progress=progress)
+            report["report_validation"] = {"mode": "local_m8_direct_cli", "reports": driver.reports}
+            progress.capture(None, "receipt_validation", report["cases"], driver)
+            validate_receipt(report, manifest, binding=binding)
+            Path(args.receipt).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            progress.capture(None, "completed", report["cases"], driver)
+        except Exception:
+            try:
+                progress.failure()
+            except Exception:
+                progress_unavailable()
+            raise
     print(json.dumps({"pair": args.pair, "cases": len(CASES), "scope": "direct_cli_operator_flags"}, sort_keys=True))
 
 

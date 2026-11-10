@@ -13,7 +13,7 @@ from db_harness import assert_identity, conninfo, psql
 from protocol_fault import ProtocolFault
 
 FAULT_CASES = ("lost_commit_reply", "provisioning_recovery")
-FOLLOW_FAULT_CASES = ("follow_drain", "follow_completion", "follow_observation")
+FOLLOW_FAULT_CASES = ("follow_drain", "follow_completion", "follow_observation", "follow_m9_async_commit")
 
 
 def backend_evidence(context, pid):

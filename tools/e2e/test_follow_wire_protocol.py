@@ -40,9 +40,9 @@ def extended(sql=b"COMMIT", statement=b"", portal=b""):
 
 class ExtendedWireTests(unittest.TestCase):
     @contextmanager
-    def relay(self, mode, pid=123):
+    def relay(self, mode, pid=123, *, ack_oracle=None, side=None, logical=False):
         try:
-            gate = WireGate("fixture", mode)
+            gate = WireGate("fixture", mode, ack_oracle=ack_oracle, side=side)
         except ValueError as error:
             self.fail(str(error))
         with gate:
@@ -55,7 +55,7 @@ class ExtendedWireTests(unittest.TestCase):
             gate.threads.append(worker)
             worker.start()
             try:
-                payload = struct.pack("!I", 196608) + b'user\0fixture\0\0'
+                payload = struct.pack("!I", 196608) + b'user\0fixture\0' + (b'replication\0database\0' if logical else b'') + b'\0'
                 startup = struct.pack("!I", len(payload) + 4) + payload
                 producer.sendall(startup)
                 self.assertTrue(receive(backend, len(startup)) == startup)
@@ -108,6 +108,78 @@ class ExtendedWireTests(unittest.TestCase):
         observer.wire_event("server", "received", b'H', b'\0\0\0')
         self.assertTrue(observer.copy_evidence()["invalid"])
 
+    def test_native_extended_copy_requires_bound_execute_and_actual_response(self):
+        for direction in ("out", "in"):
+            for format in ("text", "binary"):
+                with self.subTest(direction=direction, format=format):
+                    query = (b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT ' + format.encode() + b')'
+                             if direction == "out" else b'COPY "public"."m8_safe" ("id") FROM STDIN WITH (FORMAT ' + format.encode() + b', FREEZE true)')
+                    observer = follow_wire.PgoutputObservation(1)
+                    observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                    for request in (parse(query), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')):
+                        observer.copy_frontend(request[:1], request[5:])
+                    self.assertEqual(observer.copy_evidence()["records"], [])
+                    for kind, payload in ((b'1', b''), (b'2', b''), (b'n', b''),
+                                          (b'H' if direction == "out" else b'G', struct.pack("!BHH", int(format == "binary"), 1, int(format == "binary")))):
+                        observer.wire_event("server", "received", kind, payload)
+                    if direction == "in": observer.copy_frontend(b'c', b'')
+                    else: observer.wire_event("server", "received", b'c', b'')
+                    observer.wire_event("server", "received", b'C', b'COPY 0\0')
+                    evidence = observer.copy_evidence()
+                    self.assertFalse(evidence["invalid"], "native PQsendQueryParams COPY must be observed")
+                    self.assertEqual(len(evidence["records"]), 1)
+                    record = evidence["records"][0]
+                    self.assertEqual((record["direction"], record["format"], record["relation"], record["backend_pid"]), (direction, format, ["public", "m8_safe"], 123))
+                    self.assertTrue(record["complete"] and record["eof"])
+                    self.assertEqual(record["rows"], 0)
+
+    def test_native_extended_copy_refuses_stale_malformed_or_unexecuted_bindings(self):
+        query = b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT binary)'
+        requests = [parse(query), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')]
+        variants = [[parse(query, statement=b'named'), *requests[1:]], [parse(query, types=(23,)), *requests[1:]],
+                    [requests[0], bind(statement=b'other'), *requests[2:]], [requests[0], bind(portal=b'named'), *requests[2:]],
+                    [requests[0], bind(values=(b'value',)), *requests[2:]], [*requests[:2], frame(b'D', b'S\0'), *requests[3:]],
+                    [*requests[:3], execute(limit=1), requests[4]], [*requests[:3], execute(portal=b'named'), requests[4]],
+                    requests[:1] + requests[2:], requests[:2] + requests[3:], requests[:3],
+                    requests[:1] + [frame(b'S')] + requests[1:], requests[:4] + [execute(), requests[4]],
+                    requests[:3] + [parse(b'SELECT 1'), *requests[3:]], requests[:3] + [frame(b'Q', b'SELECT 1\0'), *requests[3:]],
+                    requests[:3] + [frame(b'C', b'P\0'), *requests[3:]], requests[:4] + [frame(b'S', b'not-empty')]]
+        for index, frames in enumerate(variants):
+            with self.subTest(variant=index):
+                observer = follow_wire.PgoutputObservation(1)
+                observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                for request in frames: observer.copy_frontend(request[:1], request[5:])
+                observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+                self.assertTrue(observer.copy_evidence()["invalid"])
+                self.assertEqual(observer.copy_evidence()["records"], [])
+        for response in (b'\0\0\1\0\0', b'\1\0\1\0\0', b'\1\0\1'):
+            with self.subTest(response=response):
+                observer = follow_wire.PgoutputObservation(1)
+                observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                for request in requests: observer.copy_frontend(request[:1], request[5:])
+                observer.wire_event("server", "received", b'H', response)
+                self.assertTrue(observer.copy_evidence()["invalid"])
+        observer = follow_wire.PgoutputObservation(1)
+        observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+        for request in requests: observer.copy_frontend(request[:1], request[5:])
+        observer.wire_event("server", "received", b'E', b'SERROR\0CXX000\0Mfixture\0\0')
+        observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+        self.assertTrue(observer.copy_evidence()["invalid"])
+        self.assertEqual(observer.copy_evidence()["records"], [])
+
+    def test_copy_diagnostic_snapshot_has_bounded_lock_wait(self):
+        gate = WireGate.__new__(WireGate)
+        gate.lock, gate.errors, gate.observers, gate.observer_overflow = threading.Lock(), [], [], False
+        gate.lock.acquire()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lock unavailable"):
+                gate.copy_evidence(timeout=.01)
+        finally:
+            gate.lock.release()
+        self.assertLess(time.monotonic() - started, .1)
+        self.assertEqual(gate.copy_evidence(timeout=.01), {"invalid": False, "overflow": False, "records": []})
+
     def test_source_copy_hold_observes_each_real_worker_until_release(self):
         with self.relay("observe") as (gate, producer, backend):
             gate.hold_copy(["public", "m8_split"])
@@ -147,7 +219,8 @@ class ExtendedWireTests(unittest.TestCase):
                 response = frame(b'H', b'\1\0\1\0\1')
                 for producer, backend, bounds in ((first, first_backend, b" WHERE ctid >= '(0,0)'::pg_catalog.tid AND ctid < '(12,0)'::pg_catalog.tid"),
                                                    (second, second_backend, b" WHERE ctid >= '(12,0)'::pg_catalog.tid")):
-                    query = frame(b'Q', b'COPY (SELECT "id" FROM ONLY "public"."m8_split"' + bounds + b') TO STDOUT WITH (FORMAT binary)\0')
+                    sql = b'COPY (SELECT "id" FROM ONLY "public"."m8_split"' + bounds + b') TO STDOUT WITH (FORMAT binary)'
+                    query = parse(sql) + bind() + frame(b'D', b'P\0') + execute() + frame(b'S')
                     producer.sendall(query)
                     self.assertEqual(receive(backend, len(query)), query)
                     gate.copy_held.clear()
@@ -708,6 +781,378 @@ class ExtendedWireTests(unittest.TestCase):
                     continue
             self.assertTrue(gate.errors)
             self.assertEqual(gate.fault_observation()["status"], "unavailable")
+
+
+class AckOracleTests(unittest.TestCase):
+    @staticmethod
+    def owned():
+        stream = {"run": [1] * 16, "source": {"system_identifier": 1, "database_oid": 2}, "generation": 1}
+        follow = {"binding": {"slot": {"intent": {"nonce": [3] * 16, "binding": {"stream": stream}},
+                  "snapshot_token": "fixture-snapshot", "consistent_point": 8}, "copy_generation": 1, "source_timeline": 1},
+                  "operator": None, "origin_name": None}
+        return {"table": '"owned"."checkpoint"', "magic": "rpgmigrate", "version": 7,
+                "run_id": "\\x" + "01" * 16, "nonce": "\\x" + "02" * 16,
+                "source_system": 1, "source_database": 2, "generation": 1, "target_system": 3,
+                "target_database": 4, "owner_oid": 5, "schema_oid": 6, "table_oid": 7,
+                "applied_order": 0, "last_xid": None, "begin_ordinal": None, "source_commit_lsn": None, "source_end_lsn": None,
+                "barrier_epoch": 0, "barrier_counter": 1, "copy_snapshot_token": None, "copy_consistent_point": None,
+                "copy_plan_nonce": None, "clone_state": None, "certified_lsn": None, "follow_binding": json.dumps(follow),
+                "drain_end_lsn": None, "drain_witness_lsn": None, "drain_kind": None, "follow_completed": False}
+
+    @staticmethod
+    def settings():
+        return {"durability": "replay-safe", "barrier_interval_ms": 10, "apply_group_txns": 100,
+                "limits": {"channel_bytes": 8388608, "channel_messages": 1024, "max_message_bytes": 16777216,
+                           "group_rows": 10000, "group_bytes": 8388608}}
+
+    def oracle(self, bound=True):
+        self.assertTrue(hasattr(follow_wire, "AckOracle"), "independent M9 ACK oracle is absent")
+        oracle = follow_wire.AckOracle("m9")
+        if bound:
+            oracle.bind(self.owned(), self.settings())
+        connection = oracle.connection("target")
+        oracle.target_backend(connection, b'K', struct.pack("!II", 123, 0))
+        return oracle, connection
+
+    def send(self, oracle, connection, data, *, backend=False, forward=True):
+        result = []
+        while data:
+            kind, size = data[:1], struct.unpack_from("!I", data, 1)[0]
+            payload, data = data[5:size + 1], data[size + 1:]
+            token = (oracle.target_backend if backend else oracle.target_frontend)(connection, kind, payload)
+            if forward:
+                oracle.forwarded(token)
+            result.append(token)
+        return result
+
+    def sql(self, oracle, connection, sql, tag, *, values=(), rows=None, ready=b'T', forward_ready=True):
+        self.send(oracle, connection, parse(sql) + bind(values=values) + frame(b'D', b'P\0') + execute() + frame(b'S'))
+        response = frame(b'1') + frame(b'2')
+        if rows is None:
+            response += frame(b'n')
+        else:
+            name, oid, value = rows
+            response += frame(b'T', b'\0\1' + name + b'\0' + struct.pack("!IhIhih", 0, 0, oid, 1 if oid == 16 else -1, -1, 0))
+            response += frame(b'D', b'\0\1' + struct.pack("!I", len(value)) + value)
+        self.send(oracle, connection, response + frame(b'C', tag + b'\0'), backend=True)
+        return self.send(oracle, connection, frame(b'Z', ready), backend=True, forward=forward_ready)[0]
+
+    @staticmethod
+    def anchor(row):
+        return {**row, "copy_snapshot_token": "fixture-snapshot", "copy_consistent_point": "0/8",
+                "copy_plan_nonce": "\\x" + "03" * 16, "clone_state": json.dumps({"generation": 1, "phase": "analyzing",
+                "snapshot_token": "fixture-snapshot", "source_timeline": 1, "table_count": 1,
+                "prepared_generation": 1, "large_objects": {"generation": 1, "initial": None, "final_sync": None}})}
+
+    def metadata(self, oracle, connection, previous, current):
+        columns = follow_wire.AckOracle.COLUMNS
+        def value(row, name):
+            item = row[name]
+            return None if item is None else ("t" if item is True else "f" if item is False else str(item)).encode()
+        values = [value(current, name) for name, _ in columns] + [value(previous, name) for name, _ in columns[12:]]
+        self.sql(oracle, connection, follow_wire.AckOracle.metadata_sql(current["table"]).encode(), b'UPDATE 1', values=values)
+
+    def commit(self, oracle, connection, previous, current, *, mode="on", terminal=True, warning=False):
+        self.sql(oracle, connection, b'BEGIN ISOLATION LEVEL READ COMMITTED', b'BEGIN')
+        self.metadata(oracle, connection, previous, current)
+        self.sql(oracle, connection, b"SET synchronous_commit TO 'on'", b'SET')
+        self.sql(oracle, connection, b'SHOW synchronous_commit', b'SHOW', rows=(b'synchronous_commit', 25, b'on'))
+        if mode == "off":
+            self.sql(oracle, connection, b'SET LOCAL synchronous_commit = off', b'SET')
+        self.sql(oracle, connection, b'SET LOCAL client_min_messages = warning', b'SET')
+        if warning:
+            oracle.target_backend(connection, b'N', b'SWARNING\0C01000\0Mfixture-password\0\0')
+        return self.sql(oracle, connection, b'COMMIT', b'COMMIT', ready=b'I', forward_ready=terminal)
+
+    def test_positive_sync_requires_bound_writing_update_and_forwarded_terminal(self):
+        oracle, connection = self.oracle()
+        initial = self.owned()
+        anchored = self.anchor({**initial, "barrier_counter": 2})
+        ready = self.commit(oracle, connection, initial, anchored, terminal=False)
+        self.assertEqual(oracle.evidence()["proofs"], [])
+        oracle.forwarded(ready)
+        self.assertEqual(oracle.evidence()["proofs"][-1]["prefix"], 8)
+        self.assertNotIn("fixture-", json.dumps(oracle.evidence()))
+
+    def test_async_visible_b_never_validates_early_ack_or_later_retrocoverage(self):
+        oracle, connection = self.oracle()
+        initial = self.owned()
+        anchored = self.anchor({**initial, "barrier_counter": 2})
+        self.commit(oracle, connection, initial, anchored)
+        source = oracle.connection("source")
+        for commit, end, xid in ((16, 24, 3), (32, 40, 4)):
+            oracle.source_transaction({"connection": source, "final_lsn": commit, "commit_lsn": commit, "end_lsn": end,
+                                       "xid": xid, "dml_count": 1, "complete": True, "begin_forwarded": True, "commit_forwarded": True})
+        a = {**anchored, "applied_order": 1, "last_xid": 3, "begin_ordinal": 16, "source_commit_lsn": "0/10", "source_end_lsn": "0/18", "barrier_counter": 3}
+        self.commit(oracle, connection, anchored, a)
+        b = {**a, "applied_order": 2, "last_xid": 4, "begin_ordinal": 32, "source_commit_lsn": "0/20", "source_end_lsn": "0/28", "barrier_counter": 4}
+        self.commit(oracle, connection, a, b, mode="off")
+        self.assertEqual(oracle.evidence()["commits"][-1]["mode"], "async")
+        self.assertEqual(oracle.evidence()["commits"][-1]["prefix"], 40)
+        early = oracle.source_status(source, (40, 40, 40))
+        oracle.forwarded(early)
+        self.assertFalse(oracle.evidence()["statuses"][-1]["safe"])
+        self.commit(oracle, connection, b, {**b, "barrier_counter": 5})
+        self.assertFalse(oracle.evidence()["statuses"][-1]["safe"])
+        later = oracle.source_status(source, (40, 40, 40))
+        oracle.forwarded(later)
+        self.assertTrue(oracle.evidence()["statuses"][-1]["safe"])
+
+    def test_synthetic_status_probe_is_oracle_only_and_cannot_release_source_wal(self):
+        oracle, connection = self.oracle()
+        old = self.owned()
+        self.commit(oracle, connection, old, self.anchor({**old, "barrier_counter": 2}))
+        source = oracle.connection("source")
+        before = oracle.evidence()
+        probe = oracle.probe_status(source, (40, 40, 40))
+        self.assertFalse(probe["ack_oracle"]["statuses"][-1]["safe"])
+        self.assertEqual(oracle.evidence(), before)
+
+    def test_no_unbound_empty_warning_rollback_or_lost_terminal_proof(self):
+        for condition in ("unbound", "empty", "warning", "rollback", "lost_ready", "lost_commit_tag"):
+            with self.subTest(condition=condition):
+                oracle, connection = self.oracle(bound=condition != "unbound")
+                old = self.owned()
+                new = self.anchor({**old, "barrier_counter": 2})
+                if condition == "empty":
+                    self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+                    self.sql(oracle, connection, b'COMMIT', b'COMMIT', ready=b'I')
+                elif condition == "rollback":
+                    self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+                    self.metadata(oracle, connection, old, new)
+                    self.sql(oracle, connection, b'ROLLBACK', b'ROLLBACK', ready=b'I')
+                else:
+                    ready = self.commit(oracle, connection, old, new, warning=condition == "warning", terminal=condition not in ("lost_ready", "lost_commit_tag"))
+                    if condition == "lost_ready":
+                        oracle.close("target", connection)
+                        self.assertTrue(oracle.evidence()["invalid"])
+                    elif condition == "lost_commit_tag":
+                        ready["terminal"]["tag"]["forwarded"] = False
+                        oracle.forwarded(ready)
+                    elif condition == "unbound":
+                        oracle.bind(new, self.settings())
+                self.assertEqual(oracle.evidence()["proofs"], [])
+
+    def test_metadata_exact_sql_identity_cas_parameter_formats_and_real_counter(self):
+        for change in ("foreign_table", "foreign_run", "predecessor", "same_counter", "partial_anchor", "wrong_row_count", "binary_parameter", "truncated_bind"):
+            with self.subTest(change=change):
+                oracle, connection = self.oracle()
+                old = self.owned()
+                new = self.anchor({**old, "barrier_counter": 2})
+                self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+                if change == "foreign_table":
+                    new["table"] = '"foreign"."checkpoint"'
+                elif change == "foreign_run":
+                    new["run_id"] = "\\x" + "09" * 16
+                elif change == "predecessor":
+                    old["barrier_counter"] = 9
+                elif change == "same_counter":
+                    new["barrier_counter"] = 1
+                elif change == "partial_anchor":
+                    new["copy_plan_nonce"] = None
+                if change in ("binary_parameter", "truncated_bind"):
+                    self.send(oracle, connection, parse(follow_wire.AckOracle.metadata_sql(old["table"]).encode()))
+                    payload = bind(values=[b'fixture-password'] * 46)[5:]
+                    if change == "binary_parameter":
+                        payload = payload[:4] + b'\0\1' + payload[6:]
+                    else:
+                        payload = payload[:-1]
+                    with self.assertRaises(ValueError):
+                        oracle.target_frontend(connection, b'B', payload)
+                elif change == "wrong_row_count":
+                    original = self.sql
+                    def bad_tag(oracle, connection, sql, tag, **kwargs):
+                        return original(oracle, connection, sql, b'UPDATE 0', **kwargs)
+                    with unittest.mock.patch.object(self, "sql", bad_tag), self.assertRaises(ValueError):
+                        self.metadata(oracle, connection, old, new)
+                else:
+                    with self.assertRaises(ValueError):
+                        self.metadata(oracle, connection, old, new)
+                self.assertTrue(oracle.evidence()["invalid"])
+                self.assertEqual(oracle.evidence()["proofs"], [])
+                self.assertNotIn("fixture-password", json.dumps(oracle.evidence()))
+
+    def test_settings_require_actual_same_transaction_show_and_do_not_leak_across_connections(self):
+        for condition in ("missing_set", "missing_show", "parameter_status", "local_off", "unclassified_after_show", "suppressed_warnings", "foreign_guard"):
+            with self.subTest(condition=condition):
+                oracle, connection = self.oracle()
+                old = self.owned()
+                new = self.anchor({**old, "barrier_counter": 2})
+                self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+                self.metadata(oracle, connection, old, new)
+                if condition != "missing_set":
+                    self.sql(oracle, connection, b"SET synchronous_commit TO 'on'", b'SET')
+                if condition != "missing_show":
+                    self.sql(oracle, connection, b'SHOW synchronous_commit', b'SHOW', rows=(b'synchronous_commit', 25, b'on'))
+                if condition == "local_off":
+                    self.sql(oracle, connection, b'SET LOCAL synchronous_commit = off', b'SET')
+                    self.sql(oracle, connection, b"SET synchronous_commit TO 'on'", b'SET')
+                    self.sql(oracle, connection, b'SHOW synchronous_commit', b'SHOW', rows=(b'synchronous_commit', 25, b'on'))
+                if condition == "parameter_status":
+                    oracle.target_backend(connection, b'S', b'synchronous_commit\0on\0')
+                if condition in ("unclassified_after_show", "foreign_guard"):
+                    self.sql(oracle, connection, b"SELECT pg_catalog.set_config('synchronous_commit','off',false)", b'SELECT 1')
+                self.sql(oracle, connection, b'SET LOCAL client_min_messages = error' if condition == "suppressed_warnings" else b'SET LOCAL client_min_messages = warning', b'SET')
+                self.sql(oracle, connection, b'COMMIT', b'COMMIT', ready=b'I')
+                if condition == "parameter_status":
+                    continue
+                self.assertEqual(oracle.evidence()["proofs"], [])
+
+    def test_bounds_refuse_extra_target_transactions_connections_and_statuses(self):
+        oracle, connection = self.oracle()
+        for _ in range(256):
+            self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+            self.sql(oracle, connection, b'COMMIT', b'COMMIT', ready=b'I')
+        with self.assertRaises(ValueError):
+            self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+            self.sql(oracle, connection, b'COMMIT', b'COMMIT', ready=b'I')
+        for side in ("source", "target"):
+            bounded, _ = self.oracle()
+            for _ in range(64 - bounded.connections[side]):
+                bounded.connection(side)
+            with self.assertRaises(ValueError):
+                bounded.connection(side)
+        bounded, _ = self.oracle()
+        source = bounded.connection("source")
+        for _ in range(10000):
+            bounded.source_status(source, (0, 0, 0))
+        with self.assertRaises(ValueError):
+            bounded.source_status(source, (0, 0, 0))
+
+    def test_received_status_cannot_wait_for_later_terminal_delivery(self):
+        oracle, connection = self.oracle()
+        old = self.owned()
+        ready = self.commit(oracle, connection, old, self.anchor({**old, "barrier_counter": 2}), terminal=False)
+        source = oracle.connection("source")
+        deliver = threading.Event()
+        worker = threading.Thread(target=lambda: (deliver.wait(1), oracle.forwarded(ready)))
+        worker.start()
+        early = oracle.source_status(source, (8, 8, 8))
+        deliver.set()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        oracle.forwarded(early)
+        self.assertFalse(early["safe"])
+        late = oracle.source_status(source, (8, 8, 8))
+        self.assertTrue(late["safe"])
+        self.assertFalse(early["safe"])
+
+    def test_guard_uses_canonical_sql_and_bound_pid_database_role(self):
+        source = (Path(__file__).resolve().parents[2] / "src/apply/checkpoint.rs").read_text()
+        literal = source.split('connection.prepare("rpgmigrate_authority_guard", &format!(\n            "', 1)[1].split('"\n        ),', 1)[0]
+        import zlib
+        canonical = literal.replace("{FENCE_CLASS}", str(0x5250474d)).replace("{slot_oid}", str(zlib.crc32(bytes([1] * 16))))
+        self.assertEqual(follow_wire.AckOracle.guard_sql(self.owned()["run_id"]), canonical)
+        for pid in (123, 124):
+            oracle, connection = self.oracle()
+            old, new = self.owned(), self.anchor({**self.owned(), "barrier_counter": 2})
+            self.sql(oracle, connection, b'BEGIN', b'BEGIN')
+            self.metadata(oracle, connection, old, new)
+            self.sql(oracle, connection, b"SET synchronous_commit TO 'on'", b'SET')
+            self.sql(oracle, connection, b'SHOW synchronous_commit', b'SHOW', rows=(b'synchronous_commit', 25, b'on'))
+            self.sql(oracle, connection, canonical.encode(), b'SELECT 1', values=(str(pid).encode(), b'4', b'5'), rows=(b'?column?', 16, b't'))
+            self.sql(oracle, connection, b'SET LOCAL client_min_messages = warning', b'SET')
+            self.sql(oracle, connection, b'COMMIT', b'COMMIT', ready=b'I')
+            self.assertEqual(bool(oracle.evidence()["proofs"]), pid == 123)
+
+    def test_before_sync_commit_socket_gate_skips_async_and_holds_classified_sync(self):
+        oracle = follow_wire.AckOracle("m9")
+        oracle.bind(self.owned(), self.settings())
+        with ExtendedWireTests().relay("before_sync_commit", ack_oracle=oracle, side="target") as (gate, producer, backend):
+            def network_sql(_oracle, _connection, sql, tag, *, values=(), rows=None, ready=b'T', forward_ready=True):
+                request = parse(sql) + bind(values=values) + frame(b'D', b'P\0') + execute() + frame(b'S')
+                producer.sendall(request)
+                self.assertEqual(receive(backend, len(request)), request)
+                response = frame(b'1') + frame(b'2')
+                if rows is None:
+                    response += frame(b'n')
+                else:
+                    name, oid, value = rows
+                    response += frame(b'T', b'\0\1' + name + b'\0' + struct.pack("!IhIhih", 0, 0, oid, 1 if oid == 16 else -1, -1, 0))
+                    response += frame(b'D', b'\0\1' + struct.pack("!I", len(value)) + value)
+                response += frame(b'C', tag + b'\0') + frame(b'Z', ready)
+                backend.sendall(response)
+                self.assertEqual(receive(producer, len(response)), response)
+            with patch.object(self, "sql", network_sql):
+                old = self.owned()
+                anchored = self.anchor({**old, "barrier_counter": 2})
+                self.commit(oracle, 1, old, anchored)
+                gate.arm()
+                asynchronous = {**anchored, "barrier_counter": 3}
+                self.commit(oracle, 1, anchored, asynchronous, mode="off")
+                self.assertFalse(gate.held.is_set())
+                self.sql(oracle, 1, b'BEGIN', b'BEGIN')
+                self.metadata(oracle, 1, asynchronous, {**asynchronous, "barrier_counter": 4})
+                self.sql(oracle, 1, b"SET synchronous_commit TO 'on'", b'SET')
+                self.sql(oracle, 1, b'SHOW synchronous_commit', b'SHOW', rows=(b'synchronous_commit', 25, b'on'))
+                self.sql(oracle, 1, b'SET LOCAL client_min_messages = warning', b'SET')
+                prefix, terminal = extended()
+                producer.sendall(prefix)
+                self.assertEqual(receive(backend, len(prefix)), prefix)
+                producer.sendall(terminal)
+                self.assertTrue(gate.held.wait(1))
+                self.assertEqual(gate.hits, 1)
+                gate.release.set()
+                self.assertEqual(receive(backend, len(terminal)), terminal)
+                response = frame(b'1') + frame(b'2') + frame(b'n') + frame(b'C', b'COMMIT\0') + frame(b'Z', b'I')
+                backend.sendall(response)
+                self.assertEqual(receive(producer, len(response)), response)
+                self.assertEqual(oracle.evidence()["commits"][-2]["mode"], "async")
+
+    def test_backend_identity_and_malformed_rows_cannot_qualify_sync(self):
+        oracle, _ = self.oracle()
+        second = oracle.connection("target")
+        with self.assertRaises(ValueError):
+            oracle.target_backend(second, b'K', struct.pack("!II", 123, 0))
+        for malformed in (frame(b'Y'), frame(b'T', b'\0\1broken'), frame(b'D', b'\0\1\0\0\0\2x')):
+            with self.subTest(malformed=malformed[:1]):
+                oracle, connection = self.oracle()
+                self.send(oracle, connection, parse(b'SELECT 1') + bind() + frame(b'D', b'P\0') + execute() + frame(b'S'))
+                self.send(oracle, connection, frame(b'1') + frame(b'2'), backend=True)
+                if malformed[:1] == b'D':
+                    self.send(oracle, connection, frame(b'T', b'\0\1value\0' + struct.pack("!IhIhih", 0, 0, 25, -1, -1, 0)), backend=True)
+                with self.assertRaises(ValueError):
+                    self.send(oracle, connection, malformed, backend=True)
+                self.assertTrue(oracle.evidence()["invalid"])
+                self.assertEqual(oracle.evidence()["proofs"], [])
+
+    def test_source_transaction_bounds_and_malformed_headers_refuse(self):
+        for bad in ({"complete": False}, {"commit_forwarded": False}, {"xid": True}, {"end_lsn": 15}):
+            oracle, _ = self.oracle()
+            source = oracle.connection("source")
+            tx = {"connection": source, "final_lsn": 16, "commit_lsn": 16, "end_lsn": 24,
+                  "xid": 3, "complete": True, "begin_forwarded": True, "commit_forwarded": True, **bad}
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                oracle.source_transaction(tx)
+        oracle, _ = self.oracle()
+        source = oracle.connection("source")
+        for index in range(256):
+            oracle.source_transaction({"connection": source, "final_lsn": 16 * (index + 1), "commit_lsn": 16 * (index + 1),
+                                       "end_lsn": 16 * (index + 1) + 8, "xid": 3, "complete": True,
+                                       "begin_forwarded": True, "commit_forwarded": True})
+        with self.assertRaises(ValueError):
+            oracle.source_transaction({})
+
+    def test_metadata_projection_matches_readonly_engine_column_catalog(self):
+        import re
+        source = (Path(__file__).resolve().parents[2] / "src/apply/metadata.rs").read_text().split("];", 1)[0]
+        columns = tuple(re.findall(r'\("([a-z_]+)", "([a-z0-9_]+)",', source))
+        self.assertEqual(follow_wire.AckOracle.COLUMNS, columns)
+
+    def test_m9_source_status_rejects_invalid_reply_flag_before_forwarding(self):
+        oracle = follow_wire.AckOracle("m9")
+        with ExtendedWireTests().relay("observe", ack_oracle=oracle, side="source", logical=True) as (gate, producer, backend):
+            request = frame(b'Q', b'''START_REPLICATION SLOT "owned" LOGICAL 0/8 ("proto_version" '1', "publication_names" '"owned"')\0''')
+            producer.sendall(request)
+            self.assertEqual(receive(backend, len(request)), request)
+            response = frame(b'W', b'\0\0\0')
+            backend.sendall(response)
+            self.assertEqual(receive(producer, len(response)), response)
+            producer.sendall(frame(b'd', b'r' + struct.pack("!QQQqB", 8, 8, 8, 0, 255)))
+            self.assertEqual(backend.recv(1), b'')
+            self.assertEqual(oracle.evidence()["statuses"], [])
+            with self.assertRaises(RuntimeError):
+                gate.evidence()
 
 
 if __name__ == "__main__":

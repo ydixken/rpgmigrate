@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -658,9 +659,17 @@ def validate_owned_container(actual, entry, token, baseline):
             or host.get("Memory") != entry["memory"] or not cpu or host.get("Privileged") is not False
             or host.get("NetworkMode") in ("host", "container", None) or host.get("PortBindings") not in ({}, None)
             or any(value for value in actual.get("NetworkSettings", {}).get("Ports", {}).values())
-            or observed != sorted(entry["mounts"]) or any(row.get("Type") != "bind" for row in mounts)
-            or entry.get("role") == "build" and (host.get("NetworkMode") != "pasta" or actual.get("NetworkSettings", {}).get("Networks") not in ({}, None))):
+            or observed != sorted(entry["mounts"]) or any(row.get("Type") != "bind" for row in mounts)):
         raise RuntimeError("exact owned container identity, caps, or mounts differ")
+    if entry.get("role") == "build":
+        networks = actual.get("NetworkSettings", {}).get("Networks")
+        empty_endpoint = {"EndpointID": "", "Gateway": "", "IPAddress": "", "IPPrefixLen": 0,
+                          "IPv6Gateway": "", "GlobalIPv6Address": "", "GlobalIPv6PrefixLen": 0,
+                          "MacAddress": "", "NetworkID": "pasta", "DriverOpts": None, "IPAMConfig": None, "Links": None}
+        placeholder = (isinstance(networks, dict) and set(networks) == {"pasta"} and networks["pasta"] == empty_endpoint
+                       and all(type(networks["pasta"][key]) is type(value) for key, value in empty_endpoint.items()))
+        if host.get("NetworkMode") != "pasta" or networks not in ({}, None) and not placeholder:
+            raise RuntimeError("owned build has a foreign or populated pasta network attachment")
     if entry.get("network"):
         expected = entry["network"]
         networks = actual.get("NetworkSettings", {}).get("Networks") or {}
@@ -672,6 +681,11 @@ def validate_owned_container(actual, entry, token, baseline):
 
 
 def validate_owned_network(actual, expected, token, baseline, *, empty=False):
+    if isinstance(baseline, dict):
+        identities = [row.get("id", row.get("Id")) if isinstance(row, dict) else None for row in baseline.values()]
+        if any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in identities):
+            raise RuntimeError("pre-existing network descriptor identity is unavailable")
+        baseline = set(identities)
     cid = actual.get("id", actual.get("Id"))
     if (not re.fullmatch(r"[a-f0-9]{64}", expected.get("id", "")) or expected["id"] in baseline or cid != expected["id"]
             or actual.get("name", actual.get("Name")) != expected["name"] or actual.get("internal", actual.get("Internal")) is not True
@@ -826,6 +840,11 @@ class RuntimeGuard:
             stream.flush()
             os.fsync(stream.fileno())
         temporary.replace(self.path)
+        descriptor = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def raw(self, arguments, timeout=5):
         remaining = self.deadline - time.monotonic()
@@ -858,7 +877,11 @@ class RuntimeGuard:
                                      "history": safe_history, "run_label": (value.get("Labels") or {}).get("io.rpgmigrate.e2e")}
         for identity in identifiers(["network", "ls", "--no-trunc", "--quiet"]):
             value = json.loads(self.raw(["network", "inspect", identity]))[0]
-            result["networks"][identity] = network_snapshot(value)
+            network = network_snapshot(value)
+            identifier = network.get("id")
+            if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{64}", identifier) or identifier in result["networks"]:
+                raise RuntimeError("network inventory has missing or duplicate full identities")
+            result["networks"][identifier] = network
         for identity in identifiers(["volume", "ls", "--quiet"]):
             value = json.loads(self.raw(["volume", "inspect", identity]))[0]
             if value.get("Options") not in ({}, None):
@@ -1056,6 +1079,19 @@ class RuntimeGuard:
         self.persist()
 
 
+def directory_identity(path):
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    identity = {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "mode": stat.S_IMODE(info.st_mode)}
+    if hasattr(info, "st_birthtime"):
+        identity["birthtime"] = info.st_birthtime
+    return identity
+
+
 def outer(args, *, program="clone", manifest=None, receipt_validator=validate_receipt, server_arguments=()):
     manifest = load_manifest() if manifest is None else manifest
     diagnostic_case = getattr(args, "diagnostic_case", None)
@@ -1100,9 +1136,14 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     if private.exists() or private.is_symlink():
         raise RuntimeError("fresh runtime private path already exists")
     private.mkdir(mode=0o700)
-    private_identity = (private.stat().st_dev, private.stat().st_ino)
+    private_identity = directory_identity(private)
+    if private_identity is None:
+        raise RuntimeError("owned private directory identity is unavailable")
+    private_identity.update(nonce=token.rsplit("-", 1)[1], absent_before=True)
     guard.ledger["private_path"] = str(private)
     guard.ledger["private_absent_before"] = True
+    guard.ledger["private_identity"] = private_identity
+    guard.persist()
     server_arguments = server_start_arguments(getattr(args, "profile", "disabled"), server_arguments)
     guard.ledger["server_arguments"] = list(server_arguments)
     server_images, server_identities = [], []
@@ -1331,8 +1372,8 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
         try:
             guard.close()
         finally:
-            if (not private.is_symlink() and private.is_dir()
-                    and (private.stat().st_dev, private.stat().st_ino) == private_identity
+            if (private_identity.get("absent_before") is True and private_identity.get("nonce") == token.rsplit("-", 1)[1]
+                    and directory_identity(private) == {key: value for key, value in private_identity.items() if key not in ("nonce", "absent_before")}
                     and all(entry.get("cleanup_status") == "absent" for entry in guard.ledger["containers"])):
                 shutil.rmtree(private)
             guard.ledger["private_removed"] = not private.exists() and not private.is_symlink()
