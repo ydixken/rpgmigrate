@@ -541,3 +541,19 @@ Record Linux-host portability as an open runtime gate.
 Run all configured checks, including `gocyclo`, on the actual joined packages.
 Do not use `--new-from-rev` or a changed-line filter to turn a scoped lint gate green.
 Preserve older results with their original source identity and report a repaired successor separately.
+
+## Preserve bounded server startup evidence, 2026-11-10
+
+Capture bounded startup state and logs, then fsync diagnostics before cleanup so an early server failure retains its actual cause.
+Validate traversal permissions on the real parent and PGDATA paths, and inspect the actual Podman `.ID` rather than assuming a Docker-compatible field.
+Keep the startup deadline bounded after adapter repairs and retain failed evidence separately from successor passes.
+
+## Test absent Task revisions through the actual command, 2026-11-10
+
+A Task global null value can reach a command as a missing revision.
+If the command accepts a missing revision, exercise the actual individual-task dry run and a missing-revision negative control; do not infer that contract from template inspection.
+
+## Retain pending publication evidence without blocking independent work, 2026-11-10
+
+Keep the source-bound first build, smoke, push, and preservation receipts when visibility or repository linkage remains pending.
+Request the unavailable browser step asynchronously and continue independent approved work without claiming anonymous pull or runtime qualification.

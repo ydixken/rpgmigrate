@@ -89,10 +89,18 @@ Full-document structural STE retains existing findings outside the changed prose
 
 ## GHCR source and qualification checkpoint, 2026-11-10
 
-The accepted engine baseline is `9ca0bc98168f4daf7016bdee1222810d1235d0f1`, including Apache-2.0 metadata and the development GHCR approval.
-The authoritative operator baseline is `8b8a500773b7f2278601d86aebf06351c44bae72`, including bounded native failure classification; production native admission remains closed.
-The approved GHCR implementation plan and schema are frozen for separate publication, provisioning, Go-input, M6-envelope, and command/docs owners.
-Their source changes still require integration, independent review, and fresh runtime evidence.
+The engine publication source is `11a28a4d1c77b035f96cc16b7b948768dd6aa6c9`, tree `e33b886b61abdd97314a57c998cc681412c9ba15`.
+The first native Linux ARM64 build, read-only smoke, and single development push completed under the approved bootstrap exception.
+The immutable native tag is `dev-11a28a4d1c77b035f96cc16b7b948768dd6aa6c9-arm64`, manifest `sha256:8916bba4c10ee30e2b7ed7d6877818c1eaa4ffa1d542e851d9bcb7a8508a4e9a`, config `sha256:420a6f33ef3bf5d46cd57911256b72466f2cdb90f8015bb5c2c52c897a075ece`.
+Publication status is `PUBLICITY_PENDING`: the package is private and unlinked, and the user has been asked to complete the manual visibility/linkage step asynchronously because the browser host was unavailable.
+Anonymous public verification and owned-node pull qualification remain open.
+Publication proof: `/private/var/tmp/rpgmigrate-native-first-publication-11a28a4-apozt_ez/publication.json`, SHA-256 `d5cb68e11305457107bf4f0bfe317a3cc7dfb6514a30603650c160272e3b84a8`.
+
+The build used the physical ARM64 Mac and ARM64 Linux VM with Podman client 6.1.4/server 5.8.3, without a tool upgrade.
+All four original containers, 206 volumes, and 124 original unique images were preserved; two owned new build images were retained.
+The builder window is released and no builder remains active.
+Preservation proof: `/private/var/tmp/rpgmigrate-native-first-publication-11a28a4-apozt_ez/preservation-release-proof.json`, SHA-256 `6f8245aeff5a9a68238ba0df07d606bbbbb8891e4a0f5f6ddb7e9682e3031175`.
+These receipts make no benchmark timing or performance claim.
 
 We publish only `ghcr.io/ydixken/pgcopydb-operator` and `ghcr.io/ydixken/rpgmigrate` development images, under `dev-<full-40-hex-commit>-<arm64|amd64>` tags, without overwriting an existing tag.
 Ordinary publication uses the corresponding exact feature-branch workflow; the separately approved first native-package bootstrap remains a narrow exception.
@@ -103,16 +111,31 @@ No release, version tag, `latest`, main push/merge, crate publication, or benchm
 The tracked upstream catalog is static; the generated private schema 2 image lock binds both clean sources and verified publication receipts without a source/digest circularity.
 The private schema 2 suite input requires `image_lock_sha256`, the lowercase SHA-256 of the exact lock copied to `RUN/image-lock.json`.
 Go independently checks those bytes and source identities before workload creation.
-The new route replaces archive/import/alias transport with public digest pulls and requires a fresh source freeze and RUN; historical failures and held RUN evidence remain unchanged.
+M7 admits standard kind read-only `extraMounts` for bundled storage, with a manifest override selecting digest references before the first storage Pod.
+This replaces the live-patch proposal; the registry route uses no archive/import or local registry and requires a fresh source freeze and RUN.
+Historical failures and held RUN evidence remain unchanged.
 
-The separate M8 checkpoint `daeac05a` contains isolated Task 7 source; it is not merged into the format 8 / metadata 6 M6 baseline and does not activate capabilities.
-Nine safe components passed PostgreSQL 16 and 18 checks under their own inputs.
-A later complete ten-component disposable runtime result remains an execution dependency, not an accepted pass in this checkpoint.
+The M6 stage freeze is parent PREPARE, UP, PULL (eight pulls with three attempts each), optional verified legacy, stable-parent-owned and locked M6 preparation, Q900 native three-by-three in a separate directory without parent mutation, V600, Go900, then final V600.
+The recorded Q deadline must not exceed the original lease, independently of the current V cap.
+S2 may consume opaque kubeconfig locally in memory only for the necessary identity and authentication checks; it adds no Secret API read or export and makes no zero-secret-memory-read claim.
+
+The isolated M8 format 9 / metadata 7 source handoff is signed at engine `c30ad3c0ba92029f199894e50dd627ad8a586c55` and operator `1678754de74222e61422d3d88789ebdde95f898b`; it has not entered the primary format 8 / metadata 6 baseline or activated capabilities.
+Source proof: `/tmp/rpgmigrate-m8-format-integration-20261110/checkpoints.json`, SHA-256 `713a580722d04d8c8340d1f0ed802a71106a439c5d8a046146f3c055391bf5a6`.
+Nine safe PostgreSQL 16/18 components retain their historical passing inputs.
+A fresh full-runtime attempt failed before tests because a mode-0700 parent prevented server traversal, with captured `Permission denied` evidence.
+The private adapter now uses a mode-0755 parent and actual mode-0700 PGDATA, fsyncs diagnostics before cleanup, and validates Podman `.ID` under a bounded deadline.
+The independent successor passed one catalog and ten Clone cases, including the marker case, on each of PostgreSQL 16.15 and 18.6, with zero failures or ignored cases and all four stage exits zero.
+Both runs used binary `2f0b077c` from source `611d1a4`; this is a component pass, with the six-profile workflow and 16-to-18 cross-version run still pending.
+Summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json`, SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
+All new fixtures were cleaned and the window released, preserving all 129 current image records, 206 volumes, and four originals; only default-network creation was an explicitly volatile observation.
+Preservation: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/final-preservation-proof.json`, SHA-256 `cb8220eb9b7d1d2352a84b412677899c503ca6646bf9dc6f2dbf31388f5e5b2f`.
 Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
 The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
 Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
-M0–M5 remain closed and M6–M10 remain open.
+M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 
+- [x] Complete the source-bound first native ARM64 build, smoke, single push, and preservation/window-release proof.
+- [ ] Complete public visibility/linkage and anonymous descriptor verification for the retained native publication.
 - [ ] Integrate and independently review both publisher sources and their exact command interfaces.
 - [ ] Bind anonymous public publication receipts, static upstream pins, and clean source identities in a fresh image lock.
 - [ ] Qualify fresh M7 legacy and M6 native runtime inputs under the original ownership, deadline, resource, and cleanup gates.
@@ -1240,11 +1263,11 @@ Earlier 188 passes and two obsolete-fixture failures retain separate provenance;
 Compare/progress wiring is included, but actual large-object verification and physical-table full-part progress have source tests only.
 The separate seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; positive E2E profiles, authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Joined source proof: `/tmp/rpgmigrate-m8-joined-source-v5-20261110/verification-receipt.json`, SHA-256 `0a6219ec91c0d1a4d7b6800e78fdbd211fec314b17495b013a656faada328394`.
-Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; PostgreSQL 18 nonbootstrap dependency-class assertions remain unqualified.
+Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases were removed and original resources preserved.
 TOC proof: `/tmp/rpgmigrate-m8-catalog-toc-20261110/0942b349889341e7/final-proof.json`, SHA-256 `79a302da68f236c733b23f8061f3f065e2097576c614d056b58327f87946c9e2`.
 Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
-One coherent isolated M8 code/docs checkpoint is being prepared; no M8 source fast-forward to the engine primary or activation is authorized.
+The isolated M8 code/docs handoff is signed as recorded above; no M8 source fast-forward to the engine primary or activation is authorized.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
