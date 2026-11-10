@@ -701,6 +701,21 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ## M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
+### Evidence checkpoint, 2026-11-10
+
+The operator owned-inventory export is integrated and source-qualified at `4c580ff1be76a2603c9eb625bce3396c6cede914`.
+Production native admission still returns `UnsupportedEngine`; native lifecycle wiring and runtime qualification remain incomplete.
+The root-approved interface freeze requires optional `nativeJobUID`/`nativePVCUID` fields as atomic known-create receipts, strict refusal to adopt when receipts are absent, and each invocation's Pod identity bound to the recorded Job/PVC.
+Native Job TTL remains unset until durable lifecycle completion; retained TERM handling must be followed by independently observed quiescence.
+These receipt/TTL/TERM requirements await implementation and qualification; they establish no runtime success.
+
+Fresh native ARM64 release packaging on engine `254ab5ba103bfe75a2e1dcd8acad0b9720e88ab8` passed with config `0c755f5e36f3fb88c9bd1ecaa53759d0a741271696b552633eec20fef9b674a9`, binary SHA-256 `4bded8d59ccef2cf73b7cc88e76ec8d9d626caf0b1fc96f879ac0be2bedc9803`, and selected manifest `5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1`.
+The actual image passed Linux-seven capability discovery and the UID 65532/read-only-rootfs smoke with stock libpq 18.6 and clients 16.15/18.6.
+Proof: `/private/var/tmp/rpgmigrate-m6-runner-254ab5ba-8z211_yv/packaging-final-proof.json`, SHA-256 `09e096a066f94d6e515e8b2bbf3952575b4147c5914e884118e4e75372f0c265`.
+This closes the fresh ARM packaging prerequisite only; actual authentication/TLS/resolver/PVC, three-pair native operator acceptance, matching AMD64 packaging, broad Go gates, and the whole-M6 review remain open.
+
+### Retained source and component evidence
+
 ### Capability discovery source checkpoints, 2026-11-09
 
 The post-cap contract keeps protocol v1 and three public discovery fields; Linux emits the original ordered six plus `verify.sealed_files.v1`, while non-Linux retains six.
@@ -738,10 +753,10 @@ M0 through M5 stay closed; M6 through M10 remain open.
 
 ### Current composed Go closing profile and blockers
 
-The authoritative clean central operator capability HEAD is `14b73f5980768841c68dcb0d699e5889e88d80ad`, tree `1f21d90ebb364241054ada9ad14a8eb54a911d51`; comparison `351aa3` and earlier control/retry receipts retain their separate provenance.
+The earlier clean central operator capability checkpoint was `14b73f5980768841c68dcb0d699e5889e88d80ad`, tree `1f21d90ebb364241054ada9ad14a8eb54a911d51`; comparison `351aa3` and earlier control/retry receipts retain their separate provenance.
 Control passed 78 named checks/zero lint and retry Reader passed six focused checks/zero lint; these retained source proofs grant no activation or new Python/image qualification.
 Fast-forward proof: `/tmp/rpgmigrate-m6-control-retry-integration-20261110/fast-forward-proof.json`, SHA-256 `2e1a86f86e7add5f47831584fa5acd1d7d6c379c71fab39df3e3e9b14e9e56b1`.
-The private two-file Python export `d1abd09` has 111754 source bytes/54 mechanism tests and is not central; canonical source/registry/golden atomic integration is in progress.
+The earlier private two-file Python export `d1abd09` retained 111754 source bytes/54 mechanism tests before canonical source/registry/golden integration; its component evidence does not supersede the later central checkpoint.
 Comparison parser/transport/helper source is integrated at the separate `351aa3` checkpoint above, while the FD implementation is integrated at engine `3c4d0a5a`; actual file/authentication/image/runtime qualification remains open.
 ACK transport passed nine focused tests with zero lint; recovery passed four top-level/43 subcases through actual Reader composition with zero lint, as component evidence only.
 Fast-forward proof: `/tmp/rpgmigrate-m6-ack-integration-20261109/fast-forward-proof.json`, SHA-256 `5c167ff85f802d716aa1655219a6d2d4c1717a06032f7f6f6ef49e0e2c432c5e`.
@@ -767,7 +782,7 @@ Fast-forward proof: `/Users/ydixken/.codex/tmp/m6-preflight-integration-evidence
 Canonical `/tmp` is Memory-backed at 64 MiB and builders must consume that canonical output without overriding it; no runtime/guard activation follows.
 The preflight field is not injected; resolver always refuses and remaining consumers, runtime, whole-M6 review, and closing gates remain open.
 The capability source candidate above supplies discovery metadata and pure consumer evidence without opening those gates.
-The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is recorded as the final route, and no push/CI/activation is claimed.
+The earlier remaining-adapter proposal required root authority correction; the 2026-11-10 checkpoint records the root-approved interface freeze, with implementation and runtime qualification still pending.
 No runtime activation, whole-M6 review, or full-Go closure is claimed.
 Resolver disposition: `/Users/ydixken/.codex/tmp/m6-containerd-dns-research-20261109/existing-containerd-dns-disposition.md`, SHA-256 `b78e83c046be9441e8d0fd25362b500af30cfb8180e1c4a824a7d7a8d7f24a00`, favors qualifying the existing standard ClusterFirst sandbox resolver.
 Actual runtime/NSS/HOME bindings remain gaps; no ConfigMap, numeric-only restriction, or HOME change is authorized.
@@ -894,6 +909,20 @@ Application write fencing and ending outstanding transactions remain the operato
 
 ## M7: Operator-driven E2E
 
+### Evidence checkpoint, 2026-11-10
+
+The corrected M7 component-qualifier API and exact image-alias fixes are composed in `/private/var/tmp/rpgmigrate-component-api-avwmu909/source`, source digest `c275c790cbe74795f08b0936e2bc3b12e3fb0273c39ac8424708df2956fd3cac`.
+This input passed 242 Python checks and retains the prior unchanged-input 151-check Go gate; those are source checks, not runtime workflow acceptance.
+Fresh PREPARE passed in 113.215 seconds and CHECK passed in 3.484 seconds on the new manager/archive/RUN.
+Proof: `/private/var/tmp/rpgmigrate-m7-component-api-preparation-5fre5jm0/final-artifact-packet.json`, SHA-256 `33b870064d96d327d5d5f8561a4a57fa08721afde0b4b6f9a2d81085ea0ca610`.
+The prepared RUN is `/private/var/tmp/rpgmigrate-m7-component-api-run-51rlqh3s`, RunID `7193d24a35e44a758cb9969cdf2937c8`; this proof establishes no UP, LOAD, observed manager runtime version, or legacy gate pass.
+Fresh UP/LOAD/legacy qualification is assigned and remains open.
+The failed historical run was retired by removing its exact three nodes and separately verified new unused volumes, preserving originals and retained failure evidence; its failed legacy gate remains FAILED.
+The capacity baseline is fourteen CPUs, 32 GiB memory, and 160 GiB disk; runtime admission still requires fresh capacity evidence.
+Benchmark execution remains unapproved, and feature-branch push authorization excludes main, tags, releases, and GHCR publication.
+
+### Retained bootstrap and failed-run evidence
+
 First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes, API readyz, and verified aggregate caps of six CPUs/12 GiB.
 The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
 Tracked CHECK before load and load passed; phase is `Loaded` with six loaded-digest receipts and positive post-load readiness.
@@ -923,7 +952,7 @@ CloudNativePG CreateContainerError came from normalizing an existing raw import 
 Sealed failed handoff: `/private/var/tmp/rpgmigrate-m7-manifest-legacy-gate-0uu04_9w/sealed-handoff-manifest.json`, SHA-256 `0d1b1bd8fe8631ab99e1d19d4eed411df7a61018d0a1784ea5d7489ad4970a41`.
 The single authorized nonforced alias addition on the Pod host made the same original CloudNativePG Pod Ready/restart zero; the historical gate remains FAILED, with no Go/M7 pass.
 Sealed experiment: `/private/var/tmp/rpgmigrate-m7-CNPG-alias-experiment-r5ad002c/sealed-experiment-manifest.json`, SHA-256 `f59ae83815c0e1b80107e2abf71df7240f82bfe9334cd3311121d2e5f68163f9`.
-M7 private fixes are ready for composition: two Python files passed 28 focused/231 full checks, three Go files passed 139 named checks/zero lint, and one guide file is ready.
+The earlier private M7 fixes passed 28 focused/231 full Python checks and 139 named Go checks/zero lint before the composed `c275` successor recorded above.
 No fresh build/runtime acceptance follows; the prior failed gate and experiment remain unchanged.
 The VM remains fourteen CPUs/32 GiB/160 GiB with originals protected; a separate four-CPU/4-GiB focused Linux Rust window with 6-GiB growth is planning only, without benchmark execution.
 These bootstrap/load observations do not qualify the legacy migration workflow, native inventory, PVC behavior, or full M7 lifecycle.

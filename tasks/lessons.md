@@ -483,3 +483,9 @@ Derive the Python mechanism inventory from actual AST definitions and compare it
 Prefix-level checks do not qualify a changed compiled package composition: run one scoped lint on the actual joined input and preserve the earlier RED result separately from the repaired successor.
 The `d28` constant-collision failure and reviewed `6d` actual scoped-lint PASS have distinct inputs; broad Go suites and independent milestone review still run once at close.
 Confirm that a CLI test driver actually supports a requested selector before reporting a partial run; if it ignores the filter, record the real broader inventory once instead of repeating the broad script.
+
+## Synchronize milestone evidence across maintained trackers, 2026-11-10
+
+Update `docs/roadmap.md` and `tasks/todo.md` together when an accepted checkpoint changes milestone evidence or remaining gates.
+Keep M0–M5 closed and M6–M10 open until their full acceptance evidence passes; fresh packaging or PREPARE/CHECK does not close native lifecycle or legacy workflow gates.
+Retain historical failures under their original input identities and record successor results separately.

@@ -96,7 +96,8 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
 > M6–M10 remain open: production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
-> VM preservation/resize maintenance and failed-node cleanup passed; corrected legacy-only M7 UP/load passed, then its blocked Loaded workflow was retired with retained evidence and source-only CHECK/index fixes awaiting fresh runtime qualification.
+> VM preservation/resize maintenance and exact failed-run retirement passed; the `c275` successor passed fresh PREPARE/CHECK, while fresh UP/LOAD/legacy qualification remains open.
+> The 2026-11-10 checkpoints below record integrated owned-inventory source and fresh ARM packaging evidence, without native lifecycle/authentication/TLS/PVC or three-pair acceptance.
 > Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
@@ -272,6 +273,21 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
+#### Evidence checkpoint, 2026-11-10
+
+The operator owned-inventory export is integrated and source-qualified at `4c580ff1be76a2603c9eb625bce3396c6cede914`.
+Production native admission still returns `UnsupportedEngine`; native lifecycle wiring and runtime qualification remain incomplete.
+The root-approved interface freeze requires optional `nativeJobUID`/`nativePVCUID` fields as atomic known-create receipts, strict refusal to adopt when receipts are absent, and each invocation's Pod identity bound to the recorded Job/PVC.
+Native Job TTL remains unset until durable lifecycle completion; retained TERM handling must be followed by independently observed quiescence.
+These receipt/TTL/TERM requirements await implementation and qualification; they establish no runtime success.
+
+Fresh native ARM64 release packaging on engine `254ab5ba103bfe75a2e1dcd8acad0b9720e88ab8` passed with config `0c755f5e36f3fb88c9bd1ecaa53759d0a741271696b552633eec20fef9b674a9`, binary SHA-256 `4bded8d59ccef2cf73b7cc88e76ec8d9d626caf0b1fc96f879ac0be2bedc9803`, and selected manifest `5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1`.
+The actual image passed Linux-seven capability discovery and the UID 65532/read-only-rootfs smoke with stock libpq 18.6 and clients 16.15/18.6.
+Proof: `/private/var/tmp/rpgmigrate-m6-runner-254ab5ba-8z211_yv/packaging-final-proof.json`, SHA-256 `09e096a066f94d6e515e8b2bbf3952575b4147c5914e884118e4e75372f0c265`.
+This closes the fresh ARM packaging prerequisite only; actual authentication/TLS/resolver/PVC, three-pair native operator acceptance, matching AMD64 packaging, broad Go gates, and the whole-M6 review remain open.
+
+#### Retained source and component evidence
+
 Production native admission still returns `UnsupportedEngine`; M4's engine and mocked-Kubernetes helper evidence does not qualify the operator lifecycle.
 Engine FD implementation is integrated at `3c4d0a5a6212de642aa8f205989fadf80b64ee49`, with retained thirteen-case Linux prerequisite evidence and host library Clippy/formatting checks.
 The exact joined FD/capability Linux producer check passed protocol ten/CLI31 plus actual binary three-field Linux-seven discovery and executable CLI28; this source qualification preserves the non-Linux six and operational arrays.
@@ -301,10 +317,10 @@ The earlier `96d3707` six-name source checkpoint remains historical evidence; th
 The operator six-capability fixture mirror `b590` is now central; source discovery still does not qualify a newly built executable or image.
 The new engine candidate and central operator mirror contain 134 identical fixtures, preserving empty/six-name parser fixtures plus Linux-seven producer metadata; engine source integration and runtime qualification remain separate.
 The producer/help, portable fixture/consumer, and packaging-smoke packets have focused source evidence only.
-No packaged image or authentication/migration runtime is qualified by those source packets or by the historical M5 `b463`/hosted `7c04dff` receipts.
-Fresh ARM packaging must precede the actual-image M6 three-pair native acceptance; AMD64 retains packaging-only scope until exact-image native database qualification in M10.
+Those source packets and historical M5 `b463`/hosted `7c04dff` receipts retain their original scope; the fresh ARM packaging proof is recorded in the 2026-11-10 checkpoint, without authentication/migration runtime qualification.
+The fresh ARM packaging prerequisite passed as recorded in the 2026-11-10 checkpoint; actual-image M6 three-pair native acceptance remains open, and AMD64 retains packaging-only scope until exact-image native database qualification in M10.
 Production `UnsupportedEngine` and resolver refusal remain unchanged.
-The remaining-adapter plan is in root authority-correction review and runtime-qualification planning is active; no unapproved interface proposal is a final route.
+The earlier remaining-adapter proposal required root authority correction; the 2026-11-10 checkpoint records the root-approved interface freeze, with implementation and runtime qualification still pending.
 This packet adds no DB/operator-migration qualification, push, CI, whole-M6 review, or full-Go result; production activation and runtime closure remain open.
 The resolver disposition favors qualifying the existing standard ClusterFirst sandbox resolver; actual runtime/NSS/HOME bindings remain gaps, with no ConfigMap, numeric-only, or HOME change authorized.
 The [dated delivery amendment](#m6-default-kubernetes-delivery-amendment-2026-11-09) remains subject to integration and runtime qualification.
@@ -323,6 +339,20 @@ One independent whole-M6 review belongs at milestone close, and users retain wri
 - [ ] Unit and envtest coverage; operator docs for the native engine.
 
 ### M7: Operator-driven E2E
+
+#### Evidence checkpoint, 2026-11-10
+
+The corrected M7 component-qualifier API and exact image-alias fixes are composed in `/private/var/tmp/rpgmigrate-component-api-avwmu909/source`, source digest `c275c790cbe74795f08b0936e2bc3b12e3fb0273c39ac8424708df2956fd3cac`.
+This input passed 242 Python checks and retains the prior unchanged-input 151-check Go gate; those are source checks, not runtime workflow acceptance.
+Fresh PREPARE passed in 113.215 seconds and CHECK passed in 3.484 seconds on the new manager/archive/RUN.
+Proof: `/private/var/tmp/rpgmigrate-m7-component-api-preparation-5fre5jm0/final-artifact-packet.json`, SHA-256 `33b870064d96d327d5d5f8561a4a57fa08721afde0b4b6f9a2d81085ea0ca610`.
+The prepared RUN is `/private/var/tmp/rpgmigrate-m7-component-api-run-51rlqh3s`, RunID `7193d24a35e44a758cb9969cdf2937c8`; this proof establishes no UP, LOAD, observed manager runtime version, or legacy gate pass.
+Fresh UP/LOAD/legacy qualification is assigned and remains open.
+The failed historical run was retired by removing its exact three nodes and separately verified new unused volumes, preserving originals and retained failure evidence; its failed legacy gate remains FAILED.
+The capacity baseline is fourteen CPUs, 32 GiB memory, and 160 GiB disk; runtime admission still requires fresh capacity evidence.
+Benchmark execution remains unapproved, and feature-branch push authorization excludes main, tags, releases, and GHCR publication.
+
+#### Retained bootstrap and failed-run evidence
 
 First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes, API readyz, and verified aggregate caps of six CPUs/12 GiB.
 The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
@@ -343,7 +373,7 @@ The approved disk resize from 128 to 160 GiB passed with the same fourteen CPUs/
 The fresh `8af` RUN passed PREPARE/CHECK/UP/LOAD with six archives/eighteen image pairs, then the legacy gate failed in 334.581 seconds (Task 201) before the Go suite.
 CloudNativePG hit CreateContainerError because CRI normalized the existing raw import alias to a missing `docker.io/library/import-2026-11-09@sha256:2e4051608564bbe757b099067e2df55f5c4a960b6191837ce448ec3d1760b297` key; retained content and source evidence establish no alias-deletion cause.
 One exact nonforced post-failure alias addition on the Pod host made the same original CloudNativePG Pod Ready with restart count zero; this mechanism experiment leaves the historical gate FAILED and supplies no Go/M7 pass.
-M7 load-alias/actual-CRI-imageID Python, Go, and guide fixes are privately ready for composition; focused source checks close no fresh-build/runtime gate and the prior failure/experiment remain unchanged.
+The private M7 load-alias/actual-CRI-imageID Python, Go, and guide fixes preceded the composed `c275` successor recorded above; the prior failure/experiment remain unchanged.
 A separate four-CPU/4-GiB focused Linux Rust window with a 6-GiB growth envelope is being planned; it is not a benchmark reservation or result.
 The earlier successor required a new manager/archive/RUN; old acceptance was not reused and no M7 stage completion follows.
 The old `5dcceda`/`47a` prepared RUN remains obsolete; the [ledger](../tasks/todo.md) records the failed handoff and experiment separately.
