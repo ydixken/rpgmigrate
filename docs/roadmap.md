@@ -102,8 +102,57 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
 On 2026-11-09, the user directed us to push through M10: continue all approved M6–M10 execution gates rather than stopping at intermediate plans or source checkpoints.
-Milestone closure still requires evidence, benchmark runs remain unapproved, and main/tag/release/GHCR boundaries remain unchanged; no ETA or measured speedup is implied.
+Milestone closure still requires evidence, benchmark runs remain unapproved, and main/tag/release boundaries remain unchanged.
+The dated M7 amendment permits only development GHCR publication.
+We make no ETA or measured-speedup claim.
 Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explicit; M4 engine qualification does not activate the operator.
+
+### GHCR source and qualification checkpoint, 2026-11-10
+
+The engine publication source is `11a28a4d1c77b035f96cc16b7b948768dd6aa6c9`, tree `e33b886b61abdd97314a57c998cc681412c9ba15`.
+The first native Linux ARM64 build, read-only smoke, and single development push completed under the approved bootstrap exception.
+The immutable native tag is `dev-11a28a4d1c77b035f96cc16b7b948768dd6aa6c9-arm64`, manifest `sha256:8916bba4c10ee30e2b7ed7d6877818c1eaa4ffa1d542e851d9bcb7a8508a4e9a`, config `sha256:420a6f33ef3bf5d46cd57911256b72466f2cdb90f8015bb5c2c52c897a075ece`.
+Publication status is `PUBLICITY_PENDING`: the package is private and unlinked, and the user has been asked to complete the manual visibility/linkage step asynchronously because the browser host was unavailable.
+Anonymous public verification and owned-node pull qualification remain open.
+Publication proof: `/private/var/tmp/rpgmigrate-native-first-publication-11a28a4-apozt_ez/publication.json`, SHA-256 `d5cb68e11305457107bf4f0bfe317a3cc7dfb6514a30603650c160272e3b84a8`.
+
+The build used the physical ARM64 Mac and ARM64 Linux VM with Podman client 6.1.4/server 5.8.3, without a tool upgrade.
+All four original containers, 206 volumes, and 124 original unique images were preserved; two owned new build images were retained.
+The builder window is released and no builder remains active.
+Preservation proof: `/private/var/tmp/rpgmigrate-native-first-publication-11a28a4-apozt_ez/preservation-release-proof.json`, SHA-256 `6f8245aeff5a9a68238ba0df07d606bbbbb8891e4a0f5f6ddb7e9682e3031175`.
+These receipts make no benchmark timing or performance claim.
+
+We publish only `ghcr.io/ydixken/pgcopydb-operator` and `ghcr.io/ydixken/rpgmigrate` development images, under `dev-<full-40-hex-commit>-<arm64|amd64>` tags, without overwriting an existing tag.
+Ordinary publication uses the corresponding exact feature-branch workflow; the separately approved first native-package bootstrap remains a narrow exception.
+Public package visibility is approved only for these packages.
+Publication, visibility, anonymous typed manifest/config/blob verification, and actual owned-node pull evidence are separate checks.
+No release, version tag, `latest`, main push/merge, crate publication, or benchmark authorization follows.
+
+The tracked upstream catalog is static; the generated private schema 2 image lock binds both clean sources and verified publication receipts without a source/digest circularity.
+The private schema 2 suite input requires `image_lock_sha256`, the lowercase SHA-256 of the exact lock copied to `RUN/image-lock.json`.
+Go independently checks those bytes and source identities before workload creation.
+M7 admits standard kind read-only `extraMounts` for bundled storage, with a manifest override selecting digest references before the first storage Pod.
+This replaces the live-patch proposal; the registry route uses no archive/import or local registry and requires a fresh source freeze and RUN.
+Historical failures and held RUN evidence remain unchanged.
+
+The M6 stage freeze is parent PREPARE, UP, PULL (eight pulls with three attempts each), optional verified legacy, stable-parent-owned and locked M6 preparation, Q900 native three-by-three in a separate directory without parent mutation, V600, Go900, then final V600.
+The recorded Q deadline must not exceed the original lease, independently of the current V cap.
+S2 may consume opaque kubeconfig locally in memory only for the necessary identity and authentication checks; it adds no Secret API read or export and makes no zero-secret-memory-read claim.
+
+The isolated M8 format 9 / metadata 7 source handoff is signed at engine `c30ad3c0ba92029f199894e50dd627ad8a586c55` and operator `1678754de74222e61422d3d88789ebdde95f898b`; it has not entered the primary format 8 / metadata 6 baseline or activated capabilities.
+Source proof: `/tmp/rpgmigrate-m8-format-integration-20261110/checkpoints.json`, SHA-256 `713a580722d04d8c8340d1f0ed802a71106a439c5d8a046146f3c055391bf5a6`.
+Nine safe PostgreSQL 16/18 components retain their historical passing inputs.
+A fresh full-runtime attempt failed before tests because a mode-0700 parent prevented server traversal, with captured `Permission denied` evidence.
+The private adapter now uses a mode-0755 parent and actual mode-0700 PGDATA, fsyncs diagnostics before cleanup, and validates Podman `.ID` under a bounded deadline.
+The independent successor passed one catalog and ten Clone cases, including the marker case, on each of PostgreSQL 16.15 and 18.6, with zero failures or ignored cases and all four stage exits zero.
+Both runs used binary `2f0b077c` from source `611d1a4`; this is a component pass, with the six-profile workflow and 16-to-18 cross-version run still pending.
+Summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json`, SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
+All new fixtures were cleaned and the window released, preserving all 129 current image records, 206 volumes, and four originals; only default-network creation was an explicitly volatile observation.
+Preservation: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/final-preservation-proof.json`, SHA-256 `cb8220eb9b7d1d2352a84b412677899c503ca6646bf9dc6f2dbf31388f5e5b2f`.
+Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
+The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
+Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
+M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 
 ### M0: Preserve and reset (rpgmigrate)
 
@@ -265,18 +314,20 @@ M5 is complete after the same reviewer’s final acceptance of hosted multi-arch
 The retained database evidence preserves its original 266-case subset and forty-case sampling/composite provenance; exact source/Cargo/build/Taskfile/test/harness bindings are unchanged from `67f7fcb` to `7c04dff`.
 This acceptance claims neither a fresh aggregate database run nor migration using the production image; broad operator Go checks are not applicable to engine-only packaging.
 The operator-publication P1 is resolved by the dated explicit GitLab mirror authorization; it remains separate from engine M5 qualification.
-No tags, releases, or GHCR publication are authorized, and these checks do not close M10.
+Tags and releases remain unauthorized.
+The dated M7 amendment permits only development GHCR publication, and these checks do not close M10.
 
 - [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
 - [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, and both native image builds.
-- [ ] GHCR publication on tags only, pending separate publication authorization.
+- [ ] Release GHCR publication on version tags only, pending separate release authorization.
+Development publication follows the dated M7 amendment.
 
 ### M6: Operator native adapter (operator, on a branch from `feat/rpgmigrate-native-operator` after a fetch)
 
 #### Evidence checkpoint, 2026-11-10
 
 Production native admission still returns `UnsupportedEngine`; no actual native operator workflow is qualified.
-The accepted operator source checkpoint is signed `cf22e84d15002f272715707b8ed6d7d89b9ddf5f`, tree `c66790dbdefe997103352f19e36217e518641dbd`; its conditional fast-forward from `0346f9e` verified a clean authoritative checkout before and after integration.
+The accepted operator source checkpoint is signed `93bd54c557d70ed2daa7be3120ea093b31cc93cf`, tree `a0739a53ca5edcc816e1904bdb87df3b6bb3a691`; its conditional fast-forward from `cf22e84` verified a clean authoritative checkout before and after integration.
 Five signed completion commits add helper receipts (`30686fa`), evidence retention (`50be291`), cleaned completion (`d937958`), follow/E/ACK dependency composition (`d87c920`), and plain-clone completion/verification (`6a27266`).
 Each prefix compiled and passed scoped lint with zero findings, with byte-identical qualified final-tree evidence reused where recorded.
 Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json`, SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
@@ -302,8 +353,8 @@ Native runner-profile Task 1/Task 2 packets are frozen with passing component ch
 Canonical NSS/resolver guards and `UnsupportedEngine` remain closed; production runner-profile qualification, three-pair native acceptance, broad Go gates, and the whole-M6 review remain open.
 Actual Kubernetes TERM and the full native lifecycle remain unqualified.
 
-The canonical policy preparation retains a resolver parameter and refuses nonempty `sslkeylogfile`; 57 Python tests, focused Go race checks, and scoped lint passed.
-This export is not integrated, and its resolver policy still unconditionally refuses.
+Canonical policy preparation is integrated in `93bd54c`: retained resolver arguments and nonempty `sslkeylogfile` refusal passed 90 Python tests, eighteen native race checks, five focused controller checks, builds, and scoped lint.
+Its resolver policy still unconditionally refuses; source integration grants no runtime activation.
 A separate active-CRI metadata candidate replaces disk-dump authority in source work only; no positive authentication/runtime proof or NRI/configuration change follows.
 The [ledger](../tasks/todo.md#evidence-checkpoint-2026-11-10) binds the preparatory export.
 
@@ -384,6 +435,24 @@ One independent whole-M6 review belongs at milestone close, and users retain wri
 
 ### M7: Operator-driven E2E
 
+#### Approved registry amendment, 2026-11-10
+
+The user approved direct public-registry pulls for upstream CloudNativePG, operator, PostgreSQL, and other public dependencies, each pinned by digest.
+This direction supersedes the local-registry proposal and the M7 archive/containerd-import, alias, and tag-retargeting path.
+We may publish manager and native-runner development images as public GHCR packages under the approved user namespace.
+Use existing manager `ghcr.io/ydixken/pgcopydb-operator`.
+`ghcr.io/ydixken/rpgmigrate` is the native-image example.
+Use immutable `dev-<sha>` image tags and reference the resulting image digest from kind.
+This approval covers development publication only.
+Version tags, `latest`, releases, and main pushes remain unauthorized.
+M10 offline candidate archive retention remains a separate qualification requirement.
+Preserve exact ownership, the original execution clock, resource caps, and cleanup guards.
+Keep archived source and old RUN evidence unchanged.
+The old Ready RUN held before LOAD under S1 does not qualify registry pulls.
+Implementation planning and fresh registry-path runtime qualification remain pending.
+M6, M8, and M10 work continues.
+M6–M10 remain open and benchmark execution stays on HOLD.
+
 #### Evidence checkpoint, 2026-11-10
 
 The fresh `f59a7f4b` M7 source passed UP, supervisor handover, and LOAD for the PostgreSQL 18 component/API profile.
@@ -399,7 +468,10 @@ Proof: `/private/var/tmp/rpgmigrate-m7-unused-volume-safety-c3anxbon/final-candi
 Exact retirement of the failed `f59a7f4b` S2 and three nodes passed, including process/cgroup absence, preservation of all 212 volumes and 395 preexisting images, and protection of four original services.
 The narrow retirement-only exception preserved the historical sticky handoff event and grants no runtime-health adoption.
 The separate six-volume cleanup passed without force or generic pruning; its exact final proof retains the bounded implicit-network metadata exception.
-A fresh `b5` RUN has started under the fixed 2026-11-10 06:30:27.495346–08:30:27.495346 UTC lease; LOAD and subsequent legacy/native workflow acceptance remain open.
+The fresh `b5` RUN passed all eighteen LOAD entries in 693.867 seconds and valid bootstrap, then its Go gate failed before any selected spec and without authenticated manager-version evidence.
+The frozen error path discarded the exact failing assertion, so its cause remains unknown.
+The failed workflow is preserved under the fixed 2026-11-10 06:30:27.495346–08:30:27.495346 UTC lease; no retry, retirement, or probe is qualified by this result.
+A safe-observability successor has passing focused source checks and lint, with independent reproduction and integration still pending.
 
 The M7 `c275` source passed fresh UP/CHECK and qualified supervisor handover after its retained PREPARE/CHECK success.
 Its first LOAD pair FAILED: default `ctr images tag` dropped labels and CRI retargeted the existing config-ID key from the prepared child manifest to its one-child archive index.
@@ -416,7 +488,8 @@ That earlier fresh UP command returned under a fixed lease ending at 05:06:57.01
 The old lease was not renewed, and the historical `c275` LOAD receipt remains FAILED.
 The capacity baseline is fourteen CPUs, 32 GiB memory, and 160 GiB disk; runtime admission still requires fresh capacity evidence.
 M0–M5 remain closed and M6–M10 remain open.
-Benchmark execution remains on HOLD; approved feature-branch pushes exclude main, tags, releases, and GHCR publication.
+Benchmark execution remains on HOLD.
+Main pushes, tags, and releases remain excluded, with development GHCR publication governed by the dated M7 amendment.
 
 #### Retained bootstrap and failed-run evidence
 
@@ -507,13 +580,17 @@ The approved [M8 implementation plan](superpowers/plans/2026-11-09-m8-feature-wi
 These are implementation decisions, without format/runtime qualification or capability activation.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
 The root approved the Task 1 interface freeze; isolated state/CLI, catalog, authority, COPY/large-object, and phase/recovery owners are building against it.
-The first state patch passed formatting and Python compilation only; joined constructor integration and Rust qualification remain open.
-Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; PostgreSQL 18 nonbootstrap dependency-class assertions remain unqualified.
-Keep the live format 8 / metadata 6 profile separate from candidate format 9 / metadata 7; no integrated M8 source or passing joined Rust result is recorded.
+Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
+Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
+Compare/progress wiring is included, but actual large-object verification and physical-table full-part progress have source tests only.
+The separate seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; positive E2E profiles, authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
+Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
+Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
+The isolated M8 code/docs handoff is signed as recorded above; no M8 source fast-forward to the engine primary or activation is authorized.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
-The approved `sha2` 0.11.1 dependency disables default features; pinned cargo-deny 0.20.2 passed actual-graph license, advisory, and yank gates against the 2026-11-09 database, while known-vector compilation remains pending.
+The approved `sha2` 0.11.1 dependency disables default features; pinned cargo-deny 0.20.2 passed actual-graph license, advisory, and yank gates against the 2026-11-09 database, and the v5 affected units now pass known-vector and chunk-boundary hashing checks.
 The [ledger](../tasks/todo.md#m8-feature-widening-each-item-enables-its-capability) binds the approved interface.
 
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
@@ -601,19 +678,32 @@ The separate mechanism plan and required validation remain open; this authorizat
 On 2026-11-09, after approving the second exact failed-kind cleanup, the user authorized future removal of independently verified rpgmigrate-owned failed kind-node containers without repeated cleanup approval.
 This standing authorization covers containers only: preserve volumes, networks, images, backups, original PostgreSQL containers, source, and RUN evidence; do not extend it to other resources or repair RUN markers.
 The user authorized pushing `rpgmigrate` branch `feat/native-engine` and the operator feature branch carrying native work to `origin` for hosted CI, including native AMD64 checks under M5/M10.
-This authorizes feature branches only: do not push or merge to main, create tags/releases, or publish to GHCR.
+This earlier authorization covered feature branches only, excluding main pushes/merges, tags/releases, and GHCR.
+The dated M7 amendment separately authorizes development GHCR publication.
 The user separately authorized one-off removal of exactly the three failed kind-node containers identified for the failed RUN.
 That exception covers no volumes, networks, images, backups, original services, RUN-marker edits, or generic guard bypass; final independent verification now accepts its exact three-container cleanup.
 The cleanup result is recorded separately from its approval; no push, hosted-CI, image-build, or kind workflow success is claimed.
 Operator preflight exposed existing all-ref/tag GitLab mirroring and skipped tests; the earlier hold prevented inferring downstream authorization from the origin-only decision.
 On 2026-11-09, the user explicitly approved the existing GitLab mirroring triggered by the operator native feature branch.
-We resolved the publication P1 by authorization and keep the existing mirror enabled; this decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
+We resolved the publication P1 by authorization and keep the existing mirror enabled.
+This mirror decision authorizes no repository settings changes, main edits/pushes, tags, releases, or GHCR publication.
+Development GHCR approval follows the dated M7 amendment.
 The CI owner restored its mirror-guard edits to baseline and committed only hosted checks in `ccde83912cdbc9e152f0bc51c47c49954ede8a9d`, parent `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 The normal feature push to `origin/test/m4-closing-m6-composed-20261109` is verified; its [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254999) passed.
 [Operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42633254706) passed docs and its unit/envtest, cluster-free E2E, and PostgreSQL 18 coverage test job; the run failed only lint on SC2015.
 The reviewed mechanical correction `5616d82f03e6a917147e55ed4a3fb436a1cc6d89` was pushed normally to the feature ref after prior tests became terminal, without cancellation.
 The new [operator CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/42636601113) is in progress and its authorized [mirror run](https://github.com/ydixken/pgcopydb-operator/actions/runs/42636601234) passed; no new CI pass is claimed.
 Engine feature pushes of `34208b6` and `7c04dff` retain their exact hosted-run scopes above; no feature CI result closes a milestone by itself.
+
+## Project license decision, 2026-11-10
+
+The user selected Apache License 2.0 for rpgmigrate.
+We record the SPDX identifier `Apache-2.0` in `Cargo.toml` and retain `publish = false`.
+The root [LICENSE](../LICENSE) contains the unchanged [official Apache License 2.0 text](https://www.apache.org/licenses/LICENSE-2.0.txt), including the unfilled Appendix example.
+Its SHA-256 is `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`.
+Existing third-party notices retain their original bytes and licenses.
+M6–M10 remain open, benchmark execution remains on HOLD, and tags and releases remain unauthorized.
+Development GHCR publication has separate dated approval.
 
 ## Execution model
 
@@ -628,7 +718,9 @@ The original 21:35 UTC startup failure predates the CPU/memory resize.
 Maintenance and failed-node quiet reservations are released; preserve host Cargo headroom and the approved resource budgets for subsequent M6/M7 execution.
 Initial uncapped kind creation requires database testing and host Cargo builds to be idle until all three node caps are verified.
 See the [capacity and preservation record](../tasks/todo.md#capacity-and-parallel-execution-user-update-2026-11-08) for budgets and the restart prerequisites.
-Commits remain small, conventional, and lint-clean; feature-branch CI pushes have the dated user authorization above, while main pushes/merges, tags, releases, and GHCR publication remain unauthorized.
+Commits remain small, conventional, and lint-clean.
+Feature-branch CI pushes have the dated user authorization above, while main pushes/merges, tags, and releases remain unauthorized.
+Development GHCR publication follows the dated M7 amendment.
 
 > [!important]
 > On 2026-11-08, the user approved exactly two local WIP checkpoint commits: `e544f2d` on `feat/native-engine` and `5e8cbcb` on the isolated operator `feat/native-contract-v1` branch, as an exception to the lint-clean-per-commit rule.

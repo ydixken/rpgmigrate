@@ -132,7 +132,7 @@ class WorkflowTests(unittest.TestCase):
             "allow": ["Apache-2.0", "MIT", "Unicode-3.0"], "private": {"ignore": True}})
         manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
         self.assertIs(manifest["package"]["publish"], False)
-        self.assertNotIn("license", manifest["package"])
+        self.assertEqual(manifest["package"]["license"], "Apache-2.0")
 
     def test_markdown_policy_preserves_semantic_lines_without_excluding_documents(self):
         policy = json.loads((ROOT / ".markdownlint-cli2.jsonc").read_text())

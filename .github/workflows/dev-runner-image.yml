@@ -1,0 +1,60 @@
+name: Development runner image
+
+on:
+  push:
+    branches: [feat/native-engine]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-ghcr-ydixken-rpgmigrate
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'ydixken/rpgmigrate' && github.ref == 'refs/heads/feat/native-engine'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checksum-pinned Task
+        run: |
+          task_bin=$(python3 tools/bootstrap-task.py)
+          dirname "$task_bin" >> "$GITHUB_PATH"
+      - name: Check publication controls
+        run: |
+          python3 -W error tools/image/test_smoke.py
+          python3 -W error tools/image/test_dev_publish.py
+      - name: Publish the exact native source once
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          receipt_dir="$RUNNER_TEMP/native-publication-${{ matrix.arch }}"
+          mkdir -m 0700 "$receipt_dir"
+          task image:dev:publish ARCHITECTURE='${{ matrix.arch }}' \
+            IMAGE_REVISION="$GITHUB_SHA" OUTPUT_DIR="$receipt_dir"
+      - name: Retain sanitized publication state
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: native-publication-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/native-publication-${{ matrix.arch }}/publication.json
+            ${{ runner.temp }}/native-publication-${{ matrix.arch }}/smoke.json
+          if-no-files-found: error

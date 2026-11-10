@@ -213,6 +213,7 @@ def main():
           'mapped_library': metadata['library_path'], 'ctypes': True, 'private_input': True, 'packages': packages,
           'python_license': {'path': license_path, 'sha256': hashlib.sha256(license_data).hexdigest()},
           'dependency_notices': hashes('/usr/share/rpgmigrate/dependency-notices'),
+          'license_sha256': hashlib.sha256(read_owned('/usr/share/rpgmigrate/LICENSE', 1024 * 1024)).hexdigest(),
           'notice_sha256': hashlib.sha256(read_owned('/usr/share/rpgmigrate/NOTICE', 1024 * 1024)).hexdigest()},
           sort_keys=True))
 
@@ -335,7 +336,7 @@ def records(output):
 
 def source_manifest():
     root = Path(__file__).resolve().parents[2]
-    paths = [root / name for name in ("Cargo.toml", "Cargo.lock", "build.rs", "NOTICE", "Dockerfile", ".dockerignore")]
+    paths = [root / name for name in ("Cargo.toml", "Cargo.lock", "build.rs", "LICENSE", "NOTICE", "Dockerfile", ".dockerignore")]
     paths.extend(path for path in (root / "src").rglob("*") if path.is_file())
     return "".join(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + str(path.relative_to(root)) + "\n"
                    for path in sorted(paths, key=lambda path: str(path.relative_to(root))))
@@ -344,7 +345,7 @@ def source_manifest():
 def validate_python(value, architecture, package, runtime_version):
     require(type(value) is dict and set(value) == {"version", "isolated", "modules", "symbols", "metadata",
             "metadata_sha256", "mapped_library", "ctypes", "private_input", "packages", "python_license",
-            "dependency_notices", "notice_sha256"}, "invalid Python observations")
+            "dependency_notices", "notice_sha256", "license_sha256"}, "invalid Python observations")
     namespace = {"__name__": "runtime_contract"}
     exec(compile(PYTHON_RUNTIME, "image-python-contract", "exec"), namespace)
     metadata = namespace["parse_metadata"](json.dumps(value["metadata"]).encode())
@@ -377,6 +378,8 @@ def validate_python(value, architecture, package, runtime_version):
             and re.fullmatch("[0-9a-f]{64}", value["notice_sha256"]), "missing notice hashes")
     expected_notice = Path(__file__).resolve().parents[2] / "NOTICE"
     require(value["notice_sha256"] == hashlib.sha256(expected_notice.read_bytes()).hexdigest(), "NOTICE source mismatch")
+    expected_license = expected_notice.with_name("LICENSE")
+    require(value["license_sha256"] == hashlib.sha256(expected_license.read_bytes()).hexdigest(), "LICENSE source mismatch")
     return value
 
 

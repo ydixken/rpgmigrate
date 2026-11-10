@@ -58,6 +58,7 @@ Check out these **examples**:
 - `/bin/sh`, GNU coreutils, and GNU sed support operator scripts.
 - `/usr/bin/python3` includes `ctypes`, `_ctypes`, and its distro `libffi` dependency.
 - `/usr/share/rpgmigrate/python-libpq-runtime.json` binds the private Python runtime to the installed stock libpq file.
+- `/usr/share/rpgmigrate/LICENSE` retains the project Apache License 2.0 text.
 - `/usr/share/rpgmigrate/NOTICE` retains the repository's third-party notice text.
 - `/usr/share/doc/<package>/copyright` retains Debian and PGDG package notices.
 - `/usr/share/rpgmigrate/dependency-notices/<name-version>` retains Cargo dependency license and notice files, preserving their relative paths and bytes.
@@ -100,7 +101,8 @@ The receipt retains this observed digest as `runtime_binary_sha256`, a lowercase
 The hash is an observation from the selected immutable image, with no caller-supplied expected binary hash or qualification authority.
 The receipt's `image_id` is the local image configuration ID returned by inspection; a registry manifest digest is a separate artifact identity.
 `build_inputs_sha256` identifies the complete source-input manifest, while `runtime_binary_sha256` identifies the installed executable bytes.
-Retain any image archive hash and its mapping to the image configuration ID or registry manifest digest alongside these fields.
+For registry qualification, retain the typed registry index, selected manifest, and config graph with anonymous public receipt hashes.
+M7 uses direct public digest pulls, without an archive/import/alias fallback.
 A tag, revision label, source-input digest, executable hash, and image manifest digest each describe different evidence and cannot substitute for one another.
 
 Keep the passing fixture-inventory result and hashes of the smoke script, contract, qualified golden, and fixture manifest with the frozen qualification packet or exact CI commit.
@@ -157,4 +159,50 @@ Earlier M5 receipts remain evidence for their recorded images and empty discover
 M6 runtime acceptance must bind the selected image and executable digest to actual clone, progress, pgoutput follow, persisted endpos/drain, schema/data comparison, and exact owned cleanup on 16:16, 18:18, and 16:18.
 Keep that acceptance pending until the exact artifact runs those checks.
 Final release qualification runs the required migration matrix on the exact production image digest.
-Publication remains a separate authorized release step after licensing and qualification gates pass.
+Development publication follows the narrow approval below.
+Release publication remains a separate step after the exact release qualification gates pass.
+
+## Public development images
+
+The approved development package is exactly `ghcr.io/ydixken/rpgmigrate`.
+Its feature-branch workflow calls `task image:dev:publish` on the exact clean source commit and native architecture.
+The Task requires `ARCHITECTURE`, `IMAGE_REVISION`, and `OUTPUT_DIR`; `RETAINED_RECEIPT` is optional for an admitted continuation.
+`OUTPUT_DIR` must identify an existing private external directory with mode 0700.
+The publisher enforces the Actions context for ordinary publication.
+The Task does not push a branch or dispatch a workflow.
+
+Tags are `dev-<full-40-hex-commit>-arm64` or `dev-<full-40-hex-commit>-amd64` and select one runnable manifest.
+An existing tag must never be overwritten.
+We do not create a multiarch join tag, release tag, or `latest` in this route.
+`IMAGE_REVISION` on `image:build` accepts only a full lowercase 40-hex commit and forwards only `SOURCE_REVISION` as a build argument.
+The default local build retains its working-tree packaging role when that value is absent.
+A revision label does not replace the complete clean-source inventory, build-input hash, executable hash, or smoke receipt.
+
+The separate first-package bootstrap approval permits only the exact native package and admitted source/platform.
+The leader must admit the exact source commit and existing private output directory before this exception runs.
+Check out these **examples**:
+
+- Publish the first native package under that separate admission.
+
+  ```sh
+  python3 tools/image/dev_publish.py publish --architecture arm64 --expected-commit "$IMAGE_REVISION" --output-dir "$OUTPUT_DIR" --bootstrap-native
+  ```
+
+- Continue anonymous visibility verification for a retained receipt without rebuilding or pushing.
+
+  ```sh
+  python3 tools/image/dev_publish.py verify-public --receipt "$RETAINED_RECEIPT" --output "$PUBLIC_RECEIPT"
+  ```
+
+A `PUBLICITY_PENDING` receipt preserves exact digest, source, and smoke evidence but does not qualify an image lock.
+Public package visibility approval covers only the exact manager and native development packages.
+An authorized visibility change is followed by verification of the same digest, without rebuild or repush.
+Require anonymous manifest, config, and blob reads before a publication receipt qualifies.
+A fresh M7/M6 run also requires actual pulls and typed image bindings on every exact owned node.
+Keep the generated schema 2 image lock outside Git; its exact sources and receipt hashes must agree with the test checkout.
+Do not commit the newly built manager digest to its own source catalog.
+
+The format 8 / metadata 6 M6 runner source remains separate from isolated M8 source and capability changes.
+Hosted image build/publication and offline contract results do not qualify operator runtime, native admission, or the migration matrix.
+Hosted kind runtime requires a separate qualified Linux-native-host Guard transport.
+Development approval does not authorize releases, crate publication, main pushes or merges, or benchmarks.

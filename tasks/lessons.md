@@ -347,9 +347,10 @@ When splitting a plan, preserve explicit module ownership instead of transferrin
 
 ## Licensing and readiness
 
-The user's project license answer is pending.
-Use `publish = false` and omit a new project license until that answer arrives.
-Preserve third-party notices.
+On 2026-11-10, the user selected Apache License 2.0 for rpgmigrate.
+Use SPDX `Apache-2.0` and the unchanged official license text.
+Retain `publish = false` and preserve third-party notices.
+Do not infer release, tag, GHCR, benchmark, or milestone authorization from a project-license decision.
 Direct crate metadata checks do not replace a locked dependency graph audit.
 Native libpq and target bookkeeping permissions are explicitly approved.
 Do not introduce another approval gate for those decisions.
@@ -448,12 +449,13 @@ Clean exact recorded observer UIDs/resourceVersions on every bounded exit; prese
 ## Continue through the approved milestone gates, 2026-11-09
 
 The user directed us to push through M10; continue approved M6–M10 execution instead of treating intermediate plans or source checkpoints as the end of the assignment.
-Keep roadmap and todo synchronized, require evidence for closure, and retain the benchmark hold and main/tag/release/GHCR boundaries; performance ranges are inferences until measured.
+Keep roadmap and todo synchronized, require evidence for closure, and retain the benchmark hold and main/tag/release boundaries and the dated development-only GHCR limits.
+Performance ranges are inferences until measured.
 
 ## Execution admission and runtime metadata attribution, 2026-11-09
 
 Approved milestone scope already permits owned M7 UP/load/legacy/native tests and ordinary fresh owned fault fixtures; enforce source/ownership/resource guards without inventing another blanket user-approval gate.
-Keep the actual benchmark artifact/argv hold and out-of-scope shared-VM/original-resource/main/tag/release/GHCR boundaries explicit.
+Keep the actual benchmark artifact/argv hold and out-of-scope shared-VM/original-resource/main/tag/release boundaries and the dated development-only GHCR limits explicit.
 Attribute runtime-synthesized HOME/passwd observations to that runtime; they do not prove immutable-image metadata or a different container runtime’s defaults.
 
 ## Canonical secret-bearing temporary storage
@@ -503,3 +505,55 @@ Do not use `reset --hard`, `clean`, or broad restoration to recover isolation.
 
 Check each descriptor media type before calling a digest a manifest.
 The retained multiarch node `099e` is an index and ARM child `10210` is the archive manifest; preserve older evidence and do not invent a conversion.
+
+## Preserve safe setup failure identity, 2026-11-10
+
+Retain structured setup-failure identity and writer provenance before discarding raw subprocess output.
+Keep credential-bearing raw output discarded, and report an unknown assertion as unknown until independent evidence identifies it.
+
+## Preserve the latest registry approval, 2026-11-10
+
+The user approved direct public-registry pulls by pinned digest for upstream CloudNativePG, operator, PostgreSQL, and other public dependencies.
+This supersedes the local-registry proposal.
+Do not continue M7 archive/containerd-import, alias, or tag-retargeting work.
+The user separately approved public GHCR publication of manager/native-runner development images under the approved user namespace.
+Use immutable `dev-<full-40-hex-commit>-<arm64|amd64>` tags and kind digest references.
+Use existing manager `ghcr.io/ydixken/pgcopydb-operator`.
+Use exactly `ghcr.io/ydixken/rpgmigrate` for the native package.
+Do not infer version-tag, `latest`, release, or main-push approval.
+Preserve historical origin/mirror authorization limits as provenance and apply this later approval only to its explicit development scope.
+Keep exact ownership, original clock, caps, and cleanup guards.
+Preserve old source and RUN evidence and require fresh registry-path qualification.
+The old Ready RUN held before LOAD under S1 is not registry-qualified.
+Keep M10 offline candidate archive retention separate and continue M6/M8/M10 work without closing any M6–M10 gate or lifting benchmark HOLD.
+
+## Keep development publication and runtime qualification separate, 2026-11-10
+
+The public development-package approval covers only the exact manager and native packages; it does not authorize release tags, `latest`, main changes, or benchmarks.
+Use the admitted feature-branch workflow for ordinary publication and keep the separately approved first-native bootstrap exception explicit.
+Require clean source identity, no-overwrite tags, anonymous public descriptor verification, and exact owned-node pull evidence before a lock qualifies.
+Keep a pending visibility receipt distinct from a qualifying publication receipt.
+A hosted publication pass or offline contract pass does not prove that the Podman VM-specific Guard runs on a Linux-native host.
+Record Linux-host portability as an open runtime gate.
+
+## Run complete scoped lint on joined inputs, 2026-11-10
+
+Run all configured checks, including `gocyclo`, on the actual joined packages.
+Do not use `--new-from-rev` or a changed-line filter to turn a scoped lint gate green.
+Preserve older results with their original source identity and report a repaired successor separately.
+
+## Preserve bounded server startup evidence, 2026-11-10
+
+Capture bounded startup state and logs, then fsync diagnostics before cleanup so an early server failure retains its actual cause.
+Validate traversal permissions on the real parent and PGDATA paths, and inspect the actual Podman `.ID` rather than assuming a Docker-compatible field.
+Keep the startup deadline bounded after adapter repairs and retain failed evidence separately from successor passes.
+
+## Test absent Task revisions through the actual command, 2026-11-10
+
+A Task global null value can reach a command as a missing revision.
+If the command accepts a missing revision, exercise the actual individual-task dry run and a missing-revision negative control; do not infer that contract from template inspection.
+
+## Retain pending publication evidence without blocking independent work, 2026-11-10
+
+Keep the source-bound first build, smoke, push, and preservation receipts when visibility or repository linkage remains pending.
+Request the unavailable browser step asynchronously and continue independent approved work without claiming anonymous pull or runtime qualification.

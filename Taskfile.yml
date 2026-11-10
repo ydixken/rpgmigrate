@@ -32,6 +32,11 @@ vars:
   RPGMIGRATE_E2E_REPORT_PROBE: null
   CONTAINER_RUNTIME: null
   IMAGE: null
+  IMAGE_REVISION: null
+  IMAGE_REVISION_VALUE:
+    sh: 'printf "%s" "${IMAGE_REVISION-}"'
+  IMAGE_REVISION_ARGUMENT: >-
+    {{if ne .IMAGE_REVISION nil}}{{.IMAGE_REVISION | shellQuote}}{{else}}{{.IMAGE_REVISION_VALUE | shellQuote}}{{end}}
   CONTAINER_VALUE:
     sh: 'printf "%s" "${CONTAINER_RUNTIME-podman}"'
   IMAGE_VALUE:
@@ -145,9 +150,12 @@ tasks:
         --skip catalog::clone::tests::live_identity_ --skip catalog::follow::tests::live_identity_
         --skip catalog::follow::tests::live_cleanup_
         --skip catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales
-        --skip snapshot::follow_tests::live_ --skip snapshot::follow_fault_tests::live_ --skip cdc::receive::tests::live_ --skip pg::follow_receive_tests::live_ --skip apply::plan::tests::live_ --skip apply::checkpoint::live_tests::follow_
+        --skip snapshot::follow_tests::live_ --skip snapshot::follow_fault_tests::live_
+        --skip cdc::receive::tests::live_ --skip pg::follow_receive_tests::live_
+        --skip apply::plan::tests::live_ --skip apply::checkpoint::live_tests::follow_
         --skip cdc::receive::tests::full_fifo_status_survives_walsender_timeout
-        --skip snapshot::clone_tests:: --skip copy::live_tests:: --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_
+        --skip snapshot::clone_tests:: --skip copy::live_tests::
+        --skip apply::checkpoint::clone_marker_tests:: --skip schema::tests::live_
 
   test-catalog:
     desc: Run the live CDC catalog profile
@@ -359,9 +367,37 @@ tasks:
   image:build:
     desc: Build the local native runner image
     cmds:
-      - '{{.RUN}} {{.CONTAINER_ARGUMENT}} build --tag {{.IMAGE_ARGUMENT}} --file Dockerfile .'
+      - |-
+        {{.RUN}}
+        revision={{.IMAGE_REVISION_ARGUMENT}}
+        if [ -n "$revision" ]; then
+          case "$revision" in
+            *[!0-9a-f]*) printf '%s\n' 'IMAGE_REVISION must be a full lowercase Git commit' >&2; exit 1 ;;
+          esac
+          test "${#revision}" -eq 40 || {
+            printf '%s\n' 'IMAGE_REVISION must be a full lowercase Git commit' >&2; exit 1;
+          }
+          {{.CONTAINER_ARGUMENT}} build --tag {{.IMAGE_ARGUMENT}} \
+            --build-arg "SOURCE_REVISION=$revision" --file Dockerfile .
+        else
+          {{.CONTAINER_ARGUMENT}} build --tag {{.IMAGE_ARGUMENT}} --file Dockerfile .
+        fi
 
   image:smoke:
     desc: Check the local runner and emit a JSON packaging receipt
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} tools/image/smoke.py --image {{.IMAGE_ARGUMENT}}'
+
+  image:dev:publish:
+    desc: Publish a source-bound development image from the approved GitHub Actions workflow
+    requires: {vars: [ARCHITECTURE, IMAGE_REVISION, OUTPUT_DIR]}
+    vars:
+      PUBLICATION_REVISION: >-
+        {{if not (regexMatch "^[0-9a-f]{40}$" (.IMAGE_REVISION | default ""))}}
+        {{fail "IMAGE_REVISION must be a full lowercase Git commit"}}{{end}}{{.IMAGE_REVISION}}
+    cmds:
+      - >-
+        {{.RUN}} {{.PYTHON_COMMAND}} tools/image/dev_publish.py publish
+        --architecture {{.ARCHITECTURE | shellQuote}} --expected-commit {{.PUBLICATION_REVISION | trim | shellQuote}}
+        --output-dir {{.OUTPUT_DIR | shellQuote}}
+        {{if .RETAINED_RECEIPT}}--retained-receipt {{.RETAINED_RECEIPT | shellQuote}}{{end}}

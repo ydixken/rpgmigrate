@@ -31,7 +31,7 @@ FOLLOW_FILTERS = ["--skip", "snapshot::follow_tests::live_", "--skip", "snapshot
                   "--skip", "cdc::receive::tests::full_fifo_status_survives_walsender_timeout"]
 TARGETS = {"check", "fmt-check", "lint", "build", "test", "test-unit", "test-cli", "test-harness",
            "test-db", "test-engine", "test-transport", "test-prepared", "test-replication", "test-authority",
-           "test-db-self-check", "default", "help", "test-catalog", "test-source-catalog", "test-clone", "test-schema", "image:build", "image:smoke", "test-e2e-clone-unit", "test-e2e-clone",
+           "test-db-self-check", "default", "help", "test-catalog", "test-source-catalog", "test-clone", "test-schema", "image:build", "image:smoke", "image:dev:publish", "test-e2e-clone-unit", "test-e2e-clone",
            "test-e2e-clone-16-16", "test-e2e-clone-18-18", "test-e2e-clone-16-18",
            "test-e2e-follow-smoke-16-16", "test-e2e-follow-smoke-18-18", "test-e2e-follow-smoke-16-18",
            "test-follow-source", "test-follow-snapshot", "test-follow-authority", "test-follow-receive", "test-follow-apply", "test-e2e-follow-unit", "test-e2e-follow", "test-e2e-follow-16-16", "test-e2e-follow-18-18", "test-e2e-follow-16-18", "test-e2e-cutover", "test-e2e-cutover-16-16", "test-e2e-cutover-18-18", "test-e2e-cutover-16-18"}
@@ -148,7 +148,7 @@ class TaskfileTests(unittest.TestCase):
         self.bin.mkdir()
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("TASK_") and key not in
-                    ("CARGO", "PYTHON", "IMAGE", "PQ_LIB_DIR", "STORAGE_ROOT", *FORWARDED)}
+                    ("CARGO", "PYTHON", "IMAGE", "IMAGE_REVISION", "PQ_LIB_DIR", "STORAGE_ROOT", *FORWARDED)}
         self.env.update(PATH=str(self.bin) + os.pathsep + os.environ["PATH"], CALL_LOG=str(self.log))
         script = "#!" + sys.executable + "\n" + '''import json, os, pathlib, sys
 args = sys.argv[1:]
@@ -170,7 +170,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             path = self.bin / name
             path.write_text(script)
             path.chmod(0o755)
-        for path in ("tools/test-db.py", "tests/cli_contract.py", "tools/ci/unit.py", "tools/e2e/clone.py", "tools/e2e/test_clone.py", "tools/e2e/test_copy_features.py", "tools/e2e/follow.py", "tools/e2e/test_follow.py", "tools/image/smoke.py"):
+        for path in ("tools/test-db.py", "tests/cli_contract.py", "tools/ci/unit.py", "tools/e2e/clone.py", "tools/e2e/test_clone.py", "tools/e2e/test_copy_features.py", "tools/e2e/follow.py", "tools/e2e/test_follow.py", "tools/image/smoke.py", "tools/image/dev_publish.py"):
             fixture = self.root / path
             fixture.parent.mkdir(parents=True, exist_ok=True)
             fixture.touch()
@@ -419,6 +419,46 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             self.log.unlink()
             self.assertNotEqual(self.run_task("test-e2e-clone-unit", env={"FAIL_MATCH": name}).returncode, 0)
             self.assertEqual(len(self.calls()), expected)
+
+    def test_image_revision_is_narrow_and_precedes_container_effects(self):
+        revision = "a" * 40
+        self.passed(self.run_task("image:build", "IMAGE_REVISION=" + revision,
+                                 env={"IMAGE_REVISION": "b" * 40}))
+        self.assertEqual(self.calls()[-1]["argv"], ["build", "--tag", "localhost/rpgmigrate:dev",
+                         "--build-arg", "SOURCE_REVISION=" + revision, "--file", "Dockerfile", "."])
+        self.log.unlink()
+        for value in ("a" * 39, "a" * 41, "A" * 40, "$(touch injected)", "abc def"):
+            with self.subTest(value=value):
+                self.assertNotEqual(self.run_task("image:build", "IMAGE_REVISION=" + value).returncode, 0)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.root / "injected").exists())
+
+    def test_dev_publication_task_quotes_inputs_and_requires_all_values(self):
+        output = str(self.root / "private $literal 'quoted'")
+        receipt = output + "/receipt.json"
+        revision = "c" * 40
+        self.assertNotEqual(self.run_task("image:dev:publish").returncode, 0)
+        self.assertEqual(self.calls(), [])
+        self.passed(self.run_task("image:dev:publish", "ARCHITECTURE=arm64", "IMAGE_REVISION=" + revision,
+                                 "OUTPUT_DIR=" + output, "RETAINED_RECEIPT=" + receipt))
+        self.assertEqual(self.calls()[-1]["argv"], ["tools/image/dev_publish.py", "publish", "--architecture",
+                         "arm64", "--expected-commit", revision, "--output-dir", output,
+                         "--retained-receipt", receipt])
+        self.assertNotIn("--bootstrap-native", self.calls()[-1]["argv"])
+
+    def test_dev_publication_dry_run_refuses_each_missing_or_invalid_input(self):
+        required = {"ARCHITECTURE": "arm64", "IMAGE_REVISION": "a" * 40, "OUTPUT_DIR": str(self.root / "private")}
+        for missing in required:
+            values = [name + "=" + value for name, value in required.items() if name != missing]
+            with self.subTest(missing=missing):
+                self.assertNotEqual(self.run_task("--dry", "image:dev:publish", *values).returncode, 0)
+        for revision in ("", "a" * 39, "A" * 40, "$(touch injected)"):
+            with self.subTest(revision=revision):
+                values = [name + "=" + value for name, value in {**required, "IMAGE_REVISION": revision}.items()]
+                self.assertNotEqual(self.run_task("--dry", "image:dev:publish", *values).returncode, 0)
+        self.passed(self.run_task("--dry", "image:dev:publish", *[name + "=" + value for name, value in required.items()]))
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.root / "injected").exists())
 
     def test_clone_matrix_enumerates_exact_pairs_and_stops_on_failure(self):
         self.passed(self.run_task("test-e2e-clone"))
