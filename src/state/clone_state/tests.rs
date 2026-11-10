@@ -672,6 +672,11 @@ fn inspection_overlaps_owner_without_lock_or_write() {
     )
     .unwrap();
     assert_eq!(read.clone_state.plan, plan);
+    assert!(read.effective_follow_settings().is_none());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&before).unwrap()["format_version"],
+        10
+    );
     assert_eq!(
         read.provenance.intent.binding.stream.run,
         state.identity.run
@@ -695,7 +700,7 @@ fn clone_rejects_old_formats_unknown_fields_and_inventory_overflow() {
     drop(state);
     let path = tmp.path().join("manifest.json");
     let bytes = fs::read(&path).unwrap();
-    for version in [1, 2, 3, 4, 5, 6, 7, 8, 10] {
+    for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         value["format_version"] = version.into();
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();

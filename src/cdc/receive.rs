@@ -1,6 +1,8 @@
 use crate::apply::checkpoint::{RecoveryStart, SafeFeedback};
 use crate::cdc::contracts::{FollowMessage, Plugin};
-use crate::contracts::{Error, ErrorKind, FollowBinding, FollowOptions, IoControl, Result};
+use crate::contracts::{
+    EffectiveFollowSettings, Error, ErrorKind, FollowBinding, FollowOptions, IoControl, Result,
+};
 use crate::follow::channel::{FeedbackReceiver, FollowSender};
 use crate::identity::{SourceEndLsn, StreamId};
 use crate::pg::{PgConnection, ReplicationEnvelope, ReplicationPoll, StandbyStatus};
@@ -17,6 +19,7 @@ const SERVICE_INTERVAL: Duration = Duration::from_millis(50);
 )]
 pub(crate) fn run(
     options: &FollowOptions,
+    settings: &EffectiveFollowSettings,
     binding: &FollowBinding,
     start: RecoveryStart,
     output: &FollowSender,
@@ -26,7 +29,7 @@ pub(crate) fn run(
     stop: &AtomicBool,
     io: &IoControl,
 ) -> Result<()> {
-    options.limits.validate()?;
+    settings.validate()?;
     let stream = binding.stream();
     if start.stream() != stream
         || binding.slot.intent.binding.plugin() != Plugin::Pgoutput
@@ -56,7 +59,7 @@ pub(crate) fn run(
         return Err(gap("follow source identity or timeline differs"));
     }
     let publication = source.quote_identifier(&binding.publication.name)?;
-    let mut decoder = super::pgoutput::Decoder::new(stream, binding, options.limits)?;
+    let mut decoder = super::pgoutput::Decoder::new(stream, binding, settings.limits)?;
     let mut health = PgConnection::connect(&options.clone.source, io)?;
     source.start_replication(
         binding.slot.intent.binding.slot_name(),
@@ -92,7 +95,7 @@ pub(crate) fn run(
         output,
         feedback,
         &mut lease,
-        options.limits.max_message_bytes,
+        settings.limits.max_message_bytes,
         io,
     )
 }
@@ -1242,14 +1245,22 @@ mod tests {
             slot_name: slot.clone(),
             publication_name: publication.clone(),
             origin_name: Some("unowned_compatibility".into()),
-            apply_group_txns: 1,
+            durability: None,
+            apply_group_txns: Some(1),
             limits: FollowLimits::default(),
         };
-        let (output, input) = crate::follow::channel::bounded(options.limits).unwrap();
+        let settings = EffectiveFollowSettings {
+            durability: crate::contracts::DurabilityMode::Durable,
+            barrier_interval_ms: None,
+            apply_group_txns: 1,
+            limits: options.limits,
+        };
+        let (output, input) = crate::follow::channel::bounded(settings.limits).unwrap();
         let (_feedback, feedback) = crate::follow::channel::feedback();
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let failure = run(
             &options,
+            &settings,
             &binding,
             start,
             &output,

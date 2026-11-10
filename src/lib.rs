@@ -121,6 +121,7 @@ fn execute(invocation: Invocation) -> Result<String> {
                     progress.work.as_ref(),
                     progress.phase,
                     &progress.copy,
+                    progress.settings.as_ref(),
                 )
             } else {
                 Ok(format!("phase: {}\n", progress.phase))

@@ -14,7 +14,7 @@ import threading
 import time
 
 from db_harness import psql, quote
-from follow_snapshot_fixture import validate_identity_modes
+from follow_snapshot_fixture import validate_effective_settings, validate_identity_modes
 from protocol_fault import error_sqlstate, packet
 
 
@@ -113,11 +113,13 @@ class Relay:
     def native(self):
         assert self.native_path.stat().st_size <= 2 * 1024 * 1024
         value = json.loads(self.native_path.read_text(), object_pairs_hook=unique_fields)
-        assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] in (8, 9)
+        assert value["magic"] == "RPGMIGRATE" and type(value["format_version"]) is int and value["format_version"] == 10
         assert value["canonical_path"] == str(self.native_path.parent)
         assert value["copy_complete"] is None and value["clone_state"] is None
         assert value["target_provenance"] == [] and value["operator"] is None
         follow = value["follow_state"]
+        assert isinstance(follow, dict) and "effective_settings" in follow, "missing follow effective settings"
+        validate_effective_settings(follow["effective_settings"])
         validate_identity_modes(follow["preliminary"])
         assert follow["cleanup"] is None and follow["binding"] is None and follow["restart"] is None
         source = follow["preliminary"]["source"]

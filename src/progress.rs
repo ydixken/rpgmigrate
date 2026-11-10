@@ -3,7 +3,8 @@ use serde::Serialize;
 use crate::apply::checkpoint::CloneProgress;
 use crate::catalog;
 use crate::contracts::{
-    CloneOptions, Error, ErrorKind, IoControl, OperatorIdentity, OwnedObject, Result,
+    CloneOptions, EffectiveFollowSettings, Error, ErrorKind, IoControl, OperatorIdentity,
+    OwnedObject, Result,
 };
 use crate::state::{ClonePhase, CloneState};
 
@@ -11,6 +12,8 @@ use crate::state::{ClonePhase, CloneState};
 pub(crate) struct ProgressSnapshot {
     pub(crate) work: Option<OperatorIdentity>,
     pub(crate) phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) settings: Option<EffectiveFollowSettings>,
     pub(crate) copy: CopyProgress,
 }
 
@@ -111,6 +114,7 @@ fn read_measured(
     );
     let result = ProgressSnapshot {
         work: options.operator.clone(),
+        settings: inspection.effective_follow_settings().cloned(),
         phase: if completed.is_some() {
             "completed"
         } else {

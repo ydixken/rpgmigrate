@@ -3,7 +3,9 @@ use super::checkpoint::TargetTxn;
 use super::plan::{DmlPlan, quote_identifier};
 use crate::catalog::FollowRelation;
 use crate::cdc::contracts::{Column, Event, RelationKey, Value};
-use crate::contracts::{Error, ErrorKind, FollowBinding, IoControl, OwnedCopyTable, Result};
+use crate::contracts::{
+    DurabilityMode, Error, ErrorKind, FollowBinding, IoControl, OwnedCopyTable, Result,
+};
 use crate::pg::{PgParam, PgResult, Pipeline};
 
 const PLAN_SLOTS: usize = 128;
@@ -282,12 +284,14 @@ impl Caches {
     pub(super) fn commit(
         &mut self,
         mut target: TargetTxn<'_>,
+        durability: DurabilityMode,
         io: &IoControl,
     ) -> Result<CommitOutcome> {
         if add(self.pending_bytes, target.checkpoint_input_bytes()?)? > PIPELINE_BYTES {
             self.flush(&mut target, io)?;
         }
         let outcome = target.commit_pipeline(
+            durability,
             io,
             |pipeline| self.send(pipeline, io),
             |index, result| self.validate(index, result),

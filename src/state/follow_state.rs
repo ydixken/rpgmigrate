@@ -1,5 +1,8 @@
 use super::*;
-use crate::contracts::{FollowBinding, PublicationReceipt, SourceType};
+use crate::contracts::{
+    DEFAULT_FOLLOW_APPLY_GROUP_TXNS, FollowBinding, PublicationReceipt,
+    REPLAY_SAFE_BARRIER_INTERVAL_MS, SourceType,
+};
 use std::collections::BTreeSet;
 
 pub(crate) const MAX_FOLLOW_CONTROL_BYTES: usize = 256 * 1024;
@@ -63,6 +66,8 @@ impl PublicationProvenance {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FollowState {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) effective_settings: Option<EffectiveFollowSettings>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) cleanup: Option<CleanupProgress>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -246,6 +251,7 @@ pub(crate) fn open_follow(
             ));
         }
         next.follow_state = Some(FollowState {
+            effective_settings: None,
             cleanup: None,
             origin_name: origin_name.map(str::to_owned),
             publication: None,
@@ -262,11 +268,77 @@ pub(crate) fn open_follow(
             .is_some_and(|f| f.publication.is_none())
         && next.clone_state.is_none()
         && next.target_provenance.is_empty();
-    state.replace_manifest(next)?;
+    if next == state.manifest {
+        state.synchronize_manifest()?;
+    } else {
+        state.replace_manifest(next)?;
+    }
     Ok(state)
 }
 
 impl NativeState {
+    pub(crate) fn effective_follow_settings(&self) -> Option<&EffectiveFollowSettings> {
+        self.manifest
+            .follow_state
+            .as_ref()
+            .and_then(|follow| follow.effective_settings.as_ref())
+    }
+
+    pub(crate) fn resolve_follow_settings(
+        &mut self,
+        requested_mode: Option<DurabilityMode>,
+        requested_group_txns: Option<u64>,
+        requested_limits: FollowLimits,
+    ) -> Result<EffectiveFollowSettings> {
+        requested_limits
+            .validate()
+            .map_err(|_| bad_state("state-settings: requested follow limits are invalid"))?;
+        let mut next = self.checked_manifest()?;
+        let follow = next
+            .follow_state
+            .as_mut()
+            .ok_or_else(|| bad_state("state-settings: native state is not a follow run"))?;
+        let settings = if let Some(saved) = &follow.effective_settings {
+            if requested_mode.is_some_and(|mode| mode != saved.durability)
+                || requested_group_txns.is_some_and(|group| group != saved.apply_group_txns)
+                || requested_limits != saved.limits
+            {
+                return Err(bad_state(
+                    "state-settings: requested follow settings differ from stored settings",
+                ));
+            }
+            saved.clone()
+        } else {
+            let durability = requested_mode.unwrap_or(DurabilityMode::Durable);
+            EffectiveFollowSettings {
+                durability,
+                barrier_interval_ms: match durability {
+                    DurabilityMode::Durable => None,
+                    DurabilityMode::ReplaySafe => REPLAY_SAFE_BARRIER_INTERVAL_MS,
+                },
+                apply_group_txns: requested_group_txns.unwrap_or(DEFAULT_FOLLOW_APPLY_GROUP_TXNS),
+                limits: requested_limits,
+            }
+        };
+        if settings.durability == DurabilityMode::ReplaySafe
+            && REPLAY_SAFE_BARRIER_INTERVAL_MS.is_none()
+        {
+            return Err(bad_state(
+                "state-settings: replay-safe execution is unavailable until cadence selection",
+            ));
+        }
+        settings
+            .validate()
+            .map_err(|_| bad_state("state-settings: follow settings are invalid"))?;
+        if follow.effective_settings.as_ref() == Some(&settings) {
+            self.synchronize_manifest()?;
+        } else {
+            follow.effective_settings = Some(settings.clone());
+            self.replace_manifest(next)?;
+        }
+        Ok(settings)
+    }
+
     pub(crate) fn begin_follow_cleanup(&mut self) -> Result<CleanupProgress> {
         control::with_native_lock(self, |native| {
             let mut next = native.checked_manifest()?;
@@ -376,6 +448,7 @@ impl NativeState {
 
     pub(crate) fn prepare_follow_source(&mut self, plan: &ClonePlan) -> Result<()> {
         clone_state::validate_plan(plan)?;
+        self.checked_manifest()?.require_follow_settings()?;
         if let Some(existing) = self.checked_follow_source()? {
             let restarting = self.checked_follow_restart()?.is_some_and(|restart| {
                 restart.slot_absent
@@ -642,6 +715,7 @@ impl NativeState {
 
     pub(crate) fn begin_publication(&mut self, name: &str) -> Result<PublicationIntent> {
         let mut next = self.checked_manifest()?;
+        next.require_follow_settings()?;
         let follow = next
             .follow_state
             .as_mut()
@@ -861,6 +935,28 @@ fn require_pending_resource_retirement(
 }
 
 impl FollowState {
+    pub(super) fn validate_settings(&self, manifest: &Manifest) -> Result<()> {
+        if let Some(settings) = &self.effective_settings {
+            settings
+                .validate()
+                .map_err(|_| bad_state("state-settings: stored follow settings are invalid"))?;
+        } else if self.preliminary.is_some()
+            || self.publication.is_some()
+            || self.binding.is_some()
+            || self.restart.is_some()
+            || self.cleanup.is_some()
+            || manifest.source_slot.is_some()
+            || !manifest.target_provenance.is_empty()
+            || manifest.clone_state.is_some()
+            || manifest.copy_complete.is_some()
+        {
+            return Err(bad_state(
+                "state-settings: unresolved follow settings cannot authorize work",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn validate(&self, manifest: &Manifest) -> Result<()> {
         if self
             .origin_name
@@ -1001,6 +1097,407 @@ mod tests {
         )))
     }
 
+    fn m9_init() -> (super::super::tests::TempDir, NativeState, StateRequest) {
+        let tmp = super::super::tests::TempDir::new();
+        let request = StateRequest {
+            path: tmp.path(),
+            action: StateAction::Create,
+        };
+        let native = super::open_follow(&request, None, None, &control()).unwrap();
+        (tmp, native, request)
+    }
+
+    #[test]
+    fn m9_settings_required_nullable() {
+        let (_tmp, native, _) = m9_init();
+        let mut value = serde_json::to_value(&native.manifest).unwrap();
+        assert_eq!(
+            value["follow_state"]["effective_settings"],
+            serde_json::Value::Null
+        );
+        value["follow_state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("effective_settings");
+        assert!(serde_json::from_value::<Manifest>(value).is_err());
+        native.manifest.validate_provenance().unwrap();
+
+        let (_tmp, bound, _, _) = bound_follow();
+        for field in [
+            "preliminary",
+            "publication",
+            "source_slot",
+            "target_provenance",
+            "binding",
+            "restart",
+            "clone_state",
+        ] {
+            let mut manifest = native.manifest.clone();
+            let follow = manifest.follow_state.as_mut().unwrap();
+            match field {
+                "preliminary" => follow.preliminary = Some(empty_plan()),
+                "publication" => {
+                    follow.publication = bound
+                        .manifest
+                        .follow_state
+                        .as_ref()
+                        .unwrap()
+                        .publication
+                        .clone()
+                }
+                "source_slot" => manifest.source_slot = bound.manifest.source_slot.clone(),
+                "target_provenance" => {
+                    manifest
+                        .target_provenance
+                        .push(TargetProvenance::Provisioning(ProvisioningIntent {
+                            binding: m9_target(&native),
+                            nonce: [1; 16],
+                        }))
+                }
+                "binding" => {
+                    follow.binding = bound
+                        .manifest
+                        .follow_state
+                        .as_ref()
+                        .unwrap()
+                        .binding
+                        .clone()
+                }
+                "restart" => {
+                    follow.restart = Some(FollowRestart {
+                        previous: bound
+                            .manifest
+                            .follow_state
+                            .as_ref()
+                            .unwrap()
+                            .binding
+                            .clone()
+                            .unwrap(),
+                        next_generation: CopyGeneration(2),
+                        slot_absent: false,
+                        publication_absent: false,
+                        new_bound: false,
+                    })
+                }
+                "clone_state" => manifest.clone_state = bound.manifest.clone_state.clone(),
+                _ => unreachable!(),
+            }
+            let error = manifest.validate_provenance().unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadState, "{field}");
+            assert!(
+                error.message.starts_with("state-settings:"),
+                "{field}: {error:?}"
+            );
+        }
+    }
+
+    fn m9_target(native: &NativeState) -> TargetBinding {
+        TargetBinding {
+            stream: StreamId {
+                run: native.identity.run,
+                source: empty_plan().source.identity,
+                generation: 1,
+            },
+            target_system_identifier: Some(4),
+            target_database_oid: 5,
+            schema_name: "rpgmigrate_native".into(),
+            table_name: "checkpoint".into(),
+            owner_oid: 10,
+            metadata_version: TARGET_METADATA_VERSION,
+        }
+    }
+
+    #[test]
+    fn m9_settings_before_resource_intent() {
+        let (tmp, mut native, _) = m9_init();
+        let path = tmp.path().join("manifest.json");
+        let before = fs::read(&path).unwrap();
+        let stream = StreamId {
+            run: native.identity.run,
+            source: empty_plan().source.identity,
+            generation: 1,
+        };
+        let slot =
+            SourceSlotBinding::new(stream, "rpgmigrate_m9".into(), Plugin::Pgoutput, 1).unwrap();
+        for error in [
+            native.prepare_follow_source(&empty_plan()).unwrap_err(),
+            native.begin_publication("rpgmigrate_m9").unwrap_err(),
+            native.begin_source_slot(&slot).unwrap_err(),
+            native
+                .begin_target_provisioning(m9_target(&native))
+                .unwrap_err(),
+            native
+                .resolve_follow_settings(
+                    Some(DurabilityMode::ReplaySafe),
+                    None,
+                    FollowLimits::default(),
+                )
+                .unwrap_err(),
+            native
+                .resolve_follow_settings(None, Some(0), FollowLimits::default())
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.kind, ErrorKind::BadState);
+            assert!(error.message.starts_with("state-settings:"), "{error:?}");
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        let settings = native
+            .resolve_follow_settings(None, None, FollowLimits::default())
+            .unwrap();
+        assert_eq!(settings.durability, DurabilityMode::Durable);
+        assert_eq!(settings.barrier_interval_ms, None);
+        assert_eq!(settings.apply_group_txns, 100);
+        native.prepare_follow_source(&empty_plan()).unwrap();
+        native.begin_publication("rpgmigrate_m9").unwrap();
+    }
+
+    #[test]
+    fn m9_native_settings_peek_read_only() {
+        let (tmp, mut native, _) = m9_init();
+        let path = tmp.path().join("manifest.json");
+        let before = fs::read(&path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert!(native.effective_follow_settings().is_none());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(after.mode(), metadata.mode());
+        assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+        let limits = FollowLimits {
+            group_rows: 17,
+            ..FollowLimits::default()
+        };
+        native
+            .resolve_follow_settings(None, Some(23), limits)
+            .unwrap();
+        let expected = EffectiveFollowSettings {
+            durability: DurabilityMode::Durable,
+            barrier_interval_ms: None,
+            apply_group_txns: 23,
+            limits,
+        };
+        let before = fs::read(&path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(native.effective_follow_settings(), Some(&expected));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(after.mode(), metadata.mode());
+        assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+        assert_eq!(after.ino(), metadata.ino());
+    }
+
+    #[test]
+    fn m9_omitted_resume_preserves_settings() {
+        let (tmp, mut native, mut request) = m9_init();
+        let limits = FollowLimits {
+            group_rows: 17,
+            ..FollowLimits::default()
+        };
+        let saved = native
+            .resolve_follow_settings(None, Some(23), limits)
+            .unwrap();
+        let before = fs::read(tmp.path().join("manifest.json")).unwrap();
+        drop(native);
+        request.action = StateAction::Resume;
+        let mut resumed = super::open_follow(&request, None, None, &control()).unwrap();
+        assert_eq!(
+            resumed.resolve_follow_settings(None, None, limits).unwrap(),
+            saved
+        );
+        assert_eq!(fs::read(tmp.path().join("manifest.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn m9_explicit_conflict_refuses_before_connection() {
+        let (tmp, mut native, _) = m9_init();
+        let limits = FollowLimits::default();
+        let saved = native
+            .resolve_follow_settings(None, Some(23), limits)
+            .unwrap();
+        let before = fs::read(tmp.path().join("manifest.json")).unwrap();
+        let smaller = FollowLimits {
+            group_rows: 17,
+            ..limits
+        };
+        for (mode, group, request_limits) in [
+            (Some(DurabilityMode::ReplaySafe), None, limits),
+            (None, Some(100), limits),
+            (None, None, smaller),
+        ] {
+            let error = native
+                .resolve_follow_settings(mode, group, request_limits)
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadState);
+            assert_eq!(error.exit_code(), 3);
+            assert_eq!(fs::read(tmp.path().join("manifest.json")).unwrap(), before);
+        }
+        assert_eq!(
+            native
+                .resolve_follow_settings(None, Some(23), limits)
+                .unwrap(),
+            saved
+        );
+    }
+
+    #[test]
+    fn m9_unqualified_replay_safe_refuses_without_rewriting_settings() {
+        let (tmp, mut native, mut request) = m9_init();
+        let limits = FollowLimits::default();
+        let mut next = native.checked_manifest().unwrap();
+        next.follow_state.as_mut().unwrap().effective_settings = Some(EffectiveFollowSettings {
+            durability: DurabilityMode::ReplaySafe,
+            barrier_interval_ms: Some(500),
+            apply_group_txns: 23,
+            limits,
+        });
+        native.replace_manifest(next).unwrap();
+        let path = tmp.path().join("manifest.json");
+        let before = fs::read(&path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        drop(native);
+        request.action = StateAction::Resume;
+        let mut native = super::open_follow(&request, None, None, &control()).unwrap();
+        let error = native
+            .resolve_follow_settings(None, None, limits)
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadState);
+        assert!(error.message.starts_with("state-settings:"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            metadata.modified().unwrap()
+        );
+    }
+
+    #[test]
+    fn m9_malformed_settings_refuse_without_conversion() {
+        let (tmp, mut native, mut request) = m9_init();
+        native
+            .resolve_follow_settings(None, None, FollowLimits::default())
+            .unwrap();
+        let original = serde_json::to_value(&native.manifest).unwrap();
+        let path = tmp.path().join("manifest.json");
+        drop(native);
+        request.action = StateAction::Resume;
+        for variant in 0..10 {
+            let mut invalid = original.clone();
+            let settings = &mut invalid["follow_state"]["effective_settings"];
+            match variant {
+                0 => settings["durability"] = serde_json::json!("relaxed"),
+                1 => settings["barrier_interval_ms"] = serde_json::json!(100),
+                2 => {
+                    settings["durability"] = serde_json::json!("replay-safe");
+                    settings["barrier_interval_ms"] = serde_json::json!(0);
+                }
+                3 => settings["limits"]["group_rows"] = serde_json::json!(0),
+                4 => settings["limits"]["channel_bytes"] = serde_json::json!(8388609),
+                5 => settings["apply_group_txns"] = serde_json::json!(1.0),
+                6 => {
+                    settings
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("barrier_interval_ms");
+                }
+                7 => settings["unknown"] = serde_json::json!(1),
+                8 => {
+                    settings["limits"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("group_bytes");
+                }
+                _ => {
+                    invalid["follow_state"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("effective_settings");
+                }
+            }
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let error = super::open_follow(&request, None, None, &control()).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::BadState, "{variant}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        let duplicate = serde_json::to_string(&original).unwrap().replace(
+            "\"apply_group_txns\":100",
+            "\"apply_group_txns\":100,\"apply_group_txns\":23",
+        );
+        assert_ne!(duplicate, serde_json::to_string(&original).unwrap());
+        fs::write(&path, duplicate.as_bytes()).unwrap();
+        assert_eq!(
+            super::open_follow(&request, None, None, &control())
+                .unwrap_err()
+                .kind,
+            ErrorKind::BadState
+        );
+        assert_eq!(fs::read(&path).unwrap(), duplicate.as_bytes());
+    }
+
+    fn open_resolved_follow(
+        request: &StateRequest,
+        operator: Option<&OperatorIdentity>,
+        origin_name: Option<&str>,
+        io: &IoControl,
+    ) -> Result<NativeState> {
+        let mut native = super::open_follow(request, operator, origin_name, io)?;
+        native.resolve_follow_settings(None, None, FollowLimits::default())?;
+        Ok(native)
+    }
+
+    #[test]
+    fn m9_clone_inspection_settings_read_only() {
+        let (tmp, mut native, _plan, _) = bound_follow();
+        let intent = native
+            .begin_target_provisioning(m9_target(&native))
+            .unwrap();
+        native
+            .confirm_target_provisioning(ConfirmedProvenance {
+                intent,
+                schema_oid: 11,
+                table_oid: 12,
+                marker_table_oid: 13,
+                marker_index_oid: 14,
+                large_object_table_oid: 15,
+                large_object_index_oid: 16,
+            })
+            .unwrap();
+        for (durability, barrier_interval_ms) in [
+            (DurabilityMode::Durable, None),
+            (DurabilityMode::ReplaySafe, Some(500)),
+        ] {
+            let settings = EffectiveFollowSettings {
+                durability,
+                barrier_interval_ms,
+                apply_group_txns: 23,
+                limits: FollowLimits::default(),
+            };
+            let mut next = native.checked_manifest().unwrap();
+            next.follow_state.as_mut().unwrap().effective_settings = Some(settings.clone());
+            native.replace_manifest(next).unwrap();
+            let path = tmp.path().join("manifest.json");
+            let before = fs::read(&path).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            let read = inspect_clone(
+                &StateRequest {
+                    path: tmp.path(),
+                    action: StateAction::Resume,
+                },
+                None,
+                &control(),
+            )
+            .unwrap();
+            assert_eq!(read.effective_follow_settings(), Some(&settings));
+            assert_eq!(
+                read.follow.unwrap().binding,
+                native.checked_follow().unwrap().unwrap()
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+            let after = fs::metadata(&path).unwrap();
+            assert_eq!(after.mode(), metadata.mode());
+            assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+            assert_eq!(after.ino(), metadata.ino());
+        }
+    }
+
     #[test]
     fn native_follow_mode_is_immutable_and_publication_candidate_is_not_adopted() {
         let tmp = super::super::tests::TempDir::new();
@@ -1008,7 +1505,8 @@ mod tests {
             path: tmp.path(),
             action: StateAction::Create,
         };
-        let mut native = open_follow(&request, None, Some("unowned_origin"), &control()).unwrap();
+        let mut native =
+            open_resolved_follow(&request, None, Some("unowned_origin"), &control()).unwrap();
         native.prepare_follow_source(&empty_plan()).unwrap();
         let intent = native.begin_publication("rpgmigrate_owned").unwrap();
         let receipt = PublicationReceipt {
@@ -1032,9 +1530,10 @@ mod tests {
         let run = native.identity().run;
         drop(native);
         request.action = StateAction::Resume;
-        assert!(open_follow(&request, None, None, &control()).is_err());
+        assert!(open_resolved_follow(&request, None, None, &control()).is_err());
         assert!(open_clone(&request, None, &control()).is_err());
-        let mut resumed = open_follow(&request, None, Some("unowned_origin"), &control()).unwrap();
+        let mut resumed =
+            open_resolved_follow(&request, None, Some("unowned_origin"), &control()).unwrap();
         assert_eq!(resumed.identity().run, run);
         assert!(
             resumed
@@ -1058,11 +1557,11 @@ mod tests {
             path: tmp.path(),
             action: StateAction::Restart,
         };
-        let native = open_follow(&request, None, None, &control()).unwrap();
+        let native = open_resolved_follow(&request, None, None, &control()).unwrap();
         let run = native.identity().run;
         drop(native);
         request.action = StateAction::Resume;
-        let mut native = open_follow(&request, None, None, &control()).unwrap();
+        let mut native = open_resolved_follow(&request, None, None, &control()).unwrap();
         assert_eq!(native.identity().run, run);
         let stream = StreamId {
             run,
@@ -1111,7 +1610,7 @@ mod tests {
             path: tmp.path(),
             action: StateAction::Create,
         };
-        let mut native = open_follow(&request, None, None, &control()).unwrap();
+        let mut native = open_resolved_follow(&request, None, None, &control()).unwrap();
         assert!(native.begin_publication("rpgmigrate_owned").is_err());
         let plan = empty_plan();
         native.prepare_follow_source(&plan).unwrap();
@@ -1130,7 +1629,7 @@ mod tests {
         native.confirm_publication(&intent, &publication).unwrap();
         let run = native.identity().run;
         drop(native);
-        let mut native = open_follow(
+        let mut native = open_resolved_follow(
             &StateRequest {
                 action: StateAction::Resume,
                 ..request
@@ -1161,7 +1660,7 @@ mod tests {
         FollowBinding,
     ) {
         let tmp = super::super::tests::TempDir::new();
-        let mut native = open_follow(
+        let mut native = open_resolved_follow(
             &StateRequest {
                 path: tmp.path(),
                 action: StateAction::Create,
@@ -1258,7 +1757,7 @@ mod tests {
     fn first_snapshot_replans_parts_but_repeated_binding_requires_exact_profile() {
         use crate::contracts::{CloneTable, CloneTableCopy, CopyFormat, CopyPart, QualifiedTable};
         let tmp = super::super::tests::TempDir::new();
-        let mut native = open_follow(
+        let mut native = open_resolved_follow(
             &StateRequest {
                 path: tmp.path(),
                 action: StateAction::Create,
@@ -1461,7 +1960,7 @@ mod tests {
             before
         );
         let tmp = super::super::tests::TempDir::new();
-        let mut native = open_follow(
+        let mut native = open_resolved_follow(
             &StateRequest {
                 path: tmp.path(),
                 action: StateAction::Create,
@@ -1495,7 +1994,7 @@ mod tests {
         assert!(native.begin_publication("replacement").is_err());
         assert_eq!(native.checked_follow().unwrap(), Some(old.clone()));
         drop(native);
-        let mut native = open_follow(
+        let mut native = open_resolved_follow(
             &StateRequest {
                 path: tmp.path(),
                 action: StateAction::Resume,

@@ -19,7 +19,7 @@ QUALIFIED_CAPABILITIES = [
 LINUX_QUALIFIED_CAPABILITIES = QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"]
 RESERVED_CAPABILITIES = [
     "clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput",
-    "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
+    "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1", "durability.status.v1",
 ]
 
 
@@ -119,6 +119,23 @@ class NativeFixtureTests(unittest.TestCase):
             "protocol_version": 1, "engine_version": "0.1.0",
             "capabilities": QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"],
         })
+
+    def test_m9_settings_cases_cover_modes_commands_and_invalid_contracts(self):
+        cases = {case["id"]: case for case in verify_inventory(ROOT)}
+        for mode in ["durable", "replay-safe"]:
+            for command in ["clone-streaming", "clone-completed", "progress", "sentinel-get", "sentinel-set"]:
+                case_id = "m9-" + mode + "-" + command
+                self.assertIn(case_id, cases)
+                case = cases[case_id]
+                self.assertTrue(case["accept"])
+                report = read_json(ROOT / case["payload"])
+                self.assertEqual(report["settings"]["durability"], mode)
+                self.assertIn("durability.status.v1", report["capabilities"])
+        negatives = [case for case in cases.values() if case["id"].startswith("m9-invalid-")]
+        self.assertGreaterEqual(len(negatives), 30)
+        self.assertTrue(all(not case["accept"] for case in negatives))
+        self.assertNotIn("durability.status.v1", read_json(ROOT / "payloads/version-qualified-profile.json")["capabilities"])
+        self.assertNotIn("settings", read_json(ROOT / "payloads/clone-copying.json"))
 
     def test_local_inventory_is_complete(self):
         self.assertGreater(len(verify_inventory(ROOT)), 0)

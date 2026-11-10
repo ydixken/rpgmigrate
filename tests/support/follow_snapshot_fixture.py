@@ -27,6 +27,18 @@ NATIVE_FIELDS = {
 }
 
 
+def validate_effective_settings(settings):
+    assert isinstance(settings, dict) and set(settings) == {"durability", "barrier_interval_ms", "apply_group_txns", "limits"}, "follow effective settings fields differ"
+    mode, interval = settings["durability"], settings["barrier_interval_ms"]
+    assert (mode == "durable" and interval is None or mode == "replay-safe" and positive(interval)), "invalid follow durability cadence"
+    assert positive(settings["apply_group_txns"]), "invalid follow transaction group size"
+    maxima = {"channel_bytes": 8388608, "channel_messages": 1024, "max_message_bytes": 16777216,
+              "group_rows": 10000, "group_bytes": 8388608}
+    limits = settings["limits"]
+    assert isinstance(limits, dict) and set(limits) == set(maxima), "follow limit fields differ"
+    assert all(positive(limits[key], maximum) for key, maximum in maxima.items()), "invalid follow limit"
+
+
 def validate_identity_modes(plan):
     assert isinstance(plan, dict) and isinstance(plan.get("tables"), list), "missing native table identity plan"
     fields = {"source_oid", "name", "writable_columns", "all_columns", "identity_modes", "partition_identity_modes"}
@@ -97,7 +109,7 @@ def validate_native(value, context, case):
     assert path.name == "manifest.json" and path.parent.parent == root, "native evidence is outside the owned fixture"
     native = read_json(path)
     assert isinstance(native, dict) and set(native) == NATIVE_FIELDS, "native follow snapshot fields differ"
-    assert native["magic"] == "RPGMIGRATE" and type(native["format_version"]) is int and native["format_version"] in (8, 9), "wrong native follow snapshot format"
+    assert native["magic"] == "RPGMIGRATE" and type(native["format_version"]) is int and native["format_version"] == 10, "wrong native follow snapshot format"
     assert native["canonical_path"] == str(path.parent), "native follow snapshot path binding differs"
     assert native["copy_complete"] is None and native["target_provenance"] == [] and native["clone_state"] is None and native["operator"] is None, "direct source lifecycle evidence fabricated target or completion state"
     assert positive(native["directory_device"]) and positive(native["directory_inode"]), "native directory identity is missing"
@@ -108,7 +120,8 @@ def validate_native(value, context, case):
     assert isinstance(source, dict) and set(source) == {"system_identifier", "database_oid"}, "invalid source identity fields"
     assert positive(source["system_identifier"]) and positive(source["database_oid"], 0xffffffff), "invalid source identity"
     follow = native["follow_state"]
-    assert isinstance(follow, dict) and set(follow) == {"origin_name", "publication", "binding", "restart", "preliminary", "cleanup"}, "follow source state fields differ"
+    assert isinstance(follow, dict) and set(follow) == {"effective_settings", "origin_name", "publication", "binding", "restart", "preliminary", "cleanup"}, "follow source state fields differ"
+    validate_effective_settings(follow["effective_settings"])
     assert follow["cleanup"] is None and follow["origin_name"] is None and follow["restart"] is None, "unexpected source origin or restart authority"
     publication = follow["publication"]
     assert isinstance(publication, dict) and set(publication) == {"phase", "intent", "receipt"} and publication["phase"] == "confirmed", "publication creation is not positively confirmed"

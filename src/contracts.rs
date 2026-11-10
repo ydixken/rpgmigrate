@@ -414,13 +414,53 @@ impl FollowLimits {
     }
 }
 
+pub(crate) const DEFAULT_FOLLOW_APPLY_GROUP_TXNS: u64 = 100;
+pub(crate) const REPLAY_SAFE_BARRIER_INTERVAL_MS: Option<u64> = None;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DurabilityMode {
+    Durable,
+    ReplaySafe,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EffectiveFollowSettings {
+    pub(crate) durability: DurabilityMode,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) barrier_interval_ms: Option<u64>,
+    pub(crate) apply_group_txns: u64,
+    pub(crate) limits: FollowLimits,
+}
+
+impl EffectiveFollowSettings {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let valid_cadence = match (self.durability, self.barrier_interval_ms) {
+            (DurabilityMode::Durable, None) => true,
+            (DurabilityMode::ReplaySafe, Some(interval)) if interval > 0 => Instant::now()
+                .checked_add(std::time::Duration::from_millis(interval))
+                .is_some(),
+            _ => false,
+        };
+        if !valid_cadence || self.apply_group_txns == 0 {
+            return Err(Error::new(
+                ErrorKind::BadConfig,
+                "follow settings require a valid durability cadence and positive transaction group size",
+            ));
+        }
+        self.limits.validate()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FollowOptions {
     pub(crate) clone: CloneOptions,
     pub(crate) slot_name: String,
     pub(crate) publication_name: String,
     pub(crate) origin_name: Option<String>,
-    pub(crate) apply_group_txns: u64,
+    pub(crate) durability: Option<DurabilityMode>,
+    pub(crate) apply_group_txns: Option<u64>,
     pub(crate) limits: FollowLimits,
 }
 
@@ -519,6 +559,109 @@ pub(crate) enum Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m9_settings_reject_invalid_numbers_and_keys() {
+        let valid = serde_json::json!({
+            "durability": "durable", "barrier_interval_ms": null, "apply_group_txns": 100,
+            "limits": {"channel_bytes": 8388608, "channel_messages": 1024,
+                "max_message_bytes": 16777216, "group_rows": 10000, "group_bytes": 8388608}
+        });
+        let settings: EffectiveFollowSettings = serde_json::from_value(valid.clone()).unwrap();
+        settings.validate().unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), valid);
+        for field in [
+            "durability",
+            "barrier_interval_ms",
+            "apply_group_txns",
+            "limits",
+        ] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<EffectiveFollowSettings>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for field in [
+            "channel_bytes",
+            "channel_messages",
+            "max_message_bytes",
+            "group_rows",
+            "group_bytes",
+        ] {
+            let mut missing = valid.clone();
+            missing["limits"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<EffectiveFollowSettings>(missing).is_err(),
+                "{field}"
+            );
+            for number in [
+                serde_json::json!(0),
+                serde_json::json!(u64::MAX),
+                serde_json::json!(1.0),
+                serde_json::json!(true),
+                serde_json::json!("1"),
+            ] {
+                let mut invalid = valid.clone();
+                invalid["limits"][field] = number;
+                assert!(
+                    serde_json::from_value::<EffectiveFollowSettings>(invalid)
+                        .map_or(true, |settings| settings.validate().is_err()),
+                    "{field}"
+                );
+            }
+        }
+        for field in ["unknown", "limits"] {
+            let mut invalid = valid.clone();
+            if field == "limits" {
+                invalid["limits"]["unknown"] = serde_json::json!(1);
+            } else {
+                invalid[field] = serde_json::json!(1);
+            }
+            assert!(serde_json::from_value::<EffectiveFollowSettings>(invalid).is_err());
+        }
+        let text = serde_json::to_string(&valid).unwrap();
+        for number in [
+            "0",
+            "-1",
+            "18446744073709551616",
+            "1.0",
+            "1e2",
+            "true",
+            "\"100\"",
+        ] {
+            let invalid = text.replace(
+                "\"apply_group_txns\":100",
+                &format!("\"apply_group_txns\":{number}"),
+            );
+            assert!(
+                serde_json::from_str::<EffectiveFollowSettings>(&invalid)
+                    .map_or(true, |settings| settings.validate().is_err()),
+                "{number}"
+            );
+        }
+        for (mode, cadence, valid) in [
+            (DurabilityMode::Durable, None, true),
+            (DurabilityMode::Durable, Some(100), false),
+            (DurabilityMode::ReplaySafe, None, false),
+            (DurabilityMode::ReplaySafe, Some(0), false),
+            (DurabilityMode::ReplaySafe, Some(100), true),
+        ] {
+            let settings = EffectiveFollowSettings {
+                durability: mode,
+                barrier_interval_ms: cadence,
+                apply_group_txns: 1,
+                limits: FollowLimits::default(),
+            };
+            assert_eq!(settings.validate().is_ok(), valid, "{mode:?} {cadence:?}");
+        }
+        for mode in ["relaxed", "unknown"] {
+            let mut invalid = valid.clone();
+            invalid["durability"] = serde_json::json!(mode);
+            assert!(serde_json::from_value::<EffectiveFollowSettings>(invalid).is_err());
+        }
+    }
 
     #[test]
     fn large_object_completion_fields_are_required_even_when_empty() {

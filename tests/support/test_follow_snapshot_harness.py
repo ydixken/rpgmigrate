@@ -57,11 +57,11 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
         point = 256 + number
         record = intent if create_loss else {"intent": intent, "consistent_point": point, "snapshot_token": "00000001-00000001-1"}
         native = {
-            "magic": "RPGMIGRATE", "format_version": 8, "run": run, "canonical_path": str(native_dir),
+            "magic": "RPGMIGRATE", "format_version": 10, "run": run, "canonical_path": str(native_dir),
             "directory_device": native_dir.stat().st_dev, "directory_inode": native_dir.stat().st_ino,
             "copy_complete": None, "target_provenance": [], "clone_state": None, "operator": None,
             "source_slot": {"phase": "provisioning" if create_loss else "confirmed", "record": record},
-            "follow_state": {"cleanup": None, "origin_name": None, "binding": None, "restart": None,
+            "follow_state": {"effective_settings": {"durability": "durable", "barrier_interval_ms": None, "apply_group_txns": 100, "limits": {"channel_bytes": 8388608, "channel_messages": 1024, "max_message_bytes": 16777216, "group_rows": 10000, "group_bytes": 8388608}}, "cleanup": None, "origin_name": None, "binding": None, "restart": None,
                              "preliminary": {"source": {"identity": stream["source"], "timeline": 1, "major": self.context["server_version_num"] // 10000}, "generation": 1, "tables": [{"source_oid": 42, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id", "value"], "all_columns": ["id", "value"], "identity_modes": [97, 0], "partition_identity_modes": None}]},
                              "publication": {"phase": "confirmed", "intent": {"run": run, "name": publication["name"], "nonce": [number + 40] * 16}, "receipt": publication}},
         }
@@ -117,27 +117,84 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
         self.records()
         fixture.validate_follow_snapshot_faults(self.context)
 
-    def test_candidate_native_format_is_explicit_and_relay_checks_it(self):
-        value = self.phase("source_finish_unknown")
-        path = Path(value["native_path"])
-        native = json.loads(path.read_text())
+    def relay_state(self, value):
         relay_state = relay.Relay.__new__(relay.Relay)
-        relay_state.native_path = path
+        relay_state.native_path = Path(value["native_path"])
         relay_state.context = self.context
         relay_state.source_identity = value["stream"]["source"]
         relay_state.source_timeline = 1
         relay_state.publication_name = value["publication"]["name"]
         relay_state.slot_name = value["slot"]["name"]
-        for version in (8, 9):
+        return relay_state
+
+    def test_candidate_native_format_is_explicit_and_relay_checks_it(self):
+        value = self.phase("source_finish_unknown")
+        path = Path(value["native_path"])
+        native = json.loads(path.read_text())
+        relay_state = self.relay_state(value)
+        for version in (10,):
             native["format_version"] = version
             path.write_text(json.dumps(native))
             fixture.validate_phase(value, self.context, value["case"], value["phase"])
             self.assertEqual(relay_state.native()[0]["format_version"], version)
-        for version in (7, 10, 999, True, 9.0):
+        for version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 999, True, 10.0):
             native["format_version"] = version
             path.write_text(json.dumps(native))
-            with self.subTest(version=version), self.assertRaises(AssertionError):
-                relay_state.native()
+            with self.subTest(version=version):
+                with self.assertRaises(AssertionError):
+                    relay_state.native()
+                with self.assertRaises(AssertionError):
+                    fixture.validate_phase(value, self.context, value["case"], value["phase"])
+
+    def test_m9_native_settings_are_required_and_strict_before_resource_evidence(self):
+        value = self.phase("source_finish_unknown")
+        path = Path(value["native_path"])
+        native = json.loads(path.read_text())
+        valid = native["follow_state"]["effective_settings"]
+        relay_state = self.relay_state(value)
+        for mode, cadence in (("durable", None), ("replay-safe", 100)):
+            candidate = copy.deepcopy(native)
+            candidate["follow_state"]["effective_settings"].update(durability=mode, barrier_interval_ms=cadence)
+            path.write_text(json.dumps(candidate))
+            fixture.validate_phase(value, self.context, value["case"], value["phase"])
+            relay_state.native()
+        invalid = [None, {}, {**valid, "unknown": 1}]
+        invalid.extend({key: item for key, item in valid.items() if key != missing} for missing in valid)
+        for key, bad in (("durability", "relaxed"), ("durability", "Durable"),
+                         ("barrier_interval_ms", 1), ("apply_group_txns", 0),
+                         ("apply_group_txns", True), ("apply_group_txns", 1.0),
+                         ("apply_group_txns", 2**64), ("limits", None)):
+            invalid.append({**valid, key: bad})
+        for cadence in (None, 0, -1, True, 1.0, 2**64):
+            invalid.append({**valid, "durability": "replay-safe", "barrier_interval_ms": cadence})
+        for key, maximum in valid["limits"].items():
+            for bad in (0, True, 1.0, maximum + 1):
+                invalid.append({**valid, "limits": {**valid["limits"], key: bad}})
+            invalid.append({**valid, "limits": {name: item for name, item in valid["limits"].items() if name != key}})
+        invalid.append({**valid, "limits": {**valid["limits"], "extra": 1}})
+        for settings in invalid:
+            candidate = copy.deepcopy(native)
+            candidate["follow_state"]["effective_settings"] = settings
+            path.write_text(json.dumps(candidate))
+            with self.subTest(settings=settings):
+                with self.assertRaises(AssertionError):
+                    fixture.validate_phase(value, self.context, value["case"], value["phase"])
+                with self.assertRaises(AssertionError):
+                    relay_state.native()
+        encoded = json.dumps(native)
+        duplicate = encoded.replace('"apply_group_txns": 100', '"apply_group_txns": 100,"apply_group_txns": 23')
+        self.assertNotEqual(duplicate, encoded)
+        path.write_text(duplicate)
+        with self.assertRaises(AssertionError):
+            fixture.validate_phase(value, self.context, value["case"], value["phase"])
+        with self.assertRaises(AssertionError):
+            relay_state.native()
+        del native["follow_state"]["effective_settings"]
+        path.write_text(json.dumps(native))
+        with self.assertRaises(AssertionError):
+            fixture.validate_phase(value, self.context, value["case"], value["phase"])
+        with self.assertRaises(AssertionError):
+            relay_state.native()
 
     def test_fault_inventory_rejects_missing_extra_duplicate_and_pending_records(self):
         records = self.records()
@@ -212,12 +269,12 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             path.write_text(json.dumps(bad))
             with self.subTest(missing=field), self.assertRaises(AssertionError):
                 fixture.validate_phase(value, self.context, value["case"], value["phase"])
-        for key, bad_value in (("format_version", 4), ("format_version", 5), ("format_version", 6), ("format_version", 7), ("format_version", 10), ("format_version", True), ("format_version", 9.0), ("copy_complete", {}),
+        for key, bad_value in (("format_version", 4), ("format_version", 5), ("format_version", 6), ("format_version", 7), ("format_version", 8), ("format_version", 9), ("format_version", True), ("format_version", 10.0), ("copy_complete", {}),
                                ("target_provenance", [{}]), ("clone_state", {}), ("run", [0] * 16)):
             path.write_text(json.dumps({**native, key: bad_value}))
             with self.subTest(key=key), self.assertRaises(AssertionError):
                 fixture.validate_phase(value, self.context, value["case"], value["phase"])
-        for field in ("origin_name", "binding", "restart", "preliminary", "publication", "cleanup"):
+        for field in ("effective_settings", "origin_name", "binding", "restart", "preliminary", "publication", "cleanup"):
             bad = copy.deepcopy(native)
             del bad["follow_state"][field]
             path.write_text(json.dumps(bad))

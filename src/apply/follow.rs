@@ -6,10 +6,13 @@ use super::checkpoint::{
     CompletedFollow, DrainWitness, DurableProof, RecoveryStart, SafeFeedback, TargetAuthority,
 };
 use super::serial::{Caches, event_bytes, refusal};
-use super::{CommitOutcome, Frontier};
+use super::{Checkpoint, CommitOutcome, Frontier};
 use crate::catalog;
 use crate::cdc::contracts::{Begin, Commit, Event, FollowMessage};
-use crate::contracts::{FollowBinding, FollowOptions, IoControl, OwnedCopyTable, Result};
+use crate::contracts::{
+    DurabilityMode, EffectiveFollowSettings, FollowBinding, FollowOptions, IoControl,
+    OwnedCopyTable, Result,
+};
 use crate::follow::channel::{FeedbackSender, FollowReceiver};
 use crate::identity::{SourceEndLsn, TxId, TxSeq};
 use crate::pg::{PgConnection, operation_control};
@@ -24,6 +27,7 @@ const CERTIFY_INTERVAL: Duration = Duration::from_secs(10);
 )]
 pub(crate) fn run(
     options: &FollowOptions,
+    settings: &EffectiveFollowSettings,
     binding: &FollowBinding,
     native: &mut NativeState,
     source_confirmed_flush: SourceEndLsn,
@@ -34,10 +38,7 @@ pub(crate) fn run(
     request_keepalive: &AtomicBool,
     io: &IoControl,
 ) -> Result<CompletedFollow> {
-    options.limits.validate()?;
-    if options.apply_group_txns == 0 {
-        return Err(refusal("follow apply: group transaction limit is zero"));
-    }
+    settings.validate()?;
     control.validate_active(io)?;
     if control.follow().binding != *binding {
         return Err(refusal(
@@ -64,16 +65,47 @@ pub(crate) fn run(
     let mut caches = Caches::new();
     let mut replay_relations = Vec::new();
     let mut pending = None;
+    let mut pending_barrier = None;
     let mut last_certification = None;
     let mut requested = None;
     loop {
         check(io)?;
         read_request(control, &mut requested, request_keepalive, io)?;
+        if let Some(proof) =
+            synchronize_pending(&mut pending_barrier, Instant::now(), false, |checkpoint| {
+                authority.barrier(
+                    Some(&checkpoint.applied),
+                    checkpoint.barrier_epoch,
+                    &operation_control(io),
+                )
+            })?
+        {
+            publish(proof, feedback, &mut durable_floor)?;
+        }
+        let wait = pending_barrier.as_ref().map_or(POLL, |pending| {
+            POLL.min(pending.due.saturating_duration_since(Instant::now()))
+        });
         let message = match pending.take() {
             Some(message) => message,
-            None => match input.recv_timeout(POLL) {
+            None => match input.recv_timeout(wait) {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(proof) = synchronize_pending(
+                        &mut pending_barrier,
+                        Instant::now(),
+                        false,
+                        |checkpoint| {
+                            authority.barrier(
+                                Some(&checkpoint.applied),
+                                checkpoint.barrier_epoch,
+                                &operation_control(io),
+                            )
+                        },
+                    )? {
+                        publish(proof, feedback, &mut durable_floor)?;
+                    }
+                    continue;
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(refusal("follow apply: receiver closed"));
                 }
@@ -112,6 +144,8 @@ pub(crate) fn run(
                         options,
                         control,
                         feedback,
+                        &mut pending_barrier,
+                        &mut durable_floor,
                         io,
                     )? {
                         authority.close(&operation_control(io))?;
@@ -126,7 +160,7 @@ pub(crate) fn run(
                     previous,
                     &mut caches,
                     &mut replay_relations,
-                    options,
+                    settings,
                     binding,
                     &owned,
                     input,
@@ -134,6 +168,8 @@ pub(crate) fn run(
                     control,
                     &mut requested,
                     request_keepalive,
+                    &mut pending_barrier,
+                    &mut durable_floor,
                     io,
                 )?;
             }
@@ -141,10 +177,20 @@ pub(crate) fn run(
                 wal_end,
                 decoder_idle: true,
             } => {
+                if let Some(proof) =
+                    synchronize_pending(&mut pending_barrier, Instant::now(), true, |checkpoint| {
+                        authority.barrier(
+                            Some(&checkpoint.applied),
+                            checkpoint.barrier_epoch,
+                            &operation_control(io),
+                        )
+                    })?
+                {
+                    publish(proof, feedback, &mut durable_floor)?;
+                }
                 match certify_keepalive(
                     wal_end,
                     request.as_ref().map(EndposRequest::end),
-                    authority.applied(),
                     &mut durable_floor,
                     &mut last_certification,
                     |candidate| {
@@ -165,6 +211,8 @@ pub(crate) fn run(
                             options,
                             control,
                             feedback,
+                            &mut pending_barrier,
+                            &mut durable_floor,
                             io,
                         )? {
                             authority.close(&operation_control(io))?;
@@ -191,7 +239,7 @@ fn apply_group(
     previous: Option<Frontier>,
     caches: &mut Caches,
     replay_relations: &mut Vec<Event>,
-    options: &FollowOptions,
+    settings: &EffectiveFollowSettings,
     binding: &FollowBinding,
     owned: &[OwnedCopyTable],
     input: &FollowReceiver,
@@ -199,6 +247,8 @@ fn apply_group(
     control: &ControlHandle,
     requested: &mut Option<SourceEndLsn>,
     request_keepalive: &AtomicBool,
+    pending_barrier: &mut Option<PendingBarrier>,
+    durable_floor: &mut SourceEndLsn,
     io: &IoControl,
 ) -> Result<Option<FollowMessage>> {
     let request = read_request(control, requested, request_keepalive, io)?;
@@ -211,6 +261,7 @@ fn apply_group(
     {
         return Ok(Some(FollowMessage::Begin(first)));
     }
+    let due = group_deadline(settings, pending_barrier.as_ref(), Instant::now())?;
     let mut target = authority.begin_group(&operation_control(io))?;
     for relation in replay_relations.drain(..) {
         caches.event(
@@ -289,9 +340,10 @@ fn apply_group(
                 last = Some(next);
                 count += 1;
                 if request.is_some()
-                    || count >= options.apply_group_txns
-                    || rows >= options.limits.group_rows
-                    || bytes >= options.limits.group_bytes
+                    || count >= settings.apply_group_txns
+                    || rows >= settings.limits.group_rows
+                    || bytes >= settings.limits.group_bytes
+                    || close_group_due(active.is_some(), due, Instant::now())
                 {
                     break None;
                 }
@@ -322,8 +374,33 @@ fn apply_group(
         ));
     }
     read_request(control, requested, request_keepalive, io)?;
-    let proof = committed_group(caches.commit(target, &operation_control(io))?, last)?;
-    publish(proof, feedback)?;
+    let outcome = caches.commit(target, settings.durability, &operation_control(io))?;
+    let checkpoint = match &outcome {
+        CommitOutcome::Acknowledged { checkpoint, .. } => Some(*checkpoint),
+        CommitOutcome::Unknown => None,
+    };
+    match committed_group(outcome, last, settings.durability)? {
+        Some(proof) => {
+            publish(proof, feedback, durable_floor)?;
+            *pending_barrier = None;
+        }
+        None => note_async_commit(
+            pending_barrier,
+            checkpoint.ok_or_else(|| refusal("follow apply: acknowledged checkpoint is absent"))?,
+            due.ok_or_else(|| refusal("follow apply: asynchronous group has no barrier deadline"))?,
+        ),
+    }
+    if let Some(proof) =
+        synchronize_pending(pending_barrier, Instant::now(), false, |checkpoint| {
+            authority.barrier(
+                Some(&checkpoint.applied),
+                checkpoint.barrier_epoch,
+                &operation_control(io),
+            )
+        })?
+    {
+        publish(proof, feedback, durable_floor)?;
+    }
     Ok(pending)
 }
 
@@ -370,6 +447,8 @@ fn try_complete(
     options: &FollowOptions,
     control: &ControlHandle,
     feedback: &FeedbackSender,
+    pending_barrier: &mut Option<PendingBarrier>,
+    durable_floor: &mut SourceEndLsn,
     io: &IoControl,
 ) -> Result<Option<CompletedFollow>> {
     check(io)?;
@@ -393,9 +472,8 @@ fn try_complete(
     };
     check(io)?;
     let proof = authority.record_drain(&sealed, witness, &operation_control(io))?;
-    if let Some(safe) = proof.feedback() {
-        feedback.publish(safe)?;
-    }
+    clear_covered_pending(pending_barrier, &proof)?;
+    publish(proof, feedback, durable_floor)?;
     let mut source = PgConnection::connect(&options.clone.source, &operation_control(io))
         .map_err(|error| crate::endpoint_error(error, crate::contracts::ErrorKind::Source))?;
     catalog::configure_session(&mut source, &operation_control(io))?;
@@ -411,22 +489,100 @@ fn try_complete(
     Ok(Some(completed))
 }
 
-fn committed_group(outcome: CommitOutcome, last: Option<Frontier>) -> Result<DurableProof> {
+fn committed_group(
+    outcome: CommitOutcome,
+    last: Option<Frontier>,
+    durability: DurabilityMode,
+) -> Result<Option<DurableProof>> {
     match outcome {
         CommitOutcome::Acknowledged {
             checkpoint,
-            durable: Some(proof),
+            durable,
         } => {
             check_group_checkpoint(&checkpoint, last)?;
-            Ok(proof)
-        }
-        CommitOutcome::Acknowledged { durable: None, .. } => {
-            Err(refusal("follow apply: group lacks durable proof"))
+            if let Some(proof) = &durable {
+                check_covering_proof(proof, &checkpoint)?;
+            }
+            if durable.is_none() && durability == DurabilityMode::Durable {
+                return Err(refusal("follow apply: group lacks durable proof"));
+            }
+            Ok(durable)
         }
         CommitOutcome::Unknown => Err(refusal(
             "follow apply: target COMMIT outcome unknown; recovery required",
         )),
     }
+}
+
+struct PendingBarrier {
+    checkpoint: Checkpoint,
+    due: Instant,
+}
+
+fn group_deadline(
+    settings: &EffectiveFollowSettings,
+    pending: Option<&PendingBarrier>,
+    now: Instant,
+) -> Result<Option<Instant>> {
+    if let Some(pending) = pending {
+        return Ok(Some(pending.due));
+    }
+    settings
+        .barrier_interval_ms
+        .map(|interval| {
+            now.checked_add(Duration::from_millis(interval))
+                .ok_or_else(|| refusal("follow apply: barrier deadline is not representable"))
+        })
+        .transpose()
+}
+
+fn close_group_due(transaction_open: bool, due: Option<Instant>, now: Instant) -> bool {
+    !transaction_open && due.is_some_and(|due| now >= due)
+}
+
+fn note_async_commit(pending: &mut Option<PendingBarrier>, checkpoint: Checkpoint, due: Instant) {
+    match pending {
+        Some(pending) => pending.checkpoint = checkpoint,
+        None => *pending = Some(PendingBarrier { checkpoint, due }),
+    }
+}
+
+fn check_covering_proof(proof: &DurableProof, checkpoint: &Checkpoint) -> Result<()> {
+    if proof.stream() != checkpoint.stream
+        || proof.frontier() != Some(&checkpoint.applied)
+        || proof.barrier_epoch() != checkpoint.barrier_epoch
+        || proof.barrier_counter() < checkpoint.barrier_counter
+    {
+        return Err(refusal(
+            "follow apply: durability proof does not cover committed checkpoint",
+        ));
+    }
+    Ok(())
+}
+
+fn synchronize_pending(
+    pending: &mut Option<PendingBarrier>,
+    now: Instant,
+    force: bool,
+    barrier: impl FnOnce(&Checkpoint) -> Result<DurableProof>,
+) -> Result<Option<DurableProof>> {
+    let Some(current) = pending.as_ref() else {
+        return Ok(None);
+    };
+    if !force && now < current.due {
+        return Ok(None);
+    }
+    let proof = barrier(&current.checkpoint)?;
+    clear_covered_pending(pending, &proof)?;
+    Ok(Some(proof))
+}
+
+fn clear_covered_pending(pending: &mut Option<PendingBarrier>, proof: &DurableProof) -> Result<()> {
+    if let Some(current) = pending.as_ref() {
+        check_covering_proof(proof, &current.checkpoint)?;
+    }
+    *pending = None;
+    Ok(())
 }
 
 fn ordered_drain_witness(
@@ -592,7 +748,6 @@ enum KeepaliveAction {
 fn certify_keepalive(
     candidate: SourceEndLsn,
     requested: Option<SourceEndLsn>,
-    applied: Option<Frontier>,
     floor: &mut SourceEndLsn,
     last: &mut Option<Instant>,
     certify: impl FnOnce(SourceEndLsn) -> Result<SafeFeedback>,
@@ -607,10 +762,7 @@ fn certify_keepalive(
     ) {
         return Ok(KeepaliveAction::Drain(witness));
     }
-    // A queued idle marker can trail the COMMIT that was just made durable.
-    if candidate <= (*floor).max(applied.map_or(SourceEndLsn(0), |frontier| frontier.end))
-        || last.is_some_and(|last| last.elapsed() < CERTIFY_INTERVAL)
-    {
+    if candidate <= *floor || last.is_some_and(|last| last.elapsed() < CERTIFY_INTERVAL) {
         return Ok(KeepaliveAction::Wait);
     }
     let safe = certify(candidate)?;
@@ -619,11 +771,13 @@ fn certify_keepalive(
     Ok(KeepaliveAction::Feedback(safe))
 }
 
-fn publish(proof: DurableProof, feedback: &FeedbackSender) -> Result<()> {
+fn publish(proof: DurableProof, feedback: &FeedbackSender, floor: &mut SourceEndLsn) -> Result<()> {
     let safe = proof
         .feedback()
         .ok_or_else(|| refusal("follow apply: durability proof has no feedback authority"))?;
-    feedback.publish(safe)
+    feedback.publish(safe)?;
+    *floor = (*floor).max(safe.end());
+    Ok(())
 }
 fn configure(connection: &mut PgConnection, io: &IoControl) -> Result<()> {
     catalog::configure_session(connection, io)?;

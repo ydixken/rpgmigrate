@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cdc::contracts::Plugin;
 use crate::contracts::{
-    ClonePlan, CopyGeneration, CopyReport, Error, ErrorKind, IoControl, MAX_SNAPSHOT_TOKEN_BYTES,
-    OperatorIdentity, OwnedCopyTable, OwnedObject, Result, RunId, SnapshotTicket, StateAction,
-    StateIdentity, StateRequest,
+    ClonePlan, CopyGeneration, CopyReport, DurabilityMode, EffectiveFollowSettings, Error,
+    ErrorKind, FollowLimits, IoControl, MAX_SNAPSHOT_TOKEN_BYTES, OperatorIdentity, OwnedCopyTable,
+    OwnedObject, Result, RunId, SnapshotTicket, StateAction, StateIdentity, StateRequest,
 };
 use crate::identity::{SourceEndLsn, StreamId};
 
@@ -171,7 +171,7 @@ pub(crate) enum TargetProvenance {
 const MANIFEST: &CStr = c"manifest.json";
 const TEMP: &CStr = c".manifest.tmp";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-const FORMAT_VERSION: u32 = 9;
+const FORMAT_VERSION: u32 = 10;
 const MAX_TARGET_PROVENANCE: usize = 1;
 pub(crate) const TARGET_METADATA_VERSION: u32 = 7;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
@@ -397,6 +397,7 @@ impl NativeState {
     ) -> Result<SourceSlotIntent> {
         binding.validate(self.identity.run)?;
         let mut next = self.checked_manifest()?;
+        next.require_follow_settings()?;
         let restarting = next
             .follow_state
             .as_ref()
@@ -502,6 +503,7 @@ impl NativeState {
     ) -> Result<ProvisioningIntent> {
         binding.validate(self.identity.run)?;
         let mut next = self.checked_manifest()?;
+        next.require_follow_settings()?;
         if let Some(record) = next.target_provenance.first() {
             if let TargetProvenance::Provisioning(intent) = record
                 && intent.binding == binding
@@ -717,6 +719,19 @@ impl TargetProvenance {
 }
 
 impl Manifest {
+    fn require_follow_settings(&self) -> Result<()> {
+        if self
+            .follow_state
+            .as_ref()
+            .is_some_and(|follow| follow.effective_settings.is_none())
+        {
+            return Err(bad_state(
+                "state-settings: follow settings must precede resource intent",
+            ));
+        }
+        Ok(())
+    }
+
     fn is_init_only(&self) -> bool {
         self.copy_complete.is_none()
             && self.target_provenance.is_empty()
@@ -725,6 +740,9 @@ impl Manifest {
     }
 
     fn validate_provenance(&self) -> Result<()> {
+        if let Some(follow) = &self.follow_state {
+            follow.validate_settings(self)?;
+        }
         if self.target_provenance.len() > MAX_TARGET_PROVENANCE {
             return Err(bad_state(
                 "state-provenance: this slice permits only one unique target stream",
@@ -1285,7 +1303,7 @@ mod tests {
 
     #[test]
     fn clone_state_uses_new_explicit_native_and_target_formats() {
-        assert_eq!(FORMAT_VERSION, 9);
+        assert_eq!(FORMAT_VERSION, 10);
         assert_eq!(TARGET_METADATA_VERSION, 7);
     }
 
@@ -1298,7 +1316,10 @@ mod tests {
         ] {
             let tmp = TempDir::new();
             drop(tmp.create());
-            change_manifest(&tmp.path(), |value| value["format_version"] = json!(8));
+            change_manifest(&tmp.path(), |value| {
+                value["format_version"] = json!(9);
+                value.as_object_mut().unwrap().remove("follow_state");
+            });
             refusal(&tmp.path(), action, "state-version:");
         }
     }
@@ -1309,7 +1330,7 @@ mod tests {
         let state = tmp.create();
         let value = manifest(&tmp.path());
         assert_eq!(value["magic"], "RPGMIGRATE");
-        assert_eq!(value["format_version"], 9);
+        assert_eq!(value["format_version"], 10);
         assert_eq!(value["canonical_path"], tmp.path().to_str().unwrap());
         assert_eq!(value["run"].as_array().unwrap().len(), 16);
         assert_ne!(value["run"], json!(vec![0; 16]));
@@ -1319,7 +1340,7 @@ mod tests {
         assert_eq!(value.get("clone_state"), Some(&Value::Null));
         assert_eq!(value.get("operator"), Some(&Value::Null));
         assert_eq!(state.identity().canonical_path, tmp.path());
-        assert_eq!(state.identity().format_version, 9);
+        assert_eq!(state.identity().format_version, 10);
         assert_eq!(value["run"], json!(state.identity().run.0));
         let directory = fs::metadata(tmp.path()).unwrap();
         assert_eq!(value["directory_inode"], directory.ino());
@@ -1456,7 +1477,7 @@ mod tests {
     fn unknown_version_is_rejected_before_restart() {
         let tmp = TempDir::new();
         drop(tmp.create());
-        change_manifest(&tmp.path(), |value| value["format_version"] = json!(10));
+        change_manifest(&tmp.path(), |value| value["format_version"] = json!(11));
         refusal(&tmp.path(), StateAction::Restart, "state-version:");
     }
 
@@ -1892,7 +1913,7 @@ mod tests {
                 };
                 intent["binding"]["metadata_version"] = json!(version);
             });
-            assert_eq!(manifest(&tmp.path())["format_version"], 9);
+            assert_eq!(manifest(&tmp.path())["format_version"], 10);
             recovery_refusal(&tmp.path(), "state-provenance:");
             for action in [
                 StateAction::Create,
@@ -2136,7 +2157,7 @@ mod tests {
 
     #[test]
     fn recovery_refuses_v1_and_unknown_versions_without_conversion() {
-        for version in [1, 2, 3, 4, 5, 6, 7, 8, 10] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
             let tmp = TempDir::new();
             drop(tmp.create());
             change_manifest(&tmp.path(), |value| {
@@ -2157,7 +2178,7 @@ mod tests {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(recovered.identity().format_version, 9);
+        assert_eq!(recovered.identity().format_version, 10);
     }
 
     #[test]
@@ -3188,7 +3209,7 @@ mod tests {
         for action in [StateAction::Resume, StateAction::Restart] {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
-        for version in [1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, u32::MAX] {
             change_manifest(&tmp.path(), |value| {
                 value["format_version"] = json!(version);
                 value.as_object_mut().unwrap().remove("source_slot");

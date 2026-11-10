@@ -2270,6 +2270,369 @@ fn follow_frontier(stream: StreamId, order: u64, end: u64) -> Frontier {
     }
 }
 
+struct M9Fixture {
+    _native: NativeState,
+    authority: TargetAuthority,
+    observer: PgConnection,
+    table: String,
+    binding: FollowBinding,
+    previous: DurableProof,
+}
+
+fn m9_fixture(case: &str, mut target: PgConnection, io: &IoControl) -> M9Fixture {
+    let mut native = state();
+    let stream = stream_for(&native);
+    let mut observer = connection(io);
+    let table = format!("public.authority_m9_{case}");
+    command(
+        &mut observer,
+        &format!("CREATE TABLE {table}(id integer PRIMARY KEY,value integer)"),
+        "CREATE TABLE",
+        io,
+    )
+    .unwrap();
+    command(
+        &mut observer,
+        &format!("INSERT INTO {table} VALUES (1,0)"),
+        "INSERT 0 1",
+        io,
+    )
+    .unwrap();
+    command(
+        &mut target,
+        "SET synchronous_commit=remote_apply",
+        "SET",
+        io,
+    )
+    .unwrap();
+    let mut authority = TargetAuthority::acquire(target, stream, &mut native, io).unwrap();
+    let binding = install_test_follow(&mut authority, io);
+    let mut tx = authority.begin_group(io).unwrap();
+    tx.prepare(
+        "m9_update",
+        &format!("UPDATE ONLY {table} SET value=$1 WHERE id=1"),
+        &[23],
+        io,
+    )
+    .unwrap();
+    tx.execute_prepared("m9_update", &[PgParam::Text(b"1")], io)
+        .unwrap();
+    tx.advance(follow_frontier(stream, 1, 100)).unwrap();
+    let CommitOutcome::Acknowledged {
+        durable: Some(previous),
+        ..
+    } = tx.commit(io).unwrap()
+    else {
+        panic!("M9 fixture has no preceding positive durable COMMIT")
+    };
+    M9Fixture {
+        _native: native,
+        authority,
+        observer,
+        table,
+        binding,
+        previous,
+    }
+}
+
+fn m9_async_group(fixture: &mut M9Fixture, io: &IoControl) -> Checkpoint {
+    let stream = fixture.binding.stream();
+    let checkpoint_table = qualified(&mut fixture.observer, &fixture.authority.provenance);
+    let before = fixture.authority.row.clone();
+    let mut tx = fixture.authority.begin_group(io).unwrap();
+    tx.pipeline(
+        io,
+        |pipeline| pipeline.execute_prepared("m9_update", &[PgParam::Text(b"2")], io),
+        |index, result| {
+            assert_eq!(index, 0);
+            assert_eq!(result.rows(), 0);
+            assert_eq!(result.command_tag()?, "UPDATE 1");
+            Ok(())
+        },
+    )
+    .unwrap();
+    let joint = format!(
+        "SELECT applied_order,(SELECT value FROM ONLY {} WHERE id=1) \
+         FROM ONLY {checkpoint_table}",
+        fixture.table
+    );
+    let observed = fixture.observer.query(&joint, io).unwrap();
+    assert_eq!(observed.cell(0, 0).unwrap(), Some(b"1".as_slice()));
+    assert_eq!(observed.cell(0, 1).unwrap(), Some(b"1".as_slice()));
+    tx.advance(follow_frontier(stream, 2, 200)).unwrap();
+    let CommitOutcome::Acknowledged {
+        checkpoint,
+        durable: None,
+    } = tx
+        .commit_pipeline(
+            DurabilityMode::ReplaySafe,
+            io,
+            |_| Ok(()),
+            |_, _| panic!("checkpoint-only pipeline returned a data result"),
+        )
+        .unwrap()
+    else {
+        panic!("asynchronous data COMMIT was not acknowledged without proof")
+    };
+    assert_eq!(checkpoint.applied, follow_frontier(stream, 2, 200));
+    assert_eq!(checkpoint.barrier_counter, before.barrier_counter + 1);
+    assert_eq!(checkpoint.barrier_epoch, before.barrier_epoch);
+    assert_eq!(fixture.authority.checkpoint(io).unwrap(), Some(checkpoint));
+    let observed = fixture.observer.query(&joint, io).unwrap();
+    assert_eq!(observed.cell(0, 0).unwrap(), Some(b"2".as_slice()));
+    assert_eq!(observed.cell(0, 1).unwrap(), Some(b"2".as_slice()));
+    assert_eq!(
+        fixture.previous.feedback().unwrap().end(),
+        SourceEndLsn(100)
+    );
+    checkpoint
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_m9_async_group_visible_without_safe_feedback() {
+    let io = control();
+    let mut fixture = m9_fixture("visible", connection(&io), &io);
+    m9_async_group(&mut fixture, &io);
+    assert_eq!(
+        fixture
+            .authority
+            .session
+            .connection()
+            .unwrap()
+            .query("SHOW synchronous_commit", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap(),
+        Some(b"remote_apply".as_slice())
+    );
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_m9_barrier_covers_async_checkpoint() {
+    let io = control();
+    let mut fixture = m9_fixture("barrier", connection(&io), &io);
+    let checkpoint = m9_async_group(&mut fixture, &io);
+    let proof = fixture
+        .authority
+        .barrier(Some(&checkpoint.applied), checkpoint.barrier_epoch + 1, &io)
+        .unwrap();
+    assert_eq!(proof.frontier(), Some(&checkpoint.applied));
+    assert_eq!(proof.barrier_epoch(), checkpoint.barrier_epoch + 1);
+    assert_eq!(proof.barrier_counter(), checkpoint.barrier_counter + 1);
+    assert_eq!(proof.feedback().unwrap().end(), SourceEndLsn(200));
+    assert_eq!(
+        fixture.previous.feedback().unwrap().end(),
+        SourceEndLsn(100)
+    );
+    let observed =
+        metadata::read_only(&mut fixture.observer, &fixture.authority.provenance, &io).unwrap();
+    assert_eq!(observed.applied, Some(checkpoint.applied));
+    assert_eq!(observed.barrier_epoch, proof.barrier_epoch());
+    assert_eq!(observed.barrier_counter, proof.barrier_counter());
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_m9_unknown_async_commit_requires_recovery() {
+    let io = control();
+    let mut fault = Fault::start("follow_m9_async_commit");
+    let mut fixture = m9_fixture("unknown", fault.connect(&io), &io);
+    let cached = fixture.authority.row.clone();
+    let checkpoint_table = qualified(&mut fixture.observer, &fixture.authority.provenance);
+    let mut tx = fixture.authority.begin_group(&io).unwrap();
+    tx.advance(follow_frontier(fixture.binding.stream(), 2, 200))
+        .unwrap();
+    fault.request("arm");
+    let outcome = tx
+        .commit_pipeline(
+            DurabilityMode::ReplaySafe,
+            &io,
+            |pipeline| pipeline.execute_prepared("m9_update", &[PgParam::Text(b"2")], &io),
+            |index, result| {
+                assert_eq!(index, 0);
+                assert_eq!(result.command_tag()?, "UPDATE 1");
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, CommitOutcome::Unknown));
+    assert!(matches!(fixture.authority.session.phase, Phase::Poisoned));
+    assert_eq!(fixture.authority.row, cached);
+    assert!(fixture.authority.checkpoint(&io).is_err());
+    assert_eq!(
+        fixture.previous.feedback().unwrap().end(),
+        SourceEndLsn(100)
+    );
+    fault.require_held();
+    let observed = fixture
+        .observer
+        .query(
+            &format!(
+                "SELECT applied_order,(SELECT value FROM ONLY {} WHERE id=1) \
+                 FROM ONLY {checkpoint_table}",
+                fixture.table
+            ),
+            &io,
+        )
+        .unwrap();
+    assert_eq!(observed.cell(0, 0).unwrap(), Some(b"2".as_slice()));
+    assert_eq!(observed.cell(0, 1).unwrap(), Some(b"2".as_slice()));
+    let mut limited = control();
+    limited.deadline = Instant::now() + Duration::from_millis(200);
+    assert!(
+        fixture
+            .authority
+            .reacquire(connection(&io), &limited)
+            .is_err()
+    );
+    fault.require_held();
+    fault.release();
+    fixture.authority.reacquire(connection(&io), &io).unwrap();
+    let recovered = fixture
+        .authority
+        .recover_follow(&fixture.binding, SourceEndLsn(100), &io)
+        .unwrap();
+    assert_eq!(recovered.start_lsn(), SourceEndLsn(200));
+    fault.finish();
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness with exclusive SyncRep settings"]
+fn follow_m9_sync_warning_never_proves_prefix() {
+    let io = control();
+    let context_path = PathBuf::from(std::env::var_os("RPGMIGRATE_TEST_CONTEXT").unwrap());
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(context_path).unwrap()).unwrap();
+    let token = context["token"].as_str().unwrap();
+    let root = PathBuf::from(context["root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+        token
+    );
+    let admin_info = Conninfo::new(
+        std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").expect("owned admin required"),
+    )
+    .unwrap();
+    let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+    assert_eq!(
+        admin
+            .query("SELECT pg_catalog.current_setting('cluster_name')", &io)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap(),
+        Some(token.as_bytes())
+    );
+    command(&mut admin, "SET synchronous_commit=off", "SET", &io).unwrap();
+    let mut fixture = m9_fixture("warning", connection(&io), &io);
+    let checkpoint = m9_async_group(&mut fixture, &io);
+    let cached = fixture.authority.row.clone();
+    let pid = fixture.authority.session.pid;
+    let policy = |admin: &mut PgConnection, sql: &str, expected: &[u8]| {
+        command(admin, sql, "ALTER SYSTEM", &io).unwrap();
+        admin
+            .query("SELECT pg_catalog.pg_reload_conf()", &io)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if admin
+                .query("SHOW synchronous_standby_names", &io)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                == Some(expected)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owned SyncRep policy did not reload"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        command(admin, "CHECKPOINT", "CHECKPOINT", &io).unwrap();
+    };
+    let cancellation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        policy(
+            &mut admin,
+            "ALTER SYSTEM SET synchronous_standby_names='FIRST 1 (rpgmigrate_m9_missing_standby)'",
+            b"FIRST 1 (rpgmigrate_m9_missing_standby)",
+        );
+        let cancel_info = admin_info.clone();
+        let cancel_io = io.clone();
+        let cancel = std::thread::spawn(move || {
+            let mut observer = PgConnection::connect(&cancel_info, &cancel_io).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "M9 SyncRep wait was not observed"
+                );
+                let wait = observer
+                    .query(
+                        &format!("SELECT wait_event='SyncRep' AND query='COMMIT' FROM pg_catalog.pg_stat_activity WHERE pid={pid}"),
+                        &cancel_io,
+                    )
+                    .unwrap();
+                assert_eq!(wait.rows(), 1);
+                if wait.cell(0, 0).unwrap() == Some(b"t".as_slice()) {
+                    let cancelled = observer
+                        .query(
+                            &format!("SELECT pg_catalog.pg_cancel_backend({pid})"),
+                            &cancel_io,
+                        )
+                        .unwrap();
+                    assert_eq!(cancelled.cell(0, 0).unwrap(), Some(b"t".as_slice()));
+                    eprintln!(
+                        "m9-sync-warning diagnostic pid={pid} wait=SyncRep query=COMMIT cancel=true"
+                    );
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let result =
+            fixture
+                .authority
+                .barrier(Some(&checkpoint.applied), checkpoint.barrier_epoch + 1, &io);
+        cancel
+            .join()
+            .expect("M9 SyncRep cancellation was not observed");
+        assert_eq!(
+            result.unwrap_err().message,
+            "target-authority: barrier COMMIT outcome unknown"
+        );
+        assert!(matches!(fixture.authority.session.phase, Phase::Poisoned));
+        assert_eq!(fixture.authority.row, cached);
+        assert_eq!(
+            fixture.previous.feedback().unwrap().end(),
+            SourceEndLsn(100)
+        );
+    }));
+    policy(
+        &mut admin,
+        "ALTER SYSTEM RESET synchronous_standby_names",
+        b"",
+    );
+    if let Err(panic) = cancellation {
+        std::panic::resume_unwind(panic);
+    }
+    let observed =
+        metadata::read_only(&mut fixture.observer, &fixture.authority.provenance, &io).unwrap();
+    assert_eq!(observed.applied, Some(checkpoint.applied));
+    assert_eq!(observed.barrier_counter, checkpoint.barrier_counter + 1);
+    fixture.authority.reacquire(connection(&io), &io).unwrap();
+    assert_eq!(
+        fixture
+            .authority
+            .recover_follow(&fixture.binding, SourceEndLsn(100), &io)
+            .unwrap()
+            .start_lsn(),
+        SourceEndLsn(200)
+    );
+}
+
 struct IdentityRewriteFixture {
     _native: NativeState,
     authority: TargetAuthority,
@@ -2603,6 +2966,7 @@ fn follow_identity_rewrite_cas_failure_rolls_back() {
     .unwrap();
     tx.advance(follow_frontier(fixture.stream, 2, 200)).unwrap();
     let result = tx.commit_pipeline(
+        DurabilityMode::Durable,
         &io,
         |pipeline| {
             pipeline.query(
@@ -2703,6 +3067,7 @@ fn follow_streamed_group_is_atomic_and_checkpointed_once() {
         durable: Some(proof),
     } = tx
         .commit_pipeline(
+            DurabilityMode::Durable,
             &io,
             |pipeline| {
                 pipeline.execute_prepared("follow_group_insert", &[PgParam::Text(b"2")], &io)
@@ -2758,6 +3123,7 @@ fn follow_streamed_group_is_atomic_and_checkpointed_once() {
         );
         let outcome = if pipelined {
             tx.commit_pipeline(
+                DurabilityMode::Durable,
                 &io,
                 |_| Ok(()),
                 |_, _| panic!("checkpoint-only group returned a data result"),
@@ -2815,7 +3181,12 @@ fn follow_cas_failure_rolls_back_dml_and_feedback() {
         &io,
     )
     .unwrap();
-    for commit_escape in [false, true] {
+    for (durability, commit_escape) in [
+        (DurabilityMode::Durable, false),
+        (DurabilityMode::Durable, true),
+        (DurabilityMode::ReplaySafe, false),
+        (DurabilityMode::ReplaySafe, true),
+    ] {
         let mut native = state();
         let stream = stream_for(&native);
         let mut authority =
@@ -2831,6 +3202,7 @@ fn follow_cas_failure_rolls_back_dml_and_feedback() {
             format!("UPDATE ONLY {table} SET barrier_counter = barrier_counter + 1")
         };
         let result = tx.commit_pipeline(
+            durability,
             &io,
             |pipeline| {
                 pipeline.query("INSERT INTO public.authority_follow_cas VALUES (1)", &io)?;
@@ -3086,6 +3458,7 @@ fn follow_cancelled_sync_wait_never_proves_group_or_certification() {
                 tx.advance(follow_frontier(stream, 1, 100)).unwrap();
                 let outcome = tx
                     .commit_pipeline(
+                        DurabilityMode::Durable,
                         &io,
                         |pipeline| {
                             pipeline
@@ -3215,6 +3588,9 @@ fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAutho
         io,
     )
     .unwrap();
+    native
+        .resolve_follow_settings(None, None, crate::contracts::FollowLimits::default())
+        .unwrap();
     let schema = format!(
         "m3_reset_{}",
         native
@@ -3525,6 +3901,9 @@ fn cutover_fixture(io: &IoControl) -> CutoverFixture {
         io,
     )
     .unwrap();
+    native
+        .resolve_follow_settings(None, None, crate::contracts::FollowLimits::default())
+        .unwrap();
     let mut source = named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", io);
     let mut target = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io);
     let schema = format!(

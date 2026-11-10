@@ -384,6 +384,7 @@ fn completion(
             progress.work.as_ref(),
             progress.phase,
             &progress.copy,
+            None,
         );
     }
     let value = serde_json::json!({
