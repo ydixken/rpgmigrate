@@ -503,3 +503,8 @@ Do not use `reset --hard`, `clean`, or broad restoration to recover isolation.
 
 Check each descriptor media type before calling a digest a manifest.
 The retained multiarch node `099e` is an index and ARM child `10210` is the archive manifest; preserve older evidence and do not invent a conversion.
+
+## Preserve safe setup failure identity, 2026-11-10
+
+Retain structured setup-failure identity and writer provenance before discarding raw subprocess output.
+Keep credential-bearing raw output discarded, and report an unknown assertion as unknown until independent evidence identifies it.

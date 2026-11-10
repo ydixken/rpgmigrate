@@ -704,7 +704,7 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 ### Evidence checkpoint, 2026-11-10
 
 Production native admission still returns `UnsupportedEngine`; no actual native operator workflow is qualified.
-The accepted operator source checkpoint is signed `cf22e84d15002f272715707b8ed6d7d89b9ddf5f`, tree `c66790dbdefe997103352f19e36217e518641dbd`; its conditional fast-forward from `0346f9e` verified a clean authoritative checkout before and after integration.
+The accepted operator source checkpoint is signed `93bd54c557d70ed2daa7be3120ea093b31cc93cf`, tree `a0739a53ca5edcc816e1904bdb87df3b6bb3a691`; its conditional fast-forward from `cf22e84` verified a clean authoritative checkout before and after integration.
 Five signed completion commits add helper receipts (`30686fa`), evidence retention (`50be291`), cleaned completion (`d937958`), follow/E/ACK dependency composition (`d87c920`), and plain-clone completion/verification (`6a27266`).
 Each prefix compiled and passed scoped lint with zero findings, with byte-identical qualified final-tree evidence reused where recorded.
 Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json`, SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
@@ -733,10 +733,11 @@ Native runner-profile Task 1/Task 2 packets are frozen with passing component ch
 Canonical NSS/resolver guards and `UnsupportedEngine` remain closed; production runner-profile qualification, three-pair native acceptance, broad Go gates, and the whole-M6 review remain open.
 Actual Kubernetes TERM and the full native lifecycle remain unqualified.
 
-The canonical policy preparation retains a resolver parameter and refuses nonempty `sslkeylogfile`; 57 Python tests, focused Go race checks, and scoped lint passed.
-This export is not integrated, and its resolver policy still unconditionally refuses.
+Canonical policy preparation is integrated in `93bd54c`: retained resolver arguments and nonempty `sslkeylogfile` refusal passed 90 Python tests, eighteen native race checks, five focused controller checks, builds, and scoped lint.
+Its resolver policy still unconditionally refuses; source integration grants no runtime activation.
 A separate active-CRI metadata candidate replaces disk-dump authority in source work only; no positive authentication/runtime proof or NRI/configuration change follows.
 Preparatory proof: `/tmp/rpgmigrate-m6-canonical-policy-prep-export-20261110/manifest.json`, SHA-256 `ddb33db698f06a018db125f3b421c7c5e75a2f12fabc96a219f1912853377e24`.
+Joined checkpoint proof: `/tmp/rpgmigrate-m6-policy-joined-checkpoint-proof-20261110.json`, SHA-256 `3b13946d655e373e025ae199f93826116189fcca05073610e3a7f268da20472b`.
 
 The bounded actual metadata probe refused before Jobs: `containerd config dump` exited zero with 394 stderr bytes, and the frozen metadata policy rejected any stderr before parsing.
 Exactly one owned namespace was removed and verified absent; no Jobs, Pods, or Secrets were created, and authentication/TLS Step 2 remained unstarted.
@@ -974,7 +975,12 @@ Proof: `/private/var/tmp/rpgmigrate-m7-unused-volume-safety-c3anxbon/final-candi
 Exact retirement of the failed `f59a7f4b` S2 and three nodes passed, including process/cgroup absence, preservation of all 212 volumes and 395 preexisting images, and protection of four original services.
 The narrow retirement-only exception preserved the historical sticky handoff event and grants no runtime-health adoption.
 The separate six-volume cleanup passed without force or generic pruning; its exact final proof retains the bounded implicit-network metadata exception.
-A fresh `b5` RUN has started under the fixed 2026-11-10 06:30:27.495346–08:30:27.495346 UTC lease; LOAD and subsequent legacy/native workflow acceptance remain open.
+The fresh `b5` RUN passed all eighteen LOAD entries in 693.867 seconds and valid bootstrap, then its Go gate failed before any selected spec and without authenticated manager-version evidence.
+The frozen error path discarded the exact failing assertion, so its cause remains unknown.
+The failed workflow is preserved under the fixed 2026-11-10 06:30:27.495346–08:30:27.495346 UTC lease; no retry, retirement, or probe is qualified by this result.
+A safe-observability successor has passing focused source checks and lint, with independent reproduction and integration still pending.
+Failed Go proof: `/private/var/tmp/rpgmigrate-m7-declared-legacy-gate-vdjrkezj/final-failed-Go-proof.json`, SHA-256 `281aaeae83376c7c6c6f77efcf485ef6b806ccef6e19715538bf0d9963410990`.
+Observability successor source SHA-256: `a9f16b40f5906877c9ac31f10f6ea35ac585a3d48d7bb3c6d1df9461012b3a5d`.
 Cleanup proof: `/private/var/tmp/rpgmigrate-m7-volume-cleanup-exec-npke035c/final-volume-cleanup-proof.json`, SHA-256 `a2ba5911eaff739a4ee4a326a9f642764af5b4177d9cbd26b36132d6c160c7b4`.
 Fresh RUN: `/private/var/tmp/rpgmigrate-m7-declared-run-qwttxyj7`, RunID `369add6677404cdd98b7e1e447f85045`; no legacy or native migration acceptance is recorded.
 Retirement proof: `/private/var/tmp/rpgmigrate-m7-f59-retirement-ty2tj0zn/retirement-handoff-manifest.json`, SHA-256 `14d39880a80841fbaf452a14a0f4346fdb5769eccec93a280abffe7a89726de1`.
@@ -1146,15 +1152,20 @@ The approved [M8 plan](../docs/superpowers/plans/2026-11-09-m8-feature-widening.
 No format/runtime gate or capability is qualified by this plan.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
 The root approved the Task 1 interface freeze; isolated state/CLI, catalog, authority, COPY/large-object, and phase/recovery owners are building against it.
-The first state patch passed formatting and Python compilation only; joined constructor integration and Rust qualification remain open.
+Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
+Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
+Compare/progress wiring is included, but actual large-object verification and physical-table full-part progress have source tests only.
+The separate seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; positive E2E profiles, authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
+Joined source proof: `/tmp/rpgmigrate-m8-joined-source-v5-20261110/verification-receipt.json`, SHA-256 `0a6219ec91c0d1a4d7b6800e78fdbd211fec314b17495b013a656faada328394`.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; PostgreSQL 18 nonbootstrap dependency-class assertions remain unqualified.
 PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases were removed and original resources preserved.
 TOC proof: `/tmp/rpgmigrate-m8-catalog-toc-20261110/0942b349889341e7/final-proof.json`, SHA-256 `79a302da68f236c733b23f8061f3f065e2097576c614d056b58327f87946c9e2`.
-Keep the live format 8 / metadata 6 profile separate from candidate format 9 / metadata 7; no integrated M8 source or passing joined Rust result is recorded.
+Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
+One coherent isolated M8 code/docs checkpoint is being prepared; no M8 source fast-forward to the engine primary or activation is authorized.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
-The approved `sha2` 0.11.1 dependency disables default features; pinned cargo-deny 0.20.2 passed actual-graph license, advisory, and yank gates against the 2026-11-09 database, while known-vector compilation remains pending.
+The approved `sha2` 0.11.1 dependency disables default features; pinned cargo-deny 0.20.2 passed actual-graph license, advisory, and yank gates against the 2026-11-09 database, and the v5 affected units now pass known-vector and chunk-boundary hashing checks.
 Approved interface: `/tmp/rpgmigrate-m8-contract-freeze-20261110/contract.md`, SHA-256 `d2ad26fe39e75414c6f475e84e8920a5496c54456e5e9a8ba882dc7c4ef56b8b`.
 
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
