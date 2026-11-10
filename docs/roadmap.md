@@ -96,8 +96,8 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
 > M6–M10 remain open: production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
-> VM preservation/resize maintenance and exact failed-run retirement passed; the `c275` successor passed fresh PREPARE/CHECK, while fresh UP/LOAD/legacy qualification remains open.
-> The 2026-11-10 checkpoints below record integrated owned-inventory source and fresh ARM packaging evidence, without native lifecycle/authentication/TLS/PVC or three-pair acceptance.
+> VM preservation/resize maintenance and exact failed-run retirement passed; `c275` passed fresh UP/CHECK and supervisor handover, then FAILED its first LOAD pair as recorded below.
+> The 2026-11-10 checkpoints below record the qualified operator source commits, retained-stop component, fresh ARM packaging, and M7 failure/fix evidence, without native lifecycle/authentication/TLS/PVC or three-pair acceptance.
 > Feature-branch pushes to origin for hosted CI, including M5/M10 native AMD64 checks, are user-authorized within the dated limits below.
 
 Remaining work follows the existing M6 production adapter and M7 operator E2E dependencies, using the accepted M5 packaging/CI evidence.
@@ -275,11 +275,16 @@ No tags, releases, or GHCR publication are authorized, and these checks do not c
 
 #### Evidence checkpoint, 2026-11-10
 
-The operator owned-inventory export is integrated and source-qualified at `4c580ff1be76a2603c9eb625bce3396c6cede914`.
-Production native admission still returns `UnsupportedEngine`; native lifecycle wiring and runtime qualification remain incomplete.
+The operator source checkpoint is clean at `9fd9061790f158ee8c65908113029ac667da68ba`, tree `53d2abe0385d28918d99d45cb71057dd24575739`.
+Four qualified commits add worker locale pinning (`73c8a9b`), owned cleanup builders (`35f4ae3`), informational sampling (`f1ca944`), and identity status fields (`9fd9061`); each intermediate tree compiled and passed scoped lint with zero findings.
+Proof: `/tmp/rpgmigrate-m6-ready-exports-composed-20261110/integrated-manifest.json`, SHA-256 `4709a0d229a45d59d0f59de328fec702b39bf22bc8144032f604fc9f0a276b25`.
+Production native admission still returns `UnsupportedEngine`; identity-receipt enforcement/TTL, retained stop, clone decoding, and follow/E/ACK wiring remain unintegrated build work.
 The root-approved interface freeze requires optional `nativeJobUID`/`nativePVCUID` fields as atomic known-create receipts, strict refusal to adopt when receipts are absent, and each invocation's Pod identity bound to the recorded Job/PVC.
-Native Job TTL remains unset until durable lifecycle completion; retained TERM handling must be followed by independently observed quiescence.
-These receipt/TTL/TERM requirements await implementation and qualification; they establish no runtime success.
+Native Job TTL must remain unset until durable lifecycle completion; retained TERM handling must be followed by independently observed quiescence.
+The retained-stop component export passed focused race tests and lint, but actual Kubernetes TERM remains unqualified.
+Proof: `/tmp/m6-retained-stop-export-20261110/manifest.json`, SHA-256 `1819a0f3f832e56fd23c256736282363d3b0253b2f095cf8d0bac9adba99f906`.
+The runner-profile qualification plan is `/Users/ydixken/.codex/tmp/2026-11-10-m6-runner-profile-qualification-tfhgdc6n.md`, SHA-256 `3b8e016d201b55197c8409c40a5922fff9d5ce3092924a8f11803a8d0a694e69`.
+Actual NSS, authentication/TLS, and three-pair acceptance remain open; image metadata is not runtime qualification.
 
 Fresh native ARM64 release packaging on engine `254ab5ba103bfe75a2e1dcd8acad0b9720e88ab8` passed with config `0c755f5e36f3fb88c9bd1ecaa53759d0a741271696b552633eec20fef9b674a9`, binary SHA-256 `4bded8d59ccef2cf73b7cc88e76ec8d9d626caf0b1fc96f879ac0be2bedc9803`, and selected manifest `5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1`.
 The actual image passed Linux-seven capability discovery and the UID 65532/read-only-rootfs smoke with stock libpq 18.6 and clients 16.15/18.6.
@@ -342,17 +347,24 @@ One independent whole-M6 review belongs at milestone close, and users retain wri
 
 #### Evidence checkpoint, 2026-11-10
 
-The corrected M7 component-qualifier API and exact image-alias fixes are composed in `/private/var/tmp/rpgmigrate-component-api-avwmu909/source`, source digest `c275c790cbe74795f08b0936e2bc3b12e3fb0273c39ac8424708df2956fd3cac`.
-This input passed 242 Python checks and retains the prior unchanged-input 151-check Go gate; those are source checks, not runtime workflow acceptance.
-Fresh PREPARE passed in 113.215 seconds and CHECK passed in 3.484 seconds on the new manager/archive/RUN.
-Proof: `/private/var/tmp/rpgmigrate-m7-component-api-preparation-5fre5jm0/final-artifact-packet.json`, SHA-256 `33b870064d96d327d5d5f8561a4a57fa08721afde0b4b6f9a2d81085ea0ca610`.
-The prepared RUN is `/private/var/tmp/rpgmigrate-m7-component-api-run-51rlqh3s`, RunID `7193d24a35e44a758cb9969cdf2937c8`; this proof establishes no UP, LOAD, observed manager runtime version, or legacy gate pass.
-Fresh UP/LOAD/legacy qualification is assigned and remains open.
-The failed historical run was retired by removing its exact three nodes and separately verified new unused volumes, preserving originals and retained failure evidence; its failed legacy gate remains FAILED.
+The M7 `c275` source passed fresh UP/CHECK and qualified supervisor handover after its retained PREPARE/CHECK success.
+Its first LOAD pair FAILED: default `ctr images tag` dropped labels and CRI retargeted the existing config-ID key from the prepared child manifest to its one-child archive index.
+No legacy or native migration test ran.
+Failure proof: `/private/var/tmp/rpgmigrate-m7-component-api-load-khjk5rqw/sealed-first-failure-manifest.json`, SHA-256 `31b5f259d277ad47c3ea83ea7916737bfa03d7fbe1cc4247598959eb5b72dada`.
+The `f410` source candidate uses the exact `--local` tag fix with the preservation contract unchanged and passed 246 Python tests.
+An independent experiment on an untouched node preserved all prior descriptors, labels, and the config-ID child key, adding exactly one expected alias.
+Experiment proof: `/private/var/tmp/rpgmigrate-m7-local-tag-experiment-24mmp_m9/final-experiment-proof.json`, SHA-256 `f024de59fd9f1564ac81ef1a2592f3c2f22debc1db9d9519c8d598393b7330ba`.
+A fresh workflow is authorized after retiring the exact old nodes/S2; it has not passed, and the historical LOAD failure remains FAILED.
 The capacity baseline is fourteen CPUs, 32 GiB memory, and 160 GiB disk; runtime admission still requires fresh capacity evidence.
-Benchmark execution remains unapproved, and feature-branch push authorization excludes main, tags, releases, and GHCR publication.
+M0–M5 remain closed and M6–M10 remain open.
+Benchmark execution remains on HOLD; approved feature-branch pushes exclude main, tags, releases, and GHCR publication.
 
 #### Retained bootstrap and failed-run evidence
+
+The earlier `c275` preparation used source `/private/var/tmp/rpgmigrate-component-api-avwmu909/source`, digest `c275c790cbe74795f08b0936e2bc3b12e3fb0273c39ac8424708df2956fd3cac`, with 242 Python checks and the retained unchanged-input 151-check Go gate.
+PREPARE passed in 113.215 seconds and CHECK in 3.484 seconds for RUN `/private/var/tmp/rpgmigrate-m7-component-api-run-51rlqh3s`, RunID `7193d24a35e44a758cb9969cdf2937c8`.
+Preparation proof: `/private/var/tmp/rpgmigrate-m7-component-api-preparation-5fre5jm0/final-artifact-packet.json`, SHA-256 `33b870064d96d327d5d5f8561a4a57fa08721afde0b4b6f9a2d81085ea0ca610`.
+The prior failed legacy RUN was retired through exact three-node and separately verified unused-volume removal, preserving originals and failure evidence; its legacy gate remains FAILED.
 
 First UP passed on the corrected 530-entry source `5cc72893`: three Ready nodes, API readyz, and verified aggregate caps of six CPUs/12 GiB.
 The frozen seven-role inventory is legacy PostgreSQL 17 only; native/PostgreSQL 16/18 entries are null placeholders, and this inventory does not establish M5 native-image qualification.
@@ -361,7 +373,7 @@ The original finite supervisor hit a read timeout during load; guarded DOWN corr
 The watcher was restored under the original deadline with a recorded 648.049941-second gap, then intentionally stopped before expiry when the blocked Loaded workflow was retired.
 Exact three-node container/process/cgroup removal is complete under standing approval; all 203 volumes, 339 images, immutable network properties, original four services, backups, source, and Loaded RUN evidence remain preserved, with actual CPU/RAM reservation released.
 The CHECK state-loss and storage index/child comparison fixes passed 189 source-level unit cases on frozen 530-entry source `5dcceda`; fresh PREPARE/CHECK passed on that corrected source, without a new UP or workflow qualification.
-The private S1/S2 handoff implementation `f57314` passed 33 fake controls only; live handover remains unqualified and no lease is renewed.
+The earlier private S1/S2 implementation `f57314` passed 33 fake controls only; the later `c275` checkpoint records qualified live supervisor handover.
 The approved [tracked kind-only Go pre-uninstall build-info hook](superpowers/plans/2026-11-09-m7-tracked-build-info-capture.md) supersedes the private observer implementation proposal and is included in the final source freeze; metrics permission remains unapplied.
 The final Go six-file packet `9fcb71e2` passed 160 source checks with zero lint; Python 198 and the guide are final.
 The final 532-entry dirty-source freeze `d5698bf5f130519336382828ecbfcf89995937df53730fb35537cca55de8897f` retains legacy provenance gaps; the full 31-path Git delta is neither committed nor lint-clean.
