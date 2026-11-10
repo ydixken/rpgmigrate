@@ -1,0 +1,106 @@
+name: Native ASAN preparation
+
+on:
+  push:
+    branches: [feat/m10-asan-preparation]
+    paths:
+      - .github/workflows/asan-prepare.yml
+      - tools/ci/ffi_asan_prepare.py
+      - tools/ci/test_ffi_asan_prepare.py
+      - tools/ci/ffi_asan.py
+      - tools/ci/ffi_asan_toolchain.toml
+      - tools/ci/verify.py
+      - tools/ci/test_verify.py
+      - Cargo.toml
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asan-preparation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'ydixken/rpgmigrate' && github.ref == 'refs/heads/feat/m10-asan-preparation'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare explicit sanitized artifact directory
+        run: |
+          umask 077
+          mkdir -m 0700 "$RUNNER_TEMP/asan-public-${{ matrix.architecture }}"
+      - name: Collect bounded native preparation without project compilation
+        env:
+          ASAN_PREP_TARGET: ${{ matrix.target }}
+          ASAN_PREP_ARCH: ${{ matrix.architecture }}
+        run: |
+          umask 077
+          sudo systemd-run --quiet --wait --collect --pipe \
+            --unit="asan-preparation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ASAN_PREP_ARCH}" \
+            --uid="$(id -u)" --gid="$(id -g)" --working-directory="$GITHUB_WORKSPACE" \
+            --property=CPUQuota=200% --property=MemoryMax=6G --property=MemorySwapMax=0 \
+            --property=TasksMax=512 --property=LimitCORE=0 --property=RuntimeMaxSec=2400 \
+            --property=Restart=no \
+            --property=UMask=0077 --property=KillMode=control-group --property=TimeoutStopSec=10 \
+            --setenv="RUNNER_TEMP=$RUNNER_TEMP" \
+            --setenv="ImageOS=$ImageOS" --setenv="ImageVersion=$ImageVersion" \
+            /usr/bin/python3 -I -B -W error tools/ci/ffi_asan_prepare.py \
+            --target "$ASAN_PREP_TARGET" \
+            --run-dir "$RUNNER_TEMP/asan-private-${ASAN_PREP_ARCH}" \
+            --receipt "$RUNNER_TEMP/asan-public-${ASAN_PREP_ARCH}/attempt.json"
+      - name: Validate sanitized attempt and exact artifact hashes
+        if: always()
+        id: evidence
+        run: |
+          /usr/bin/python3 -I -B -W error - <<'PYVALIDATE'
+          import json
+          import os
+          from pathlib import Path
+          import runpy
+          try:
+              helper = runpy.run_path("tools/ci/ffi_asan_prepare.py")
+              directory = Path(os.environ["RUNNER_TEMP"]) / "asan-public-${{ matrix.architecture }}"
+              attempt = json.loads((directory / "attempt.json").read_text())
+              helper["validate_attempt"](attempt)
+              if {path.name for path in directory.iterdir()} != set(attempt["artifacts"]) | {"attempt.json"}:
+                  raise SystemExit("unexpected preparation artifact")
+              if "public-provenance.json" in attempt["artifacts"]:
+                  public = json.loads((directory / "public-provenance.json").read_text())
+                  helper["validate_public_bundle"](public, directory / "public-provenance.tar")
+              if "provenance.json" not in attempt["artifacts"]:
+                  raise SystemExit("preparation provenance is missing")
+              for name, expected in attempt["artifacts"].items():
+                  if helper["sha256"](directory / name) != expected:
+                      raise SystemExit("sanitized preparation artifact changed")
+          except Exception:
+              raise SystemExit("sanitized preparation evidence unavailable or invalid") from None
+          PYVALIDATE
+      - name: Retain only explicit sanitized preparation evidence
+        if: always() && steps.evidence.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: asan-preparation-${{ matrix.architecture }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/asan-public-${{ matrix.architecture }}/attempt.json
+            ${{ runner.temp }}/asan-public-${{ matrix.architecture }}/graphs.json
+            ${{ runner.temp }}/asan-public-${{ matrix.architecture }}/provenance.json
+            ${{ runner.temp }}/asan-public-${{ matrix.architecture }}/third-party-licenses.json
+            ${{ runner.temp }}/asan-public-${{ matrix.architecture }}/public-provenance.json
+            ${{ runner.temp }}/asan-public-${{ matrix.architecture }}/public-provenance.tar
+          if-no-files-found: error
+          retention-days: 7
