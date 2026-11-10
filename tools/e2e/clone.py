@@ -3,6 +3,7 @@
 
 import argparse
 import ctypes
+from datetime import datetime
 import hashlib
 import io
 import json
@@ -905,6 +906,145 @@ class RuntimeGuard:
         entry["cgroup_verified"] = True
         entry["cgroup_limits"] = {"cpu_quota": quota, "cpu_period": period, "memory_bytes": memory}
 
+    def _create(self, command, expected, *, timeout=300):
+        if getattr(self, "_pending_creation", None) is not None or self._creation_unresolved():
+            raise RuntimeError("another resource creation remains pending")
+        fields = {"container": {"kind", "role", "image", "name", "mounts", "memory", "network"},
+                  "network": {"kind", "name"}, "image": {"kind", "tag"}}
+        kind = expected.get("kind")
+        if kind not in fields or set(expected) != fields[kind]:
+            raise RuntimeError("pending creation specification differs")
+        prefix = [self.runtime, "network", "create"] if kind == "network" else [self.runtime, "build" if kind == "image" else "create"]
+        if command[:len(prefix)] != prefix or "io.rpgmigrate.e2e=" + self.token not in command:
+            raise RuntimeError("pending creation command binding differs")
+        self.checkpoint()
+        identity = expected["tag" if kind == "image" else "name"]
+        if self.exists(kind, identity):
+            raise RuntimeError("fresh resource name or tag already exists")
+        projection = {**expected, "run": self.token, "absent_before": True, "status": "intent", "invoked_at": time.time(),
+                      "maximum_seconds": min(self.work_deadline - time.monotonic(), timeout)}
+        self.ledger["pending_creation"] = projection
+        pending = {"command": tuple(command), "expected": dict(expected), "projection": projection,
+                   "deadline": min(self.work_deadline, time.monotonic() + timeout)}
+        self._pending_creation = pending
+        try:
+            self.persist()
+            output = self.execute(command, timeout=timeout)
+            entry = self._admit_creation(output)
+            self.checkpoint()
+            return entry
+        except BaseException:
+            if "admitted" in pending:
+                pending["admitted"]["cleanup_only"] = True
+                projection["status"] = "cleanup_only"
+            else:
+                projection["status"] = "unresolved"
+                try:
+                    absent = not self.exists(kind, identity)
+                    for cid in pending.get("observed_ids", set()):
+                        absent = absent and not self.exists("container", cid)
+                    if absent:
+                        projection["status"] = "absent"
+                except Exception as error:
+                    projection["absence_error_kind"] = type(error).__name__
+            try:
+                self.persist()
+            except Exception as error:
+                projection["persistence_error_kind"] = type(error).__name__
+            raise
+        finally:
+            if not self._creation_unresolved():
+                self._pending_creation = None
+
+    def _creation_unresolved(self):
+        return self.ledger.get("pending_creation", {}).get("status") not in (None, "admitted", "cleanup_only", "absent")
+
+    def _created_container(self, cid):
+        pending = self._pending_creation
+        expected = pending["expected"]
+        if re.fullmatch(r"[a-f0-9]{64}", cid):
+            pending.setdefault("observed_ids", set()).add(cid)
+        if pending.get("candidate") not in (None, cid) or cid in self.baseline["external"]:
+            raise RuntimeError("pending container identity changed or predates creation")
+        entry = {key: value for key, value in expected.items() if key != "kind"}
+        entry["id"] = cid
+        actual = validate_owned_container(self.inspect(cid), entry, self.token, self.baseline["containers"])
+        state = actual.get("State", {})
+        zero = (None, "", "0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000000Z")
+        try:
+            created = datetime.fromisoformat(actual["Created"].replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                raise ValueError
+            created = created.timestamp()
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError("pending container creation time is unavailable") from None
+        upper = pending["projection"].get("started_at", pending["projection"]["invoked_at"]) + pending["projection"]["maximum_seconds"]
+        if (not pending["projection"]["invoked_at"] <= created <= min(time.time(), upper)
+                or state.get("Status") != "created" or state.get("Running") is not False
+                or type(state.get("Pid")) is not int or state["Pid"] != 0
+                or type(actual.get("RestartCount")) is not int or actual["RestartCount"] != 0
+                or state.get("StartedAt") not in zero or state.get("FinishedAt") not in zero):
+            raise RuntimeError("pending container is stale or has already started")
+        if expected["role"] in ("source", "target"):
+            networks = actual.get("NetworkSettings", {}).get("Networks") or {}
+            endpoint = networks.get(expected["network"]["name"], {})
+            if expected["role"] not in (endpoint.get("Aliases") or []):
+                raise RuntimeError("pending database role alias differs")
+        return entry, actual
+
+    def _observe_pending_container(self, cid):
+        pending = getattr(self, "_pending_creation", None)
+        if pending and time.monotonic() >= pending["deadline"]:
+            raise RuntimeError("pending creation command deadline expired")
+        if (not pending or pending["expected"]["kind"] != "container" or "admitted" in pending
+                or pending["projection"]["status"] != "active" or not pending.get("process")
+                or type(pending["projection"].get("pid")) is not int or pending["projection"]["pid"] <= 0
+                or pending["process"].pid != pending["projection"].get("pid") or pending["process"].poll() is not None):
+            raise RuntimeError("unknown container has no active bound creation")
+        _, actual = self._created_container(cid)
+        pending["candidate"] = cid
+        pending["projection"].update(candidate_id=cid, observation=container_snapshot(actual))
+        self.persist()
+        return actual
+
+    def _admit_creation(self, output):
+        pending = self._pending_creation
+        if "admitted" in pending:
+            if pending["receipt"] != output:
+                raise RuntimeError("resource creation receipt changed")
+            return pending["admitted"]
+        expected, projection = pending["expected"], pending["projection"]
+        if expected["kind"] == "container":
+            cid = output.decode().strip()
+            if not re.fullmatch(r"[a-f0-9]{64}", cid):
+                raise RuntimeError("fresh creation returned no single exact container identity")
+            _, actual = self._created_container(cid)
+            entry = self.retain_container(cid, expected["role"], expected["image"], expected["name"], expected["mounts"], expected["memory"], expected["network"], actual=actual)
+            entry["absent_before"] = True
+        elif expected["kind"] == "network":
+            receipt = output.decode().strip()
+            actual = json.loads(self.raw(["network", "inspect", expected["name"]]))[0]
+            entry = {"id": actual.get("id", actual.get("Id")), "name": expected["name"], "absent_before": True, "cleanup_status": "pending"}
+            if receipt not in (entry["name"], entry["id"]):
+                raise RuntimeError("fresh network creation result differs from inspected identity")
+            validate_owned_network(actual, entry, self.token, self.baseline["networks"], empty=True)
+            if self.raw(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"]).strip():
+                raise RuntimeError("fresh network has an unexpected filtered attachment")
+            entry["created_observation"] = network_snapshot(actual)
+            self.ledger["network"] = entry
+        else:
+            actual = json.loads(self.raw(["image", "inspect", expected["tag"]]))[0]
+            identity = image_identity(actual["Id"])
+            if identity in self.baseline["images"] or actual.get("Labels", {}).get("io.rpgmigrate.e2e") != self.token:
+                raise RuntimeError("built development image identity or run label differs")
+            entry = self.ledger["development_image"]
+            entry.update(id=identity, bytes=actual["Size"], architecture=actual["Architecture"])
+            self.ledger["admitted_images"].append(identity)
+        pending.update(admitted=entry, receipt=output)
+        projection.update(status="admitted", admitted_id=entry["id"])
+        self.persist()
+        return entry
+
 
     def sample(self):
         memory = self.raw(["machine", "ssh", "cat", "/proc/meminfo"])
@@ -936,8 +1076,14 @@ class RuntimeGuard:
             attached = sorted(actual["containers"])
             filtered = sorted(self.raw(["ps", "--all", "--filter", "network=" + network["id"], "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
             known = {entry["id"] for entry in self.ledger["containers"] if entry["role"] != "build"}
-            if set(attached).difference(known) or set(filtered).difference(known):
-                raise RuntimeError("owned network has a foreign container attachment")
+            unknown = set(attached).union(filtered).difference(known)
+            if unknown:
+                pending = getattr(self, "_pending_creation", None)
+                if pending and pending["expected"]["kind"] == "container":
+                    pending.setdefault("observed_ids", set()).update(cid for cid in unknown if re.fullmatch(r"[a-f0-9]{64}", cid))
+                if len(unknown) != 1:
+                    raise RuntimeError("owned network has a foreign container attachment")
+                self._observe_pending_container(next(iter(unknown)))
             network.setdefault("membership_observations", []).append({"at": time.time(), "attached_ids": attached, "filtered_ids": filtered})
         self.last_sample = time.monotonic()
         external = self.raw(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"], timeout=5).decode().splitlines()
@@ -962,6 +1108,13 @@ class RuntimeGuard:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         record = {"pid": process.pid, "kind": command[1] if Path(command[0]).name in ("podman", "docker") else Path(command[0]).name,
                   "started_at": time.time(), "maximum_seconds": deadline - started}
+        pending = getattr(self, "_pending_creation", None)
+        if pending and pending["command"] == tuple(command):
+            pending.update(process=process, deadline=deadline)
+            pending["projection"].update(status="active", pid=process.pid, started_at=record["started_at"], maximum_seconds=deadline - started)
+        else:
+            pending = None
+        failure, output = None, b""
         try:
             self.ledger.setdefault("processes", []).append(record)
             self.persist()
@@ -976,17 +1129,38 @@ class RuntimeGuard:
                     self.checkpoint()
             if process.returncode:
                 raise SubprocessFailure(private_failure("owned-runtime-subprocess", process.returncode, error, None, caller))
+            if pending:
+                self._admit_creation(output)
             self.checkpoint()
             return output
+        except BaseException as error:
+            failure = error
+            raise
         finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=min(5, max(.01, self.deadline - time.monotonic())))
+            try:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    output, _ = process.communicate(timeout=min(5, max(.01, self.deadline - time.monotonic())))
+                elif failure is not None and pending and not output:
+                    output, _ = process.communicate(timeout=min(5, max(.01, self.deadline - time.monotonic())))
+                if failure is not None and pending and pending["expected"]["kind"] != "image" and "admitted" not in pending and output:
+                    try:
+                        self._admit_creation(output)
+                        pending["admitted"]["cleanup_only"] = True
+                        pending["projection"]["status"] = "cleanup_only"
+                    except Exception as error:
+                        pending["projection"]["admission_error_kind"] = type(error).__name__
+            except Exception as error:
+                record["reaping_error_kind"] = type(error).__name__
+                if failure is None:
+                    raise
             record.update(returncode=process.returncode, finished_at=time.time())
             try:
                 self.persist()
-            except OSError:
+            except Exception:
                 record["ledger_write_failed"] = True
+                if failure is None:
+                    raise
 
     def exists(self, kind, identity):
         remaining = self.deadline - time.monotonic()
@@ -997,16 +1171,15 @@ class RuntimeGuard:
             raise RuntimeError("resource absence probe is unavailable")
         return result.returncode == 0
 
-    def retain_container(self, cid, role, image, name, mounts, memory, network=None):
+    def retain_container(self, cid, role, image, name, mounts, memory, network=None, *, actual=None):
         if not re.fullmatch(r"[a-f0-9]{64}", cid) or cid in self.baseline["containers"] or cid in self.baseline["external"]:
             raise RuntimeError("fresh owned creation returned no exact new container identity")
         entry = {"id": cid, "role": role, "image": image, "name": name, "mounts": mounts, "memory": memory, "network": network, "cleanup_status": "pending"}
-        self.ledger["containers"].append(entry)
-        self.persist()
-        actual = validate_owned_container(self.inspect(cid), entry, self.token, self.baseline["containers"])
+        actual = validate_owned_container(actual or self.inspect(cid), entry, self.token, self.baseline["containers"])
         entry["observed"] = container_snapshot(actual)
         entry["ownership_verified"] = True
-        self.persist()
+        self.ledger["containers"].append(entry)
+        # Creation admission fsyncs this entry together with its authoritative receipt.
         return entry
 
     def cleanup_container(self, entry):
@@ -1074,6 +1247,7 @@ class RuntimeGuard:
             self.ledger["preservation_verified"] = False
             self.ledger["preservation_error_kind"] = type(error).__name__
         self.ledger["cleanup_complete"] = (self.ledger.get("preservation_verified") is True
+            and not self._creation_unresolved()
             and all(entry.get("cleanup_status") == "absent" for entry in self.ledger["containers"])
             and ("network" not in self.ledger or self.ledger["network"].get("cleanup_status") == "absent"))
         self.persist()
@@ -1208,15 +1382,10 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                                                "effective_cgroup_status": "not_proven_for_ephemeral_image_build"}
         guard.ledger["stage"] = "development_image"
         guard.persist()
-        guard.execute([runtime, "build", "--jobs", "2", "--memory", "4g", *cpu_arguments, "--label", label,
-                       "--network", "private", "--tag", image, "--file", str(source_context / "tools/e2e/Containerfile"), str(source_context / "tools/e2e")], timeout=1200)
-        built = json.loads(guard.raw(["image", "inspect", image]))[0]
-        image_id = image_identity(built["Id"])
-        if image_id in guard.baseline["images"] or built.get("Labels", {}).get("io.rpgmigrate.e2e") != token:
-            raise RuntimeError("built development image identity or run label differs")
-        guard.ledger["development_image"].update(id=image_id, bytes=built["Size"], architecture=built["Architecture"])
-        guard.ledger["admitted_images"].append(image_id)
-        guard.persist()
+        built = guard._create([runtime, "build", "--jobs", "2", "--memory", "4g", *cpu_arguments, "--label", label,
+                              "--network", "private", "--tag", image, "--file", str(source_context / "tools/e2e/Containerfile"), str(source_context / "tools/e2e")],
+                             {"kind": "image", "tag": image}, timeout=1200)
+        image_id = built["id"]
         external = set(guard.raw(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
         unresolved = sorted(external.difference(guard.baseline["external"]))
         guard.ledger["unresolved_external_build_ids"] = unresolved
@@ -1228,18 +1397,19 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             name = token + "-" + role
             if guard.exists("container", name):
                 raise RuntimeError("fresh container name already exists")
-            cid = guard.execute([runtime, "create", "--name", name, "--image-volume=ignore", *arguments]).decode().strip()
-            entry = guard.retain_container(cid, role, image_id, name, mounts, memory, network=None if role == "build" else {"name": token, "id": network_id})
-            entry["absent_before"] = True
-            guard.persist()
+            entry = guard._create([runtime, "create", "--name", name, "--image-volume=ignore", *arguments],
+                                  {"kind": "container", "role": role, "image": image_id, "name": name, "mounts": mounts,
+                                   "memory": memory, "network": None if role == "build" else {"name": token, "id": network_id}})
+            cid = entry["id"]
             if timeout is None:
                 guard.execute([runtime, "start", cid])
                 return entry
             try:
                 return guard.execute([runtime, "start", "--attach", cid], timeout=timeout)
             finally:
+                failed = sys.exc_info()[0] is not None
                 guard.cleanup_container(entry)
-                if entry["cleanup_status"] != "absent":
+                if entry["cleanup_status"] != "absent" and not failed:
                     raise RuntimeError("exact owned " + role + " cleanup could not be verified")
         build_mounts = [(str(source_context), "/workspace", False), (str(cache), "/build", True), (str(cargo_cache), "/cargo", True)]
         fetch = ["--network", "pasta", "--memory", "4g", "--cpus", "2", "--label", label, "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--env", "CARGO_BUILD_JOBS=2",
@@ -1251,20 +1421,8 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             raise RuntimeError("source changed during source-bound debug build")
         if guard.exists("network", token):
             raise RuntimeError("fresh network name already exists")
-        created_network = guard.execute([runtime, "network", "create", "--internal", "--label", label, token]).decode().strip()
-        guard.ledger["network"] = {"id": "", "name": token, "absent_before": True, "cleanup_status": "pending"}
-        guard.persist()
-        actual_network = json.loads(guard.raw(["network", "inspect", token]))[0]
-        network_id = actual_network.get("id", "")
-        guard.ledger["network"]["id"] = network_id
-        guard.persist()
-        if created_network not in (token, network_id):
-            raise RuntimeError("fresh network creation result differs from inspected identity")
-        validate_owned_network(actual_network, guard.ledger["network"], token, guard.baseline["networks"], empty=True)
-        guard.ledger["network"]["created_observation"] = network_snapshot(actual_network)
-        guard.persist()
-        if guard.raw(["ps", "--all", "--filter", "network=" + network_id, "--no-trunc", "--format", "{{.ID}}"]).strip():
-            raise RuntimeError("fresh network has an unexpected filtered attachment")
+        network = guard._create([runtime, "network", "create", "--internal", "--label", label, token], {"kind": "network", "name": token})
+        network_id = network["id"]
         for role, major in zip(("source", "target"), args.pair.split("-")):
             guard.ledger["stage"] = role + "_start"
             guard.persist()
@@ -1356,6 +1514,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
         guard.ledger["failure"] = {"kind": type(error).__name__, "stage": guard.ledger.get("stage", "setup")}
         raise
     finally:
+        failed = sys.exc_info()[0] is not None
         try:
             smoke_path = private / "receipt/m8-smoke.json"
             if smoke_path.is_file() and not smoke_path.is_symlink():
@@ -1371,14 +1530,24 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             guard.ledger["build_smoke_unavailable"] = True
         try:
             guard.close()
-        finally:
+        except Exception as error:
+            guard.ledger["close_error_kind"] = type(error).__name__
+            if not failed:
+                raise
+        try:
             if (private_identity.get("absent_before") is True and private_identity.get("nonce") == token.rsplit("-", 1)[1]
                     and directory_identity(private) == {key: value for key, value in private_identity.items() if key not in ("nonce", "absent_before")}
+                    and guard.ledger.get("cleanup_complete") is True
+                    and not guard._creation_unresolved()
                     and all(entry.get("cleanup_status") == "absent" for entry in guard.ledger["containers"])):
                 shutil.rmtree(private)
             guard.ledger["private_removed"] = not private.exists() and not private.is_symlink()
             guard.ledger["secret_file_absent"] = guard.ledger["private_removed"]
             guard.persist()
+        except Exception as error:
+            guard.ledger["private_cleanup_error_kind"] = type(error).__name__
+            if not failed:
+                raise
     if not guard.ledger["cleanup_complete"] or not guard.ledger["private_removed"]:
         raise RuntimeError("exact owned cleanup or preservation could not be verified; inspect " + str(ledger_path))
     if feature_mode and (guard.ledger.get("build_smoke_unavailable") or guard.ledger.get("build_smoke") != report.get("build_smoke") or not guard.ledger.get("build_smoke")):

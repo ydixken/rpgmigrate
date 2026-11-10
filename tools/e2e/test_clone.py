@@ -2,7 +2,8 @@
 
 import importlib.util
 import copy
-from contextlib import closing
+from contextlib import closing, contextmanager, ExitStack
+from datetime import datetime, timezone
 import json
 import sqlite3
 import stat
@@ -360,12 +361,14 @@ class ModelRuntime:
                     networks[network_name] = {"NetworkID": network["id"], "Aliases": [role]}
             self.containers[cid] = {"Id": cid, "Name": name, "Image": image, "Config": {"Labels": {"io.rpgmigrate.e2e": label}, "Env": ["PASSWORD=must-not-persist"]},
                 "Mounts": mounts, "HostConfig": {"Memory": memory, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "pasta" if role == "build" else "bridge", "PortBindings": {}},
-                "NetworkSettings": {"Ports": {}, "Networks": networks}, "Created": "now", "RestartCount": 0, "State": {"Running": True, "Status": "running", "StartedAt": "2026-11-10T00:00:00Z", "FinishedAt": "zero", "Pid": 42}}
+                "NetworkSettings": {"Ports": {}, "Networks": networks}, "Created": datetime.fromtimestamp(harness.time.time(), timezone.utc).isoformat(), "RestartCount": 0,
+                "State": {"Running": False, "Status": "created", "StartedAt": "0001-01-01T00:00:00Z", "FinishedAt": "0001-01-01T00:00:00Z", "Pid": 0}}
             self.containers[cid]["model_role"] = role
             self.containers[cid]["model_pgdata"] = next((value[7:] for value in args if value.startswith("PGDATA=")), None)
             return cid.encode()
         if args[0] == "start":
             cid = args[-1]; actual = self.containers[cid]; role = actual["model_role"]
+            actual["State"].update(Running=True, Status="running", Pid=42, StartedAt=datetime.fromtimestamp(harness.time.time(), timezone.utc).isoformat())
             if role == "build":
                 cache = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/build"))
                 (cache / "debug").mkdir(); (cache / "debug/rpgmigrate").write_bytes(b"debug executable"); (cache / "debug/rpgmigrate").chmod(0o700)
@@ -420,6 +423,388 @@ class ModelRuntime:
         if len(argv)>3 and argv[1] == "exec" and argv[3] == "pg_isready":
             return subprocess.CompletedProcess(argv, 0, stdout=b"accepting connections", stderr=b"")
         raise AssertionError("unexpected modeled low-level subprocess")
+
+
+class CreationClock:
+    def __init__(self): self.now = 100.0
+    def monotonic(self): return self.now
+    def wall(self): return 1794300000.0 + self.now
+
+
+class CreationProcess:
+    def __init__(self, command, model, clock, role, boundary, pid):
+        self.command, self.clock, self.boundary = command, clock, boundary
+        self.pid, self.returncode, self.waited = pid, None, False
+        self.trigger = (command[1] == "create" and command[command.index("--name") + 1].endswith("-" + role)
+                        or role == "image" and command[1] == "build" or role == "network" and command[1:3] == ["network", "create"])
+        self.attached = command[1] == "start" and "--attach" in command
+        self.output = model.call(command)
+
+    def communicate(self, timeout):
+        if self.trigger and self.waited and self.boundary == "poll" and self.returncode is None:
+            self.clock.now += 5
+        if self.trigger and not self.waited:
+            self.waited = True
+            self.clock.now += 5
+            if self.boundary == "poll":
+                raise subprocess.TimeoutExpired(self.command, timeout)
+        if self.attached and not self.waited:
+            self.clock.now += 5
+            self.waited = True
+        self.returncode = 0 if self.returncode is None else self.returncode
+        return self.output, b""
+
+    def poll(self): return self.returncode
+
+
+class PendingCreationTests(unittest.TestCase):
+    @contextmanager
+    def creation(self, *, boundary="poll", effect=None, output=None, code=0, hang=False, reap_output=b""):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root, clock = Path(temporary).resolve(), CreationClock()
+            model = ModelRuntime(root)
+            model.networks["7"*64] = {"id": "7"*64, "name": "fresh", "internal": True, "driver": "bridge", "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {}}
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.token, guard.path = "podman", "fresh", root / "ledger.json"
+            guard.deadline, guard.work_deadline, guard.last_sample = 900, 600, clock.now
+            guard.baseline = {"containers": {}, "external": [], "images": {}, "networks": {}, "volumes": {}}
+            guard.ledger = {"containers": [], "samples": [], "admitted_images": [], "network": {"id": "7"*64, "name": "fresh", "cleanup_status": "pending"}}
+            guard.initial_capacity = {"vm_free": 40802189312, "host_free": 57*harness.GIB, "vm_available": 24*harness.GIB, "vm_cpus": 14}
+            expected = {"kind": "container", "role": "source", "image": "sha256:" + "1"*64, "name": "fresh-source", "mounts": [], "memory": harness.GIB, "network": {"name": "fresh", "id": "7"*64}}
+            command = ["podman", "create", "--name", "fresh-source", "--network", "fresh", "--network-alias", "source", "--label", "io.rpgmigrate.e2e=fresh", "--memory", "1g", "--cpus", "2", expected["image"]]
+            children = []
+            def launch(argv, **kwargs):
+                self.assertEqual(argv, command, "an unexpected subprocess escaped the fake creation boundary")
+                persisted = json.loads(guard.path.read_text())
+                self.assertEqual(persisted["pending_creation"]["status"], "intent")
+                child = CreationProcess(argv, model, clock, "source", boundary, 1000 + len(children))
+                if output is not None: child.output = output
+                original = child.communicate
+                def communicate(timeout):
+                    if effect is not None: effect(guard, model, clock, child)
+                    if hang and child.returncode is None:
+                        clock.now += min(5, timeout)
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    if child.returncode is not None and hang:
+                        return reap_output, b""
+                    result = original(timeout)
+                    if child.returncode == 0: child.returncode = code
+                    return result
+                child.communicate = communicate
+                children.append(child)
+                return child
+            def terminate(pid, sig):
+                self.assertEqual(pid, children[-1].pid)
+                self.assertEqual(sig, harness.signal.SIGKILL)
+                children[-1].returncode = -sig
+            stack.enter_context(patch.object(harness.RuntimeGuard, "__init__", side_effect=AssertionError("real admission constructor forbidden")))
+            stack.enter_context(patch.object(harness, "ROOT", root))
+            stack.enter_context(patch.object(harness, "DIAGNOSTIC_ROOT", root / "diagnostics"))
+            stack.enter_context(patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*harness.GIB)))
+            stack.enter_context(patch.object(harness.time, "monotonic", side_effect=clock.monotonic))
+            stack.enter_context(patch.object(harness.time, "time", side_effect=clock.wall))
+            stack.enter_context(patch.object(harness, "run", side_effect=model.call))
+            stack.enter_context(patch.object(harness.subprocess, "run", side_effect=model.subprocess))
+            stack.enter_context(patch.object(harness.subprocess, "Popen", side_effect=launch))
+            stack.enter_context(patch.object(harness.os, "killpg", side_effect=terminate))
+            yield guard, model, clock, command, expected, children
+
+    def test_pending_candidate_specification_and_never_started_state_are_closed(self):
+        mutations = {
+            "nonce": lambda x: x["Config"]["Labels"].update({"io.rpgmigrate.e2e": "foreign"}),
+            "image": lambda x: x.update(Image="sha256:" + "2"*64), "name": lambda x: x.update(Name="foreign"),
+            "mount": lambda x: x["Mounts"].append({"Type": "bind", "Source": "/foreign", "Destination": "/data", "RW": True}),
+            "memory": lambda x: x["HostConfig"].update(Memory=0), "cpu": lambda x: x["HostConfig"].update(NanoCpus=0),
+            "network": lambda x: x["NetworkSettings"]["Networks"]["fresh"].update(NetworkID="8"*64),
+            "alias": lambda x: x["NetworkSettings"]["Networks"]["fresh"].update(Aliases=["target"]),
+            "stale": lambda x: x.update(Created="2000-01-01T00:00:00Z"),
+            "future": lambda x: x.update(Created="2100-01-01T00:00:00Z"),
+            "running": lambda x: x["State"].update(Running=True), "status": lambda x: x["State"].update(Status="running"),
+            "pid": lambda x: x["State"].update(Pid=42), "boolean_pid": lambda x: x["State"].update(Pid=False),
+            "started": lambda x: x["State"].update(StartedAt="2026-11-10T00:00:00Z"),
+            "finished": lambda x: x["State"].update(FinishedAt="2026-11-10T00:00:00Z"), "restarts": lambda x: x.update(RestartCount=1),
+        }
+        for name, mutate in mutations.items():
+            def effect(guard, model, clock, child): mutate(model.containers["a"*64])
+            with self.subTest(fault=name), self.creation(effect=effect, output=b"") as (guard, model, _, command, expected, children):
+                with self.assertRaises(RuntimeError): guard._create(command, expected)
+                self.assertFalse(guard.ledger["containers"])
+                self.assertEqual(guard.ledger["pending_creation"]["status"], "unresolved")
+                self.assertFalse(model.removed)
+                self.assertIsNotNone(children[0].returncode)
+
+    def test_wrong_missing_multiple_and_replaced_receipts_never_own_candidates(self):
+        for receipt in (b"", b"a"*12, b"b"*64, b"a"*64 + b"\n" + b"b"*64):
+            with self.subTest(receipt=receipt), self.creation(output=receipt) as (guard, model, _, command, expected, _):
+                with self.assertRaises((RuntimeError, KeyError)): guard._create(command, expected)
+                self.assertFalse(guard.ledger["containers"])
+                self.assertFalse(model.removed)
+                self.assertTrue(guard._creation_unresolved())
+
+    def test_foreign_peer_in_either_network_inventory_is_never_explained(self):
+        for channel in ("endpoint", "filtered"):
+            def effect(guard, model, clock, child):
+                if channel == "endpoint": model.networks["7"*64]["containers"]["f"*64] = {}
+            with self.subTest(channel=channel), self.creation(effect=effect, output=b"") as (guard, model, _, command, expected, _):
+                raw = guard.raw
+                def probe(arguments, **kwargs):
+                    result = raw(arguments, **kwargs)
+                    return result + b"\n" + b"f"*64 if channel == "filtered" and arguments[0] == "ps" and "--filter" in arguments else result
+                with patch.object(guard, "raw", side_effect=probe), self.assertRaises(RuntimeError): guard._create(command, expected)
+                self.assertFalse(model.removed)
+                self.assertFalse(guard.ledger["containers"])
+
+    def test_partial_creation_without_receipt_remains_unresolved_and_untouched(self):
+        for mode in ("nonzero", "timeout"):
+            with self.subTest(mode=mode), self.creation(output=b"", code=9 if mode == "nonzero" else 0, hang=mode == "timeout") as (guard, model, _, command, expected, children):
+                with self.assertRaises(RuntimeError): guard._create(command, expected, timeout=10)
+                self.assertFalse(guard.ledger["containers"])
+                self.assertTrue(guard._creation_unresolved())
+                guard.close()
+                self.assertFalse(guard.ledger["cleanup_complete"])
+                self.assertFalse(model.removed)
+                self.assertIn("a"*64, model.containers)
+                self.assertIsNotNone(children[0].returncode)
+
+    def test_authoritative_receipt_after_failure_grants_cleanup_only(self):
+        for mode in ("nonzero", "timeout", "capacity", "deadline", "persist"):
+            def effect(guard, model, clock, child):
+                if mode == "capacity": model.fault = "capacity"
+                if mode == "deadline": clock.now = guard.work_deadline + 1
+            with self.subTest(mode=mode), self.creation(effect=effect, code=9 if mode == "nonzero" else 0, hang=mode == "timeout", reap_output=b"a"*64) as (guard, model, _, command, expected, children):
+                deadlines = guard.work_deadline, guard.deadline
+                persist = guard.persist
+                def store():
+                    if mode == "persist" and guard.ledger.get("pending_creation", {}).get("status") == "admitted":
+                        raise OSError("modeled durable admission failure")
+                    persist()
+                with patch.object(guard, "persist", side_effect=store), self.assertRaises(RuntimeError if mode != "persist" else OSError):
+                    guard._create(command, expected, timeout=10)
+                self.assertEqual(len(guard.ledger["containers"]), 1)
+                self.assertTrue(guard.ledger["containers"][0]["cleanup_only"])
+                self.assertFalse(any(argv[1] == "start" for argv in model.commands))
+                self.assertEqual(len(children), 1)
+                self.assertEqual((guard.work_deadline, guard.deadline), deadlines)
+                guard.cleanup_container(guard.ledger["containers"][0])
+                self.assertEqual(model.removed, ["a"*64])
+
+    def test_only_the_live_bound_child_can_explain_a_provisional_candidate(self):
+        for fault in ("second", "pid", "inactive", "expired", "baseline", "external", "crash"):
+            def effect(guard, model, clock, child):
+                pending = guard._pending_creation
+                if fault == "second": guard._create(child.command, pending["expected"])
+                if fault == "pid": pending["projection"]["pid"] += 1
+                if fault == "inactive": pending["projection"]["status"] = "intent"
+                if fault == "expired": pending["deadline"] = clock.now
+                if fault == "baseline": guard.baseline["containers"]["a"*64] = {}
+                if fault == "external": guard.baseline["external"].append("a"*64)
+                if fault == "crash": guard._pending_creation = None
+            with self.subTest(fault=fault), self.creation(effect=effect, output=b"") as (guard, model, _, command, expected, children):
+                with self.assertRaises(RuntimeError): guard._create(command, expected)
+                self.assertEqual(len(children), 1)
+                self.assertFalse(guard.ledger["containers"])
+                self.assertFalse(model.removed)
+
+    def test_candidate_identity_and_receipt_are_pinned_idempotently(self):
+        def replace(guard, model, clock, child):
+            if child.waited:
+                model.containers["b"*64] = model.containers.pop("a"*64)
+                model.containers["b"*64]["Id"] = "b"*64
+                model.networks["7"*64]["containers"] = {"b"*64: {}}
+                child.output = b"b"*64
+        with self.creation(effect=replace) as (guard, model, _, command, expected, _):
+            with self.assertRaisesRegex(RuntimeError, "identity changed"): guard._create(command, expected)
+            self.assertFalse(guard.ledger["containers"])
+            self.assertEqual(guard.ledger["pending_creation"]["candidate_id"], "a"*64)
+            self.assertFalse(model.removed)
+        def changed(guard, model, clock, child):
+            if child.waited: model.containers["a"*64]["HostConfig"]["Memory"] = 0
+        with self.creation(effect=changed) as (guard, model, _, command, expected, _):
+            with self.assertRaisesRegex(RuntimeError, "caps"): guard._create(command, expected)
+            self.assertFalse(guard.ledger["containers"])
+            self.assertFalse(model.removed)
+        with self.creation() as (guard, _, _, command, expected, _):
+            admit = guard._admit_creation
+            def repeated(output):
+                entry = admit(output)
+                self.assertIs(admit(output), entry)
+                with self.assertRaisesRegex(RuntimeError, "receipt changed"): admit(b"b"*64)
+                return entry
+            with patch.object(guard, "_admit_creation", side_effect=repeated):
+                entry = guard._create(command, expected)
+            self.assertEqual(guard.ledger["containers"], [entry])
+
+    def test_positive_absence_resolves_without_deletion_and_unavailable_probe_does_not(self):
+        for fault in (None, "unavailable", "ambiguous"):
+            def effect(guard, model, clock, child):
+                model.containers.clear()
+                model.networks["7"*64]["containers"].clear()
+            with self.subTest(fault=fault), self.creation(effect=effect, output=b"", code=9, boundary="return") as (guard, model, _, command, expected, _):
+                probe = model.subprocess
+                def exists(argv, **kwargs):
+                    if fault and children_started[0] and argv[1] == "container":
+                        if fault == "unavailable": raise OSError("unavailable")
+                        return subprocess.CompletedProcess(argv, 125)
+                    return probe(argv, **kwargs)
+                children_started = [False]
+                launch = harness.subprocess.Popen.side_effect
+                def popen(argv, **kwargs):
+                    child = launch(argv, **kwargs)
+                    children_started[0] = True
+                    return child
+                with patch.object(harness.subprocess, "Popen", side_effect=popen), patch.object(harness.subprocess, "run", side_effect=exists), self.assertRaises(RuntimeError):
+                    guard._create(command, expected)
+                self.assertEqual(guard.ledger["pending_creation"]["status"], "absent" if fault is None else "unresolved")
+                self.assertFalse(model.removed)
+
+    def test_initial_persistence_failure_launches_nothing_and_first_error_survives_reaping(self):
+        with self.creation() as (guard, model, _, command, expected, children):
+            with patch.object(guard, "persist", side_effect=OSError("first durable intent")), self.assertRaisesRegex(OSError, "first durable intent"):
+                guard._create(command, expected)
+            self.assertFalse(children)
+            self.assertFalse(model.containers)
+        with self.creation(hang=True) as (guard, model, _, command, expected, _):
+            with patch.object(harness.os, "killpg", side_effect=OSError("secondary reap")), self.assertRaisesRegex(RuntimeError, "deadline"):
+                guard._create(command, expected, timeout=10)
+            self.assertEqual(guard.ledger["processes"][0]["reaping_error_kind"], "OSError")
+            self.assertTrue(guard._creation_unresolved())
+            self.assertFalse(model.removed)
+
+    def test_pending_projection_rejects_secret_fields_and_unbound_commands(self):
+        for fault in ("secret", "command", "existing"):
+            with self.subTest(fault=fault), self.creation() as (guard, model, _, command, expected, children):
+                if fault == "secret": expected["environment"] = {"PASSWORD": "never-persist"}
+                if fault == "command": command[1] = "rm"
+                if fault == "existing": model.call(command)
+                with self.assertRaises(RuntimeError): guard._create(command, expected)
+                self.assertFalse(children)
+                self.assertNotIn("never-persist", json.dumps(guard.ledger))
+
+    def test_outer_retains_unresolved_private_paths_and_preserves_first_failure(self):
+        for fault in ("unconfirmed", "cleanup", "persist"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                root, clock, guards, children = Path(temporary).resolve(), CreationClock(), [], []
+                (root / "tools/e2e").mkdir(parents=True)
+                (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
+                model = ModelRuntime(root, None if fault == "unconfirmed" else "runner")
+                initialize, persist = harness.RuntimeGuard.__init__, harness.RuntimeGuard.persist
+                def admission(guard, *args):
+                    initialize(guard, *args)
+                    guards.append(guard)
+                def store(guard):
+                    if fault == "persist" and "failure" in guard.ledger: raise OSError("secondary ledger failure")
+                    persist(guard)
+                def raw(argv, **kwargs):
+                    if fault == "cleanup" and argv[1] == "rm" and "d"*64 in model.containers: raise OSError("secondary cleanup failure")
+                    return model.call(argv, **kwargs)
+                def launch(argv, **kwargs):
+                    self.assertIn(argv[0], ("git", "podman"))
+                    child = CreationProcess(argv, model, clock, "source", "return", 1000 + len(children))
+                    if fault == "unconfirmed" and child.trigger:
+                        original = child.communicate
+                        def no_receipt(timeout):
+                            original(timeout)
+                            child.returncode = 9
+                            return b"", b"PASSWORD=must-not-persist private-row"
+                        child.communicate = no_receipt
+                    children.append(child)
+                    return child
+                stack.enter_context(patch.object(harness, "ROOT", root))
+                stack.enter_context(patch.object(harness, "DIAGNOSTIC_ROOT", root / "diagnostics"))
+                stack.enter_context(patch.object(harness.shutil, "which", return_value="/fake/podman"))
+                stack.enter_context(patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*harness.GIB)))
+                stack.enter_context(patch.object(harness.time, "monotonic", side_effect=clock.monotonic))
+                stack.enter_context(patch.object(harness.time, "time", side_effect=clock.wall))
+                stack.enter_context(patch.object(harness, "run", side_effect=raw))
+                stack.enter_context(patch.object(harness.subprocess, "run", side_effect=model.subprocess))
+                stack.enter_context(patch.object(harness.subprocess, "Popen", side_effect=launch))
+                stack.enter_context(patch.object(harness.RuntimeGuard, "__init__", admission))
+                stack.enter_context(patch.object(harness.RuntimeGuard, "persist", store))
+                stack.enter_context(patch.object(harness.os, "killpg", side_effect=AssertionError("unexpected child termination")))
+                args = types.SimpleNamespace(pair="16-16", receipt=str(root / "result.json"), report_probe=None, profile="m8")
+                with self.assertRaises(RuntimeError) as raised: harness.outer(args)
+                ledger = guards[0].ledger
+                if fault == "unconfirmed":
+                    self.assertIsInstance(raised.exception, harness.SubprocessFailure)
+                    self.assertEqual(raised.exception.metadata["returncode"], 9)
+                    self.assertTrue(guards[0]._creation_unresolved())
+                    self.assertNotIn("a"*64, model.removed)
+                    self.assertFalse(any(argv[1] == "start" and argv[-1] == "a"*64 for argv in model.commands))
+                else:
+                    self.assertEqual(str(raised.exception), "modeled runner failure")
+                if fault != "persist":
+                    self.assertFalse(ledger["cleanup_complete"])
+                    self.assertFalse(ledger["private_removed"])
+                    self.assertTrue(Path(ledger["private_path"]).is_dir())
+                self.assertFalse(Path(args.receipt).exists())
+                retained = json.dumps(ledger)
+                self.assertNotIn("must-not-persist", retained)
+                self.assertNotIn("private-row", retained)
+                self.assertNotIn('"argv"', retained)
+
+    def test_real_execute_admits_creation_before_poll_and_final_samples(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import copy_features
+        try:
+            for role in ("source", "target", "runner", "build", "network", "image"):
+                for boundary in ("poll", "return"):
+                    with self.subTest(role=role, boundary=boundary), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                        root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
+                        (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
+                        model, clock, children = ModelRuntime(root), CreationClock(), []
+                        observed = []
+                        sample = harness.RuntimeGuard.sample
+                        def guarded_sample(guard):
+                            pending = guard.ledger.get("pending_creation", {})
+                            if pending.get("status") == "admitted":
+                                persisted = json.loads(guard.path.read_text())
+                                self.assertEqual(persisted["pending_creation"]["admitted_id"], pending["admitted_id"])
+                                if pending["kind"] == "image":
+                                    self.assertIn(pending["admitted_id"], persisted["admitted_images"])
+                                elif pending["kind"] == "network":
+                                    self.assertEqual(persisted["network"]["id"], pending["admitted_id"])
+                                else:
+                                    self.assertTrue(any(entry["id"] == pending["admitted_id"] and entry["ownership_verified"] for entry in persisted["containers"]))
+                                observed.append(pending["kind"])
+                            return sample(guard)
+                        def launch(command, **kwargs):
+                            self.assertIn(command[0], ("podman", "git"))
+                            if command[1] == "start":
+                                ledger = json.loads(model.build_ledger_path.read_text())
+                                owned = [entry for entry in ledger["containers"] if entry["id"] == command[-1]]
+                                self.assertEqual(len(owned), 1)
+                                self.assertIs(owned[0].get("ownership_verified"), True)
+                            child = CreationProcess(command, model, clock, role, boundary, 1000 + len(children))
+                            children.append(child)
+                            return child
+                        def terminate(pid, sig):
+                            matches = [child for child in children if child.pid == pid]
+                            self.assertEqual(len(matches), 1)
+                            self.assertEqual(sig, harness.signal.SIGKILL)
+                            matches[0].returncode = -sig
+                        stack.enter_context(patch.object(harness, "ROOT", root))
+                        stack.enter_context(patch.object(harness, "DIAGNOSTIC_ROOT", root / "diagnostics"))
+                        stack.enter_context(patch.object(harness.shutil, "which", return_value="/fake/podman"))
+                        stack.enter_context(patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*harness.GIB)))
+                        stack.enter_context(patch.object(harness.time, "monotonic", side_effect=clock.monotonic))
+                        stack.enter_context(patch.object(harness.time, "time", side_effect=clock.wall))
+                        stack.enter_context(patch.object(harness, "run", side_effect=model.call))
+                        stack.enter_context(patch.object(harness.subprocess, "run", side_effect=model.subprocess))
+                        stack.enter_context(patch.object(harness.subprocess, "Popen", side_effect=launch))
+                        stack.enter_context(patch.object(harness.RuntimeGuard, "sample", guarded_sample))
+                        stack.enter_context(patch.object(harness.os, "killpg", side_effect=terminate))
+                        stack.enter_context(patch.object(copy_features, "validate_receipt"))
+                        output = root / "result.json"
+                        harness.outer(types.SimpleNamespace(pair="16-16", receipt=str(output), report_probe=None, profile="m8"), receipt_validator=lambda *_: None)
+                        self.assertTrue(output.is_file())
+                        self.assertTrue(all(child.returncode == 0 for child in children))
+                        self.assertFalse(model.containers)
+                        ledger = json.loads(model.build_ledger_path.read_text())
+                        self.assertTrue(ledger["cleanup_complete"])
+                        self.assertEqual(len(ledger["containers"]), 4)
+                        self.assertIn("container" if role in ("source", "target", "runner", "build") else role, observed)
+        finally:
+            sys.path.pop(0)
 
 
 class RuntimeOwnershipTests(unittest.TestCase):
