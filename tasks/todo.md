@@ -66,13 +66,13 @@ Development GHCR publication has separate dated approval.
 
 The user approved the [registry amendment](../docs/roadmap.md#approved-registry-amendment-2026-11-10), superseding the local-registry proposal.
 Pull public upstream dependencies directly by pinned digest.
-Publish only manager/native-runner development images as public packages under the approved user namespace, using immutable `dev-<sha>` tags and kind digest references.
+Publish only manager/native-runner development images as public packages under the approved user namespace, using immutable `dev-<full-40-hex-commit>-<arm64|amd64>` tags and kind digest references.
 The manager namespace is `ghcr.io/ydixken/pgcopydb-operator`.
-`ghcr.io/ydixken/rpgmigrate` is the native-image example.
+The native package is exactly `ghcr.io/ydixken/rpgmigrate`.
 Version tags, `latest`, releases, and main pushes remain unauthorized.
 
 - [x] Record the narrow development GHCR approval and superseding M7 direction in the maintained roadmap and lessons.
-- [ ] Finish and review the M7 implementation replan before changing the execution path.
+- [x] Freeze the approved GHCR implementation plan and shared schema before granting disjoint implementation leases.
 - [ ] Replace M7 archive/containerd-import, alias, and tag-retargeting paths with direct registry pulls.
 - [ ] Qualify fresh source and RUN on the registry path, preserving ownership, original clock, caps, and cleanup guards.
 
@@ -86,6 +86,38 @@ Combined integration review: offline locked metadata reports `Apache-2.0` and `p
 Affected Markdown lint, changed-prose structural STE at baseline zero, exact five-file scope, official license bytes, and `git diff --check` passed.
 All 317 other tracked files retain their base bytes, including `NOTICE`, `Cargo.lock`, and vendored licenses.
 Full-document structural STE retains existing findings outside the changed prose.
+
+## GHCR source and qualification checkpoint, 2026-11-10
+
+The accepted engine baseline is `9ca0bc98168f4daf7016bdee1222810d1235d0f1`, including Apache-2.0 metadata and the development GHCR approval.
+The authoritative operator baseline is `8b8a500773b7f2278601d86aebf06351c44bae72`, including bounded native failure classification; production native admission remains closed.
+The approved GHCR implementation plan and schema are frozen for separate publication, provisioning, Go-input, M6-envelope, and command/docs owners.
+Their source changes still require integration, independent review, and fresh runtime evidence.
+
+We publish only `ghcr.io/ydixken/pgcopydb-operator` and `ghcr.io/ydixken/rpgmigrate` development images, under `dev-<full-40-hex-commit>-<arm64|amd64>` tags, without overwriting an existing tag.
+Ordinary publication uses the corresponding exact feature-branch workflow; the separately approved first native-package bootstrap remains a narrow exception.
+Public package visibility is approved only for these packages.
+Publication, visibility, anonymous typed manifest/config/blob verification, and actual owned-node pull evidence are separate checks.
+No release, version tag, `latest`, main push/merge, crate publication, or benchmark authorization follows.
+
+The tracked upstream catalog is static; the generated private schema 2 image lock binds both clean sources and verified publication receipts without a source/digest circularity.
+The private schema 2 suite input requires `image_lock_sha256`, the lowercase SHA-256 of the exact lock copied to `RUN/image-lock.json`.
+Go independently checks those bytes and source identities before workload creation.
+The new route replaces archive/import/alias transport with public digest pulls and requires a fresh source freeze and RUN; historical failures and held RUN evidence remain unchanged.
+
+The separate M8 checkpoint `daeac05a` contains isolated Task 7 source; it is not merged into the format 8 / metadata 6 M6 baseline and does not activate capabilities.
+Nine safe components passed PostgreSQL 16 and 18 checks under their own inputs.
+A later complete ten-component disposable runtime result remains an execution dependency, not an accepted pass in this checkpoint.
+Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
+The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
+Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
+M0–M5 remain closed and M6–M10 remain open.
+
+- [ ] Integrate and independently review both publisher sources and their exact command interfaces.
+- [ ] Bind anonymous public publication receipts, static upstream pins, and clean source identities in a fresh image lock.
+- [ ] Qualify fresh M7 legacy and M6 native runtime inputs under the original ownership, deadline, resource, and cleanup gates.
+- [ ] Implement and qualify the bounded Linux-native-host Guard transport before activating hosted kind runtime.
+- [ ] Run full scoped lint, including `gocyclo`, on the joined inputs and retain PostgreSQL 16/18 evidence.
 
 ## M0: Preserve and reset (rpgmigrate)
 

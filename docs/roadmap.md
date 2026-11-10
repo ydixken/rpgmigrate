@@ -107,6 +107,32 @@ The dated M7 amendment permits only development GHCR publication.
 We make no ETA or measured-speedup claim.
 Keep their image, Kubernetes/PVC, dependency, capacity, and release gates explicit; M4 engine qualification does not activate the operator.
 
+### GHCR source and qualification checkpoint, 2026-11-10
+
+The accepted engine baseline is `9ca0bc98168f4daf7016bdee1222810d1235d0f1`, including Apache-2.0 metadata and the development GHCR approval.
+The authoritative operator baseline is `8b8a500773b7f2278601d86aebf06351c44bae72`, including bounded native failure classification; production native admission remains closed.
+The approved GHCR implementation plan and schema are frozen for separate publication, provisioning, Go-input, M6-envelope, and command/docs owners.
+Their source changes still require integration, independent review, and fresh runtime evidence.
+
+We publish only `ghcr.io/ydixken/pgcopydb-operator` and `ghcr.io/ydixken/rpgmigrate` development images, under `dev-<full-40-hex-commit>-<arm64|amd64>` tags, without overwriting an existing tag.
+Ordinary publication uses the corresponding exact feature-branch workflow; the separately approved first native-package bootstrap remains a narrow exception.
+Public package visibility is approved only for these packages.
+Publication, visibility, anonymous typed manifest/config/blob verification, and actual owned-node pull evidence are separate checks.
+No release, version tag, `latest`, main push/merge, crate publication, or benchmark authorization follows.
+
+The tracked upstream catalog is static; the generated private schema 2 image lock binds both clean sources and verified publication receipts without a source/digest circularity.
+The private schema 2 suite input requires `image_lock_sha256`, the lowercase SHA-256 of the exact lock copied to `RUN/image-lock.json`.
+Go independently checks those bytes and source identities before workload creation.
+The new route replaces archive/import/alias transport with public digest pulls and requires a fresh source freeze and RUN; historical failures and held RUN evidence remain unchanged.
+
+The separate M8 checkpoint `daeac05a` contains isolated Task 7 source; it is not merged into the format 8 / metadata 6 M6 baseline and does not activate capabilities.
+Nine safe components passed PostgreSQL 16 and 18 checks under their own inputs.
+A later complete ten-component disposable runtime result remains an execution dependency, not an accepted pass in this checkpoint.
+Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
+The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
+Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
+M0–M5 remain closed and M6–M10 remain open.
+
 ### M0: Preserve and reset (rpgmigrate)
 
 - [x] Guarded preservation: `stash@{0}` plus the 51 untracked files are archive commit `8fceb45` on `wip/native-copy-snapshot` (base `bd0925d`, never merged); `archive/stash-0` pins the stash; a tar of the untracked files sits outside the repo.

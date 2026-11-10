@@ -517,12 +517,27 @@ The user approved direct public-registry pulls by pinned digest for upstream Clo
 This supersedes the local-registry proposal.
 Do not continue M7 archive/containerd-import, alias, or tag-retargeting work.
 The user separately approved public GHCR publication of manager/native-runner development images under the approved user namespace.
-Use immutable `dev-<sha>` tags and kind digest references.
+Use immutable `dev-<full-40-hex-commit>-<arm64|amd64>` tags and kind digest references.
 Use existing manager `ghcr.io/ydixken/pgcopydb-operator`.
-`ghcr.io/ydixken/rpgmigrate` is the native-image example.
+Use exactly `ghcr.io/ydixken/rpgmigrate` for the native package.
 Do not infer version-tag, `latest`, release, or main-push approval.
 Preserve historical origin/mirror authorization limits as provenance and apply this later approval only to its explicit development scope.
 Keep exact ownership, original clock, caps, and cleanup guards.
 Preserve old source and RUN evidence and require fresh registry-path qualification.
 The old Ready RUN held before LOAD under S1 is not registry-qualified.
 Keep M10 offline candidate archive retention separate and continue M6/M8/M10 work without closing any M6–M10 gate or lifting benchmark HOLD.
+
+## Keep development publication and runtime qualification separate, 2026-11-10
+
+The public development-package approval covers only the exact manager and native packages; it does not authorize release tags, `latest`, main changes, or benchmarks.
+Use the admitted feature-branch workflow for ordinary publication and keep the separately approved first-native bootstrap exception explicit.
+Require clean source identity, no-overwrite tags, anonymous public descriptor verification, and exact owned-node pull evidence before a lock qualifies.
+Keep a pending visibility receipt distinct from a qualifying publication receipt.
+A hosted publication pass or offline contract pass does not prove that the Podman VM-specific Guard runs on a Linux-native host.
+Record Linux-host portability as an open runtime gate.
+
+## Run complete scoped lint on joined inputs, 2026-11-10
+
+Run all configured checks, including `gocyclo`, on the actual joined packages.
+Do not use `--new-from-rev` or a changed-line filter to turn a scoped lint gate green.
+Preserve older results with their original source identity and report a repaired successor separately.
