@@ -393,6 +393,7 @@ Treat `docs/roadmap.md` as the primary project status overview and keep it synch
 Update the roadmap and task ledger in the same change without waiting for a reminder; the ledger holds detailed evidence.
 Tick completed subdeliverables, and leave milestone closing gates unchecked until their required checks pass.
 Do not use a current task ledger as a reason to leave the roadmap stale.
+Always carry accepted progress and blocker updates into both maintained trackers in the same change, including intermediate source checkpoints.
 
 Before reusing a catalog planner on a new call path, trace its nested SQL transaction requirements, including `LOCK TABLE`, and preserve the established caller transaction boundary.
 Separately passing source API checks do not qualify preliminary planning on an idle connection.
@@ -488,6 +489,7 @@ Confirm that a CLI test driver actually supports a requested selector before rep
 
 Update `docs/roadmap.md` and `tasks/todo.md` together when an accepted checkpoint changes milestone evidence or remaining gates.
 Keep M0–M5 closed and M6–M10 open until their full acceptance evidence passes; fresh packaging or PREPARE/CHECK does not close native lifecycle or legacy workflow gates.
+Continue approved isolated M8 work after its Task 1 interface freeze while M7 closure remains open, and keep live format 8 / metadata 6 inputs separate from candidate format 9 / metadata 7.
 Retain historical failures under their original input identities and record successor results separately.
 
 ## Verify implementation isolation before granting a file lease, 2026-11-10

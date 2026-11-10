@@ -716,7 +716,9 @@ These are source/component checkpoints; no broad Go suite, whole-M6 review, actu
 The root-approved completion-rejoin amendment requires separate partial-cleanup admission for flags `00`, `10`, and `01`, with actual target-row completion authority and completion-only credential-free version discovery.
 Ordinary active admission and the fully cleaned predicate remain unchanged; status and resource inventory cannot authorize completion.
 Private plan: `/tmp/rpgmigrate-m6-completion-rejoin-plan-20261110/2026-11-10-m6-completion-rejoin-amendment.md`, SHA-256 `1b4dfa9c7051a4037c92be38520d09bbcf4ce52f0e8a7e3f6d2fe5d9fd294dbf`.
-Preflight six-path, partial-cleanup twelve-path, and finalizer twelve-path packets are component-qualified but not integrated at this checkpoint.
+The preceding 46-path completion/rejoin/finalization/disposition join is frozen at tree `1eb28adac4088756694e56006edf3240fbb6a8d0`; its actual production `./cmd` build, four-package compilation, and scoped lint passed with zero findings.
+Joined proof: `/tmp/m6-joined-integration-20261110/preceding-source-manifest.json`, SHA-256 `9c41fcd8591b4b5b04ec64a109ec9ec30990f19ae14c7c44fcc840b08ab5cb5b`.
+Its signed checkpoint groups and the separate five-path main dispatch packet still require their final recorded checks and integration.
 The finalizer successor includes the production constant-build repair and stale-failed-condition repair; its actual production build, 39 affected race checks, and scoped lint passed with zero findings.
 Its older 335-race-check packet retains separate provenance and is not relabeled as qualification of the repaired successor.
 Finalizer proof: `/tmp/m6-clone-stale-failure-repair-export-20261110/manifest.json`, SHA-256 `3dfc5322c44bb678da6d966621a2b91a495bc86590099ce0646d2bbf75b1525c`.
@@ -726,6 +728,15 @@ Native evidence-bearing helper retention is checkpointed; exact-UID disposal and
 Native runner-profile Task 1/Task 2 packets are frozen with passing component checks; actual NSS, authentication/TLS, PVC/provider behavior, and canonical runtime admission remain unqualified.
 Canonical NSS/resolver guards and `UnsupportedEngine` remain closed; production runner-profile qualification, three-pair native acceptance, broad Go gates, and the whole-M6 review remain open.
 Actual Kubernetes TERM and the full native lifecycle remain unqualified.
+
+The bounded actual metadata probe refused before Jobs: `containerd config dump` exited zero with 394 stderr bytes, and the frozen metadata policy rejected any stderr before parsing.
+Exactly one owned namespace was removed and verified absent; no Jobs, Pods, or Secrets were created, and authentication/TLS Step 2 remained unstarted.
+A later read-only taxonomy found both a version-migration warning and an ignored unknown TOML plugin-key warning; a blanket stderr exception is not approved, and effective NRI disablement remains unproven.
+Taxonomy proof: `/private/var/tmp/rpgmigrate-m6-independent-live-dg9wwby9/readonly-warning-taxonomy-20261110/taxonomy.json`, SHA-256 `1d21a49bf6560b884bdad00607baa5381a63242788ccf3e9156dc2166c7f4f2b`.
+Cause proof: `/private/var/tmp/rpgmigrate-m6-independent-live-dg9wwby9/readonly-node-metadata-cause-20261110/final-index.json`, SHA-256 `10fa3a9cadbaabf201dc34b8a6dc767b67f23b421bf014612904ca99f570cde8`.
+The separate deadline-composition candidate preserves the original parent clocks and requires 3300 seconds for cold admission or 2400 seconds with a complete same-source receipt.
+It passed 27 host tests, 32 focused Go race checks, and scoped lint with zero findings; it performed no live action and grants no metadata, authentication, or production qualification.
+Deadline candidate proof: `/Users/ydixken/.codex/tmp/m6-deadline-composition-packet-20261110/manifest.json`, SHA-256 `98c9ee94e60c6f10aa3434e9b8c2e47696fa48cfa87f518481935bf031a67030`.
 
 The preceding `aaad6c7` lifecycle checkpoint added identity receipts/worker TTL, retained TERM primitives, and bounded clone capture/parsing, with 288 named focused race checks and nineteen final-proof-join race checks.
 Prior lifecycle proof: `/tmp/m6-lifecycle-components-integration-export-20261110/checkpoint-manifest.json`, SHA-256 `15fc47e882e9863980e3440b716afc8f13e5d3e4f1a3b6db64071f26baac75f7`.
@@ -947,10 +958,11 @@ Go migration tests and the metrics observer did not run; no legacy or native wor
 Failure proof: `/private/var/tmp/rpgmigrate-m7-tagged-legacy-gate-6s2i181n/final-failed-gate-proof.json`, SHA-256 `269d0780ab532117842ce072674dbd4356c41c21f7873c64050fa61872afcc92`.
 The private declared-imageID fix has source inventory SHA-256 `b5da9c9aa6a0142fd27eaf69950d639c9be68363376be2f930cbe3662f2259a3` at `/private/var/tmp/rpgmigrate-declared-imageid-candidate-zad1graq/source`.
 It changes five paths, preserves 527 peers, and passed one full 259-test Python run, thirty top-level/186 named focused Go checks, and zero scoped lint findings.
-Independent verification and fresh workflow acceptance remain pending; the retained failed gate is unchanged.
-Six old unused kind volumes have independent read-only candidate proof, and none were deleted.
+Independent pure-data replay accepted the retained actual Pod data under `b5` while `f59` refused it, and rejected all eleven negative controls; fresh workflow acceptance remains pending, and the retained `f59a7f4b` gate remains failed.
+Replay proof: `/private/var/tmp/rpgmigrate-m7-declared-imageid-data-proof-m7umsaqh/pure-data-result.json`, SHA-256 `978118f6bcf93701055aae19fd9dcd5f0c426b015067036a34b4c3e601cab8d3`.
+Six old unused kind volumes have independent read-only candidate proof and approved cleanup scope; deletion has not executed.
 Proof: `/private/var/tmp/rpgmigrate-m7-unused-volume-safety-c3anxbon/final-candidate-proof.json`, SHA-256 `06fe68baef50633e019b070f32605ebdb4f39b9eaeea4ee4f426b2bc09428f12`.
-The current S2 baseline protects all prior volumes; any execution must wait for its retirement and revalidate the exact sealed ownership/reference barrier immediately before non-force removal.
+The failed `f59a7f4b` nodes and S2 still require exact retirement; volume removal must wait for that retirement and revalidate the exact sealed ownership/reference barrier immediately before non-force removal.
 
 The M7 `c275` source passed fresh UP/CHECK and qualified supervisor handover after its retained PREPARE/CHECK success.
 Its first LOAD pair FAILED: default `ctr images tag` dropped labels and CRI retargeted the existing config-ID key from the prepared child manifest to its one-child archive index.
@@ -1117,6 +1129,9 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 
 The approved [M8 plan](../docs/superpowers/plans/2026-11-09-m8-feature-widening.md) freezes fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative binary fallback, and mandatory exact LO comparison under the unchanged array contract plus a proven-empty inventory guard.
 No format/runtime gate or capability is qualified by this plan.
+The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
+Task 1 is assigned for an isolated contract/state proposal; dependent implementation awaits that freeze.
+Keep the live format 8 / metadata 6 profile separate from candidate format 9 / metadata 7; neither candidate source nor an interface proposal qualifies runtime compatibility.
 
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
 - [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
