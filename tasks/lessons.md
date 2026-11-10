@@ -602,3 +602,23 @@ State cases depend on temporary-directory device/inode values, so a fixed RNG se
 Keep the original wall lease when wall and monotonic clocks diverge.
 A stored Ready receipt grants no live authority after its supervisor expires.
 Record the discontinuity without assigning an unproven cause, and require fresh admission rather than renewing authority from historical success.
+
+## Bind the real framework execution identity
+
+Attest the interpreter/framework process that actually executes the guarded work, separately from the launcher path or version string.
+A wrapper can dispatch a different runtime; preserve the admitted execution pair and its original clock through handover.
+
+## Cover pending Created containers before database startup
+
+Exercise actual create, receipt, and start ordering, including an owned container that remains Created when receipt persistence or adoption fails.
+Missing receipts do not prove resource absence; retain independently bound pending identities through bounded cleanup and preserve the original failure.
+
+## Make pure-test runtime tripwires complete
+
+Pure/source tests must fail if any runtime, subprocess, VM, or API entry point is reached.
+Guard every used entry point rather than only one convenience wrapper, and keep real execution evidence separate.
+
+## Preserve the public JSON producer framing contract
+
+Fix a public producer that violates its single-document JSON contract instead of relaxing the strict decoder to accept noise or extra documents.
+Keep this distinct from an external renderer’s explicitly qualified multi-object stream contract.

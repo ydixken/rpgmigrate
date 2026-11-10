@@ -564,6 +564,11 @@ M6–M10 remain open and benchmark execution stays on HOLD.
 
 #### Evidence checkpoint, 2026-11-10
 
+The retained canonical `29ed` interpreter-pair admission passed live supervisor handover, then PULL failed; a separate actual-help check shows crictl 1.36 rejects canonical `--timeout=10`.
+The original pull stderr remains unknown; the later bounded actual-help check accepts `--timeout=10s` with exit 0 in 0.112 seconds, which proves help syntax only.
+Exact container-only retirement is complete and the lease released: three owned nodes were removed nonforced, identity-checked S2/caffeinate processes are gone, and all 429 images/215 volumes/original four containers/two networks are retained.
+The approved three-file shared `10`-to-`10s` implementation is active in isolation; fresh public-manager provenance, lock, and source rebind are required before kind retry, with no retry pull or M7 acceptance claimed.
+
 The fresh `f59a7f4b` M7 source passed UP, supervisor handover, and LOAD for the PostgreSQL 18 component/API profile.
 Its legacy gate FAILED during storage-probe image-ID recognition: the actual probe Pod Succeeded with exit zero and bound PVC/PV, but the wrapper refused the exact declared tag at its selected manifest.
 Go migration tests and the metrics observer did not run; no legacy or native workflow acceptance follows.
@@ -685,6 +690,11 @@ No manual proof JSON or lease renewal is allowed.
 
 ### M8: Feature widening (each item enables its capability)
 
+Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03eb6d34fc` passed six profiles and nine local reports on each of 16 to 16 and 18 to 18.
+The cross-major 16-to-18 attempt failed before PostgreSQL at a Created-container receipt/adoption race, with zero executed pair profiles/reports; its exact owned empty container/network were retired and release proved while the original RED remains immutable.
+The pending-creation fix is signed as private workflow checkpoint `1d8e5f750df2dcfde7178acaca6d30966357d76b`, with clone 48/follow 60/cutover 36 focused checks passing and primary unchanged.
+Fresh cross-pair qualification is not yet available and its admission proposal is active without a new VM run; the two positive receipts remain bound to `8ad`, without operator or full M8 acceptance.
+
 The approved [M8 implementation plan](superpowers/plans/2026-11-09-m8-feature-widening.md) targets fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative whole-table binary fallback, and exact mandatory large-object comparison with the unchanged array contract plus a proven-empty inventory guard.
 These are implementation decisions, without format/runtime qualification or capability activation.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
@@ -692,7 +702,7 @@ The root approved the Task 1 interface freeze; isolated state/CLI, catalog, auth
 Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
 Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
 At the earlier joined-source checkpoint, compare/progress wiring had source tests only; the later component checkpoint above records the additional same-major runtime evidence.
-The separate seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; positive E2E profiles, authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
+The earlier seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
 The isolated M8 code/docs handoff is signed as recorded above; no M8 source fast-forward to the engine primary or activation is authorized.
@@ -708,6 +718,10 @@ The [ledger](../tasks/todo.md#m8-feature-widening-each-item-enables-its-capabili
 - [ ] Re-run the M7 native matrix with operator defaults.
 
 ### M9: Durability modes and measured performance
+
+M9 checkpoint `59abca5308b827d29dfe12cbbed0b7928ca50ff1` uses native format 10 / metadata 7 and retains `REPLAY_SAFE_BARRIER_INTERVAL_MS=None`, H1/H4 ACK source work, and M10 fuzz provenance.
+The outer-Durable candidate has 49 focused passes and the five-file benchmark preparation has 29 offline passes; cutover/Task H and coherent runtime qualification remain incomplete.
+Benchmark execution remains on HOLD, without measured cadence or speedup.
 
 The approved [M9 implementation plan](superpowers/plans/2026-11-09-m9-durability-performance.md) follows M8 with native format 10 / metadata 7 and the settings/status capability extension; no ACK may derive from a volatile frontier, and cadence is selected from later measurements.
 Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized.
@@ -726,6 +740,11 @@ The checkpoint above records focused packet tests, the approved CLI omission cla
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
 ### M10: Release readiness
+
+On source `cefbc4f6`, ordinary hosted checks run 42898026149 passed all eight jobs, including 512 selected Rust passes (22 ignored, 107 filtered) and eleven plain-clone cases on each declared pair.
+Native run 42898026214 failed both architectures at binfmt admission; actual host handler presence remains unknown and no ASAN qualification follows.
+The official component inventory confirms 15,119,285-byte and 2,599,602-byte notice files exceed the existing 2-MiB bound.
+A strict ELF-disjoint parser/toolchain candidate uses 16-MiB per-file/32-MiB aggregate notice limits and removes installer `--docdir`; that correction is active source work, not toolchain/runtime qualification.
 
 The approved [M10 implementation plan](superpowers/plans/2026-11-09-m10-release-readiness.md) uses bounded mutation tests, native Linux ASAN with its nightly still unverified, STE source/license provenance, and exact production OCI artifacts for the final matrix.
 These preparation decisions close no release or runtime gate.

@@ -1174,6 +1174,16 @@ Application write fencing and ending outstanding transactions remain the operato
 
 ## M7: Operator-driven E2E
 
+The retained canonical `29ed` interpreter-pair admission passed live supervisor handover, then PULL failed; a separate actual-help check shows crictl 1.36 rejects canonical `--timeout=10`.
+The original pull stderr remains unknown; the later bounded actual-help check accepts `--timeout=10s` with exit 0 in 0.112 seconds, which proves help syntax only.
+Exact container-only retirement is complete and the lease released: three owned nodes were removed nonforced, identity-checked S2/caffeinate processes are gone, and all 429 images/215 volumes/original four containers/two networks are retained.
+The approved three-file shared `10`-to-`10s` implementation is active in isolation; fresh public-manager provenance, lock, and source rebind are required before kind retry, with no retry pull or M7 acceptance claimed.
+
+Current admission evidence: `/private/var/tmp/rpgmigrate-m7-canonical29ed-interpreter-pair-admission-20261110-62e4b093` contains `runtime-supervisors/s2-evidence/handover-complete.json`, SHA-256 `4ffc8f1415305560a9d44dc350cf7814466317a07f8cc1d2ec12403a1717bff7`, and `diagnostic-handoff.json`, SHA-256 `23d6f60cfea0771da5043ba8b8d973e8ba2c9fa4d6b3497c46fc5bbdfe70e4e0`.
+The one corrected local help receipt `corrected-duration-help.json` has SHA-256 `9f76f7b70419ff7aa2163b2d314ab2c1821f06c4d95ca4289f349902abd36f35`; it is no pull/image-operation receipt.
+Final retirement/release: `failed-parent-retirement-preservation-release-proof.json` under that admission directory, SHA-256 `bb69e3e0f2bb6791716bed57f8a7a3029bf54875b4ba4295501796cf4b253f86`.
+The isolated duration implementation follows `/tmp/rpgmigrate-m7-crictl-duration-plan-20261110.md`, SHA-256 `c1bf4122758f7514465e5a4b391f368b2649336aafe9c88e080a233b608e2bba`; no source retry/pull ran during retirement.
+
 ### Evidence checkpoint, 2026-11-10
 
 The fresh `f59a7f4b` M7 source passed UP, supervisor handover, and LOAD for the PostgreSQL 18 component/API profile.
@@ -1363,6 +1373,16 @@ No manual proof JSON, renewed lease, or new schema is allowed.
 
 ## M8: Feature widening (each item enables its capability)
 
+Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03eb6d34fc` passed six profiles and nine local reports on each of 16 to 16 and 18 to 18.
+The cross-major 16-to-18 attempt failed before PostgreSQL at a Created-container receipt/adoption race, with zero executed pair profiles/reports; its exact owned empty container/network were retired and release proved while the original RED remains immutable.
+The pending-creation fix is signed as private workflow checkpoint `1d8e5f750df2dcfde7178acaca6d30966357d76b`, with clone 48/follow 60/cutover 36 focused checks passing and primary unchanged.
+Fresh cross-pair qualification is not yet available and its admission proposal is active without a new VM run; the two positive receipts remain bound to `8ad`, without operator or full M8 acceptance.
+
+Same-major receipts: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-matrix-8ad-16-16-76bcbc51/clone-m8-16-16.json`, SHA-256 `f3ee9a9158e5e5bf79635f6fb913f7c07b19d8e87c72be48d7a2f037a6cd3410`; pair 18-to-18 receipt at `20261110-matrix-8ad-18-18-64cc4f21/clone-m8-18-18.json` under the same evidence root, SHA-256 `ee0b11e5182abdc23692f75f8b50034a4b7b2857bcd093c2c7e438695b8925b3`.
+Cross-pair release: `20261110-matrix-8ad-16-18-a0c745cc/independent-manual-retirement-preservation-release-proof.json` under that root, SHA-256 `9e34bab960c7d7eb4af5add96d2817239febf30c6415b43043e73f10820bdb1f`.
+Source-only fix: `/tmp/rpgmigrate-m8-pending-creation-handoff-20261110-he5ipv4k/pending-creation.patch`, SHA-256 `3093f87ad4d986de6dfdf3273a767dfe6afb5613ea42a0eee68246e092303aa3`.
+Signed successor tree `d453580e1ffdd0844f98d521d66743d0a37b0968` is clean on the M8 workflow branch; manifest `/tmp/rpgmigrate-m8-pending-checkpoint-20261110-fx0mih_8/manifest.json`, SHA-256 `ed29c75c656fa1ecdab550ed1db379595f34ad89d9fe00e5e7161a026525b5ef`, binds its preserved source/dependency inventories.
+
 The approved [M8 plan](../docs/superpowers/plans/2026-11-09-m8-feature-widening.md) freezes fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative binary fallback, and mandatory exact LO comparison under the unchanged array contract plus a proven-empty inventory guard.
 No format/runtime gate or capability is qualified by this plan.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
@@ -1370,7 +1390,7 @@ The root approved the Task 1 interface freeze; isolated state/CLI, catalog, auth
 Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
 Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
 At the earlier joined-source checkpoint, compare/progress wiring had source tests only; the later component checkpoint above records the additional same-major runtime evidence.
-The separate seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; positive E2E profiles, authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
+The earlier seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Joined source proof: `/tmp/rpgmigrate-m8-joined-source-v5-20261110/verification-receipt.json`, SHA-256 `0a6219ec91c0d1a4d7b6800e78fdbd211fec314b17495b013a656faada328394`.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases were removed and original resources preserved.
@@ -1390,6 +1410,10 @@ Approved interface: `/tmp/rpgmigrate-m8-contract-freeze-20261110/contract.md`, S
 
 ## M9: Durability modes and measured performance
 
+M9 checkpoint `59abca5308b827d29dfe12cbbed0b7928ca50ff1` uses native format 10 / metadata 7 and retains `REPLAY_SAFE_BARRIER_INTERVAL_MS=None`, H1/H4 ACK source work, and M10 fuzz provenance.
+The outer-Durable candidate has 49 focused passes and the five-file benchmark preparation has 29 offline passes; cutover/Task H and coherent runtime qualification remain incomplete.
+Benchmark execution remains on HOLD, without measured cadence or speedup.
+
 The approved [M9 plan](../docs/superpowers/plans/2026-11-09-m9-durability-performance.md) follows M8 with native format 10 / metadata 7 and the settings/status capability extension; no ACK derives from volatile frontier and cadence awaits actual measurements.
 Benchmark execution remains on HOLD until the final actual artifact/argv packet is approved; no benchmark run or VM reservation is authorized, and M10 remains open.
 Initial-copy planning keeps fork COPY async and native per-table durability enabled.
@@ -1406,6 +1430,14 @@ The checkpoint above records focused packet tests, the approved CLI omission cla
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
 ## M10: Release readiness
+
+On source `cefbc4f6`, ordinary hosted checks run 42898026149 passed all eight jobs, including 512 selected Rust passes (22 ignored, 107 filtered) and eleven plain-clone cases on each declared pair.
+Native run 42898026214 failed both architectures at binfmt admission; actual host handler presence remains unknown and no ASAN qualification follows.
+The official component inventory confirms 15,119,285-byte and 2,599,602-byte notice files exceed the existing 2-MiB bound.
+A strict ELF-disjoint parser/toolchain candidate uses 16-MiB per-file/32-MiB aggregate notice limits and removes installer `--docdir`; that correction is active source work, not toolchain/runtime qualification.
+
+[Ordinary CI run 42898026149](https://github.com/ydixken/rpgmigrate/actions/runs/42898026149) and [native run 42898026214](https://github.com/ydixken/rpgmigrate/actions/runs/42898026214) retain their exact source and separate scopes.
+Official archive evidence: `/private/tmp/rpgmigrate-m10-component-inventory-20261110/archive-inventory-proof.json`, SHA-256 `11c976e71c420ebf621ce64511d35371f958c3151c469bc1a66e70d8bfaf17ff`; installer contract proof SHA-256 `e4a78031abf8648eccf674b663c84d62f400e697319479ea770fc532a0c50531`.
 
 The approved [M10 plan](../docs/superpowers/plans/2026-11-09-m10-release-readiness.md) covers bounded mutation testing, native ASAN with nightly unverified, STE source/license provenance, and exact production OCI artifacts/final matrix; preparation is not release qualification.
 The unchanged structural STE script, MIT license, and [provenance](../tools/docs/provenance.md) are integrated from reviewed export `/Users/ydixken/.codex/tmp/rpgmigrate-m10-ste-vendor-export-20261109`, manifest SHA-256 `942eae4c135d7125296b1bec02a2755550e8dfbee093ac15516dffa77a939f83`, patch SHA-256 `1ad4b24fcba5e2dcfaf09c92555edef5ca1208bdb13116472acffea602e4e2ef`.
