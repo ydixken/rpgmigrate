@@ -2,6 +2,7 @@
 
 import re
 import select
+import copy
 import hashlib
 import json
 import socket
@@ -814,6 +815,163 @@ class AckTargetProtocol(CommitProtocol):
         self.oracle.proofs.append({"ordinal": ordinal, "connection": self.connection, "backend_pid": self.pid, "prefix": prefix})
 
 
+class _SequenceFailure(CommitProtocol):
+    def __init__(self, expected_sql, binding):
+        if (not isinstance(expected_sql, bytes) or len(expected_sql) > 65536
+                or not isinstance(binding, str) or re.fullmatch(r"[0-9a-f]{64}", binding) is None):
+            raise ValueError("sequence failure observation requires exact private input hashes")
+        sql = re.fullmatch(rb"SELECT pg_catalog\.setval\('((?:[^'\x00]|'')+)'::pg_catalog\.regclass,1001,true\)", expected_sql)
+        qualified = sql[1].replace(b"''", b"'") if sql else b''
+        if re.fullmatch(rb'"(?:[^"\x00]|"")+"\."(?:[^"\x00]|"")+"', qualified) is None:
+            raise ValueError("sequence failure observation requires the exact final literal setval")
+        try:
+            qualified.decode("utf-8")
+        except UnicodeError:
+            raise ValueError("sequence failure observation requires UTF-8 identifiers") from None
+        self.invalid = self.overflow = False
+        self.oracle = None
+        self.statement = self.portal = self.stage = None
+        self.responses = 0
+        self.described = self.synced = self.flushed = self.terminated = False
+        self.forwarding = {}
+        self.data = {"version": 1, "statement_class": "final_sequence_setval",
+                     "fixture_binding_sha256": binding, "statement_sha256": hashlib.sha256(expected_sql).hexdigest(),
+                     "connection": None, "backend_pid": None, "parameter_count": None,
+                     "parse_forwarded": False, "bind_forwarded": False, "execute_forwarded": False,
+                     "error_observed": False, "sqlstate": None, "matches": 0, "pre_error_ack": None}
+
+    def frontend(self, connection, target, kind, payload):
+        if target.oracle is not self.oracle:
+            self.fail()
+        if kind == b'P':
+            statement, offset = self.name(payload)
+            sql, offset = self.string(payload, offset, 65536)
+            count, offset = self.short(payload, offset)
+            if count > self.PARAM_LIMIT or len(payload) != offset + 4 * count:
+                self.fail(count > self.PARAM_LIMIT)
+            if hashlib.sha256(sql).hexdigest() == self.data["statement_sha256"]:
+                if (self.data["connection"] is not None or count or target.pid is None or target.expected
+                        or not target.active or target.warned or target.next is not None
+                        or target.terminal is not None or target.delivery is not None):
+                    self.fail()
+                self.data.update(connection=connection, backend_pid=target.pid, parameter_count=0)
+                self.statement, self.stage = statement, "parse"
+                return "parse_forwarded"
+        if connection != self.data["connection"]:
+            if self.data["connection"] is not None and (kind != b'X' or payload):
+                self.fail()
+            return None
+        if target.pid != self.data["backend_pid"]:
+            self.fail()
+        if kind == b'B' and self.stage == "parse" and self.data["parse_forwarded"]:
+            portal, offset = self.name(payload)
+            statement, offset = self.name(payload, offset)
+            formats, offset = self.formats(payload, offset)
+            count, offset = self.short(payload, offset)
+            results_start = offset
+            results, offset = self.formats(payload, offset)
+            if statement != self.statement or formats or count or results not in (0, 1):
+                self.fail()
+            if offset != len(payload) or any(payload[results_start + 2:]):
+                self.fail()
+            self.portal, self.stage = portal, "bind"
+            return "bind_forwarded"
+        if kind == b'D' and self.stage == "bind" and self.data["bind_forwarded"]:
+            portal, offset = self.name(payload, 1)
+            if payload[:1] != b'P' or portal != self.portal or offset != len(payload):
+                self.fail()
+            self.described, self.stage = True, "describe"
+            return "describe"
+        if kind == b'E' and self.stage in ("bind", "describe") and self.data["bind_forwarded"]:
+            portal, offset = self.name(payload)
+            if (portal != self.portal or len(payload) != offset + 4
+                    or struct.unpack_from("!I", payload, offset)[0] or self.described and not self.forwarding.get("describe")):
+                self.fail()
+            self.stage = "execute"
+            return "execute_forwarded"
+        if kind == b'S' and self.stage in ("execute", "error") and not self.synced and not payload:
+            self.synced = True
+            return "sync"
+        if kind == b'H' and self.stage in ("parse", "bind", "describe", "execute") and not self.flushed and not payload:
+            self.flushed = True
+            return "flush"
+        if kind == b'X' and self.stage == "ready" and not self.terminated and not payload:
+            self.terminated = True
+            return None
+        self.fail()
+
+    def forwarded(self, token):
+        if token is None:
+            return
+        if self.forwarding.get(token):
+            self.fail()
+        self.forwarding[token] = True
+        if token in self.data:
+            self.data[token] = True
+
+    def error(self, payload):
+        if len(payload) > 65536:
+            self.fail(True)
+        fields, seen, offset = {}, set(), 0
+        while offset < len(payload):
+            kind, offset = payload[offset:offset + 1], offset + 1
+            if kind == b'\0':
+                if (offset != len(payload) or b'M' not in seen or fields.get(b'C') != b'22003'
+                        or fields.get(b'S') != b'ERROR' or fields.get(b'V', b'ERROR') != b'ERROR'):
+                    self.fail()
+                return
+            if kind not in b'SVCMDHPpqWstcdnFLR' or kind in seen:
+                self.fail()
+            seen.add(kind)
+            value, offset = self.string(payload, offset, 65536)
+            if kind in (b'S', b'V', b'C'):
+                fields[kind] = value
+        self.fail()
+
+    def backend(self, connection, target, kind, payload, oracle):
+        if oracle is not self.oracle:
+            self.fail()
+        if connection != self.data["connection"]:
+            if kind == b'E' or self.data["connection"] is not None:
+                self.fail()
+            return False
+        if target.pid != self.data["backend_pid"]:
+            self.fail()
+        if kind == b'E':
+            if (self.invalid or self.stage != "execute" or self.responses != (3 if self.described else 2)
+                    or not all(self.data[key] for key in ("parse_forwarded", "bind_forwarded", "execute_forwarded"))
+                    or not target.active or oracle.invalid or oracle.overflow):
+                self.fail()
+            self.error(payload)
+            self.data.update(error_observed=True, sqlstate="22003", pre_error_ack=copy.deepcopy(oracle.evidence()))
+            self.stage = "error"
+            return False
+        if kind == b'Z' and self.stage == "error" and not self.invalid:
+            # The same Sync can enter the ACK queue after ErrorResponse cleared it.
+            if (payload != b'E' or not self.forwarding.get("sync") or target.expected not in ([], [b'Z'])
+                    or target.active or not oracle.invalid):
+                self.fail()
+            self.stage, self.data["matches"] = "ready", 1
+            return True
+        if kind == b'1' and self.responses == 0 and self.data["parse_forwarded"] and not payload:
+            self.responses = 1
+            return False
+        if kind == b'2' and self.responses == 1 and self.data["bind_forwarded"] and not payload:
+            self.responses = 2
+            return False
+        if kind == b'T' and self.responses == 2 and self.described and self.forwarding.get("describe"):
+            name, offset = self.string(payload, 2, 128)
+            if (payload[:2] != b'\0\1' or name != b'setval' or len(payload) != offset + 18
+                    or struct.unpack_from("!IhIhih", payload, offset) != (0, 0, 20, 8, -1, 0)):
+                self.fail()
+            self.responses = 3
+            return False
+        self.fail()
+
+    def evidence(self):
+        return copy.deepcopy({**self.data, "invalid": self.invalid, "overflow": self.overflow})
+
+
 class PgoutputObservation:
     # These are test observations; no value can construct production feedback authority.
     LIMIT = 256
@@ -1098,6 +1256,7 @@ class WireGate:
         self.fault_record = self.fault_observer = None
         self.close_deadline = self.close_candidate = None
         self.copy_relation = None
+        self._sequence_failure = None
         self.copy_held, self.copy_release = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=self.accept, daemon=True)
 
@@ -1112,12 +1271,74 @@ class WireGate:
         if not isinstance(oracle, AckOracle) or side not in ("source", "target"):
             raise ValueError("ACK wire observation requires an exact shared oracle and side")
         with self.lock:
+            if self._sequence_failure is not None and (oracle is not self.ack_oracle or side != self.side):
+                self._sequence_failure.invalid = True
             self.ack_oracle, self.side = oracle, side
 
     def hold_copy(self, relation):
-        if self.mode not in ("observe", "after_begin") or self.copy_relation is not None or not isinstance(relation, list) or len(relation) != 2:
+        if self.mode not in ("observe", "after_begin", "later_begin_only") or self.copy_relation is not None or not isinstance(relation, list) or len(relation) != 2:
             raise RuntimeError("COPY hold needs one exact relation on an observation gate")
         self.copy_relation = list(relation)
+
+    def observe_sequence_failure(self, expected_sql, fixture_binding_sha256):
+        witness = _SequenceFailure(expected_sql, fixture_binding_sha256)
+        with self.lock:
+            oracle = self.ack_oracle
+            if self._sequence_failure is not None or self.side != "target" or not isinstance(oracle, AckOracle):
+                raise RuntimeError("sequence failure observation requires one exact target ACK gate")
+            with oracle.lock:
+                if not oracle.bound or oracle.invalid or oracle.overflow:
+                    raise RuntimeError("sequence failure observation requires a bound valid ACK oracle")
+                witness.oracle = oracle
+                self._sequence_failure = witness
+
+    def _sequence_frontend(self, observation, kind, payload):
+        if self._sequence_failure is None:
+            return None
+        oracle = observation.ack_oracle
+        with self.lock:
+            with oracle.lock:
+                try:
+                    return self._sequence_failure.frontend(observation.connection, oracle.targets[observation.connection], kind, payload)
+                except ValueError:
+                    return None
+
+    def _sequence_forwarded(self, token):
+        if token is None:
+            return
+        with self.lock:
+            try:
+                self._sequence_failure.forwarded(token)
+            except ValueError:
+                pass
+
+    def _sequence_backend(self, observation, kind, payload):
+        oracle = observation.ack_oracle
+        if self._sequence_failure is None:
+            return oracle.target_backend(observation.connection, kind, payload)
+        with self.lock:
+            with oracle.lock:
+                try:
+                    if self._sequence_failure.backend(observation.connection, oracle.targets[observation.connection], kind, payload, oracle):
+                        # ErrorResponse already invalidated the ACK oracle; this tail cannot supply proof.
+                        return None
+                except ValueError:
+                    pass
+                return oracle.target_backend(observation.connection, kind, payload)
+
+    def sequence_failure_evidence(self, timeout=None):
+        acquired = self.lock.acquire() if timeout is None else self.lock.acquire(timeout=max(0, min(timeout, 0.02)))
+        if not acquired:
+            raise RuntimeError("sequence failure observer lock unavailable")
+        try:
+            if self._sequence_failure is None:
+                raise RuntimeError("sequence failure observation was not requested")
+            value = self._sequence_failure.evidence()
+            value["overflow"] |= self.observer_overflow or self._sequence_failure.oracle.overflow
+            value["invalid"] |= bool(self.errors) or value["overflow"]
+            return value
+        finally:
+            self.lock.release()
 
     def copy_evidence(self, timeout=None):
         acquired = self.lock.acquire() if timeout is None else self.lock.acquire(timeout=max(0, min(timeout, 0.02)))
@@ -1350,10 +1571,11 @@ class WireGate:
             while not self.stopping.is_set():
                 self.trace(observation, "client", "frame_wait")
                 kind, frame, payload = self.close_packet(client, observation) if self.mode == "completed_resume_close" else packet(client)
-                ack_token = status_token = None
+                ack_token = status_token = sequence_token = None
                 oracle = getattr(observation, "ack_oracle", None)
                 if oracle is not None:
                     if observation.ack_side == "target":
+                        sequence_token = self._sequence_frontend(observation, kind, payload)
                         ack_token = oracle.target_frontend(observation.connection, kind, payload)
                     elif observation.copy_active and kind == b'd' and payload[:1] == b'r':
                         if len(payload) != 34 or payload[-1] not in (0, 1):
@@ -1388,6 +1610,7 @@ class WireGate:
                             return
                 self.trace(observation, "client", "forwarding")
                 server.sendall(frame)
+                self._sequence_forwarded(sequence_token)
                 if oracle is not None:
                     oracle.forwarded(ack_token)
                     oracle.forwarded(status_token)
@@ -1434,7 +1657,7 @@ class WireGate:
                         observation.invalid |= observation.copy_active
                     raise
                 oracle = getattr(observation, "ack_oracle", None)
-                ack_token = oracle.target_backend(observation.connection, kind, payload) if oracle is not None and observation.ack_side == "target" else None
+                ack_token = self._sequence_backend(observation, kind, payload) if oracle is not None and observation.ack_side == "target" else None
                 with self.lock:
                     token = observation.received(kind, payload)
                     observation.wire_event("server", "received", kind, payload)
