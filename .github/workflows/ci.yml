@@ -180,6 +180,8 @@ jobs:
                                sort_keys=True))
           for path in sorted(Path("target/e2e/failures").glob("*.json")):
               print(path.read_text())
+              if json.loads(path.read_text())["callsite"]["function"] == "raw":
+                  print([line[:300] for line in path.with_suffix(".stderr").read_text(errors="replace").splitlines() if line.startswith("Error:")])
           PYLEDGER
       - name: Revalidate the exact sanitized clone receipt
         run: |
