@@ -1,6 +1,8 @@
 """Private socket controls for SQL COMMIT fault boundaries."""
 
 from contextlib import contextmanager
+import copy
+import hashlib
 import json
 from pathlib import Path
 import socket
@@ -1153,6 +1155,419 @@ class AckOracleTests(unittest.TestCase):
             self.assertEqual(oracle.evidence()["statuses"], [])
             with self.assertRaises(RuntimeError):
                 gate.evidence()
+
+
+class SequenceFailureTests(unittest.TestCase):
+    SQL = b'''SELECT pg_catalog.setval('"private_fixture"."sequence_password"'::pg_catalog.regclass,1001,true)'''
+    BINDING = "ab" * 32
+
+    def setUp(self):
+        for entry in ("socket.socket", "socket.socketpair", "socket.create_connection", "subprocess.Popen",
+                      "subprocess.run", "threading.Thread.start"):
+            guard = patch(entry, side_effect=AssertionError("runtime entry point is outside pure protocol controls"))
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    @staticmethod
+    def offline_gate(mode, oracle=None, side=None):
+        gate = WireGate.__new__(WireGate)
+        gate.lock, gate.errors, gate.observers, gate.observer_overflow = threading.Lock(), [], [], False
+        gate.ack_oracle, gate.side, gate._sequence_failure = oracle, side, None
+        gate.mode, gate.threads = mode, []
+        gate.stopping, gate.armed, gate.held, gate.release, gate.copy_held, gate.copy_release = (threading.Event() for _ in range(6))
+        gate.copy_relation = None
+        gate.hits = gate.data_bytes = gate.begins = gate.commits = gate.dropped_keepalives = 0
+        return gate
+
+    def gate(self, *, arm=True, active=True):
+        self.assertTrue(hasattr(WireGate, "observe_sequence_failure"), "passive final sequence failure observation is absent")
+        controls = AckOracleTests()
+        oracle, connection = controls.oracle()
+        old = controls.owned()
+        controls.commit(oracle, connection, old, controls.anchor({**old, "barrier_counter": 2}))
+        source = oracle.connection("source")
+        oracle.forwarded(oracle.source_status(source, (8, 8, 8)))
+        gate = self.offline_gate("observe", oracle, "target")
+        observation = follow_wire.PgoutputObservation(connection)
+        observation.ack_oracle, observation.ack_side = oracle, "target"
+        gate.observers.append(observation)
+        if arm:
+            gate.observe_sequence_failure(self.SQL, self.BINDING)
+        if active:
+            controls.sql(oracle, connection, b'BEGIN ISOLATION LEVEL READ COMMITTED', b'BEGIN')
+        return gate, observation
+
+    def send(self, gate, observation, data, *, backend=False, forward=True):
+        while data:
+            kind, size = data[:1], struct.unpack_from("!I", data, 1)[0]
+            payload, data = data[5:size + 1], data[size + 1:]
+            if backend:
+                token = gate._sequence_backend(observation, kind, payload)
+            else:
+                sequence = gate._sequence_frontend(observation, kind, payload)
+                token = gate.ack_oracle.target_frontend(observation.connection, kind, payload)
+                if forward:
+                    gate._sequence_forwarded(sequence)
+            if forward:
+                gate.ack_oracle.forwarded(token)
+
+    def requests(self):
+        return [parse(self.SQL), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')]
+
+    @staticmethod
+    def description():
+        return frame(b'T', b'\0\1setval\0' + struct.pack("!IhIhih", 0, 0, 20, 8, -1, 0))
+
+    @staticmethod
+    def error(fields=b'SERROR\0VERROR\0C22003\0Msequence_password detail\0Drow_password\0Hsecret_hint\0'):
+        return frame(b'E', fields + b'\0')
+
+    def finish(self, gate, observation, *, error=None):
+        self.send(gate, observation, frame(b'1') + frame(b'2') + self.description(), backend=True)
+        self.send(gate, observation, self.error() if error is None else error, backend=True)
+        evidence = gate.sequence_failure_evidence()
+        if evidence["error_observed"] and not evidence["invalid"]:
+            self.assertEqual(evidence["matches"], 0)
+            self.send(gate, observation, frame(b'Z', b'E'), backend=True)
+
+    def test_exact_literal_zero_parameter_execution_has_closed_private_failure_evidence(self):
+        gate, observation = self.gate()
+        for request in self.requests():
+            self.send(gate, observation, request)
+        self.finish(gate, observation)
+        evidence = gate.sequence_failure_evidence()
+        self.assertEqual(set(evidence), set("version statement_class fixture_binding_sha256 statement_sha256 connection backend_pid parameter_count parse_forwarded bind_forwarded execute_forwarded error_observed sqlstate invalid overflow matches pre_error_ack".split()))
+        self.assertEqual({key: evidence[key] for key in ("version", "statement_class", "fixture_binding_sha256", "statement_sha256", "connection", "backend_pid", "parameter_count", "sqlstate", "matches")},
+                         {"version": 1, "statement_class": "final_sequence_setval", "fixture_binding_sha256": self.BINDING,
+                          "statement_sha256": hashlib.sha256(self.SQL).hexdigest(), "connection": 1, "backend_pid": 123,
+                          "parameter_count": 0, "sqlstate": "22003", "matches": 1})
+        self.assertTrue(all(evidence[key] for key in ("parse_forwarded", "bind_forwarded", "execute_forwarded", "error_observed")))
+        self.assertFalse(evidence["invalid"] or evidence["overflow"])
+        self.assertFalse(evidence["pre_error_ack"]["invalid"])
+        self.assertTrue(gate.ack_oracle.evidence()["invalid"])
+        from follow import synchronous_feedback
+        snapshot = evidence["pre_error_ack"]
+        self.assertEqual(synchronous_feedback({"ack_oracle": snapshot, "statuses": [(8, 8, 8)]}), [(8, 8, 8)])
+        self.assertIsNone(synchronous_feedback({"ack_oracle": gate.ack_oracle.evidence(), "statuses": [(8, 8, 8)]}))
+        for secret in ("private_fixture", "sequence_password", "row_password", "secret_hint", "1001", "regclass"):
+            self.assertNotIn(secret, json.dumps(evidence))
+
+    def test_missing_or_unforwarded_execution_never_matches(self):
+        for missing in range(4):
+            with self.subTest(missing=missing):
+                gate, observation = self.gate()
+                requests = self.requests()
+                try:
+                    for index, request in enumerate(requests):
+                        if index != missing:
+                            self.send(gate, observation, request)
+                    self.finish(gate, observation)
+                except ValueError:
+                    pass
+                evidence = gate.sequence_failure_evidence()
+                self.assertNotEqual((evidence["matches"], evidence["invalid"]), (1, False))
+        for missing in ("parse_forwarded", "bind_forwarded", "execute_forwarded", "error"):
+            with self.subTest(missing=missing):
+                gate, observation = self.gate()
+                for index, request in enumerate(self.requests()):
+                    self.send(gate, observation, request, forward=index != {"parse_forwarded": 0, "bind_forwarded": 1, "execute_forwarded": 3}.get(missing))
+                if missing != "error":
+                    self.finish(gate, observation)
+                self.assertNotEqual((gate.sequence_failure_evidence()["matches"], gate.sequence_failure_evidence()["invalid"]), (1, False))
+
+    def test_wrong_bind_portal_limit_pipeline_warning_and_backend_never_match(self):
+        variants = [
+            [parse(self.SQL, types=(25,)), *self.requests()[1:]],
+            [parse(self.SQL), bind(values=(b'private-sequence', b'1001', b'true')), *self.requests()[2:]],
+            [parse(self.SQL), bind()[:-2] + b'\0\1', *self.requests()[2:]],
+            [parse(self.SQL), bind(statement=b'other'), *self.requests()[2:]],
+            [*self.requests()[:3], execute(portal=b'other'), frame(b'S')],
+            [*self.requests()[:3], execute(limit=1), frame(b'S')],
+            [*self.requests()[:3], parse(b'SELECT 1'), *self.requests()[3:]],
+            [*self.requests()[:3], frame(b'Q', b'SELECT 1\0'), *self.requests()[3:]],
+            [*self.requests()[:4], execute(), frame(b'S')],
+            [*self.requests()[:4], frame(b'S', b'bad')],
+            [parse(self.SQL, statement=b'x' * 129), *self.requests()[1:]],
+        ]
+        for index, requests in enumerate(variants):
+            with self.subTest(variant=index):
+                gate, observation = self.gate()
+                try:
+                    for request in requests:
+                        self.send(gate, observation, request)
+                    self.finish(gate, observation)
+                except ValueError:
+                    pass
+                evidence = gate.sequence_failure_evidence()
+                self.assertTrue(evidence["invalid"])
+                self.assertNotEqual(evidence["matches"], 1)
+        for variation in ("warning", "prior_warning", "backend", "pending", "pid", "unknown_backend", "duplicate", "no_transaction"):
+            with self.subTest(variation=variation):
+                gate, observation = self.gate(active=variation != "no_transaction")
+                if variation == "pending":
+                    self.send(gate, observation, parse(b'SELECT 1'))
+                elif variation == "prior_warning":
+                    self.send(gate, observation, frame(b'N', b'SWARNING\0C01000\0Mprivate\0\0'), backend=True)
+                for request in self.requests():
+                    self.send(gate, observation, request)
+                if variation == "warning":
+                    self.send(gate, observation, frame(b'N', b'SWARNING\0C01000\0Mprivate\0\0'), backend=True)
+                elif variation == "backend":
+                    other = gate.ack_oracle.connection("target")
+                    gate.ack_oracle.target_backend(other, b'K', struct.pack("!II", 124, 0))
+                    observation.connection = other
+                elif variation == "pid":
+                    gate.ack_oracle.targets[1].pid = 124
+                elif variation == "unknown_backend":
+                    try:
+                        self.send(gate, observation, frame(b'A', b'private'), backend=True)
+                    except ValueError:
+                        pass
+                try:
+                    self.finish(gate, observation)
+                    if variation == "duplicate":
+                        self.send(gate, observation, parse(self.SQL))
+                except ValueError:
+                    pass
+                self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+
+    def test_wrong_sql_error_fields_and_incomplete_backend_order_never_match(self):
+        errors = [b'SERROR\0CXX000\0Mprivate\0', b'SERROR\0C22003\0C22003\0Mprivate\0',
+                  b'SERROR\0C22003', b'SERROR\0C22003\0VWARNING\0Mprivate\0',
+                  b'SERROR\0Mprivate\0', b'SWARNING\0C22003\0Mprivate\0',
+                  b'SERROR\0C22003\0Mprivate\0\0Mtrailing\0', b'SERROR\0C22003\0M' + b'x' * 65536 + b'\0']
+        for fields in errors:
+            with self.subTest(fields=fields[:40]):
+                gate, observation = self.gate()
+                for request in self.requests():
+                    self.send(gate, observation, request)
+                self.finish(gate, observation, error=self.error(fields))
+                self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+                self.assertNotEqual(gate.sequence_failure_evidence()["matches"], 1)
+                if len(fields) > 65536:
+                    self.assertTrue(gate.sequence_failure_evidence()["overflow"])
+        for response in (b'', frame(b'1'), frame(b'2') + frame(b'1'), frame(b'1') + frame(b'2')):
+            gate, observation = self.gate()
+            for request in self.requests():
+                self.send(gate, observation, request)
+            try:
+                self.send(gate, observation, response + self.error(), backend=True)
+            except ValueError:
+                pass
+            self.assertNotEqual((gate.sequence_failure_evidence()["matches"], gate.sequence_failure_evidence()["invalid"]), (1, False))
+        gate, observation = self.gate()
+        for request in [parse(self.SQL.replace(b'1001', b'1000')), *self.requests()[1:]]:
+            self.send(gate, observation, request)
+        self.finish(gate, observation)
+        self.assertEqual(gate.sequence_failure_evidence()["matches"], 0)
+        self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+
+    def test_snapshot_is_deeply_private_and_cannot_retroactively_cover_unsafe_status(self):
+        gate, observation = self.gate()
+        source = gate.ack_oracle.connection("source")
+        gate.ack_oracle.forwarded(gate.ack_oracle.source_status(source, (40, 40, 40)))
+        for request in self.requests():
+            self.send(gate, observation, request)
+        self.finish(gate, observation)
+        frozen = copy.deepcopy(gate.sequence_failure_evidence())
+        exported = gate.sequence_failure_evidence()
+        exported["pre_error_ack"]["statuses"][-1]["safe"] = True
+        oracle = gate.ack_oracle
+        proofs = oracle.evidence()["proofs"]
+        oracle.source_transaction({"connection": source, "final_lsn": 32, "commit_lsn": 32, "end_lsn": 40,
+                                   "xid": 7, "complete": True, "begin_forwarded": True, "commit_forwarded": True})
+        controls = AckOracleTests()
+        anchored = controls.anchor({**controls.owned(), "barrier_counter": 2})
+        controls.commit(oracle, observation.connection, anchored, {**anchored, "barrier_counter": 3, "applied_order": 1,
+                        "last_xid": 7, "begin_ordinal": 32, "source_commit_lsn": "0/20", "source_end_lsn": "0/28"})
+        self.assertEqual(oracle.evidence()["proofs"], proofs)
+        gate.ack_oracle.proofs.append({"ordinal": gate.ack_oracle.ordinal + 1, "connection": 1, "backend_pid": 123, "prefix": 40})
+        self.assertEqual(gate.sequence_failure_evidence(), frozen)
+        from follow import synchronous_feedback
+        snapshot = frozen["pre_error_ack"]
+        with self.assertRaisesRegex(RuntimeError, "prior covering"):
+            synchronous_feedback({"ack_oracle": snapshot, "statuses": [(8, 8, 8), (40, 40, 40)]})
+        self.assertTrue(gate.ack_oracle.evidence()["invalid"])
+
+    def test_opt_in_is_exact_once_bounded_and_diagnostic_lock_has_deadline(self):
+        gate, _ = self.gate(arm=False)
+        for sql, binding in ((self.SQL, "bad"), (self.SQL + b'\0', self.BINDING),
+                             (b'SELECT 1', self.BINDING), (self.SQL.replace(b'1001', b'1000'), self.BINDING),
+                             (self.SQL.replace(b'true', b'false'), self.BINDING), (b'x' * 65537, self.BINDING)):
+            with self.assertRaises((ValueError, RuntimeError)):
+                gate.observe_sequence_failure(sql, binding)
+        gate.observe_sequence_failure(self.SQL, self.BINDING)
+        with self.assertRaises((ValueError, RuntimeError)):
+            gate.observe_sequence_failure(self.SQL, self.BINDING)
+        gate.lock.acquire()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lock unavailable"):
+                gate.sequence_failure_evidence(timeout=.01)
+        finally:
+            gate.lock.release()
+        self.assertEqual(gate.sequence_failure_evidence()["matches"], 0)
+
+    def test_opt_in_cannot_move_to_a_different_or_unbound_oracle(self):
+        gate, _ = self.gate()
+        with self.assertRaises(RuntimeError):
+            self.offline_gate("observe", gate.ack_oracle, "source").observe_sequence_failure(self.SQL, self.BINDING)
+        with self.assertRaises(RuntimeError):
+            self.offline_gate("observe", follow_wire.AckOracle("m9"), "target").observe_sequence_failure(self.SQL, self.BINDING)
+        original = gate.ack_oracle
+        gate.attach_ack_oracle(follow_wire.AckOracle("m9"), "target")
+        gate.attach_ack_oracle(original, "target")
+        self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+        gate, _ = self.gate()
+        for _ in range(63):
+            gate.ack_oracle.connection("target")
+        with self.assertRaises(ValueError):
+            gate.ack_oracle.connection("target")
+        evidence = gate.sequence_failure_evidence()
+        self.assertTrue(evidence["invalid"] and evidence["overflow"])
+
+    def test_same_exchange_sync_may_follow_error_but_precedes_failed_ready(self):
+        gate, observation = self.gate()
+        for request in self.requests()[:-1]:
+            self.send(gate, observation, request)
+        self.send(gate, observation, frame(b'1') + frame(b'2') + self.description() + self.error(), backend=True)
+        evidence = gate.sequence_failure_evidence()
+        self.assertTrue(evidence["error_observed"])
+        self.assertEqual(evidence["matches"], 0)
+        self.send(gate, observation, frame(b'S'))
+        self.send(gate, observation, frame(b'Z', b'E'), backend=True)
+        self.assertEqual(gate.sequence_failure_evidence()["matches"], 1)
+        self.assertFalse(gate.sequence_failure_evidence()["invalid"])
+        self.assertTrue(gate.ack_oracle.evidence()["invalid"])
+
+    def test_only_one_same_backend_failed_transaction_tail_can_complete_the_failure(self):
+        for tail in (frame(b'Z', b'T'), frame(b'Z', b'I'), frame(b'Z', b'EE'),
+                     frame(b'C', b'SELECT 1\0'), frame(b'N', b'SWARNING\0C01000\0Mprivate\0\0')):
+            with self.subTest(tail=tail[:12]):
+                gate, observation = self.gate()
+                for request in self.requests():
+                    self.send(gate, observation, request)
+                self.send(gate, observation, frame(b'1') + frame(b'2') + self.description() + self.error(), backend=True)
+                self.assertEqual(gate.sequence_failure_evidence()["matches"], 0)
+                try:
+                    self.send(gate, observation, tail, backend=True)
+                except ValueError:
+                    pass
+                self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+        gate, observation = self.gate()
+        for request in self.requests():
+            self.send(gate, observation, request)
+        self.finish(gate, observation)
+        self.assertEqual(gate.sequence_failure_evidence()["matches"], 1)
+        with self.assertRaises(ValueError):
+            self.send(gate, observation, frame(b'Z', b'E'), backend=True)
+        self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+        self.assertTrue(gate.ack_oracle.evidence()["invalid"])
+        gate, observation = self.gate()
+        for request in self.requests():
+            self.send(gate, observation, request)
+        self.send(gate, observation, frame(b'1') + frame(b'2') + self.description() + self.error(), backend=True)
+        other = gate.ack_oracle.connection("target")
+        gate.ack_oracle.target_backend(other, b'K', struct.pack("!II", 124, 0))
+        observation.connection = other
+        with self.assertRaises(ValueError):
+            self.send(gate, observation, frame(b'Z', b'E'), backend=True)
+        self.assertTrue(gate.sequence_failure_evidence()["invalid"])
+        self.assertEqual(gate.sequence_failure_evidence()["matches"], 0)
+        gate, observation = self.gate(arm=False)
+        for request in self.requests():
+            self.send(gate, observation, request)
+        self.send(gate, observation, frame(b'1') + frame(b'2') + self.description() + self.error(), backend=True)
+        with self.assertRaises(ValueError):
+            self.send(gate, observation, frame(b'Z', b'E'), backend=True)
+        self.assertTrue(gate.ack_oracle.evidence()["invalid"])
+
+    @staticmethod
+    def relay_frames(gate, observation, frames, *, backend=False):
+        class MemoryStream:
+            def __init__(self):
+                self.forwarded = []
+
+            def recv(self, *_args):
+                return b'1'
+
+            def sendall(self, value):
+                self.forwarded.append(value)
+
+            def shutdown(self, _how):
+                pass
+
+            def close(self):
+                pass
+
+        class UnstartedThread:
+            def start(self):
+                pass
+
+        client, server = MemoryStream(), MemoryStream()
+        packets = [(value[:1], value, value[5:]) for value in frames]
+        if not backend:
+            startup = struct.pack("!I", 196608) + b'user\0fixture\0\0'
+            packets.insert(0, (b'', struct.pack("!I", len(startup) + 4) + startup, startup))
+        with patch.object(follow_wire, "packet", side_effect=[*packets, EOFError]), \
+                patch.object(follow_wire.threading, "Thread", return_value=UnstartedThread()):
+            (gate.downstream if backend else gate.upstream)(client, server, observation)
+        return client.forwarded if backend else server.forwarded[1:]
+
+    def test_live_forwarding_hooks_preserve_every_fixture_frame_in_memory(self):
+        gate, observation = self.gate()
+        requests = self.requests()
+        responses = [frame(b'1'), frame(b'2'), self.description(), self.error(), frame(b'Z', b'E')]
+        self.assertEqual(self.relay_frames(gate, observation, requests), requests)
+        self.assertEqual(self.relay_frames(gate, observation, responses, backend=True), responses)
+        self.assertEqual(gate.errors, [])
+        self.assertEqual(gate.sequence_failure_evidence()["matches"], 1)
+        self.assertTrue(gate.ack_oracle.evidence()["invalid"])
+
+    def test_later_begin_gate_holds_exact_copy_before_logical_routing(self):
+        relation = ["M2 space", "rows"]
+        for mode in ("observe", "after_begin", "later_begin_only"):
+            with self.subTest(mode=mode):
+                gate = self.offline_gate(mode)
+                self.assertIsNone(gate.copy_relation)
+                gate.hold_copy(relation)
+                self.assertEqual(gate.copy_relation, relation)
+                with self.assertRaises(RuntimeError):
+                    gate.hold_copy(relation)
+        for mode in ("before_commit", "after_commit", "before_sync_commit", "completed_resume_close"):
+            with self.subTest(mode=mode), self.assertRaises(RuntimeError):
+                self.offline_gate(mode).hold_copy(relation)
+        gate = self.offline_gate("later_begin_only")
+        gate.arm()
+        gate.hold_copy(relation)
+        gate.copy_release.set()
+        observation = follow_wire.PgoutputObservation(1)
+        gate.observers.append(observation)
+        sql = b'COPY (SELECT "id" FROM ONLY "M2 space"."rows") TO STDOUT WITH (FORMAT binary)'
+        requests = [parse(sql), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')]
+        self.assertEqual(self.relay_frames(gate, observation, requests), requests)
+        copy = [frame(b'K', struct.pack("!II", 123, 0)), frame(b'1'), frame(b'2'), frame(b'n'),
+                frame(b'H', b'\1\0\1\0\1'), frame(b'c'), frame(b'C', b'COPY 0\0'), frame(b'Z', b'I')]
+        self.assertEqual(self.relay_frames(gate, observation, copy, backend=True), copy)
+        self.assertTrue(gate.copy_held.is_set())
+        evidence = gate.copy_evidence()
+        self.assertFalse(evidence["invalid"] or evidence["overflow"])
+        self.assertEqual(len(evidence["records"]), 1)
+        record = evidence["records"][0]
+        self.assertEqual(record["relation"], relation)
+        self.assertTrue(record["held"] and record["released"] and record["complete"])
+        self.assertEqual((gate.hits, gate.dropped_keepalives), (0, 0))
+        logical = follow_wire.PgoutputObservation(2)
+        gate.observers.append(logical)
+        logical.startup(struct.pack("!I", 196608) + b'user\0fixture\0replication\0database\0\0')
+        logical.query(b'''START_REPLICATION SLOT "owned" LOGICAL 0/8 ("proto_version" '1', "publication_names" '"owned"')\0''')
+        gate.release.set()
+        start = frame(b'W', b'\0\0\0')
+        keepalive = frame(b'd', b'k' + struct.pack("!QqB", 32, 0, 0))
+        begin = frame(b'd', b'w' + struct.pack("!QQq", 64, 64, 0) + b'B' + struct.pack("!QqI", 64, 0, 3))
+        self.assertEqual(self.relay_frames(gate, logical, [start, keepalive, begin], backend=True), [start, begin])
+        self.assertEqual((gate.hits, gate.dropped_keepalives), (1, 1))
+        self.assertTrue(gate.held.is_set())
+        self.assertEqual(gate.errors, [])
 
 
 if __name__ == "__main__":
