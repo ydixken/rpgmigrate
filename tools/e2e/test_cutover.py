@@ -17,6 +17,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import clone
 import cutover
+from test_clone import ModelRuntime
 
 
 WORK = {"migration_uid": "12345678-9abc-def0-1234-56789abcdef0", "run_id": "123456789abcdef0123456789abcdef0",
@@ -865,44 +866,39 @@ class CutoverHarnessTests(unittest.TestCase):
         manifest = cutover.load_manifest()
         for changed in (False, True):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve()
+                (root / "tools/e2e").mkdir(parents=True)
+                (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6" * 64 + "\n")
                 args = SimpleNamespace(pair="16-18", receipt=str(root / "result.json"), report_probe=None,
                                        cutover=True, smoke=False, diagnostic_case=None)
-                commands, containers = [], {}
-                token = None
-                def command(argv, **_kwargs):
-                    nonlocal token
-                    commands.append(argv)
-                    if argv[1:3] == ["network", "create"]:
-                        token = argv[-1]
-                    if argv[1:3] == ["image", "inspect"]:
-                        return (("a" * 64).encode() if "--format" in argv else json.dumps([{"Id": "b" * 64}]).encode())
-                    if argv[1] in ("run", "create"):
-                        cid = f"{len(containers) + 1:064x}"
-                        containers[cid] = argv
-                        return cid.encode()
-                    if argv[1:3] == ["start", "--attach"]:
-                        created = containers[argv[-1]]
-                        if "tools/e2e/follow.py" in created:
+                model = ModelRuntime(root)
+                source_tree = cutover.source_inventory(root)
+                def execute(guard, command, **kwargs):
+                    guard.checkpoint()
+                    result = model.call(command, **kwargs)
+                    if command[1] == "start" and "--attach" in command:
+                        guard.sample()
+                        actual = model.containers[command[-1]]
+                        if actual["model_role"] == "runner":
+                            created = next(call for call in model.commands if call[1] == "create" and "tools/e2e/follow.py" in call)
                             self.assertIn("--cutover", created)
-                            receipt = next(Path(value.split(":/receipt")[0]) for value in created if value.endswith(":/receipt"))
-                            (receipt / "result.json").write_text(json.dumps(fixture))
-                        return b""
-                    return b""
-                def process(argv, **_kwargs):
-                    status = 1 if argv[1:3] == ["container", "exists"] else 0
-                    return subprocess.CompletedProcess(argv, status, (token or "").encode(), b"")
+                            receipt = Path(next(row["Source"] for row in actual["Mounts"] if row["Destination"] == "/receipt"))
+                            value = copy.deepcopy(fixture)
+                            value["source_tree"] = {**source_tree, "sha256": "f" * 64} if changed else source_tree
+                            (receipt / "result.json").write_text(json.dumps(value))
+                    return result
                 def validate(value, manifest):
-                    self.assertEqual(value["runner_image_id"], "a" * 64)
-                    self.assertEqual(value["server_image_ids"], ["b" * 64] * 2)
-                    self.assertEqual(value["source_tree"], fixture["source_tree"])
+                    self.assertEqual(value["runner_image_id"], "sha256:" + "5" * 64)
+                    self.assertEqual(value["server_image_ids"], ["sha256:" + digit * 64 for digit in ("1", "2")])
+                    self.assertEqual(value["source_tree"], source_tree)
                     cutover.validate_receipt(value, manifest, require_images=True)
-                identities = [fixture["source_tree"], {**fixture["source_tree"], "sha256": "f" * 64}] if changed else None
                 with patch.object(cutover, "load_manifest", return_value=manifest), \
-                        patch.object(clone, "ROOT", root), patch.object(clone, "DIAGNOSTIC_ROOT", root / "diagnostics"), \
-                        patch.object(clone.shutil, "which", return_value="/unit/runtime"), patch.object(clone, "run", side_effect=command), \
-                        patch.object(clone.subprocess, "run", side_effect=process), \
-                        patch.object(cutover, "source_inventory", side_effect=identities, return_value=fixture["source_tree"]), \
+                        patch.object(clone, "ROOT", root), patch.object(clone, "DIAGNOSTIC_ROOT", root / "target/e2e/diagnostics"), \
+                        patch.object(clone.shutil, "which", return_value="/unit/podman"), \
+                        patch.object(clone.shutil, "disk_usage", return_value=SimpleNamespace(free=57 * 1024**3)), \
+                        patch.object(clone, "run", side_effect=model.call), \
+                        patch.object(clone.subprocess, "run", side_effect=model.subprocess), \
+                        patch.object(clone.RuntimeGuard, "execute", execute), \
                         patch("sys.stdout", new=io.StringIO()):
                     validator = unittest.mock.Mock(side_effect=validate)
                     if changed:
@@ -914,7 +910,10 @@ class CutoverHarnessTests(unittest.TestCase):
                         manifest = cutover.load_manifest()
                         clone.outer(args, program="follow", manifest=manifest, receipt_validator=validator)
                         validator.assert_called_once()
-                        self.assertEqual(json.loads(Path(args.receipt).read_bytes())["runner_image_id"], "a" * 64)
+                        self.assertEqual(json.loads(Path(args.receipt).read_bytes())["runner_image_id"], "sha256:" + "5" * 64)
+                self.assertFalse(model.containers)
+                self.assertFalse(model.networks)
+                self.assertEqual(len(model.removed), 4)
 
 
     def test_failed_sentinel_result_is_retained_before_gate_and_workdir_cleanup_without_free_text(self):

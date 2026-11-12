@@ -48,10 +48,10 @@ The admitted native recovery path needs its own checked snapshot and target auth
 
 ## Candidate formats and support
 
-The primary baseline remains native format 8 with target metadata 6.
-The isolated M8 candidate uses native format 9 with metadata 7.
-The isolated M9 candidate uses native format 10 with metadata 7.
-These candidates do not promote their formats or stored durability settings into baseline support.
-Unsupported formats refuse without conversion.
-No benchmark result, checkpoint cadence, replay-safe availability, or relaxed loss budget follows from candidate code or parser acceptance.
+The retained format 8 / target metadata 6 runner evidence is bound to its [recorded source and images](runner-image.md#public-development-images).
+The M8 engine candidate uses native format 9 with target metadata 7 and requires fresh native state.
+The isolated M9 candidate uses native format 10 with target metadata 7.
+Unsupported state or metadata formats refuse without conversion.
+Public execution remains durable.
+Replay-safe execution, a relaxed loss budget, checkpoint cadence, and benchmark results require their own qualification.
 Use the [roadmap](roadmap.md) for handoffs and qualification gates.

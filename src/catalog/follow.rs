@@ -1441,7 +1441,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter(|t| t.name.schema == schema)
-            .collect();
+            .collect::<Vec<_>>();
         ClonePlan {
             target: crate::contracts::CloneTarget {
                 identity: SourceId {
@@ -1451,7 +1451,9 @@ mod tests {
                 major: source.major,
             },
             source,
+            copy_tables: super::provisional_copy_tables(&tables).unwrap(),
             tables,
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
             generation: CopyGeneration(1),
             sequences: vec![],
             policy: crate::contracts::RestorePolicy::default(),

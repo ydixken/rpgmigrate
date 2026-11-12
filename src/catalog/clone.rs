@@ -1,7 +1,7 @@
 use super::*;
 use crate::contracts::{
-    ClonePlan, CloneSource, CloneTable, CloneTarget, CopyGeneration, OwnedCopyTable, OwnedObject,
-    RestorePolicy,
+    CloneCopyPolicy, ClonePlan, CloneSource, CloneTable, CloneTableCopy, CloneTarget,
+    CopyGeneration, CopyPart, MAX_COPY_PARTS, OwnedCopyTable, OwnedObject, RestorePolicy,
 };
 
 const MAX_TABLES: usize = 4096;
@@ -22,6 +22,335 @@ fn admitted_relation(
             "p" | "v" | "S" => true,
             _ => false,
         }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BinaryColumn {
+    name: String,
+    type_oid: u32,
+    namespace_oid: u32,
+    type_name: String,
+    kind: String,
+    modifier: i32,
+    scalar: bool,
+    send_oid: u32,
+    receive_oid: u32,
+    send_name: String,
+    receive_name: String,
+    send_builtin: bool,
+    receive_builtin: bool,
+    extension_owned: bool,
+}
+
+fn binary_columns_compatible(
+    source: &[BinaryColumn],
+    target: &[BinaryColumn],
+    source_encodings: (&str, &str),
+    target_encodings: (&str, &str),
+) -> bool {
+    if source.is_empty()
+        || source != target
+        || source_encodings != target_encodings
+        || source_encodings.0.is_empty()
+        || source_encodings.0 != source_encodings.1
+    {
+        return false;
+    }
+    source.iter().all(|column| {
+        // Both majors pin these scalar and binary I/O identities in pg_type.dat/pg_proc.dat.
+        let (oid, send, receive, io_name) = match column.type_name.as_str() {
+            "bool" => (16, 2437, 2436, "bool"),
+            "bytea" => (17, 2413, 2412, "bytea"),
+            "int2" => (21, 2405, 2404, "int2"),
+            "int4" => (23, 2407, 2406, "int4"),
+            "int8" => (20, 2409, 2408, "int8"),
+            "float4" => (700, 2425, 2424, "float4"),
+            "float8" => (701, 2427, 2426, "float8"),
+            "numeric" => (1700, 2461, 2460, "numeric_"),
+            "text" => (25, 2415, 2414, "text"),
+            "varchar" => (1043, 2433, 2432, "varchar"),
+            "bpchar" => (1042, 2431, 2430, "bpchar"),
+            "date" => (1082, 2469, 2468, "date_"),
+            "time" => (1083, 2471, 2470, "time_"),
+            "timestamp" => (1114, 2475, 2474, "timestamp_"),
+            "timestamptz" => (1184, 2477, 2476, "timestamptz_"),
+            "interval" => (1186, 2479, 2478, "interval_"),
+            "uuid" => (2950, 2962, 2961, "uuid_"),
+            "json" => (114, 324, 323, "json_"),
+            "jsonb" => (3802, 3803, 3805, "jsonb_"),
+            _ => return false,
+        };
+        (column.type_oid, column.send_oid, column.receive_oid) == (oid, send, receive)
+            && column.send_name == format!("{io_name}send")
+            && column.receive_name == format!("{io_name}recv")
+            && column.namespace_oid == 11
+            && column.kind == "b"
+            && column.scalar
+            && column.send_builtin
+            && column.receive_builtin
+            && !column.extension_owned
+    })
+}
+
+fn require_planning_transactions(source: &PgConnection, target: &PgConnection) -> Result<()> {
+    if source.transaction_status()? != TransactionStatus::InTransaction
+        || target.transaction_status()? != TransactionStatus::InTransaction
+    {
+        return Err(refusal(
+            "COPY planning requires the caller's healthy source snapshot and target transaction",
+        ));
+    }
+    Ok(())
+}
+
+fn binary_columns(
+    connection: &mut PgConnection,
+    oid: u32,
+    io: &IoControl,
+) -> Result<Vec<BinaryColumn>> {
+    let result = connection.query(&format!(r#"SELECT a.attname,t.oid,t.typnamespace,t.typname,t.typtype,a.atttypmod,
+ t.typelem=0 AND t.typbasetype=0 AND t.typrelid=0,t.typsend::pg_catalog.oid,t.typreceive::pg_catalog.oid,
+ COALESCE(s.proname::pg_catalog.text,''),COALESCE(r.proname::pg_catalog.text,''),
+ COALESCE(s.pronamespace=11 AND s.prolang=12 AND s.prokind='f' AND s.prosrc=s.proname::pg_catalog.text,false),
+ COALESCE(r.pronamespace=11 AND r.prolang=12 AND r.prokind='f' AND r.prosrc=r.proname::pg_catalog.text,false),
+ EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.deptype='e' AND
+ ((d.classid='pg_catalog.pg_type'::pg_catalog.regclass AND d.objid=t.oid) OR
+ (d.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid IN (t.typsend,t.typreceive))))
+FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid
+LEFT JOIN pg_catalog.pg_proc s ON s.oid=t.typsend LEFT JOIN pg_catalog.pg_proc r ON r.oid=t.typreceive
+WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated=''
+ORDER BY a.attnum LIMIT 1601"#), io)?;
+    if result.rows() > 1600 || result.columns()? != 14 {
+        return Err(refusal(
+            "binary COPY requires a bounded complete writable column layout",
+        ));
+    }
+    (0..result.rows())
+        .map(|row| {
+            let number = |column| {
+                text(&result, row, column)?
+                    .parse::<u32>()
+                    .map_err(|_| refusal("binary COPY catalog returned an invalid identity"))
+            };
+            Ok(BinaryColumn {
+                name: text(&result, row, 0)?.into(),
+                type_oid: number(1)?,
+                namespace_oid: number(2)?,
+                type_name: text(&result, row, 3)?.into(),
+                kind: text(&result, row, 4)?.into(),
+                modifier: text(&result, row, 5)?
+                    .parse()
+                    .map_err(|_| refusal("binary COPY catalog returned an invalid typmod"))?,
+                scalar: text(&result, row, 6)? == "t",
+                send_oid: number(7)?,
+                receive_oid: number(8)?,
+                send_name: text(&result, row, 9)?.into(),
+                receive_name: text(&result, row, 10)?.into(),
+                send_builtin: text(&result, row, 11)? == "t",
+                receive_builtin: text(&result, row, 12)? == "t",
+                extension_owned: text(&result, row, 13)? != "f",
+            })
+        })
+        .collect()
+}
+
+fn locked_clone_oid(
+    connection: &mut PgConnection,
+    table: &CloneTable,
+    io: &IoControl,
+) -> Result<u32> {
+    require_copy_name(&table.name)?;
+    let quoted = qualified(connection, &table.name.schema, &table.name.table)?;
+    command(
+        connection,
+        &format!("LOCK TABLE ONLY {quoted} IN ACCESS SHARE MODE"),
+        "LOCK TABLE",
+        io,
+    )?;
+    let schema = connection.quote_literal(&table.name.schema)?;
+    let name = connection.quote_literal(&table.name.table)?;
+    let result = connection.query(&format!("SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_am a ON a.oid=c.relam WHERE n.nspname={schema} AND c.relname={name} AND c.relkind='r' AND c.relpersistence='p' AND a.amname='heap' AND a.oid<16384 LIMIT 2"), io)?;
+    if result.rows() != 1 || result.columns()? != 1 {
+        return Err(refusal(
+            "COPY planning requires one exact locked physical heap",
+        ));
+    }
+    cdc_object_id(text(&result, 0, 0)?)
+}
+
+pub(crate) fn binary_copy_compatible(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    table: &CloneTable,
+    io: &IoControl,
+) -> Result<bool> {
+    require_planning_transactions(source, target)?;
+    if locked_clone_oid(source, table, io)? != table.source_oid {
+        return Err(refusal(
+            "binary COPY source table identity differs from the snapshot plan",
+        ));
+    }
+    let target_oid = locked_clone_oid(target, table, io)?;
+    let source_columns = binary_columns(source, table.source_oid, io)?;
+    let target_columns = binary_columns(target, target_oid, io)?;
+    if source_columns
+        .iter()
+        .map(|c| &c.name)
+        .ne(table.writable_columns.iter())
+    {
+        return Err(refusal(
+            "binary COPY source writable columns differ from the snapshot plan",
+        ));
+    }
+    let source_server = setting(source, "server_encoding", io)?;
+    let source_client = setting(source, "client_encoding", io)?;
+    let target_server = setting(target, "server_encoding", io)?;
+    let target_client = setting(target, "client_encoding", io)?;
+    Ok(binary_columns_compatible(
+        &source_columns,
+        &target_columns,
+        (&source_server, &source_client),
+        (&target_server, &target_client),
+    ))
+}
+
+pub(crate) fn plan_copy_parts(
+    relation_bytes: u64,
+    block_size: u32,
+    threshold_bytes: u64,
+    max_parts: u32,
+) -> Result<Vec<CopyPart>> {
+    if block_size == 0 || max_parts == 0 || max_parts > i32::MAX as u32 {
+        return Err(refusal(
+            "COPY parts require a positive block size and bounded part maximum",
+        ));
+    }
+    let blocks = relation_bytes.div_ceil(u64::from(block_size));
+    if blocks > u64::from(u32::MAX) {
+        return Err(refusal(
+            "COPY physical table exceeds PostgreSQL block bounds",
+        ));
+    }
+    let requested = if threshold_bytes == 0 || relation_bytes <= threshold_bytes {
+        1
+    } else {
+        relation_bytes
+            .div_ceil(threshold_bytes)
+            .min(u64::from(max_parts))
+            .min(blocks)
+    };
+    let width = blocks.div_ceil(requested).max(1);
+    let count = blocks.div_ceil(width).max(1);
+    if count > MAX_COPY_PARTS as u64 {
+        return Err(refusal("COPY exceeds the 4096 actual part bound"));
+    }
+    let count = count as u32;
+    Ok((0..count)
+        .map(|index| CopyPart {
+            number: index + 1,
+            count,
+            start_block: (u64::from(index) * width) as u32,
+            end_block: (index + 1 < count).then(|| (u64::from(index + 1) * width) as u32),
+        })
+        .collect())
+}
+
+pub(crate) fn provisional_copy_tables(tables: &[CloneTable]) -> Result<Vec<CloneTableCopy>> {
+    if tables.len() > MAX_COPY_PARTS {
+        return Err(refusal("COPY exceeds the 4096 actual part bound"));
+    }
+    let mut entries = tables
+        .iter()
+        .map(|table| CloneTableCopy {
+            source_oid: table.source_oid,
+            format: CopyFormat::Text,
+            parts: vec![CopyPart {
+                number: 1,
+                count: 1,
+                start_block: 0,
+                end_block: None,
+            }],
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|entry| entry.source_oid);
+    let mut previous = 0;
+    for entry in &entries {
+        if entry.source_oid <= previous {
+            return Err(refusal(
+                "COPY profile requires unique nonzero source table identities",
+            ));
+        }
+        previous = entry.source_oid;
+    }
+    Ok(entries)
+}
+
+pub(crate) fn resolve_clone_copy_tables(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    plan: &ClonePlan,
+    io: &IoControl,
+) -> Result<Vec<CloneTableCopy>> {
+    require_planning_transactions(source, target)?;
+    if read_clone_source(source, io)? != plan.source
+        || read_clone_target(target, io)? != plan.target
+    {
+        return Err(refusal("COPY execution planning endpoint identity differs"));
+    }
+    let mut entries = provisional_copy_tables(&plan.tables)?;
+    let block_size = setting(source, "block_size", io)?
+        .parse::<u32>()
+        .map_err(|_| refusal("COPY planning returned an invalid physical block size"))?;
+    let by_oid = plan
+        .tables
+        .iter()
+        .map(|table| (table.source_oid, table))
+        .collect::<BTreeMap<_, _>>();
+    let mut total = 0usize;
+    for entry in &mut entries {
+        let table = by_oid[&entry.source_oid];
+        if locked_clone_oid(source, table, io)? != table.source_oid {
+            return Err(refusal(
+                "COPY physical table identity differs from its snapshot plan",
+            ));
+        }
+        let result = source.query(
+            &format!(
+                "SELECT pg_catalog.pg_relation_size({}::pg_catalog.oid, 'main')",
+                table.source_oid
+            ),
+            io,
+        )?;
+        if result.rows() != 1 || result.columns()? != 1 {
+            return Err(refusal(
+                "COPY physical storage measurement is absent or ambiguous",
+            ));
+        }
+        let bytes = text(&result, 0, 0)?
+            .parse::<u64>()
+            .map_err(|_| refusal("COPY physical storage measurement is invalid"))?;
+        let parts = plan_copy_parts(
+            bytes,
+            block_size,
+            plan.copy_policy.split_tables_larger_than,
+            plan.copy_policy.split_max_parts,
+        )?;
+        total = total
+            .checked_add(parts.len())
+            .ok_or_else(|| refusal("COPY actual part count overflow"))?;
+        if total > MAX_COPY_PARTS {
+            return Err(refusal("COPY exceeds the 4096 actual part bound"));
+        }
+        entry.parts = parts;
+        entry.format = if plan.copy_policy.use_copy_binary
+            && binary_copy_compatible(source, target, table, io)?
+        {
+            CopyFormat::Binary
+        } else {
+            CopyFormat::Text
+        };
+    }
+    Ok(entries)
 }
 
 fn clone_identity(connection: &mut PgConnection, io: &IoControl) -> Result<(SourceId, u32, u32)> {
@@ -107,6 +436,7 @@ CROSS JOIN LATERAL pg_catalog.pg_identify_object(d.classid,d.objid,d.objsubid) i
 LEFT JOIN pg_catalog.pg_namespace n ON n.nspname=i.schema
 WHERE d.dbid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())
  AND d.deptype='o' AND d.objid>=16384
+ AND d.classid<>'pg_catalog.pg_largeobject'::pg_catalog.regclass
  AND NOT EXISTS (SELECT 1 FROM known k WHERE k.class_oid=d.classid AND k.object_oid=d.objid)
 ORDER BY class_oid,object_oid LIMIT 65537
 "#;
@@ -176,14 +506,23 @@ pub(crate) fn verify_exact_exclusions(
     Ok(())
 }
 
-fn source_obligations(connection: &mut PgConnection, io: &IoControl) -> Result<()> {
-    let result=connection.query("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE COALESCE(pg_catalog.cardinality(extconfig),0)>0), EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata)",io)?;
-    if result.rows() != 1 || result.cell(0, 0)? != Some(b"f") || result.cell(0, 1)? != Some(b"f") {
+fn require_source_obligations(extension_configuration: Option<&[u8]>) -> Result<()> {
+    if extension_configuration != Some(b"f") {
         return Err(refusal(
-            "clone does not support extension configuration data or large objects",
+            "clone does not support extension configuration data",
         ));
     }
     Ok(())
+}
+
+fn source_obligations(connection: &mut PgConnection, io: &IoControl) -> Result<()> {
+    let result = connection.query("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE COALESCE(pg_catalog.cardinality(extconfig),0)>0)", io)?;
+    if result.rows() != 1 || result.columns()? != 1 {
+        return Err(refusal(
+            "clone extension configuration inventory is absent or invalid",
+        ));
+    }
+    require_source_obligations(result.cell(0, 0)?)
 }
 
 fn clone_columns(
@@ -432,11 +771,13 @@ pub(crate) fn inspect_clone_tables(
 }
 
 /// The caller keeps source and target DDL quiescent through the ownership handoff.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_clone(
     source: &mut PgConnection,
     target: &mut PgConnection,
     generation: CopyGeneration,
     policy: RestorePolicy,
+    copy_policy: CloneCopyPolicy,
     exact_metadata: &[OwnedObject],
     owned_objects: &[OwnedObject],
     io: &IoControl,
@@ -499,9 +840,11 @@ pub(crate) fn plan_clone(
         source: source_id,
         target: target_id,
         generation,
+        copy_tables: provisional_copy_tables(&tables)?,
         tables,
         sequences,
         policy,
+        copy_policy,
     })
 }
 
@@ -658,6 +1001,247 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provisional_copy_profiles_are_sorted_exact_and_bounded() {
+        let table = |oid| CloneTable {
+            source_oid: oid,
+            name: QualifiedTable {
+                schema: "public".into(),
+                table: format!("items_{oid}"),
+            },
+            writable_columns: vec!["id".into()],
+            all_columns: vec!["id".into()],
+            identity_modes: vec![0],
+            partition_identity_modes: None,
+        };
+        let actual = provisional_copy_tables(&[table(9), table(3)]).unwrap();
+        assert_eq!(
+            actual
+                .iter()
+                .map(|item| item.source_oid)
+                .collect::<Vec<_>>(),
+            [3, 9]
+        );
+        for item in &actual {
+            assert_eq!(item.format, CopyFormat::Text);
+            assert_eq!(
+                item.parts,
+                [CopyPart {
+                    number: 1,
+                    count: 1,
+                    start_block: 0,
+                    end_block: None
+                }]
+            );
+        }
+        assert!(provisional_copy_tables(&[table(0)]).is_err());
+        assert!(provisional_copy_tables(&[table(3), table(3)]).is_err());
+        let at_bound = (1..=4096).map(table).collect::<Vec<_>>();
+        assert_eq!(provisional_copy_tables(&at_bound).unwrap().len(), 4096);
+        let over_bound = (1..=4097).map(table).collect::<Vec<_>>();
+        assert!(provisional_copy_tables(&over_bound).is_err());
+        assert!(provisional_copy_tables(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn extension_configuration_remains_refused_without_coupling_large_objects() {
+        require_source_obligations(Some(b"f")).unwrap();
+        for flag in [
+            None,
+            Some(b"t".as_slice()),
+            Some(b"".as_slice()),
+            Some(b"false".as_slice()),
+        ] {
+            assert!(require_source_obligations(flag).is_err());
+        }
+    }
+
+    #[test]
+    fn copy_parts_use_physical_blocks_with_an_unbounded_tail() {
+        let singleton = vec![(1, 1, 0, None)];
+        for (bytes, threshold, maximum, expected) in [
+            (0, 8192, 8, singleton.clone()),
+            (8192, 0, 8, singleton.clone()),
+            (8192, 8192, 8, singleton.clone()),
+            (16384, 8192, 1, singleton.clone()),
+            (16384, 8192, 8, vec![(1, 2, 0, Some(1)), (2, 2, 1, None)]),
+            (
+                24577,
+                8192,
+                8,
+                vec![
+                    (1, 4, 0, Some(1)),
+                    (2, 4, 1, Some(2)),
+                    (3, 4, 2, Some(3)),
+                    (4, 4, 3, None),
+                ],
+            ),
+            (
+                81920,
+                8192,
+                3,
+                vec![(1, 3, 0, Some(4)), (2, 3, 4, Some(8)), (3, 3, 8, None)],
+            ),
+        ] {
+            let actual = plan_copy_parts(bytes, 8192, threshold, maximum).unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|p| (p.number, p.count, p.start_block, p.end_block))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn copy_parts_refuse_invalid_sizes_and_excess_actual_work_before_allocation() {
+        for (bytes, block, threshold, maximum) in [
+            (8192, 0, 1, 8),
+            (8192, 8192, 1, 0),
+            (8192, 8192, 1, u32::MAX),
+            (u64::MAX, 8192, 1, 8),
+            ((u64::from(u32::MAX) + 1) * 8192, 8192, 1, 8),
+            (8192 * 4097, 8192, 8192, 4097),
+        ] {
+            assert!(plan_copy_parts(bytes, block, threshold, maximum).is_err());
+        }
+        assert_eq!(
+            plan_copy_parts(1, 8192, 1, i32::MAX as u32).unwrap().len(),
+            1
+        );
+    }
+
+    fn binary_fixture(oid: u32, name: &str, send_oid: u32, receive_oid: u32) -> BinaryColumn {
+        let io_name = if matches!(
+            name,
+            "numeric"
+                | "date"
+                | "time"
+                | "timestamp"
+                | "timestamptz"
+                | "interval"
+                | "uuid"
+                | "json"
+                | "jsonb"
+        ) {
+            format!("{name}_")
+        } else {
+            name.into()
+        };
+        BinaryColumn {
+            name: "value".into(),
+            type_oid: oid,
+            namespace_oid: 11,
+            type_name: name.into(),
+            kind: "b".into(),
+            modifier: -1,
+            scalar: true,
+            send_oid,
+            receive_oid,
+            send_name: format!("{io_name}send"),
+            receive_name: format!("{io_name}recv"),
+            send_builtin: true,
+            receive_builtin: true,
+            extension_owned: false,
+        }
+    }
+
+    #[test]
+    fn binary_columns_admit_only_exact_builtin_scalar_profiles() {
+        for (oid, name, send, receive) in [
+            (16, "bool", 2437, 2436),
+            (17, "bytea", 2413, 2412),
+            (21, "int2", 2405, 2404),
+            (23, "int4", 2407, 2406),
+            (20, "int8", 2409, 2408),
+            (700, "float4", 2425, 2424),
+            (701, "float8", 2427, 2426),
+            (1700, "numeric", 2461, 2460),
+            (25, "text", 2415, 2414),
+            (1043, "varchar", 2433, 2432),
+            (1042, "bpchar", 2431, 2430),
+            (1082, "date", 2469, 2468),
+            (1083, "time", 2471, 2470),
+            (1114, "timestamp", 2475, 2474),
+            (1184, "timestamptz", 2477, 2476),
+            (1186, "interval", 2479, 2478),
+            (2950, "uuid", 2962, 2961),
+            (114, "json", 324, 323),
+            (3802, "jsonb", 3803, 3805),
+        ] {
+            let column = binary_fixture(oid, name, send, receive);
+            assert!(binary_columns_compatible(
+                std::slice::from_ref(&column),
+                std::slice::from_ref(&column),
+                ("UTF8", "UTF8"),
+                ("UTF8", "UTF8")
+            ));
+        }
+    }
+
+    #[test]
+    fn binary_columns_fall_back_for_spoofs_containers_layout_and_encoding_drift() {
+        let original = binary_fixture(23, "int4", 2407, 2406);
+        let compatible = |s: &BinaryColumn, t: &BinaryColumn| {
+            binary_columns_compatible(
+                std::slice::from_ref(s),
+                std::slice::from_ref(t),
+                ("UTF8", "UTF8"),
+                ("UTF8", "UTF8"),
+            )
+        };
+        for mutate in [
+            |c: &mut BinaryColumn| c.type_oid = 17001,
+            |c: &mut BinaryColumn| c.namespace_oid = 17001,
+            |c: &mut BinaryColumn| c.type_name = "tsvector".into(),
+            |c: &mut BinaryColumn| c.scalar = false,
+            |c: &mut BinaryColumn| c.send_name = "evil".into(),
+            |c: &mut BinaryColumn| c.receive_name = "evil".into(),
+            |c: &mut BinaryColumn| c.send_oid = 0,
+            |c: &mut BinaryColumn| c.receive_oid = 0,
+            |c: &mut BinaryColumn| c.send_builtin = false,
+            |c: &mut BinaryColumn| c.receive_builtin = false,
+            |c: &mut BinaryColumn| c.extension_owned = true,
+        ] {
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            assert!(!compatible(&changed, &changed));
+            assert!(!compatible(&original, &changed));
+        }
+        for kind in ["d", "e", "c", "r", "m", "p"] {
+            let mut changed = original.clone();
+            changed.kind = kind.into();
+            assert!(!compatible(&changed, &changed));
+        }
+        let mut target = original.clone();
+        target.modifier = 14;
+        assert!(!compatible(&original, &target));
+        target = original.clone();
+        target.name = "other".into();
+        assert!(!compatible(&original, &target));
+        assert!(!binary_columns_compatible(
+            &[],
+            &[],
+            ("UTF8", "UTF8"),
+            ("UTF8", "UTF8")
+        ));
+        for encoding in [("LATIN1", "UTF8"), ("UTF8", "LATIN1"), ("", "")] {
+            assert!(!binary_columns_compatible(
+                std::slice::from_ref(&original),
+                std::slice::from_ref(&original),
+                ("UTF8", "UTF8"),
+                encoding
+            ));
+        }
+        assert!(!binary_columns_compatible(
+            std::slice::from_ref(&original),
+            &[],
+            ("UTF8", "UTF8"),
+            ("UTF8", "UTF8")
+        ));
+    }
+
+    #[test]
     fn target_modes_normalize_only_zero_local_declarative_leaves_on_pg18() {
         let mut table = CloneTable {
             source_oid: 42,
@@ -756,6 +1340,17 @@ mod tests {
         };
         assert_eq!(get("plain").identity_modes, [b'a', b'd']);
         assert_eq!(get("plain").partition_identity_modes, None);
+        let binary_columns = binary_columns(&mut connection, get("plain").source_oid, &io).unwrap();
+        assert_eq!(binary_columns.len(), 2);
+        for column in binary_columns {
+            assert_eq!(
+                (column.type_oid, column.send_oid, column.receive_oid),
+                (23, 2407, 2406)
+            );
+            assert_eq!(column.send_name, "int4send");
+            assert_eq!(column.receive_name, "int4recv");
+            assert!(column.send_builtin && column.receive_builtin);
+        }
         assert_eq!(get("parent").identity_modes, [b'a', 0]);
         assert_eq!(get("child").identity_modes, [b'd', 0]);
         assert_eq!(get("child").partition_identity_modes, None);

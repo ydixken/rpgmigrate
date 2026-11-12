@@ -400,6 +400,7 @@ fn try_complete(
         .map_err(|error| crate::endpoint_error(error, crate::contracts::ErrorKind::Source))?;
     catalog::configure_session(&mut source, &operation_control(io))?;
     let completed = authority.complete_follow(
+        &options.clone,
         &mut source,
         native,
         control.plan(),

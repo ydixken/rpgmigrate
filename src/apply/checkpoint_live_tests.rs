@@ -3260,7 +3260,13 @@ fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAutho
         },
         sequences: Vec::new(),
         policy: crate::contracts::RestorePolicy::default(),
+        copy_policy: crate::contracts::CloneCopyPolicy {
+            skip_large_objects: true,
+            ..Default::default()
+        },
+        copy_tables: Vec::new(),
     };
+    plan.copy_tables = test_copy_profile(&plan.tables);
     let binding = follow_reset_resources(&mut native, &plan, 10);
     native
         .bind_follow(
@@ -3306,12 +3312,14 @@ fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAutho
         .collect::<Vec<_>>();
     let tables =
         crate::catalog::reconcile_clone_tables(&mut observer, &plan, &objects, io).unwrap();
-    native.confirm_pre_data(objects, tables.clone()).unwrap();
+    native
+        .confirm_pre_data(&plan, objects, tables.clone())
+        .unwrap();
     authority.bind_tables(&native, io).unwrap();
     for table in &tables {
         let mut tx = CopyTxn::begin(
             named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io),
-            authority.permit(table).unwrap(),
+            authority.permit(table, &single_part()).unwrap(),
             io,
         )
         .unwrap();
@@ -3471,6 +3479,29 @@ fn follow_restart_refuses_foreign_replacement_and_fk_without_mutating_rows() {
     }
 }
 
+fn cutover_options() -> crate::contracts::CloneOptions {
+    crate::contracts::CloneOptions {
+        source: Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_SOURCE").unwrap())
+            .unwrap(),
+        target: Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").unwrap())
+            .unwrap(),
+        state: StateRequest {
+            path: PathBuf::new(),
+            action: StateAction::Resume,
+        },
+        operator: None,
+        table_jobs: 1,
+        post_data_jobs: 1,
+        policy: crate::contracts::RestorePolicy::default(),
+        not_consistent: false,
+        use_copy_binary: false,
+        split_tables_larger_than: 0,
+        split_max_parts: 8,
+        skip_large_objects: true,
+        large_objects_jobs: 1,
+    }
+}
+
 struct CutoverFixture {
     native: NativeState,
     authority: TargetAuthority,
@@ -3512,6 +3543,11 @@ fn cutover_fixture(io: &IoControl) -> CutoverFixture {
         target: crate::catalog::read_clone_target(&mut target, io).unwrap(),
         generation: CopyGeneration(1),
         tables: Vec::new(),
+        copy_policy: crate::contracts::CloneCopyPolicy {
+            skip_large_objects: true,
+            ..Default::default()
+        },
+        copy_tables: Vec::new(),
         sequences: vec![crate::contracts::QualifiedTable {
             schema: schema.clone(),
             table: "final_sequence".into(),
@@ -3573,7 +3609,7 @@ fn cutover_fixture(io: &IoControl) -> CutoverFixture {
         .into_iter()
         .filter(|o| !before.contains(o))
         .collect();
-    native.confirm_pre_data(objects, Vec::new()).unwrap();
+    native.confirm_pre_data(&plan, objects, Vec::new()).unwrap();
     copy.bind_tables(&native, io).unwrap();
     for phase in [
         ClonePhase::PostDataPending,
@@ -3789,6 +3825,7 @@ fn follow_drain_completion_syncs_final_sequences_and_is_immutable() {
         fixture
             .authority
             .complete_follow(
+                &cutover_options(),
                 &mut wrong_source,
                 &fixture.native,
                 &fixture.plan,
@@ -3808,6 +3845,7 @@ fn follow_drain_completion_syncs_final_sequences_and_is_immutable() {
     let completed = fixture
         .authority
         .complete_follow(
+            &cutover_options(),
             &mut fixture.source,
             &fixture.native,
             &fixture.plan,
@@ -3895,6 +3933,7 @@ fn follow_drain_recovery_reproves_original_witness() {
     let completed = fixture
         .authority
         .complete_follow(
+            &cutover_options(),
             &mut fixture.source,
             &fixture.native,
             &fixture.plan,
@@ -3949,6 +3988,7 @@ fn follow_observation_unknown_commit_needs_new_barrier() {
             "follow_completion" => fixture
                 .authority
                 .complete_follow(
+                    &cutover_options(),
                     &mut fixture.source,
                     &fixture.native,
                     &fixture.plan,
@@ -4062,6 +4102,7 @@ fn follow_cancelled_sync_wait_never_proves_drain_completion_or_observation() {
                 "completion" => fixture
                     .authority
                     .complete_follow(
+                        &cutover_options(),
                         &mut fixture.source,
                         &fixture.native,
                         &fixture.plan,

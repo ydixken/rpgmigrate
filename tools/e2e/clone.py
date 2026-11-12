@@ -2,18 +2,21 @@
 """Qualify plain clone in disposable PostgreSQL containers, never operator runtime."""
 
 import argparse
-from contextlib import ExitStack
 import ctypes
+from datetime import datetime
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import uuid
 
@@ -75,7 +78,7 @@ def require_failure(status, output, reason, observed=True):
         raise RuntimeError("required refusal reason or observed fault is absent")
 
 
-def validate_receipt(report, manifest, *, require_reports=True):
+def validate_runtime(report):
     if report.get("pair") not in PAIRS:
         raise RuntimeError("wrong version pair")
     source, target = report["pair"].split("-")
@@ -87,6 +90,10 @@ def validate_receipt(report, manifest, *, require_reports=True):
         raise RuntimeError("actual client version mismatch")
     if not isinstance(report.get("linked_libpq"), int) or report["linked_libpq"] // 10000 not in (16, 18):
         raise RuntimeError("actual linked libpq version missing or unsupported")
+
+
+def validate_receipt(report, manifest, *, require_reports=True):
+    validate_runtime(report)
     if require_reports:
         validation = report.get("report_validation", {})
         records = validation.get("reports", [])
@@ -171,6 +178,8 @@ def private_failure(kind, returncode, stderr, environment, frame, line=None):
             descriptor = os.open(DIAGNOSTIC_ROOT / (identifier + "." + suffix), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(contents)
+                stream.flush()
+                os.fsync(stream.fileno())
     except OSError:
         metadata["retained"] = False
     return metadata
@@ -374,7 +383,7 @@ class Driver:
         self.reports.append({"binding": binding, "raw_json": raw.decode("utf-8"), "probe_checked": checked})
         return report
 
-    def start(self, source, target, state, *arguments, gate=None):
+    def start(self, source, target, state, *arguments, gate=None, skip_large_objects=True):
         self.number += 1
         output = self.root / f"command-{self.number}.log"
         output.touch(mode=0o600)
@@ -389,7 +398,7 @@ class Driver:
         with output.open("wb") as stream, stderr_path.open("wb") as errors:
             process = subprocess.Popen([str(self.binary), "clone", "--source", source, "--target", target,
                                         "--dir", str(state), "--table-jobs", "4", "--index-jobs", "4", "--restore-jobs", "4",
-                                        "--skip-large-objects", *arguments], env=environment, stdout=stream,
+                                        *(["--skip-large-objects"] if skip_large_objects else []), *arguments], env=environment, stdout=stream,
                                        stderr=errors, start_new_session=True)
         process.output = output
         process.error_output = stderr_path
@@ -476,7 +485,7 @@ def inner(args):
     linked = int(libpq.PQlibVersion())
     receipt = {"pair": args.pair, "server_versions": versions, "client_versions": clients, "linked_libpq": linked, "cases": {}}
     # Refuse wrong inputs before the engine can create target objects.
-    validate_receipt({**receipt, "cases": {name: {"observed": True} for name in manifest["cases"]}}, manifest, require_reports=False)
+    validate_runtime(receipt)
     with tempfile.TemporaryDirectory(prefix="rpgmigrate-m2-") as temporary:
         root = Path(temporary)
         driver = Driver(binary, environment, root, mode="operator", report_probe=args.report_probe)
@@ -545,20 +554,6 @@ def inner(args):
         if signature != target.catalog_signature(dstname) or before != target.sql(dstname, "SELECT oid FROM pg_class WHERE oid='public.foreign_probe'::regclass; SELECT * FROM public.foreign_probe;"):
             raise RuntimeError("foreign target object changed")
         receipt["cases"]["foreign_collision"] = {"observed": True}
-        for name, flags in (("binary_refusal", ("--use-copy-binary",)), ("split_refusal", ("--split-tables-larger-than", "1MB"))):
-            srcname, dstname, src, dst, state = case(name)
-            before = target.catalog_signature(dstname)
-            driver.finish(driver.start(src, dst, state, *flags), success=False, reason="unimplemented option " + flags[0])
-            if before != target.catalog_signature(dstname):
-                raise RuntimeError("unsupported option mutated target")
-            receipt["cases"][name] = {"observed": True}
-        srcname, dstname, src, dst, state = case("lo")
-        source.sql(srcname, "SELECT lo_create(90001);")
-        before = target.catalog_signature(dstname)
-        driver.finish(driver.start(src, dst, state), success=False, reason="large")
-        if before != target.catalog_signature(dstname) or target.sql(dstname, "SELECT count(*) FROM pg_largeobject_metadata;").strip() != b"0":
-            raise RuntimeError("unsupported large object mutated target")
-        receipt["cases"]["large_object_refusal"] = {"observed": True}
     receipt["report_validation"] = {"mode": "operator_go_parse_report" if args.report_probe is not None else "local_m2_contract", "reports": driver.reports}
     if args.report_probe is not None:
         receipt["report_validation"]["probe_sha256"] = hashlib.sha256(Path(args.report_probe).read_bytes()).hexdigest()
@@ -629,15 +624,663 @@ def copy_restart(source, target, driver, root, bindir, manifest, receipt, case):
     receipt["cases"]["copy_restart"] = {"observed": True, "previous_generation": previous, "current_generation": current, "prior_committed_tables": required_markers, "predata_drift_refused": True, "blocked_backend_pid": blocked_pid, "target_receipt": target.completion(dstname, state, manifest)}
 
 
+LOGICAL_SERVER_ARGUMENTS = ("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s")
+GIB = 1024 ** 3
+
+
+def server_start_arguments(profile, arguments):
+    if profile == "m8":
+        if arguments and tuple(arguments) != LOGICAL_SERVER_ARGUMENTS:
+            raise RuntimeError("candidate logical server startup arguments conflict")
+        return LOGICAL_SERVER_ARGUMENTS
+    return arguments
+
+
+def build_cpu_arguments(help_text):
+    if not all(re.search(rb"(?<![\w-])" + flag + rb"(?:[ =\n]|$)", help_text) for flag in (b"--cpu-period", b"--cpu-quota")):
+        raise RuntimeError("runtime build has no supported hard CFS CPU cap")
+    return ["--cpu-period", "100000", "--cpu-quota", "200000"]
+
+
+def image_identity(value):
+    value = value.removeprefix("sha256:") if isinstance(value, str) else ""
+    if not re.fullmatch(r"[a-f0-9]{64}", value):
+        raise RuntimeError("immutable image identity is absent")
+    return "sha256:" + value
+
+
+def validate_owned_container(actual, entry, token, baseline):
+    host = actual.get("HostConfig", {})
+    cpu = host.get("NanoCpus") == 2000000000 or (host.get("CpuPeriod") == 100000 and host.get("CpuQuota") == 200000)
+    mounts = actual.get("Mounts")
+    observed = sorted((row.get("Source"), row.get("Destination"), row.get("RW")) for row in mounts) if isinstance(mounts, list) else None
+    if (not re.fullmatch(r"[a-f0-9]{64}", entry.get("id", "")) or entry["id"] in baseline
+            or actual.get("Id", actual.get("ID")) != entry["id"] or image_identity(actual.get("Image")) != entry["image"]
+            or actual.get("Name", "").lstrip("/") != entry["name"] or actual.get("Config", {}).get("Labels", {}).get("io.rpgmigrate.e2e") != token
+            or host.get("Memory") != entry["memory"] or not cpu or host.get("Privileged") is not False
+            or host.get("NetworkMode") in ("host", "container", None) or host.get("PortBindings") not in ({}, None)
+            or any(value for value in actual.get("NetworkSettings", {}).get("Ports", {}).values())
+            or observed != sorted(entry["mounts"]) or any(row.get("Type") != "bind" for row in mounts)):
+        raise RuntimeError("exact owned container identity, caps, or mounts differ")
+    if entry.get("role") == "build":
+        networks = actual.get("NetworkSettings", {}).get("Networks")
+        empty_endpoint = {"EndpointID": "", "Gateway": "", "IPAddress": "", "IPPrefixLen": 0,
+                          "IPv6Gateway": "", "GlobalIPv6Address": "", "GlobalIPv6PrefixLen": 0,
+                          "MacAddress": "", "NetworkID": "pasta", "DriverOpts": None, "IPAMConfig": None, "Links": None}
+        placeholder = (isinstance(networks, dict) and set(networks) == {"pasta"} and networks["pasta"] == empty_endpoint
+                       and all(type(networks["pasta"][key]) is type(value) for key, value in empty_endpoint.items()))
+        if host.get("NetworkMode") != "pasta" or networks not in ({}, None) and not placeholder:
+            raise RuntimeError("owned build has a foreign or populated pasta network attachment")
+    if entry.get("network"):
+        expected = entry["network"]
+        networks = actual.get("NetworkSettings", {}).get("Networks") or {}
+        if (set(networks).difference({expected["name"]})
+                or any(row.get("NetworkID") not in ("", expected["id"]) for row in networks.values())
+                or actual.get("State", {}).get("Running") is True and (set(networks) != {expected["name"]} or networks[expected["name"]].get("NetworkID") != expected["id"])):
+            raise RuntimeError("owned container has a foreign or unknown network attachment")
+    return actual
+
+
+def validate_owned_network(actual, expected, token, baseline, *, empty=False):
+    if isinstance(baseline, dict):
+        identities = [row.get("id", row.get("Id")) if isinstance(row, dict) else None for row in baseline.values()]
+        if any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in identities):
+            raise RuntimeError("pre-existing network descriptor identity is unavailable")
+        baseline = set(identities)
+    cid = actual.get("id", actual.get("Id"))
+    if (not re.fullmatch(r"[a-f0-9]{64}", expected.get("id", "")) or expected["id"] in baseline or cid != expected["id"]
+            or actual.get("name", actual.get("Name")) != expected["name"] or actual.get("internal", actual.get("Internal")) is not True
+            or actual.get("labels", actual.get("Labels", {})).get("io.rpgmigrate.e2e") != token
+            or not isinstance(actual.get("containers"), dict) or empty and actual["containers"]):
+        raise RuntimeError("exact owned internal network identity or membership differs")
+    return actual
+
+
+def validate_capacity(sample, baseline, *, initial=False):
+    if any(type(sample.get(key)) is not int or sample[key] <= 0 for key in ("vm_free", "host_free", "vm_available", "vm_cpus")):
+        raise RuntimeError("resource capacity sample is unavailable")
+    disk, memory = (32 * GIB, 12 * GIB) if initial else (20 * GIB, 8 * GIB)
+    if (sample["vm_cpus"] < 6 or min(sample["vm_free"], sample["host_free"]) < disk or sample["vm_available"] < memory
+            or any(baseline[key] - sample[key] > 12 * GIB for key in ("vm_free", "host_free"))):
+        raise RuntimeError("resource capacity floor or growth budget crossed")
+
+
+def materialize_source(root, destination, execute=None):
+    execute = run if execute is None else execute
+    expected, total_size = {}, 0
+    records = execute(["git", "-C", str(root), "ls-tree", "-r", "-l", "-z", "HEAD"]).split(b"\0")
+    for record in records:
+        if not record:
+            continue
+        metadata, name = record.decode().split("\t", 1)
+        mode, kind, identity, size = metadata.split()
+        if mode not in ("100644", "100755") or kind != "blob" or not re.fullmatch(r"[a-f0-9]{40}", identity) or name in expected:
+            raise RuntimeError("tracked source tree has unsupported modes or object identities")
+        if not size.isdecimal() or int(size) > 16 * 1024 * 1024:
+            raise RuntimeError("tracked source Git blob exceeded its bound")
+        total_size += int(size)
+        if total_size > 64 * 1024 * 1024:
+            raise RuntimeError("tracked source Git tree exceeded its bound")
+        expected[name] = (int(mode[-3:], 8), identity)
+    if not expected or len(expected) > 4096:
+        raise RuntimeError("tracked source tree is empty or exceeded its bound")
+    raw = execute(["git", "-C", str(root), "-c", "tar.umask=0022", "archive", "--format=tar", "HEAD"])
+    if len(raw) > 72 * 1024 * 1024:
+        raise RuntimeError("tracked source archive exceeded its bound")
+    destination.mkdir(mode=0o700)
+    files, total, seen, extracted = 0, 0, set(), set()
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        for member in archive:
+            parts = member.name.rstrip("/").split("/")
+            if (not member.name or member.name.startswith("/") or any(part in ("", ".", "..", ".git", "target", "__pycache__") for part in parts)
+                    or member.name in seen or not (member.isfile() or member.isdir())):
+                raise RuntimeError("tracked source archive contains a replaced or unsafe entry")
+            seen.add(member.name)
+            path = destination.joinpath(*parts)
+            if member.isdir():
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+                continue
+            files += 1
+            total += member.size
+            if member.mode not in (0o644, 0o755) or member.size > 16 * 1024 * 1024 or total > 64 * 1024 * 1024 or files > 4096:
+                raise RuntimeError("tracked source archive mode or size bound differs")
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with archive.extractfile(member) as source:
+                data = source.read(16 * 1024 * 1024 + 1)
+            identity = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+            if (len(data) != member.size or expected.get(member.name) != (member.mode, identity)
+                    or data.startswith(b"version https://git-lfs.github.com/spec/v1\n")):
+                raise RuntimeError("tracked source archive differs from exact Git blobs or contains an LFS pointer")
+            with path.open("xb") as target:
+                target.write(data)
+            path.chmod(member.mode)
+            extracted.add(member.name)
+    if extracted != set(expected):
+        raise RuntimeError("tracked source archive omitted expected Git files")
+
+
+def container_snapshot(value):
+    host_keys = ("Memory", "MemorySwap", "NanoCpus", "CpuPeriod", "CpuQuota", "CpusetCpus", "PidsLimit", "Privileged", "ReadonlyRootfs", "NetworkMode", "PortBindings", "Binds", "Tmpfs")
+    mount_keys = ("Type", "Name", "Source", "Destination", "Driver", "Mode", "RW", "Propagation")
+    return {"id": value.get("Id", value.get("ID")), "name": value["Name"], "created": value["Created"], "image": value["Image"], "restarts": value["RestartCount"],
+            "state": {key: value["State"].get(key) for key in ("Running", "Status", "Pid", "StartedAt", "FinishedAt")},
+            "host_config": {key: value["HostConfig"].get(key) for key in host_keys},
+            "restart_policy": {key: value["HostConfig"].get("RestartPolicy", {}).get(key) for key in ("Name", "MaximumRetryCount")},
+            "mounts": [{key: row.get(key) for key in mount_keys} for row in value["Mounts"]],
+            "ports": value.get("NetworkSettings", {}).get("Ports"),
+            "networks": {name: {key: row.get(key) for key in ("NetworkID", "Aliases")} for name, row in (value.get("NetworkSettings", {}).get("Networks") or {}).items()}, "run_label": value.get("Config", {}).get("Labels", {}).get("io.rpgmigrate.e2e")}
+
+
+def network_snapshot(value):
+    keys = {"name", "id", "driver", "network_interface", "created", "subnets", "ipv6_enabled", "internal", "dns_enabled", "network_dns_servers", "ipam_options", "routes"}
+    options = value.get("options") or {}
+    if not isinstance(options, dict) or set(options).difference({"isolate", "mtu", "metric", "interface_name", "mode", "vlan"}):
+        raise RuntimeError("network descriptor has unreviewed options")
+    return {**{key: value.get(key) for key in keys}, "options": options,
+            "run_label": (value.get("labels") or {}).get("io.rpgmigrate.e2e"),
+            "containers": sorted(value["containers"]) if isinstance(value.get("containers"), dict) else None}
+
+
+def validate_preservation(before, after, owned_images):
+    if set(before) != {"containers", "external", "images", "networks", "volumes"} or set(after) != set(before):
+        raise RuntimeError("preservation inventory is unavailable")
+    for kind in before:
+        if kind == "images":
+            if (any(after[kind].get(key) != value for key, value in before[kind].items())
+                    or not set(after[kind]).difference(before[kind]).issubset(owned_images)):
+                raise RuntimeError("pre-existing image associations changed or an unowned image appeared")
+        elif before[kind] != after[kind]:
+            raise RuntimeError("pre-existing resources changed or an unresolved " + kind + " resource remains")
+
+
+class RuntimeGuard:
+    def __init__(self, runtime, token, path):
+        self.runtime, self.token, self.path = runtime, token, path
+        self.deadline = time.monotonic() + 5400
+        self.work_deadline = self.deadline - 300
+        self.last_sample = 0
+        self.ledger = {"version": 2, "scope": "runtime_resource_ownership", "run": token, "containers": [], "cleanup_complete": False,
+                       "deadline_unix": time.time() + 5400, "cleanup_reserve_seconds": 300, "samples": []}
+        self.persist()
+        try:
+            versions = json.loads(self.raw(["version", "--format", "json"]))
+            info = json.loads(self.raw(["info", "--format", "json"]))
+            host = info.get("host", {})
+            pasta = host.get("pasta") or {}
+            if (host.get("security", {}).get("rootless") is not True or pasta.get("executable") != "/usr/bin/pasta"
+                    or self.raw(["machine", "ssh", "which", "pasta"]).strip() != b"/usr/bin/pasta"
+                    or b"--network" not in self.raw(["run", "--help"])):
+                raise RuntimeError("isolated rootless pasta build networking is unavailable")
+            self.ledger["runtime_api"] = {"client": versions.get("Client", {}).get("Version"), "server": versions.get("Server", {}).get("Version"),
+                                          "rootless": True, "network_backend": host.get("networkBackend"), "pasta_executable": pasta["executable"],
+                                          "pasta_package": pasta.get("package"), "cargo_network": "pasta", "image_build_network": "private"}
+            if not all(isinstance(self.ledger["runtime_api"][key], str) and self.ledger["runtime_api"][key] for key in ("client", "server")):
+                raise RuntimeError("actual runtime version identity unavailable")
+            self.baseline = self.inventory()
+            self.ledger["baseline"] = self.baseline
+            self.ledger["builtin_network_created_observations"] = []
+            for identity, before in self.baseline["networks"].items():
+                if before.get("name") == "podman" and before.get("driver") == "bridge" and before.get("internal") is False:
+                    after = network_snapshot(json.loads(self.raw(["network", "inspect", identity]))[0])
+                    if {key: value for key, value in before.items() if key != "created"} != {key: value for key, value in after.items() if key != "created"}:
+                        raise RuntimeError("builtin network changed during independent baseline reads")
+                    self.ledger["builtin_network_created_observations"].append({"id": identity, "before": before["created"], "after": after["created"]})
+            self.initial_capacity = self.sample()
+            validate_capacity(self.initial_capacity, self.initial_capacity, initial=True)
+            self.persist()
+        except Exception:
+            self.ledger["admission_failed"] = True
+            self.persist()
+            raise
+
+    def persist(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(self.ledger, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(self.path)
+        descriptor = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def raw(self, arguments, timeout=5):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("owned cleanup deadline expired")
+        return run([self.runtime, *arguments], timeout=min(timeout, remaining))
+
+    def inspect(self, cid):
+        rows = json.loads(self.raw(["inspect", cid]))
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise RuntimeError("exact container inspection is unavailable")
+        return rows[0]
+
+    def inventory(self):
+        def identifiers(arguments):
+            return sorted(set(self.raw(arguments, timeout=20).decode().splitlines()))
+        result = {"containers": {}, "external": identifiers(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"]),
+                  "images": {}, "networks": {}, "volumes": {}}
+        for cid in identifiers(["ps", "--all", "--no-trunc", "--format", "{{.ID}}"]):
+            value = self.inspect(cid)
+            result["containers"][cid] = container_snapshot(value)
+        for identity in identifiers(["image", "ls", "--all", "--no-trunc", "--quiet"]):
+            value = json.loads(self.raw(["image", "inspect", identity]))[0]
+            key = image_identity(value["Id"])
+            history = json.loads(self.raw(["history", "--no-trunc", "--format", "json", identity]))
+            if not isinstance(history, list):
+                raise RuntimeError("image history associations are unavailable")
+            safe_history = [{key: next((item for name, item in row.items() if name.lower() == key), None) for key in ("id", "created", "size")} for row in history]
+            result["images"][key] = {"tags": sorted(value.get("RepoTags") or []), "digests": sorted(value.get("RepoDigests") or []), "size": value["Size"],
+                                     "history": safe_history, "run_label": (value.get("Labels") or {}).get("io.rpgmigrate.e2e")}
+        for identity in identifiers(["network", "ls", "--no-trunc", "--quiet"]):
+            value = json.loads(self.raw(["network", "inspect", identity]))[0]
+            network = network_snapshot(value)
+            identifier = network.get("id")
+            if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{64}", identifier) or identifier in result["networks"]:
+                raise RuntimeError("network inventory has missing or duplicate full identities")
+            result["networks"][identifier] = network
+        for identity in identifiers(["volume", "ls", "--quiet"]):
+            value = json.loads(self.raw(["volume", "inspect", identity]))[0]
+            if value.get("Options") not in ({}, None):
+                raise RuntimeError("volume descriptor has unreviewed options")
+            result["volumes"][identity] = {key: value.get(key) for key in ("Name", "Driver", "Mountpoint", "CreatedAt", "Scope", "Options")}
+            result["volumes"][identity]["run_label"] = (value.get("Labels") or {}).get("io.rpgmigrate.e2e")
+        return result
+
+    def observe_caps(self, entry, actual=None):
+        actual = validate_owned_container(actual or self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
+        if actual.get("State", {}).get("Running") is not True:
+            raise RuntimeError("effective limits require a live exact owned container")
+        observed = self.raw(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]).splitlines()
+        try:
+            quota, period = (int(value) for value in observed[0].split())
+            memory = int(observed[1])
+            if len(observed) != 2 or period <= 0 or quota != period * 2 or memory != entry["memory"]:
+                raise ValueError
+        except (ValueError, IndexError):
+            raise RuntimeError("actual owned cgroup CPU or memory limit is absent or differs") from None
+        entry["cgroup_verified"] = True
+        entry["cgroup_limits"] = {"cpu_quota": quota, "cpu_period": period, "memory_bytes": memory}
+
+    def _create(self, command, expected, *, timeout=300):
+        if getattr(self, "_pending_creation", None) is not None or self._creation_unresolved():
+            raise RuntimeError("another resource creation remains pending")
+        fields = {"container": {"kind", "role", "image", "name", "mounts", "memory", "network"},
+                  "network": {"kind", "name"}, "image": {"kind", "tag"}}
+        kind = expected.get("kind")
+        if kind not in fields or set(expected) != fields[kind]:
+            raise RuntimeError("pending creation specification differs")
+        prefix = [self.runtime, "network", "create"] if kind == "network" else [self.runtime, "build" if kind == "image" else "create"]
+        if command[:len(prefix)] != prefix or "io.rpgmigrate.e2e=" + self.token not in command:
+            raise RuntimeError("pending creation command binding differs")
+        self.checkpoint()
+        identity = expected["tag" if kind == "image" else "name"]
+        if self.exists(kind, identity):
+            raise RuntimeError("fresh resource name or tag already exists")
+        projection = {**expected, "run": self.token, "absent_before": True, "status": "intent", "invoked_at": time.time(),
+                      "maximum_seconds": min(self.work_deadline - time.monotonic(), timeout)}
+        self.ledger["pending_creation"] = projection
+        pending = {"command": tuple(command), "expected": dict(expected), "projection": projection,
+                   "deadline": min(self.work_deadline, time.monotonic() + timeout)}
+        self._pending_creation = pending
+        try:
+            self.persist()
+            output = self.execute(command, timeout=timeout)
+            entry = self._admit_creation(output)
+            self.checkpoint()
+            return entry
+        except BaseException:
+            if "admitted" in pending:
+                pending["admitted"]["cleanup_only"] = True
+                projection["status"] = "cleanup_only"
+            else:
+                projection["status"] = "unresolved"
+                try:
+                    absent = not self.exists(kind, identity)
+                    for cid in pending.get("observed_ids", set()):
+                        absent = absent and not self.exists("container", cid)
+                    if absent:
+                        projection["status"] = "absent"
+                except Exception as error:
+                    projection["absence_error_kind"] = type(error).__name__
+            try:
+                self.persist()
+            except Exception as error:
+                projection["persistence_error_kind"] = type(error).__name__
+            raise
+        finally:
+            if not self._creation_unresolved():
+                self._pending_creation = None
+
+    def _creation_unresolved(self):
+        return self.ledger.get("pending_creation", {}).get("status") not in (None, "admitted", "cleanup_only", "absent")
+
+    def _created_container(self, cid):
+        pending = self._pending_creation
+        expected = pending["expected"]
+        if re.fullmatch(r"[a-f0-9]{64}", cid):
+            pending.setdefault("observed_ids", set()).add(cid)
+        if pending.get("candidate") not in (None, cid) or cid in self.baseline["external"]:
+            raise RuntimeError("pending container identity changed or predates creation")
+        entry = {key: value for key, value in expected.items() if key != "kind"}
+        entry["id"] = cid
+        actual = validate_owned_container(self.inspect(cid), entry, self.token, self.baseline["containers"])
+        state = actual.get("State", {})
+        zero = (None, "", "0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000000Z")
+        try:
+            created = datetime.fromisoformat(actual["Created"].replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                raise ValueError
+            created = created.timestamp()
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError("pending container creation time is unavailable") from None
+        upper = pending["projection"].get("started_at", pending["projection"]["invoked_at"]) + pending["projection"]["maximum_seconds"]
+        if (not pending["projection"]["invoked_at"] <= created <= min(time.time(), upper)
+                or state.get("Status") != "created" or state.get("Running") is not False
+                or type(state.get("Pid")) is not int or state["Pid"] != 0
+                or type(actual.get("RestartCount")) is not int or actual["RestartCount"] != 0
+                or state.get("StartedAt") not in zero or state.get("FinishedAt") not in zero):
+            raise RuntimeError("pending container is stale or has already started")
+        if expected["role"] in ("source", "target"):
+            networks = actual.get("NetworkSettings", {}).get("Networks") or {}
+            endpoint = networks.get(expected["network"]["name"], {})
+            if expected["role"] not in (endpoint.get("Aliases") or []):
+                raise RuntimeError("pending database role alias differs")
+        return entry, actual
+
+    def _observe_pending_container(self, cid):
+        pending = getattr(self, "_pending_creation", None)
+        if pending and time.monotonic() >= pending["deadline"]:
+            raise RuntimeError("pending creation command deadline expired")
+        if (not pending or pending["expected"]["kind"] != "container" or "admitted" in pending
+                or pending["projection"]["status"] != "active" or not pending.get("process")
+                or type(pending["projection"].get("pid")) is not int or pending["projection"]["pid"] <= 0
+                or pending["process"].pid != pending["projection"].get("pid") or pending["process"].poll() is not None):
+            raise RuntimeError("unknown container has no active bound creation")
+        _, actual = self._created_container(cid)
+        pending["candidate"] = cid
+        pending["projection"].update(candidate_id=cid, observation=container_snapshot(actual))
+        self.persist()
+        return actual
+
+    def _admit_creation(self, output):
+        pending = self._pending_creation
+        if "admitted" in pending:
+            if pending["receipt"] != output:
+                raise RuntimeError("resource creation receipt changed")
+            return pending["admitted"]
+        expected, projection = pending["expected"], pending["projection"]
+        if expected["kind"] == "container":
+            cid = output.decode().strip()
+            if not re.fullmatch(r"[a-f0-9]{64}", cid):
+                raise RuntimeError("fresh creation returned no single exact container identity")
+            _, actual = self._created_container(cid)
+            entry = self.retain_container(cid, expected["role"], expected["image"], expected["name"], expected["mounts"], expected["memory"], expected["network"], actual=actual)
+            entry["absent_before"] = True
+        elif expected["kind"] == "network":
+            receipt = output.decode().strip()
+            actual = json.loads(self.raw(["network", "inspect", expected["name"]]))[0]
+            entry = {"id": actual.get("id", actual.get("Id")), "name": expected["name"], "absent_before": True, "cleanup_status": "pending"}
+            if receipt not in (entry["name"], entry["id"]):
+                raise RuntimeError("fresh network creation result differs from inspected identity")
+            validate_owned_network(actual, entry, self.token, self.baseline["networks"], empty=True)
+            if self.raw(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"]).strip():
+                raise RuntimeError("fresh network has an unexpected filtered attachment")
+            entry["created_observation"] = network_snapshot(actual)
+            self.ledger["network"] = entry
+        else:
+            actual = json.loads(self.raw(["image", "inspect", expected["tag"]]))[0]
+            identity = image_identity(actual["Id"])
+            if identity in self.baseline["images"] or actual.get("Labels", {}).get("io.rpgmigrate.e2e") != self.token:
+                raise RuntimeError("built development image identity or run label differs")
+            entry = self.ledger["development_image"]
+            entry.update(id=identity, bytes=actual["Size"], architecture=actual["Architecture"])
+            self.ledger["admitted_images"].append(identity)
+        pending.update(admitted=entry, receipt=output)
+        projection.update(status="admitted", admitted_id=entry["id"])
+        self.persist()
+        return entry
+
+
+    def sample(self):
+        memory = self.raw(["machine", "ssh", "cat", "/proc/meminfo"])
+        match = re.search(rb"^MemAvailable:\s+(\d+) kB$", memory, re.MULTILINE)
+        disk = self.raw(["machine", "ssh", "df", "-B1", "/var/home/core"]).splitlines()[-1].split()
+        sample = {"vm_free": int(disk[3]), "host_free": shutil.disk_usage(ROOT).free,
+                  "vm_available": int(match[1]) * 1024 if match else None,
+                  "vm_cpus": int(self.raw(["machine", "ssh", "getconf", "_NPROCESSORS_ONLN"]).strip())}
+        storage = {}
+        for entry in self.ledger["containers"]:
+            if entry.get("cleanup_status") == "absent":
+                continue
+            actual = validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
+            if actual.get("State", {}).get("Running") is True:
+                self.observe_caps(entry, actual)
+            elif entry.get("ready"):
+                raise RuntimeError("owned database stopped during resource sampling")
+            if entry["role"] in ("source", "target") and entry.get("ready"):
+                raw = self.raw(["exec", entry["id"], "psql", "-X", "-qAt", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                                "SELECT (SELECT sum(pg_database_size(oid)) FROM pg_catalog.pg_database),(SELECT coalesce(sum(size),0) FROM pg_catalog.pg_ls_waldir());"])
+                values = [int(value) for value in raw.strip().split(b"|")]
+                if len(values) != 2 or any(value < 0 or value > 2 * GIB for value in values):
+                    raise RuntimeError("owned database or WAL storage bound exceeded")
+                storage[entry["role"]] = values
+        network = self.ledger.get("network")
+        if network and network.get("cleanup_status") != "absent":
+            actual = json.loads(self.raw(["network", "inspect", network["id"]]))[0]
+            validate_owned_network(actual, network, self.token, self.baseline["networks"])
+            attached = sorted(actual["containers"])
+            filtered = sorted(self.raw(["ps", "--all", "--filter", "network=" + network["id"], "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
+            known = {entry["id"] for entry in self.ledger["containers"] if entry["role"] != "build"}
+            unknown = set(attached).union(filtered).difference(known)
+            if unknown:
+                pending = getattr(self, "_pending_creation", None)
+                if pending and pending["expected"]["kind"] == "container":
+                    pending.setdefault("observed_ids", set()).update(cid for cid in unknown if re.fullmatch(r"[a-f0-9]{64}", cid))
+                if len(unknown) != 1:
+                    raise RuntimeError("owned network has a foreign container attachment")
+                self._observe_pending_container(next(iter(unknown)))
+            network.setdefault("membership_observations", []).append({"at": time.time(), "attached_ids": attached, "filtered_ids": filtered})
+        self.last_sample = time.monotonic()
+        external = self.raw(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"], timeout=5).decode().splitlines()
+        unknown = sorted(set(external).difference(self.baseline["external"], (entry["id"] for entry in self.ledger["containers"])))
+        self.ledger["samples"].append({**sample, "at": time.time(), "storage": storage, "unattributed_external_build_ids": unknown})
+        return sample
+
+    def checkpoint(self):
+        if time.monotonic() >= self.work_deadline:
+            raise RuntimeError("runtime work deadline expired; cleanup reserve started")
+        if time.monotonic() - self.last_sample >= 5:
+            validate_capacity(self.sample(), self.initial_capacity)
+            self.persist()
+        if time.monotonic() >= self.work_deadline:
+            raise RuntimeError("runtime work deadline expired during resource observation")
+
+    def execute(self, command, *, timeout=300):
+        self.checkpoint()
+        started = time.monotonic()
+        deadline = min(self.work_deadline, started + timeout)
+        caller = sys._getframe(1)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        record = {"pid": process.pid, "kind": command[1] if Path(command[0]).name in ("podman", "docker") else Path(command[0]).name,
+                  "started_at": time.time(), "maximum_seconds": deadline - started}
+        pending = getattr(self, "_pending_creation", None)
+        if pending and pending["command"] == tuple(command):
+            pending.update(process=process, deadline=deadline)
+            pending["projection"].update(status="active", pid=process.pid, started_at=record["started_at"], maximum_seconds=deadline - started)
+        else:
+            pending = None
+        failure, output = None, b""
+        try:
+            self.ledger.setdefault("processes", []).append(record)
+            self.persist()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("owned subprocess deadline expired")
+                try:
+                    output, error = process.communicate(timeout=min(5, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    self.checkpoint()
+            if process.returncode:
+                raise SubprocessFailure(private_failure("owned-runtime-subprocess", process.returncode, error, None, caller))
+            if pending:
+                self._admit_creation(output)
+            self.checkpoint()
+            return output
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            try:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    output, _ = process.communicate(timeout=min(5, max(.01, self.deadline - time.monotonic())))
+                elif failure is not None and pending and not output:
+                    output, _ = process.communicate(timeout=min(5, max(.01, self.deadline - time.monotonic())))
+                if failure is not None and pending and pending["expected"]["kind"] != "image" and "admitted" not in pending and output:
+                    try:
+                        self._admit_creation(output)
+                        pending["admitted"]["cleanup_only"] = True
+                        pending["projection"]["status"] = "cleanup_only"
+                    except Exception as error:
+                        pending["projection"]["admission_error_kind"] = type(error).__name__
+            except Exception as error:
+                record["reaping_error_kind"] = type(error).__name__
+                if failure is None:
+                    raise
+            record.update(returncode=process.returncode, finished_at=time.time())
+            try:
+                self.persist()
+            except Exception:
+                record["ledger_write_failed"] = True
+                if failure is None:
+                    raise
+
+    def exists(self, kind, identity):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("owned cleanup deadline expired")
+        result = subprocess.run([self.runtime, kind, "exists", identity], capture_output=True, timeout=min(5, remaining))
+        if result.returncode not in (0, 1):
+            raise RuntimeError("resource absence probe is unavailable")
+        return result.returncode == 0
+
+    def retain_container(self, cid, role, image, name, mounts, memory, network=None, *, actual=None):
+        if not re.fullmatch(r"[a-f0-9]{64}", cid) or cid in self.baseline["containers"] or cid in self.baseline["external"]:
+            raise RuntimeError("fresh owned creation returned no exact new container identity")
+        entry = {"id": cid, "role": role, "image": image, "name": name, "mounts": mounts, "memory": memory, "network": network, "cleanup_status": "pending"}
+        actual = validate_owned_container(actual or self.inspect(cid), entry, self.token, self.baseline["containers"])
+        entry["observed"] = container_snapshot(actual)
+        entry["ownership_verified"] = True
+        self.ledger["containers"].append(entry)
+        # Creation admission fsyncs this entry together with its authoritative receipt.
+        return entry
+
+    def cleanup_container(self, entry):
+        try:
+            validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
+            entry["ownership_verified"] = True
+            self.raw(["rm", "--force", entry["id"]], timeout=10)
+            entry["cleanup_status"] = "present" if self.exists("container", entry["id"]) else "absent"
+        except Exception as error:
+            entry["cleanup_status"] = "unresolved"
+            entry["cleanup_error_kind"] = type(error).__name__
+        try:
+            self.persist()
+        except OSError:
+            entry["ledger_write_failed"] = True
+
+    def cleanup_network(self):
+        entry = self.ledger.get("network")
+        if not entry:
+            return
+        try:
+            actual = json.loads(self.raw(["network", "inspect", entry["id"]]))[0]
+            validate_owned_network(actual, entry, self.token, self.baseline["networks"], empty=True)
+            members = self.raw(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"])
+            if members.strip():
+                raise RuntimeError("owned network still has an exact filtered container attachment")
+            observed = network_snapshot(actual)
+            entry["cleanup_observation"] = observed
+            if entry.get("created_observation") is not None and observed != entry["created_observation"]:
+                raise RuntimeError("owned empty network descriptor changed since creation")
+            entry["empty_membership_verified"] = True
+            self.persist()
+            self.raw(["network", "rm", entry["id"]], timeout=10)
+            entry["cleanup_status"] = "present" if self.exists("network", entry["id"]) else "absent"
+        except Exception as error:
+            entry["cleanup_status"] = "unresolved"
+            entry["cleanup_error_kind"] = type(error).__name__
+        try:
+            self.persist()
+        except OSError:
+            entry["ledger_write_failed"] = True
+
+    def close(self):
+        for entry in reversed(self.ledger["containers"]):
+            if entry.get("cleanup_status") != "absent":
+                self.cleanup_container(entry)
+        self.cleanup_network()
+        try:
+            after = self.inventory()
+            self.ledger["after"] = after
+            normalized = json.loads(json.dumps(after))
+            deltas = []
+            for observation in self.ledger.get("builtin_network_created_observations", []):
+                identity = observation["id"]
+                if identity not in after["networks"]:
+                    raise RuntimeError("builtin network identity disappeared")
+                previous, current = self.baseline["networks"][identity]["created"], after["networks"][identity]["created"]
+                if previous != current:
+                    deltas.append({"id": identity, "field": "created", "before": previous, "after": current})
+                    normalized["networks"][identity]["created"] = previous
+            self.ledger["builtin_network_created_deltas"] = deltas
+            validate_preservation(self.baseline, normalized, set(self.ledger.get("admitted_images", [])))
+            self.ledger["preservation_verified"] = True
+        except Exception as error:
+            self.ledger["preservation_verified"] = False
+            self.ledger["preservation_error_kind"] = type(error).__name__
+        self.ledger["cleanup_complete"] = (self.ledger.get("preservation_verified") is True
+            and not self._creation_unresolved()
+            and all(entry.get("cleanup_status") == "absent" for entry in self.ledger["containers"])
+            and ("network" not in self.ledger or self.ledger["network"].get("cleanup_status") == "absent"))
+        self.persist()
+
+
+def directory_identity(path):
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    identity = {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "mode": stat.S_IMODE(info.st_mode)}
+    if hasattr(info, "st_birthtime"):
+        identity["birthtime"] = info.st_birthtime
+    return identity
+
+
 def outer(args, *, program="clone", manifest=None, receipt_validator=validate_receipt, server_arguments=()):
     manifest = load_manifest() if manifest is None else manifest
     diagnostic_case = getattr(args, "diagnostic_case", None)
     cutover_mode = getattr(args, "cutover", False)
+    feature_mode = getattr(args, "profile", "disabled") == "m8"
+    if feature_mode:
+        if program != "clone" or args.report_probe is not None:
+            raise RuntimeError("candidate M8 direct CLI profile requires clone without the old Go report probe")
+        import copy_features
+        import cutover
+        copy_features.load_manifest()
     if cutover_mode:
         if program != "follow" or args.report_probe is not None or diagnostic_case or getattr(args, "smoke", False):
             raise RuntimeError("cutover producer mode requires its distinct follow route without the clone-only probe")
         import cutover
-        source_tree = cutover.source_inventory(ROOT)
     if diagnostic_case and (program != "follow" or diagnostic_case != "before_commit_rollback" or getattr(args, "smoke", False) or not args.receipt):
         raise RuntimeError("follow diagnostic requires one supported case and an explicit receipt")
     if not args.pair or args.pair not in PAIRS:
@@ -647,127 +1290,273 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     runtime = os.environ.get("CONTAINER_RUNTIME", "podman")
     if not shutil.which(runtime):
         raise RuntimeError("required container runtime unavailable")
-    token = "rpgmigrate-" + ("m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex[:12]
+    token = "rpgmigrate-" + ("m8" if feature_mode else "m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex
     label = "io.rpgmigrate.e2e=" + token
-    image = "localhost/rpgmigrate-m2-dev:stock"
-    output = Path(args.receipt).resolve() if args.receipt else ROOT / "target/e2e" / (("" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
-    if diagnostic_case and output.exists():
-        raise RuntimeError("follow diagnostic receipt already exists")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    image = "localhost/" + token + ":dev"
+    output = Path(args.receipt).absolute() if args.receipt else ROOT / "target/e2e" / (("clone-m8-" if feature_mode else "" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-")) + args.pair + ".json")
+    if output.is_symlink() or (diagnostic_case or feature_mode) and output.exists():
+        raise RuntimeError("explicit diagnostic/candidate receipt already exists or is replaced")
+    output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    output = output.parent.resolve() / output.name
     ledger_path = output.parent / (output.name + "." + token + ".runtime.json")
-    ledger = {"version": 1, "scope": "runtime_resource_ownership", "run": token, "containers": [], "cleanup_complete": False}
-    def persist_ledger():
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=ledger_path.parent, delete=False) as stream:
-            temporary_ledger = Path(stream.name)
-            json.dump(ledger, stream, sort_keys=True)
-            stream.write("\n")
-        temporary_ledger.replace(ledger_path)
-    def cleanup_container(entry):
-        cid = entry["id"]
-        try:
-            owned = subprocess.run([runtime, "inspect", "--format", '{{ index .Config.Labels "io.rpgmigrate.e2e" }}', cid], capture_output=True, timeout=5)
-            entry["ownership_label_verified"] = owned.returncode == 0 and owned.stdout.strip() == token.encode()
-            if entry["ownership_label_verified"]:
-                removed = subprocess.run([runtime, "rm", "--force", "--volumes", cid], capture_output=True, timeout=10)
-                entry["remove_exit"] = removed.returncode
-            absent = subprocess.run([runtime, "container", "exists", cid], capture_output=True, timeout=5)
-            entry["cleanup_status"] = "absent" if absent.returncode == 1 else "present" if absent.returncode == 0 else "unavailable"
-        except Exception:
-            entry["cleanup_status"] = "unavailable"
-        try:
-            persist_ledger()
-        except Exception:
-            entry["ledger_write_failed"] = True
-    def retain_container(cid, role, cleanup):
-        entry = {"id": cid, "role": role, "ownership_label_verified": False, "cleanup_status": "pending"}
-        ledger["containers"].append(entry)
-        cleanup.callback(cleanup_container, entry)
-        persist_ledger()
-    def finalize_ledger(_kind, error, _trace):
-        ledger["cleanup_complete"] = bool(ledger["containers"]) and all(entry["cleanup_status"] == "absent" and entry["ownership_label_verified"] for entry in ledger["containers"])
-        try:
-            persist_ledger()
-        except Exception:
-            if error is None:
-                raise RuntimeError("runtime ownership ledger could not be retained") from None
-        if isinstance(error, SubprocessFailure):
-            error.metadata["runtime_ledger"] = str(ledger_path)
-        if error is None and not ledger["cleanup_complete"]:
-            raise RuntimeError("exact owned container cleanup could not be verified")
-        return False
-    persist_ledger()
-    cache = ROOT / "target/e2e/build"
-    cargo_cache = ROOT / "target/e2e/cargo"
-    for path in (cache, cargo_cache):
-        path.mkdir(parents=True, exist_ok=True)
-    run([runtime, "build", "--jobs", "2", "--memory", "4g", "--tag", image, "--file", str(ROOT / "tools/e2e/Containerfile"), str(ROOT / "tools/e2e")], timeout=1200)
-    image_id = run([runtime, "image", "inspect", image, "--format", "{{.Id}}"]).decode().strip()
-    with tempfile.TemporaryDirectory(prefix=token, dir=ROOT / "target/e2e") as temporary, ExitStack() as cleanup:
-        cleanup.push(finalize_ledger)
-        private = Path(temporary)
+    if ledger_path.exists() or ledger_path.is_symlink():
+        raise RuntimeError("fresh runtime ledger destination already exists")
+    guard = RuntimeGuard(runtime, token, ledger_path)
+    private_parent = ROOT / "target/e2e"
+    if any(path.is_symlink() for path in (private_parent, private_parent.parent)):
+        raise RuntimeError("run-owned shared parent is replaced")
+    private_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private = private_parent / (token + ".private")
+    if private.exists() or private.is_symlink():
+        raise RuntimeError("fresh runtime private path already exists")
+    private.mkdir(mode=0o700)
+    private_identity = directory_identity(private)
+    if private_identity is None:
+        raise RuntimeError("owned private directory identity is unavailable")
+    private_identity.update(nonce=token.rsplit("-", 1)[1], absent_before=True)
+    guard.ledger["private_path"] = str(private)
+    guard.ledger["private_absent_before"] = True
+    guard.ledger["private_identity"] = private_identity
+    guard.persist()
+    server_arguments = server_start_arguments(getattr(args, "profile", "disabled"), server_arguments)
+    guard.ledger["server_arguments"] = list(server_arguments)
+    server_images, server_identities = [], []
+    try:
+        import cutover
+        guard.ledger["stage"] = "source"
+        source_identity = {"commit": guard.execute(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).decode().strip(),
+                           "git_tree": guard.execute(["git", "-C", str(ROOT), "rev-parse", "HEAD^{tree}"]).decode().strip(),
+                           "branch": guard.execute(["git", "-C", str(ROOT), "branch", "--show-current"]).decode().strip()}
+        if (not re.fullmatch(r"[a-f0-9]{40}", source_identity["commit"]) or not re.fullmatch(r"[a-f0-9]{40}", source_identity["git_tree"])
+                or source_identity["branch"] in ("", "main", "master") or guard.execute(["git", "-C", str(ROOT), "status", "--porcelain"])):
+            raise RuntimeError("workflow source must be a clean committed feature branch")
+        source_context = private / "source"
+        materialize_source(ROOT, source_context, execute=guard.execute)
+        source_tree = cutover.source_inventory(source_context)
+        source_identity["inventory"] = source_tree
+        guard.ledger["source"] = source_identity
+        cache, cargo_cache = private / "build", private / "cargo"
+        for path in (cache, cargo_cache):
+            path.mkdir(mode=0o700)
         secret = uuid.uuid4().hex
         FIXTURE_SECRETS.add(secret)
+        envfile = private / "environment"
+        with envfile.open("x") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write("POSTGRES_PASSWORD=" + secret + "\nPGPASSWORD=" + secret + "\n")
         diagnostics = DIAGNOSTIC_ROOT / token
         diagnostics.mkdir(mode=0o700, parents=True)
-        envfile = private / "environment"
-        envfile.touch(mode=0o600)
-        envfile.write_text("POSTGRES_PASSWORD=" + secret + "\nPGPASSWORD=" + secret + "\n")
-        run([runtime, "network", "create", "--internal", "--label", label, token])
-        cleanup.callback(subprocess.run, [runtime, "network", "rm", token], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        server_images = []
-        for role, major in zip(("source", "target"), args.pair.split("-")):
-            server_image = "docker.io/library/postgres:" + major + "@" + manifest["images"][major]
-            # Pull happens outside the private network; record the resolved immutable image.
-            if subprocess.run([runtime, "image", "exists", server_image], capture_output=True).returncode:
-                run([runtime, "pull", server_image], timeout=600)
-            server_images.append(json.loads(run([runtime, "image", "inspect", server_image]).decode())[0]["Id"])
-            name = token + "-" + role
-            cid = run([runtime, "run", "--detach", "--network", token, "--network-alias", role,
-                       "--label", label, "--name", name, "--env-file", str(envfile),
-                       "--memory", "1g", "--cpus", "2", server_image, *server_arguments]).decode().strip()
-            if not re.fullmatch(r"[a-f0-9]{64}", cid):
-                raise RuntimeError("owned server creation returned no exact container identity")
-            retain_container(cid, role, cleanup)
-            def ready():
-                result = subprocess.run([runtime, "exec", cid, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True, timeout=5)
-                return result.returncode == 0
-            wait_for(ready, role + " server readiness")
         receipt_dir = private / "receipt"
-        receipt_dir.mkdir()
-        command = ["--network", token, "--label", label, "--memory", "4g", "--cpus", "2",
-                   "--name", token + "-runner", "--env-file", str(envfile), "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo",
-                   "--volume", str(ROOT) + ":/workspace:ro", "--volume", str(cache) + ":/build",
-                   "--volume", str(cargo_cache) + ":/cargo", "--volume", str(receipt_dir) + ":/receipt",
-                   "--volume", str(diagnostics) + ":/diagnostics", image_id]
+        receipt_dir.mkdir(mode=0o700)
+        checksums = private / "source-checksums"
+        lines = []
+        for path in sorted(source_context.rglob("*")):
+            if path.is_file():
+                if any(character in str(path) for character in ("\n", "\r", "\\")):
+                    raise RuntimeError("shared source checksum filename is unsupported")
+                lines.append(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + str(path))
+        with checksums.open("x") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write("\n".join(lines) + "\n")
+        guard.raw(["machine", "ssh", "sha256sum", "--check", "--status", str(checksums)], timeout=20)
+        guard.raw(["machine", "ssh", "test", "-r", str(envfile)])
+        guard.ledger["shared_source_verified"] = {"files": len(lines), "sha256": hashlib.sha256(checksums.read_bytes()).hexdigest()}
+        guard.persist()
+        def ensure_image(reference):
+            if not guard.exists("image", reference):
+                raise RuntimeError("pinned public image reference is absent; provision it before protected baseline admission")
+            identity = image_identity(json.loads(guard.raw(["image", "inspect", reference]))[0]["Id"])
+            guard.ledger.setdefault("admitted_images", []).append(identity)
+            guard.persist()
+            return identity
+        base = re.search(r"^FROM (\S+)$", (source_context / "tools/e2e/Containerfile").read_text(), re.MULTILINE)
+        if not base or not re.fullmatch(r"[^\s]+@sha256:[a-f0-9]{64}", base[1]):
+            raise RuntimeError("development builder base is not digest pinned")
+        ensure_image(base[1])
+        if guard.exists("image", image):
+            raise RuntimeError("run-unique development image already exists")
+        guard.ledger["development_image"] = {"tag": image, "absent_before": True, "retained": True}
+        guard.persist()
+        cpu_arguments = build_cpu_arguments(guard.raw(["build", "--help"]))
+        guard.ledger["image_build_limits"] = {"requested_memory_bytes": 4*GIB, "requested_cpu_arguments": cpu_arguments,
+                                               "effective_cgroup_status": "not_proven_for_ephemeral_image_build"}
+        guard.ledger["stage"] = "development_image"
+        guard.persist()
+        built = guard._create([runtime, "build", "--jobs", "2", "--memory", "4g", *cpu_arguments, "--label", label,
+                              "--network", "private", "--tag", image, "--file", str(source_context / "tools/e2e/Containerfile"), str(source_context / "tools/e2e")],
+                             {"kind": "image", "tag": image}, timeout=1200)
+        image_id = built["id"]
+        external = set(guard.raw(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
+        unresolved = sorted(external.difference(guard.baseline["external"]))
+        guard.ledger["unresolved_external_build_ids"] = unresolved
+        if unresolved:
+            guard.persist()
+            raise RuntimeError("development image build left unattributed external containers")
+        guard.persist()
+        def owned_container(arguments, *, role, image_id, mounts, memory, timeout=None):
+            name = token + "-" + role
+            if guard.exists("container", name):
+                raise RuntimeError("fresh container name already exists")
+            entry = guard._create([runtime, "create", "--name", name, "--image-volume=ignore", *arguments],
+                                  {"kind": "container", "role": role, "image": image_id, "name": name, "mounts": mounts,
+                                   "memory": memory, "network": None if role == "build" else {"name": token, "id": network_id}})
+            cid = entry["id"]
+            if timeout is None:
+                guard.execute([runtime, "start", cid])
+                return entry
+            try:
+                return guard.execute([runtime, "start", "--attach", cid], timeout=timeout)
+            finally:
+                failed = sys.exc_info()[0] is not None
+                guard.cleanup_container(entry)
+                if entry["cleanup_status"] != "absent" and not failed:
+                    raise RuntimeError("exact owned " + role + " cleanup could not be verified")
+        build_mounts = [(str(source_context), "/workspace", False), (str(cache), "/build", True), (str(cargo_cache), "/cargo", True)]
+        fetch = ["--network", "pasta", "--memory", "4g", "--cpus", "2", "--label", label, "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--env", "CARGO_BUILD_JOBS=2",
+                 "--volume", str(source_context) + ":/workspace:ro", "--volume", str(cache) + ":/build", "--volume", str(cargo_cache) + ":/cargo", image_id, "cargo", "build", "--locked"]
+        guard.ledger["stage"] = "cargo_build"
+        guard.persist()
+        owned_container(fetch, timeout=1200, role="build", image_id=image_id, mounts=build_mounts, memory=4*GIB)
+        if cutover.source_inventory(source_context) != source_identity["inventory"]:
+            raise RuntimeError("source changed during source-bound debug build")
+        if guard.exists("network", token):
+            raise RuntimeError("fresh network name already exists")
+        network = guard._create([runtime, "network", "create", "--internal", "--label", label, token], {"kind": "network", "name": token})
+        network_id = network["id"]
+        for role, major in zip(("source", "target"), args.pair.split("-")):
+            guard.ledger["stage"] = role + "_start"
+            guard.persist()
+            server_image = "docker.io/library/postgres:" + major + "@" + manifest["images"][major]
+            identity = ensure_image(server_image)
+            server_images.append(identity)
+            data_directory = "/var/lib/postgresql/data" if major == "16" else "/var/lib/postgresql/18/docker"
+            entry = owned_container(["--network", token, "--network-alias", role, "--label", label, "--env-file", str(envfile),
+                                     "--env", "PGDATA=" + data_directory, "--memory", "1g", "--cpus", "2", identity, *server_arguments],
+                                    role=role, image_id=identity, mounts=[], memory=GIB)
+            cid = entry["id"]
+            def ready():
+                guard.checkpoint()
+                result = subprocess.run([runtime, "exec", cid, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True, timeout=5)
+                guard.checkpoint()
+                if result.returncode not in (0, 1, 2):
+                    raise RuntimeError("owned server readiness observation unavailable")
+                return result.returncode == 0
+            try:
+                wait_for(ready, role + " server readiness")
+                details = json.loads(guard.execute([runtime, "exec", cid, "psql", "-X", "-qAt", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                    "SELECT json_build_object('system_identifier',(SELECT system_identifier::text FROM pg_catalog.pg_control_system()),'version',split_part(current_setting('server_version'),' ',1),'data_directory',current_setting('data_directory'),'wal_level',current_setting('wal_level'));"]))
+                permissions = guard.execute([runtime, "exec", cid, "stat", "-c", "%a|%U", data_directory]).strip()
+                actual = validate_owned_container(guard.inspect(cid), entry, token, guard.baseline["containers"])
+                network = actual.get("NetworkSettings", {}).get("Networks", {}).get(token, {})
+                if (details.get("data_directory") != data_directory or permissions != b"700|postgres"
+                        or not re.fullmatch(r"[0-9]{19,20}", details.get("system_identifier", ""))
+                        or details["system_identifier"] in {"7705796426308472853", "7705919902701522967", *(row["system_identifier"] for row in server_identities)}
+                        or feature_mode and (details.get("version") != {"16": "16.15", "18": "18.6"}[major] or details.get("wal_level") != "logical")
+                        or role not in network.get("Aliases", []) or network.get("NetworkID") != network_id):
+                    raise RuntimeError("actual fresh server identity, startup settings, alias or PGDATA differ")
+                guard.observe_caps(entry, actual)
+                entry.update(ready=True, server=details)
+                server_identities.append({**details, "id": cid, "image": identity, "role": role, "started_at": actual["State"]["StartedAt"], "pgdata_permissions": "700|postgres"})
+                guard.persist()
+            except Exception:
+                try:
+                    entry["startup_state"] = {key: guard.inspect(cid)["State"].get(key) for key in ("Running", "Status", "StartedAt", "FinishedAt")}
+                    entry["startup_diagnostic"] = private_failure("owned-server-startup", None, guard.raw(["logs", "--tail", "200", cid]), None, sys._getframe())
+                    guard.persist()
+                except Exception:
+                    entry["startup_diagnostic_unavailable"] = True
+                raise
+        if feature_mode:
+            binary = cache / "debug/rpgmigrate"
+            if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+                raise RuntimeError("source-bound debug executable is absent or replaced")
+            feature_binding = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "source_tree_sha256": source_tree["sha256"],
+                               "source_commit": source_identity["commit"], "source_git_tree": source_identity["git_tree"],
+                               "runner_image_id": image_id, "server_image_ids": server_images, "servers": server_identities, "run": token.rsplit("-", 1)[1]}
+            (receipt_dir / "m8-input.json").write_text(json.dumps(feature_binding))
+            guard.ledger["binding"] = feature_binding
+            guard.persist()
+        command = ["--network", token, "--label", label, "--memory", "4g", "--cpus", "2", "--env-file", str(envfile),
+                   "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--volume", str(source_context) + ":/workspace:ro",
+                   "--volume", str(cache) + ":/build", "--volume", str(cargo_cache) + ":/cargo", "--volume", str(receipt_dir) + ":/receipt", "--volume", str(diagnostics) + ":/diagnostics"]
+        mounts = [*build_mounts, (str(receipt_dir), "/receipt", True), (str(diagnostics), "/diagnostics", True)]
         if args.report_probe is not None:
-            command[-1:-1] = ["--volume", str(Path(args.report_probe).resolve()) + ":/report-probe:ro"]
-        def owned_container(arguments, timeout, role):
-            cid = run([runtime, "create", *arguments]).decode().strip()
-            if not re.fullmatch(r"[a-f0-9]{64}", cid):
-                raise RuntimeError("owned container creation returned no exact identity")
-            retain_container(cid, role, cleanup)
-            return run([runtime, "start", "--attach", cid], timeout=timeout)
-        # The dependency fetch is allowed network access; runtime database checks use only the private network.
-        fetch = ["--memory", "4g", "--cpus", "2", "--label", label,
-                 "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--env", "CARGO_BUILD_JOBS=2",
-                 "--volume", str(ROOT) + ":/workspace:ro", "--volume", str(cache) + ":/build",
-                 "--volume", str(cargo_cache) + ":/cargo", image_id, "cargo", "build", "--locked"]
-        owned_container(fetch, timeout=1200, role="build")
-        result = owned_container([*command, "python3", "tools/e2e/" + program + ".py", "--inside", "--pair", args.pair,
+            command += ["--volume", str(Path(args.report_probe).resolve()) + ":/report-probe:ro"]
+            mounts.append((str(Path(args.report_probe).resolve()), "/report-probe", False))
+        guard.ledger["stage"] = "profiles"
+        guard.persist()
+        result = owned_container([*command, image_id, "python3", "tools/e2e/" + program + ".py", "--inside", "--pair", args.pair,
                       "--binary", "/build/debug/rpgmigrate", "--receipt", "/receipt/result.json",
                       *(["--report-probe", "/report-probe"] if args.report_probe is not None else []),
-                      *(["--smoke"] if getattr(args, "smoke", False) else []),
-                      *(["--cutover"] if cutover_mode else []),
-                      *(["--diagnostic-case", diagnostic_case] if diagnostic_case else [])], timeout=1200, role="runner")
+                      *(["--profile", "m8", "--feature-binding", "/receipt/m8-input.json"] if feature_mode else []),
+                      *(["--smoke"] if getattr(args, "smoke", False) else []), *(["--cutover"] if cutover_mode else []),
+                      *(["--diagnostic-case", diagnostic_case] if diagnostic_case else [])], timeout=1200, role="runner", image_id=image_id, mounts=mounts, memory=4*GIB)
         report = json.loads((receipt_dir / "result.json").read_text())
         report.update(runner_image_id=image_id, server_image_ids=server_images)
-        if cutover_mode and (report.get("source_tree") != source_tree or cutover.source_inventory(ROOT) != source_tree):
+        if (cutover.source_inventory(source_context) != source_identity["inventory"] or guard.execute(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).decode().strip() != source_identity["commit"]
+                or guard.execute(["git", "-C", str(ROOT), "status", "--porcelain"])):
+            raise RuntimeError("actual workflow source changed during qualification")
+        if cutover_mode and report.get("source_tree") != source_tree:
             raise RuntimeError("cutover producer receipt differs from the actual unchanged runner source tree")
-        receipt_validator(report, manifest)
-        with output.open("x" if diagnostic_case else "w") as stream:
-            stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        print(result.decode(), end="")
-        print(program + " receipt: " + str(output))
+        guard.ledger["stage"] = "receipt_validation"
+        guard.persist()
+        if feature_mode:
+            copy_features.validate_receipt(report, manifest, binding=feature_binding)
+        else:
+            receipt_validator(report, manifest)
+        guard.ledger["expected_roles_verified"] = sorted(entry["role"] for entry in guard.ledger["containers"]) == ["build", "runner", "source", "target"]
+        if not guard.ledger["expected_roles_verified"] or not all(entry.get("cgroup_verified") is True for entry in guard.ledger["containers"]):
+            raise RuntimeError("four exact owned runtime roles and effective cgroup caps were not observed")
+    except Exception as error:
+        error.runtime_ledger = str(ledger_path)
+        if isinstance(error, SubprocessFailure):
+            error.metadata["runtime_ledger"] = str(ledger_path)
+        guard.ledger["failure"] = {"kind": type(error).__name__, "stage": guard.ledger.get("stage", "setup")}
+        raise
+    finally:
+        failed = sys.exc_info()[0] is not None
+        try:
+            smoke_path = private / "receipt/m8-smoke.json"
+            if smoke_path.is_file() and not smoke_path.is_symlink():
+                if smoke_path.stat().st_size > 65536 or smoke_path.stat().st_mode & 0o777 != 0o600:
+                    raise RuntimeError("retained build smoke exceeded its bound or private mode differs")
+                smoke = json.loads(smoke_path.read_bytes(), object_pairs_hook=unique_object)
+                if not feature_mode or "binding" not in guard.ledger:
+                    raise RuntimeError("retained build smoke lacks a reviewed candidate binding")
+                copy_features.validate_artifact_binding(guard.ledger["binding"])
+                copy_features.validate_build_smoke(smoke, guard.ledger["binding"], args.pair)
+                guard.ledger["build_smoke"] = smoke
+        except Exception:
+            guard.ledger["build_smoke_unavailable"] = True
+        try:
+            guard.close()
+        except Exception as error:
+            guard.ledger["close_error_kind"] = type(error).__name__
+            if not failed:
+                raise
+        try:
+            if (private_identity.get("absent_before") is True and private_identity.get("nonce") == token.rsplit("-", 1)[1]
+                    and directory_identity(private) == {key: value for key, value in private_identity.items() if key not in ("nonce", "absent_before")}
+                    and guard.ledger.get("cleanup_complete") is True
+                    and not guard._creation_unresolved()
+                    and all(entry.get("cleanup_status") == "absent" for entry in guard.ledger["containers"])):
+                shutil.rmtree(private)
+            guard.ledger["private_removed"] = not private.exists() and not private.is_symlink()
+            guard.ledger["secret_file_absent"] = guard.ledger["private_removed"]
+            guard.persist()
+        except Exception as error:
+            guard.ledger["private_cleanup_error_kind"] = type(error).__name__
+            if not failed:
+                raise
+    if not guard.ledger["cleanup_complete"] or not guard.ledger["private_removed"]:
+        raise RuntimeError("exact owned cleanup or preservation could not be verified; inspect " + str(ledger_path))
+    if feature_mode and (guard.ledger.get("build_smoke_unavailable") or guard.ledger.get("build_smoke") != report.get("build_smoke") or not guard.ledger.get("build_smoke")):
+        raise RuntimeError("source-bound pre-workflow debug smoke is missing or differs; inspect " + str(ledger_path))
+    report["runtime_ledger"] = str(ledger_path)
+    with output.open("x" if diagnostic_case or feature_mode else "w") as stream:
+        stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(result.decode(), end="")
+    print(program + " receipt: " + str(output))
 
 
 def main():
@@ -776,6 +1565,8 @@ def main():
     parser.add_argument("--pair", required=True, choices=PAIRS)
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--binary", default="/build/debug/rpgmigrate")
+    parser.add_argument("--profile", choices=("disabled", "m8"), default="disabled", help="explicit candidate profile; M8 requires separate runtime admission")
+    parser.add_argument("--feature-binding", help=argparse.SUPPRESS)
     parser.add_argument("--receipt")
     parser.add_argument("--report-probe", default=os.environ.get("RPGMIGRATE_E2E_REPORT_PROBE"), help="optional authoritative operator Go ParseReport executable")
     args = parser.parse_args()
@@ -785,7 +1576,11 @@ def main():
         DIAGNOSTIC_ROOT = Path("/diagnostics")
         if not args.receipt:
             raise RuntimeError("inside qualification requires a receipt destination")
-        inner(args)
+        if args.profile == "m8":
+            import copy_features
+            copy_features.inner(args)
+        else:
+            inner(args)
     else:
         outer(args)
     return 0
@@ -802,5 +1597,7 @@ if __name__ == "__main__":
             while trace.tb_next is not None:
                 trace = trace.tb_next
             metadata = private_failure("python-exception", None, str(error).encode(), None, trace.tb_frame, trace.tb_lineno)
+        if getattr(error, "runtime_ledger", None):
+            metadata["runtime_ledger"] = error.runtime_ledger
         print("clone-e2e: " + json.dumps(metadata, sort_keys=True), file=sys.stderr)
         sys.exit(1)

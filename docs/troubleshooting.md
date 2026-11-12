@@ -84,6 +84,8 @@ Preserve the conflicting resource and receipts for review.
 Never broaden cleanup by name prefix, delete authority files, or delete a whole PVC to repair a refusal.
 An empty cleanup inventory cannot prove completion.
 
-Older or incompatible native formats refuse before effects and have no automatic conversion path.
-Isolated M8 format 9 and M9 format 10 candidates do not change the primary format 8 / metadata 6 baseline.
+Older or incompatible native state and target metadata formats refuse before effects and have no automatic conversion path.
+The M8 engine candidate expects native format 9 and target metadata 7 for fresh migrations.
+For retained format 8 / metadata 6 state, consult the receipt for its exact qualified runner and source.
+The isolated M9 format 10 candidate requires its own qualification.
 Never adopt, convert, resume, restart, mutate, or clean pgcopydb state with native commands.

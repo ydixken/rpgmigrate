@@ -227,7 +227,10 @@ Keep the generated schema 2 image lock outside Git.
 Its exact sources and receipt hashes must agree with the test checkout.
 Do not commit the newly built manager digest to its own source catalog.
 
-The format 8 / metadata 6 M6 runner source remains separate from isolated M8 source and capability changes.
+The retained format 8 / metadata 6 development runner receipts bind the first arm64 publication to source `11a28a4d1c77b035f96cc16b7b948768dd6aa6c9`.
+The two-architecture successor receipts bind source `abd1a36e50726a26a9f655c5f53bb34ed8d182c1` and its published image digests.
+The M8 engine candidate uses native format 9 and target metadata 7.
+Qualification of that candidate requires receipts for its exact source and runner, including the operator helper and operator-default migration matrix.
 Hosted image build/publication and offline contract results do not qualify operator runtime, native admission, or the migration matrix.
 Hosted kind runtime requires a separate qualified Linux-native-host Guard transport.
 Development approval does not authorize releases, crate publication, main pushes or merges, or benchmarks.

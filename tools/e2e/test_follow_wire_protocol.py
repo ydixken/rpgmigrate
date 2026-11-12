@@ -76,6 +76,169 @@ class ExtendedWireTests(unittest.TestCase):
         backend.sendall(response)
         self.assertTrue(receive(producer, len(response)) == response)
 
+    def test_copy_observation_requires_wire_response_identity_and_real_eof(self):
+        observer = follow_wire.PgoutputObservation(1)
+        observer.copy_frontend(b'Q', b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT binary)\0')
+        observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+        self.assertEqual(observer.copy_evidence()["records"], [])
+        observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+        observer.copy_frontend(b'Q', b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT binary)\0')
+        observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+        record = observer.copy_evidence()["records"][0]
+        self.assertEqual((record["backend_pid"], record["relation"], record["format"]), (123, ["public", "m8_safe"], "binary"))
+        self.assertFalse(record["complete"])
+        observer.wire_event("server", "received", b'd', b'PGCOPY\n\xff\r\n\0')
+        observer.wire_event("server", "received", b'c', b'')
+        observer.wire_event("server", "received", b'C', b'COPY 0\0')
+        record = observer.copy_evidence()["records"][0]
+        self.assertTrue(record["complete"])
+        self.assertEqual((record["rows"], record["data_frames"]), (0, 1))
+        self.assertNotIn("PGCOPY", json.dumps(observer.copy_evidence()))
+
+    def test_copy_observation_rejects_skipped_malformed_and_mismatched_responses(self):
+        for response in (b'', b'\1\0\1', b'\2\0\0', b'\1\0\1\0\0', b'\0\0\1\0\1'):
+            observer = follow_wire.PgoutputObservation(1)
+            observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+            observer.copy_frontend(b'Q', b'COPY "public"."m8_safe" ("id") FROM STDIN WITH (FORMAT binary, FREEZE true)\0')
+            observer.wire_event("server", "received", b'G', response)
+            self.assertTrue(observer.copy_evidence()["invalid"])
+        observer = follow_wire.PgoutputObservation(1)
+        observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+        observer.copy_frontend(b'Q', b'SELECT 1\0')
+        observer.wire_event("server", "received", b'H', b'\0\0\0')
+        self.assertTrue(observer.copy_evidence()["invalid"])
+
+    def test_native_extended_copy_requires_bound_execute_and_actual_response(self):
+        for direction in ("out", "in"):
+            for format in ("text", "binary"):
+                with self.subTest(direction=direction, format=format):
+                    query = (b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT ' + format.encode() + b')'
+                             if direction == "out" else b'COPY "public"."m8_safe" ("id") FROM STDIN WITH (FORMAT ' + format.encode() + b', FREEZE true)')
+                    observer = follow_wire.PgoutputObservation(1)
+                    observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                    for request in (parse(query), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')):
+                        observer.copy_frontend(request[:1], request[5:])
+                    self.assertEqual(observer.copy_evidence()["records"], [])
+                    for kind, payload in ((b'1', b''), (b'2', b''), (b'n', b''),
+                                          (b'H' if direction == "out" else b'G', struct.pack("!BHH", int(format == "binary"), 1, int(format == "binary")))):
+                        observer.wire_event("server", "received", kind, payload)
+                    if direction == "in": observer.copy_frontend(b'c', b'')
+                    else: observer.wire_event("server", "received", b'c', b'')
+                    observer.wire_event("server", "received", b'C', b'COPY 0\0')
+                    evidence = observer.copy_evidence()
+                    self.assertFalse(evidence["invalid"], "native PQsendQueryParams COPY must be observed")
+                    self.assertEqual(len(evidence["records"]), 1)
+                    record = evidence["records"][0]
+                    self.assertEqual((record["direction"], record["format"], record["relation"], record["backend_pid"]), (direction, format, ["public", "m8_safe"], 123))
+                    self.assertTrue(record["complete"] and record["eof"])
+                    self.assertEqual(record["rows"], 0)
+
+    def test_native_extended_copy_refuses_stale_malformed_or_unexecuted_bindings(self):
+        query = b'COPY (SELECT "id" FROM ONLY "public"."m8_safe") TO STDOUT WITH (FORMAT binary)'
+        requests = [parse(query), bind(), frame(b'D', b'P\0'), execute(), frame(b'S')]
+        variants = [[parse(query, statement=b'named'), *requests[1:]], [parse(query, types=(23,)), *requests[1:]],
+                    [requests[0], bind(statement=b'other'), *requests[2:]], [requests[0], bind(portal=b'named'), *requests[2:]],
+                    [requests[0], bind(values=(b'value',)), *requests[2:]], [*requests[:2], frame(b'D', b'S\0'), *requests[3:]],
+                    [*requests[:3], execute(limit=1), requests[4]], [*requests[:3], execute(portal=b'named'), requests[4]],
+                    requests[:1] + requests[2:], requests[:2] + requests[3:], requests[:3],
+                    requests[:1] + [frame(b'S')] + requests[1:], requests[:4] + [execute(), requests[4]],
+                    requests[:3] + [parse(b'SELECT 1'), *requests[3:]], requests[:3] + [frame(b'Q', b'SELECT 1\0'), *requests[3:]],
+                    requests[:3] + [frame(b'C', b'P\0'), *requests[3:]], requests[:4] + [frame(b'S', b'not-empty')]]
+        for index, frames in enumerate(variants):
+            with self.subTest(variant=index):
+                observer = follow_wire.PgoutputObservation(1)
+                observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                for request in frames: observer.copy_frontend(request[:1], request[5:])
+                observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+                self.assertTrue(observer.copy_evidence()["invalid"])
+                self.assertEqual(observer.copy_evidence()["records"], [])
+        for response in (b'\0\0\1\0\0', b'\1\0\1\0\0', b'\1\0\1'):
+            with self.subTest(response=response):
+                observer = follow_wire.PgoutputObservation(1)
+                observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+                for request in requests: observer.copy_frontend(request[:1], request[5:])
+                observer.wire_event("server", "received", b'H', response)
+                self.assertTrue(observer.copy_evidence()["invalid"])
+        observer = follow_wire.PgoutputObservation(1)
+        observer.wire_event("server", "received", b'K', struct.pack("!II", 123, 0))
+        for request in requests: observer.copy_frontend(request[:1], request[5:])
+        observer.wire_event("server", "received", b'E', b'SERROR\0CXX000\0Mfixture\0\0')
+        observer.wire_event("server", "received", b'H', b'\1\0\1\0\1')
+        self.assertTrue(observer.copy_evidence()["invalid"])
+        self.assertEqual(observer.copy_evidence()["records"], [])
+
+    def test_copy_diagnostic_snapshot_has_bounded_lock_wait(self):
+        gate = WireGate.__new__(WireGate)
+        gate.lock, gate.errors, gate.observers, gate.observer_overflow = threading.Lock(), [], [], False
+        gate.lock.acquire()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lock unavailable"):
+                gate.copy_evidence(timeout=.01)
+        finally:
+            gate.lock.release()
+        self.assertLess(time.monotonic() - started, .1)
+        self.assertEqual(gate.copy_evidence(timeout=.01), {"invalid": False, "overflow": False, "records": []})
+
+    def test_source_copy_hold_observes_each_real_worker_until_release(self):
+        with self.relay("observe") as (gate, producer, backend):
+            gate.hold_copy(["public", "m8_split"])
+            query = frame(b'Q', b'COPY (SELECT "id" FROM ONLY "public"."m8_split" WHERE ctid >= \'(0,0)\'::pg_catalog.tid AND ctid < \'(12,0)\'::pg_catalog.tid) TO STDOUT WITH (FORMAT text)\0')
+            producer.sendall(query)
+            self.assertEqual(receive(backend, len(query)), query)
+            response = frame(b'H', b'\0\0\1\0\0')
+            backend.sendall(response)
+            self.assertTrue(gate.copy_held.wait(timeout=1))
+            evidence = gate.copy_evidence()
+            self.assertTrue(evidence["records"][0]["held"])
+            self.assertEqual(evidence["records"][0]["range"], [0, 12])
+            self.assertFalse(evidence["records"][0]["released"])
+            gate.copy_release.set()
+            self.assertEqual(receive(producer, len(response)), response)
+            backend.sendall(frame(b'c') + frame(b'C', b'COPY 0\0'))
+            receive(producer, len(frame(b'c') + frame(b'C', b'COPY 0\0')))
+            self.assertTrue(gate.copy_evidence()["records"][0]["complete"])
+
+    def test_two_source_copy_workers_remain_held_at_the_same_boundary(self):
+        with self.relay("observe") as (gate, first, first_backend):
+            gate.hold_copy(["public", "m8_split"])
+            second_client, second = socket.socketpair()
+            second_server, second_backend = socket.socketpair()
+            gate.sockets.extend((second_client, second_server))
+            second.settimeout(2); second_backend.settimeout(2)
+            worker = threading.Thread(target=gate.downstream, args=(second_client, second_server), daemon=True)
+            gate.threads.append(worker); worker.start()
+            try:
+                startup_payload = struct.pack("!I", 196608) + b'user\0fixture\0\0'
+                startup = struct.pack("!I", len(startup_payload) + 4) + startup_payload
+                second.sendall(startup)
+                self.assertEqual(receive(second_backend, len(startup)), startup)
+                identity = frame(b'K', struct.pack("!II", 124, 0))
+                second_backend.sendall(identity)
+                self.assertEqual(receive(second, len(identity)), identity)
+                response = frame(b'H', b'\1\0\1\0\1')
+                for producer, backend, bounds in ((first, first_backend, b" WHERE ctid >= '(0,0)'::pg_catalog.tid AND ctid < '(12,0)'::pg_catalog.tid"),
+                                                   (second, second_backend, b" WHERE ctid >= '(12,0)'::pg_catalog.tid")):
+                    sql = b'COPY (SELECT "id" FROM ONLY "public"."m8_split"' + bounds + b') TO STDOUT WITH (FORMAT binary)'
+                    query = parse(sql) + bind() + frame(b'D', b'P\0') + execute() + frame(b'S')
+                    producer.sendall(query)
+                    self.assertEqual(receive(backend, len(query)), query)
+                    gate.copy_held.clear()
+                    backend.sendall(response)
+                    self.assertTrue(gate.copy_held.wait(timeout=1))
+                observed = gate.copy_evidence()["records"]
+                self.assertEqual({row["backend_pid"] for row in observed}, {123, 124})
+                self.assertTrue(all(row["held"] and not row["released"] for row in observed))
+                gate.copy_release.set()
+                for producer, backend in ((first, first_backend), (second, second_backend)):
+                    self.assertEqual(receive(producer, len(response)), response)
+                    completion = frame(b'c') + frame(b'C', b'COPY 0\0')
+                    backend.sendall(completion)
+                    self.assertEqual(receive(producer, len(completion)), completion)
+                self.assertTrue(all(row["complete"] and row["released"] for row in gate.copy_evidence()["records"]))
+            finally:
+                second.close(); second_backend.close()
+
     def test_completed_resume_close_preserves_terminal_then_distinguishes_next_request(self):
         for request, kind, old_drop in ((frame(b'X'), "X", True), (parse(b'SELECT fixture_private_value'), "P", False),
                                         (bind(), "B", False), (frame(b'Q', b'SELECT fixture_private_value\0'), "Q", False)):

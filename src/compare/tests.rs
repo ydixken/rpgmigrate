@@ -21,6 +21,11 @@ fn internal_file_maps_refuse_before_state_access() {
             post_data_jobs: 1,
             policy: crate::contracts::RestorePolicy::default(),
             not_consistent: false,
+            use_copy_binary: false,
+            split_tables_larger_than: 0,
+            split_max_parts: 8,
+            skip_large_objects: false,
+            large_objects_jobs: 4,
         };
         let io = IoControl::unbounded(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
@@ -86,6 +91,52 @@ fn inventories_measure_missing_tables_and_refuse_absent_coverage() {
     assert!(inventory[1].1.is_none());
     assert!(inventory[2].0.is_none());
     assert!(union_tables(&[table("a", 1), table("a", 2)], &[]).is_err());
+}
+
+#[test]
+fn proven_empty_tables_require_successful_selected_large_object_comparison() {
+    let policy = crate::contracts::CloneCopyPolicy::default();
+    for message in [
+        "large-object mismatch",
+        "large-object inventory query failed",
+    ] {
+        let error = verified_tables(&[], &[], &policy, || Err(refusal(message))).unwrap_err();
+        assert_eq!(error.message, message);
+    }
+    let inventory = verified_tables(&[], &[], &policy, || Ok(())).unwrap();
+    assert!(inventory.is_empty());
+    assert!(union_tables(&[], &[]).is_err());
+    assert_eq!(
+        serde_json::to_value(Vec::<TableComparison>::new()).unwrap(),
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn table_coverage_cannot_mask_large_object_failure_or_override_selected_skip() {
+    let source = [table("a", 1)];
+    let target = [table("a", 2)];
+    let policy = crate::contracts::CloneCopyPolicy::default();
+    assert!(verified_tables(&source, &target, &policy, || Err(refusal("LO mismatch"))).is_err());
+    let skipped = crate::contracts::CloneCopyPolicy {
+        skip_large_objects: true,
+        ..policy
+    };
+    assert_eq!(
+        verified_tables(&source, &target, &skipped, || panic!(
+            "recorded skip must bypass LO comparison"
+        ))
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(
+        verified_tables(&[], &[], &skipped, || panic!(
+            "recorded skip must bypass LO comparison"
+        ))
+        .unwrap()
+        .is_empty()
+    );
 }
 
 #[test]

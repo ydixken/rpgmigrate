@@ -754,6 +754,8 @@ mod tests {
             tables: Vec::new(),
             sequences: Vec::new(),
             policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
+            copy_tables: Vec::new(),
         };
         let stream = StreamId {
             run: native.identity.run,
@@ -800,6 +802,8 @@ mod tests {
             table_oid: 12,
             marker_table_oid: 13,
             marker_index_oid: 14,
+            large_object_table_oid: 15,
+            large_object_index_oid: 16,
         })];
         next.clone_state = Some(CloneState {
             ticket: SnapshotTicket {

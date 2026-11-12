@@ -65,6 +65,11 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
         options.not_consistent,
     )?;
     if let Some(previous) = &previous {
+        if options.copy_policy() != previous.plan.copy_policy {
+            return Err(refusal(
+                "clone-recovery: selected COPY policy differs from the native binding",
+            ));
+        }
         if options.policy != RestorePolicy::default() && options.policy != previous.plan.policy {
             return Err(refusal(
                 "clone-recovery: restore policy differs from the native binding",
@@ -113,6 +118,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             &mut target,
             generation,
             options.policy,
+            options.copy_policy(),
             &[],
             &[],
             io,
@@ -153,10 +159,12 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
                 &mut target,
                 generation,
                 options.policy,
+                options.copy_policy(),
                 &metadata,
                 &previous.owned_objects,
                 io,
             )?;
+            let candidate = resolve_copy_profile(&mut snapshot, &mut target, &candidate, io)?;
             require_same_plan(&plan, &candidate)?;
             require_pre_data_match(crate::schema::compare_pre_data(
                 &options,
@@ -185,7 +193,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
                     "clone-recovery: recorded table ownership changed before restart",
                 ));
             }
-            native.advance_copy_generation(snapshot.ticket())?;
+            native.advance_copy_generation(&candidate, snapshot.ticket())?;
             authority.advance_generation(&native, io)?;
             plan = candidate;
         }
@@ -194,7 +202,8 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             let owned = crate::schema::restore_pre(&options, &plan, &archive, &mut native, io)?;
             authority.mark_stage(ClonePhase::PreDataPending, io)?;
             let tables = catalog::reconcile_clone_tables(&mut target, &plan, &owned, io)?;
-            native.confirm_pre_data(owned, tables)?;
+            plan = resolve_copy_profile(&mut snapshot, &mut target, &plan, io)?;
+            native.confirm_pre_data(&plan, owned, tables)?;
             authority.bind_tables(&native, io)?;
         }
         report = crate::copy::run_tables(
@@ -205,6 +214,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             &mut authority,
             io,
         )?;
+        crate::large_objects::run_initial(&options, &plan, &mut snapshot, &mut authority, io)?;
         pending(&mut native, &mut authority, ClonePhase::PostDataPending, io)?;
         crate::schema::restore_post(&options, &archive, io)?;
         positive(
@@ -261,18 +271,59 @@ pub(crate) fn require_pre_data_match(result: Result<bool>) -> Result<()> {
     }
 }
 
-pub(crate) fn require_same_plan(previous: &ClonePlan, candidate: &ClonePlan) -> Result<()> {
+pub(crate) fn require_same_catalog(previous: &ClonePlan, candidate: &ClonePlan) -> Result<()> {
     if previous.source != candidate.source
         || previous.target != candidate.target
         || previous.tables != candidate.tables
         || previous.sequences != candidate.sequences
         || previous.policy != candidate.policy
+        || previous.copy_policy != candidate.copy_policy
     {
         return Err(refusal(
             "clone-recovery: source plan or endpoint binding changed; fresh-snapshot restart cannot reuse target ownership",
         ));
     }
     Ok(())
+}
+
+pub(crate) fn require_same_plan(previous: &ClonePlan, candidate: &ClonePlan) -> Result<()> {
+    require_same_catalog(previous, candidate)?;
+    if candidate.generation == previous.generation {
+        if candidate.copy_tables != previous.copy_tables {
+            return Err(refusal(
+                "clone-recovery: same-generation execution profile changed",
+            ));
+        }
+    } else if previous.generation.0.checked_add(1) != Some(candidate.generation.0) {
+        return Err(refusal(
+            "clone-recovery: execution profile replacement requires the exact next generation",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_copy_profile(
+    snapshot: &mut CloneSnapshot,
+    target: &mut PgConnection,
+    plan: &ClonePlan,
+    io: &IoControl,
+) -> Result<ClonePlan> {
+    if snapshot.ticket().source != plan.source || snapshot.ticket().generation != plan.generation {
+        return Err(refusal(
+            "clone-recovery: execution planning requires its actual exported snapshot",
+        ));
+    }
+    catalog::command(
+        target,
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "BEGIN",
+        io,
+    )?;
+    let copy_tables = catalog::resolve_clone_copy_tables(snapshot.connection()?, target, plan, io)?;
+    catalog::command(target, "COMMIT", "COMMIT", io)?;
+    let mut resolved = plan.clone();
+    resolved.copy_tables = copy_tables;
+    Ok(resolved)
 }
 
 pub(crate) fn metadata(
@@ -359,6 +410,98 @@ fn refusal(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan() -> ClonePlan {
+        ClonePlan {
+            source: crate::contracts::CloneSource {
+                identity: crate::identity::SourceId {
+                    system_identifier: 1,
+                    database_oid: 2,
+                },
+                timeline: 1,
+                major: 16,
+            },
+            target: crate::contracts::CloneTarget {
+                identity: crate::identity::SourceId {
+                    system_identifier: 3,
+                    database_oid: 4,
+                },
+                major: 18,
+            },
+            generation: CopyGeneration(1),
+            tables: vec![crate::contracts::CloneTable {
+                source_oid: 5,
+                name: crate::contracts::QualifiedTable {
+                    schema: "public".into(),
+                    table: "items".into(),
+                },
+                writable_columns: vec!["id".into()],
+                all_columns: vec!["id".into()],
+                identity_modes: vec![0],
+                partition_identity_modes: None,
+            }],
+            sequences: vec![],
+            policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy {
+                split_tables_larger_than: 1,
+                ..crate::contracts::CloneCopyPolicy::default()
+            },
+            copy_tables: vec![crate::contracts::CloneTableCopy {
+                source_oid: 5,
+                format: crate::contracts::CopyFormat::Text,
+                parts: vec![
+                    crate::contracts::CopyPart {
+                        number: 1,
+                        count: 2,
+                        start_block: 0,
+                        end_block: Some(10),
+                    },
+                    crate::contracts::CopyPart {
+                        number: 2,
+                        count: 2,
+                        start_block: 10,
+                        end_block: None,
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn same_generation_requires_the_selected_copy_policy_and_exact_profile() {
+        let previous = plan();
+        for field in 0..5 {
+            let mut changed = previous.clone();
+            match field {
+                0 => changed.copy_policy.use_copy_binary = true,
+                1 => changed.copy_policy.split_tables_larger_than = 2,
+                2 => changed.copy_policy.split_max_parts = 16,
+                3 => changed.copy_policy.skip_large_objects = true,
+                _ => {
+                    changed.copy_tables[0].parts[0].end_block = Some(20);
+                    changed.copy_tables[0].parts[1].start_block = 20;
+                }
+            }
+            assert!(
+                require_same_plan(&previous, &changed).is_err(),
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_exact_next_generation_can_replace_a_snapshot_profile() {
+        let previous = plan();
+        let mut next = previous.clone();
+        next.generation = CopyGeneration(2);
+        next.copy_tables[0].parts[0].end_block = Some(20);
+        next.copy_tables[0].parts[1].start_block = 20;
+        require_same_plan(&previous, &next).unwrap();
+        for generation in [0, 3, u64::MAX] {
+            next.generation = CopyGeneration(generation);
+            assert!(require_same_plan(&previous, &next).is_err());
+        }
+    }
 
     #[test]
     fn admitted_init_state_starts_without_recovery_artifacts() {

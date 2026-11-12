@@ -122,10 +122,19 @@ M3/M4 follow and cutover implementation does not qualify the complete operator w
 Use the task ledger for the exact closing gates.
 The M7 vertical slice explicitly switches off binary COPY, splitting, and large objects.
 M8 qualifies them before using operator defaults.
+
+The M8 standalone defaults leave binary COPY off and set the split threshold to zero with a maximum of eight parts.
+The candidate includes large objects and defaults to four large-object workers.
+A zero threshold disables splitting.
+A runtime split plan can contain at most 4096 actual parts and must fit the one-MiB manifest limit.
+Operator defaults select binary COPY, a 536870912-byte split threshold, a maximum of eight parts, and large objects.
+Supported operator execution at those defaults requires the operator matrix and qualified capabilities.
+
 In the narrowed native profile, a zero effective split threshold makes the renderer omit both `--split-tables-larger-than` and `--split-max-parts`.
 This includes otherwise positive max-parts values.
-This is a renderer rule, not a relaxation of engine parser admission.
-The default/nonzero split profile and binary COPY still require their qualified capabilities, and the legacy renderer remains unchanged.
+The engine parser rejects an explicit maximum of zero parts.
+The nonzero split profile and binary COPY each require their qualified capability.
+The legacy renderer keeps its existing argument rules.
 Dormant native worker construction and passing CLI vectors do not establish production native support or the M7 runtime profile.
 DropIfExists and filters are excluded from the native E2E profile.
 M1 freezes precise native option and environment admission rather than inferring support from the inventory above.

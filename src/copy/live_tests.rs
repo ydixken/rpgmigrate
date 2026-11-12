@@ -26,8 +26,82 @@ fn control() -> IoControl {
     IoControl::unbounded(Arc::new(AtomicBool::new(false)))
 }
 
+fn fixture_copy_tables(
+    tables: &[crate::contracts::CloneTable],
+    format: CopyFormat,
+    parts: &[crate::contracts::CopyPart],
+) -> Vec<crate::contracts::CloneTableCopy> {
+    let mut profiles = catalog::provisional_copy_tables(tables).unwrap();
+    for profile in &mut profiles {
+        profile.format = format;
+        profile.parts = parts.to_vec();
+    }
+    profiles
+}
+
+#[test]
+fn fixture_execution_profiles_follow_oid_order_without_reordering_catalog_tables() {
+    let table = |source_oid, name: &str| crate::contracts::CloneTable {
+        source_oid,
+        name: crate::contracts::QualifiedTable {
+            schema: "public".into(),
+            table: name.into(),
+        },
+        writable_columns: vec!["id".into()],
+        all_columns: vec!["id".into()],
+        identity_modes: vec![0],
+        partition_identity_modes: None,
+    };
+    let tables = vec![
+        table(30_000, "a_created_second"),
+        table(20_000, "z_created_first"),
+    ];
+    let original = tables.clone();
+    let parts = vec![crate::contracts::CopyPart {
+        number: 1,
+        count: 1,
+        start_block: 0,
+        end_block: None,
+    }];
+    let profiles = fixture_copy_tables(&tables, CopyFormat::Binary, &parts);
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.source_oid)
+            .collect::<Vec<_>>(),
+        [20_000, 30_000]
+    );
+    assert!(
+        profiles
+            .iter()
+            .all(|profile| profile.format == CopyFormat::Binary && profile.parts == parts)
+    );
+    assert_eq!(tables, original);
+}
+
 impl Fixture {
     fn new(source_ddl: &[&str], target_ddl: &[&str], seed: &[&str]) -> Self {
+        Self::new_profile(
+            source_ddl,
+            target_ddl,
+            seed,
+            CopyFormat::Text,
+            vec![crate::contracts::CopyPart {
+                number: 1,
+                count: 1,
+                start_block: 0,
+                end_block: None,
+            }],
+        )
+    }
+
+    fn new_profile(
+        source_ddl: &[&str],
+        target_ddl: &[&str],
+        seed: &[&str],
+        format: CopyFormat,
+        parts: Vec<crate::contracts::CopyPart>,
+    ) -> Self {
         let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
         let context: serde_json::Value =
             serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
@@ -70,15 +144,22 @@ impl Fixture {
             &io,
         )
         .unwrap();
-        let tables = catalog::inspect_clone_tables(snapshot.connection().unwrap(), &[], &io)
-            .unwrap()
-            .into_iter()
-            .filter(|table| table.name.schema == schema)
-            .collect();
+        let tables: Vec<crate::contracts::CloneTable> =
+            catalog::inspect_clone_tables(snapshot.connection().unwrap(), &[], &io)
+                .unwrap()
+                .into_iter()
+                .filter(|table| table.name.schema == schema)
+                .collect();
         let plan = ClonePlan {
             source: snapshot.ticket().source.clone(),
             target: catalog::read_clone_target(&mut target, &io).unwrap(),
             generation: CopyGeneration(1),
+            copy_tables: fixture_copy_tables(&tables, format, &parts),
+            copy_policy: crate::contracts::CloneCopyPolicy {
+                use_copy_binary: format == CopyFormat::Binary,
+                split_tables_larger_than: if parts.len() > 1 { 1 } else { 0 },
+                ..crate::contracts::CloneCopyPolicy::default()
+            },
             tables,
             sequences: vec![],
             policy: RestorePolicy::default(),
@@ -95,6 +176,11 @@ impl Fixture {
             post_data_jobs: 3,
             policy: RestorePolicy::default(),
             not_consistent: false,
+            use_copy_binary: format == CopyFormat::Binary,
+            split_tables_larger_than: if parts.len() > 1 { 1 } else { 0 },
+            split_max_parts: 8,
+            skip_large_objects: false,
+            large_objects_jobs: 4,
         };
         let mut state = state::open_clone(&options.state, None, &io).unwrap();
         state.bind_clone(&plan, snapshot.ticket()).unwrap();
@@ -125,7 +211,7 @@ impl Fixture {
             .filter(|object| !before.contains(object))
             .collect::<Vec<_>>();
         let tables = catalog::reconcile_clone_tables(&mut target, &plan, &objects, &io).unwrap();
-        state.confirm_pre_data(objects, tables).unwrap();
+        state.confirm_pre_data(&plan, objects, tables).unwrap();
         authority.bind_tables(&state, &io).unwrap();
         Self {
             options,
@@ -295,7 +381,16 @@ fn live_clone_late_target_error_rolls_back_truncate_copy_and_marker() {
     assert!(
         fixture
             .authority
-            .resolve_unknown(&owned[0], &io)
+            .resolve_unknown(
+                &owned[0],
+                &crate::contracts::CopyPart {
+                    number: 1,
+                    count: 1,
+                    start_block: 0,
+                    end_block: None
+                },
+                &io
+            )
             .unwrap()
             .is_none()
     );
@@ -348,7 +443,16 @@ fn live_clone_late_target_error_rolls_back_truncate_copy_and_marker() {
     assert!(
         generated
             .authority
-            .resolve_unknown(&owned[0], &io)
+            .resolve_unknown(
+                &owned[0],
+                &crate::contracts::CopyPart {
+                    number: 1,
+                    count: 1,
+                    start_block: 0,
+                    end_block: None
+                },
+                &io
+            )
             .unwrap()
             .is_none()
     );
@@ -392,7 +496,16 @@ fn live_clone_oversize_row_refuses_before_table_commit() {
     assert!(
         fixture
             .authority
-            .resolve_unknown(&owned[0], &io)
+            .resolve_unknown(
+                &owned[0],
+                &crate::contracts::CopyPart {
+                    number: 1,
+                    count: 1,
+                    start_block: 0,
+                    end_block: None
+                },
+                &io
+            )
             .unwrap()
             .is_none()
     );
@@ -419,7 +532,16 @@ fn live_clone_oversize_row_refuses_before_table_commit() {
     assert!(
         generated
             .authority
-            .resolve_unknown(&owned[0], &io)
+            .resolve_unknown(
+                &owned[0],
+                &crate::contracts::CopyPart {
+                    number: 1,
+                    count: 1,
+                    start_block: 0,
+                    end_block: None
+                },
+                &io
+            )
             .unwrap()
             .is_none()
     );
@@ -467,4 +589,133 @@ fn live_clone_rejects_replaced_snapshot_in_same_generation_before_copy() {
         )
         .unwrap();
     assert_eq!(rows.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_binary_copy_counts_empty_single_and_multiple_rows_from_command_results() {
+    let ddl = ["CREATE TABLE payload (id integer,value text)"];
+    for rows in [0, 1, 13] {
+        let seed =
+            format!("INSERT INTO payload SELECT n,'value-'||n FROM generate_series(1,{rows}) AS n");
+        let mut fixture = Fixture::new_profile(
+            &ddl,
+            &ddl,
+            &[&seed],
+            CopyFormat::Binary,
+            vec![crate::contracts::CopyPart {
+                number: 1,
+                count: 1,
+                start_block: 0,
+                end_block: None,
+            }],
+        );
+        let report = fixture.copy().unwrap();
+        assert_eq!(report.tables, 1);
+        assert_eq!(report.rows, rows);
+        assert!(
+            report.bytes >= 21,
+            "binary header and trailer were not relayed"
+        );
+        assert_eq!(fixture.authority.copy_report(&fixture.io).unwrap(), report);
+    }
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_split_copy_retains_every_part_without_freeze_or_worker_truncate() {
+    let ddl = ["CREATE TABLE payload (id integer,value text)"];
+    let mut fixture = Fixture::new_profile(
+        &ddl,
+        &ddl,
+        &["INSERT INTO payload SELECT n,repeat('x',1000) FROM generate_series(1,2000) AS n"],
+        CopyFormat::Text,
+        vec![
+            crate::contracts::CopyPart {
+                number: 1,
+                count: 2,
+                start_block: 0,
+                end_block: Some(1),
+            },
+            crate::contracts::CopyPart {
+                number: 2,
+                count: 2,
+                start_block: 1,
+                end_block: None,
+            },
+        ],
+    );
+    let report = fixture.copy().unwrap();
+    assert_eq!(report.tables, 1);
+    assert_eq!(report.rows, 2000);
+    assert_eq!(fixture.authority.copy_report(&fixture.io).unwrap(), report);
+    let result = fixture
+        .target()
+        .query(
+            &format!(
+                "SELECT count(*),count(DISTINCT id) FROM {}.payload",
+                fixture.schema
+            ),
+            &fixture.io,
+        )
+        .unwrap();
+    assert_eq!(result.cell(0, 0).unwrap(), Some(b"2000".as_slice()));
+    assert_eq!(result.cell(0, 1).unwrap(), Some(b"2000".as_slice()));
+}
+
+#[test]
+#[ignore = "requires a fresh disposable M8 database pair with no existing large objects"]
+fn live_large_object_initial_copy_preserves_empty_binary_multichunk_and_sparse_objects() {
+    let ddl = ["CREATE TABLE payload (id integer,object_oid oid)"];
+    let mut fixture = Fixture::new(
+        &ddl,
+        &ddl,
+        &[
+            "INSERT INTO payload VALUES(1,pg_catalog.lo_create(0))",
+            "INSERT INTO payload VALUES(2,pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff275c','hex')))",
+            "INSERT INTO payload VALUES(3,pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('5a',2*1024*1024+7),'hex')))",
+            "INSERT INTO payload VALUES(4,pg_catalog.lo_create(0))",
+            "SELECT pg_catalog.lo_put(object_oid,1024*1024+7,pg_catalog.decode('00ff','hex')) FROM payload WHERE id=4",
+        ],
+    );
+    fixture.copy().unwrap();
+    let oid_json = fixture
+        .snapshot
+        .connection()
+        .unwrap()
+        .query(
+        "SELECT pg_catalog.json_typeof(pg_catalog.json_build_object('owner',m.lomowner)->'owner'),pg_catalog.json_typeof(pg_catalog.json_build_object('owner',m.lomowner::pg_catalog.int8)->'owner') FROM pg_catalog.pg_largeobject_metadata m ORDER BY m.oid LIMIT 1",
+        &fixture.io,
+    )
+        .unwrap();
+    assert_eq!(oid_json.rows(), 1);
+    assert_eq!(oid_json.cell(0, 0).unwrap(), Some(b"string".as_slice()));
+    assert_eq!(oid_json.cell(0, 1).unwrap(), Some(b"number".as_slice()));
+    let completion = crate::large_objects::run_initial(
+        &fixture.options,
+        &fixture.plan,
+        &mut fixture.snapshot,
+        &mut fixture.authority,
+        &fixture.io,
+    )
+    .unwrap();
+    assert_eq!(completion.objects, 4);
+    assert_eq!(
+        completion.bytes,
+        4 + (2 * 1024 * 1024 + 7) + (1024 * 1024 + 9)
+    );
+    let mut target = fixture.target();
+    let binary=target.query(&format!("SELECT pg_catalog.encode(pg_catalog.lo_get(object_oid,0,4),'hex') FROM {}.payload WHERE id=2",fixture.schema),&fixture.io).unwrap();
+    assert_eq!(binary.cell(0, 0).unwrap(), Some(b"00ff275c".as_slice()));
+    let hole=target.query(&format!("SELECT pg_catalog.encode(pg_catalog.lo_get(object_oid,1024*1024+5,4),'hex') FROM {}.payload WHERE id=4",fixture.schema),&fixture.io).unwrap();
+    assert_eq!(hole.cell(0, 0).unwrap(), Some(b"000000ff".as_slice()));
+    let retry = crate::large_objects::run_initial(
+        &fixture.options,
+        &fixture.plan,
+        &mut fixture.snapshot,
+        &mut fixture.authority,
+        &fixture.io,
+    )
+    .unwrap();
+    assert_eq!(retry, completion);
 }

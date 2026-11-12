@@ -249,7 +249,7 @@ fn leaf(name: &'static str, parser: Parser) -> Command {
             .value_parser(OsStringValueParser::new()),
     );
     if matches!(name, "clone" | "follow") {
-        command.after_help("Native follow requires --skip-large-objects and admits only pgoutput v1 with durable commits. Limits: 1024 queued messages, 8 MiB queued capacity plus one message up to 16 MiB when empty; apply groups default to 100 transactions, 10000 rows or 8 MiB, closing only at a source COMMIT. Cutover requires a persisted endpos and a caller write freeze through final sequence synchronization.")
+        command.after_help("Native follow admits only pgoutput v1 with durable commits. Limits: 1024 queued messages, 8 MiB queued capacity plus one message up to 16 MiB when empty; apply groups default to 100 transactions, 10000 rows or 8 MiB, closing only at a source COMMIT. Cutover requires a persisted endpos and a caller write freeze through final sequence and selected large-object synchronization.")
     } else {
         command
     }
@@ -272,7 +272,7 @@ fn command() -> Command {
     base("rpgmigrate", Parser::Root)
         .bin_name("rpgmigrate")
         .about("PostgreSQL migration engine")
-        .after_help("Native profiles: single-database clone, read-only progress and schema/data comparison, ping, restricted copy table-data, bounded follow, stream sentinel get, stream sentinel set endpos, and stream cleanup of owned resources. Clone and follow use unsplit text COPY; follow requires --skip-large-objects, pgoutput v1, and durable commits. PostgreSQL pairs: 16 to 16, 18 to 18, and 16 to 18. Unsupported profile options fail before database or state changes.")
+        .after_help("Native profiles: single-database clone, read-only progress and schema/data comparison, ping, restricted copy table-data, bounded follow, stream sentinel get, stream sentinel set endpos, and stream cleanup of owned resources. Follow requires pgoutput v1 and durable commits. PostgreSQL pairs: 16 to 16, 18 to 18, and 16 to 18. Unsupported profile options fail before database or state changes.")
         .subcommands(["clone", "fork", "follow"].map(|name| leaf(name, Parser::Copy)))
         .subcommand(leaf("snapshot", Parser::Snapshot))
         .subcommand(leaf("ping", Parser::Ping))
@@ -441,6 +441,109 @@ mod tests {
         ("PGCOPYDB_SOURCE_PGURI", "dbname=source"),
         ("PGCOPYDB_TARGET_PGURI", "dbname=target"),
     ];
+
+    #[test]
+    fn m8_clone_and_follow_admit_selected_copy_features_before_io() {
+        for command in ["clone", "follow"] {
+            for selectors in [
+                vec!["--use-copy-binary"],
+                vec!["--split-tables-larger-than", "0", "--split-max-parts", "8"],
+                vec![
+                    "--split-tables-larger-than",
+                    "536870912",
+                    "--split-max-parts",
+                    "1",
+                ],
+                vec!["--large-objects-jobs", "1"],
+                vec!["--large-objects-jobs", "128"],
+                vec!["--split-max-parts", "2147483647"],
+                vec![],
+            ] {
+                let mut args = vec![command];
+                args.extend(selectors);
+                assert!(invoke(&args, CONNECTIONS).is_ok(), "{args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn m8_copy_defaults_and_environment_precedence_preserve_selected_policy() {
+        let Invocation::Clone(defaults) = invoke(&["clone"], CONNECTIONS).unwrap() else {
+            panic!("clone")
+        };
+        assert!(!defaults.use_copy_binary);
+        assert_eq!(defaults.split_tables_larger_than, 0);
+        assert_eq!(defaults.split_max_parts, 8);
+        assert!(!defaults.skip_large_objects);
+        assert_eq!(defaults.large_objects_jobs, 4);
+        let mut env = CONNECTIONS.to_vec();
+        env.extend([
+            ("PGCOPYDB_USE_COPY_BINARY", "false"),
+            ("PGCOPYDB_SPLIT_TABLES_LARGER_THAN", "1GB"),
+            ("PGCOPYDB_SPLIT_MAX_PARTS", "1"),
+            ("PGCOPYDB_LARGE_OBJECTS_JOBS", "128"),
+        ]);
+        let Invocation::Clone(selected) = invoke(
+            &[
+                "clone",
+                "--use-copy-binary",
+                "--split-tables-larger-than",
+                "536870912",
+                "--split-max-parts",
+                "8",
+                "--large-objects-jobs",
+                "1",
+                "--skip-large-objects",
+            ],
+            &env,
+        )
+        .unwrap() else {
+            panic!("clone")
+        };
+        assert!(selected.use_copy_binary);
+        assert_eq!(selected.split_tables_larger_than, 536870912);
+        assert_eq!(selected.split_max_parts, 8);
+        assert!(selected.skip_large_objects);
+        assert_eq!(selected.large_objects_jobs, 1);
+        let Invocation::Clone(environment) = invoke(&["clone"], &env).unwrap() else {
+            panic!("clone")
+        };
+        assert!(!environment.use_copy_binary);
+        assert_eq!(environment.split_tables_larger_than, 1_073_741_824);
+        assert_eq!(environment.split_max_parts, 1);
+        assert_eq!(environment.large_objects_jobs, 128);
+        assert_eq!(selected.copy_policy().split_tables_larger_than, 536870912);
+    }
+
+    #[test]
+    fn m8_copy_selector_bounds_and_read_only_admission_fail_closed() {
+        for selectors in [
+            vec!["--large-objects-jobs", "0"],
+            vec!["--large-objects-jobs", "129"],
+            vec!["--split-max-parts", "0"],
+            vec!["--split-max-parts", "2147483648"],
+        ] {
+            let mut args = vec!["clone"];
+            args.extend(selectors);
+            assert!(invoke(&args, CONNECTIONS).is_err(), "{args:?}");
+        }
+        for route in [
+            vec!["list", "progress"],
+            vec!["compare", "data"],
+            vec!["compare", "schema"],
+        ] {
+            for selectors in [
+                vec!["--use-copy-binary"],
+                vec!["--split-max-parts", "8"],
+                vec!["--large-objects-jobs", "4"],
+                vec!["--skip-large-objects"],
+            ] {
+                let mut args = route.clone();
+                args.extend(selectors);
+                assert!(invoke(&args, CONNECTIONS).is_err(), "{args:?}");
+            }
+        }
+    }
 
     #[test]
     fn m4_routes_admit_only_cutover_and_cleanup_commands() {
@@ -759,18 +862,10 @@ mod tests {
 
     #[test]
     fn follow_refuses_unsupported_effective_settings_before_io() {
-        assert!(
-            invoke(&["follow"], CONNECTIONS)
-                .unwrap_err()
-                .message
-                .contains("--skip-large-objects")
-        );
         for args in [
             vec!["--plugin", "test_decoding"],
             vec!["--plugin", "wal2json"],
             vec!["--durability", "replay-safe"],
-            vec!["--use-copy-binary"],
-            vec!["--split-tables-larger-than", "1GB"],
             vec!["--endpos", "0/10"],
         ] {
             let mut argv = vec!["follow", "--skip-large-objects"];
@@ -835,11 +930,9 @@ mod tests {
     #[test]
     fn clone_refuses_staged_features_before_database_or_state_actions() {
         for option in [
-            "--follow",
             "--roles",
             "--all-databases",
             "--drop-if-exists",
-            "--use-copy-binary",
             "--skip-analyze",
             "--skip-extensions",
             "--defer-indexes",

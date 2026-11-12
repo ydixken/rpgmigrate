@@ -152,6 +152,8 @@ pub(crate) struct ConfirmedProvenance {
     pub(crate) table_oid: u32,
     pub(crate) marker_table_oid: u32,
     pub(crate) marker_index_oid: u32,
+    pub(crate) large_object_table_oid: u32,
+    pub(crate) large_object_index_oid: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -169,9 +171,9 @@ pub(crate) enum TargetProvenance {
 const MANIFEST: &CStr = c"manifest.json";
 const TEMP: &CStr = c".manifest.tmp";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 const MAX_TARGET_PROVENANCE: usize = 1;
-pub(crate) const TARGET_METADATA_VERSION: u32 = 6;
+pub(crate) const TARGET_METADATA_VERSION: u32 = 7;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -692,15 +694,19 @@ impl TargetProvenance {
                 || confirmed.table_oid == 0
                 || confirmed.marker_table_oid == 0
                 || confirmed.marker_index_oid == 0
+                || confirmed.large_object_table_oid == 0
+                || confirmed.large_object_index_oid == 0
                 || [
                     confirmed.table_oid,
                     confirmed.marker_table_oid,
                     confirmed.marker_index_oid,
+                    confirmed.large_object_table_oid,
+                    confirmed.large_object_index_oid,
                 ]
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
-                    != 3)
+                    != 5)
         {
             return Err(bad_state(
                 "state-provenance: confirmed object OIDs must be nonzero",
@@ -1279,8 +1285,22 @@ mod tests {
 
     #[test]
     fn clone_state_uses_new_explicit_native_and_target_formats() {
-        assert_eq!(FORMAT_VERSION, 8);
-        assert_eq!(TARGET_METADATA_VERSION, 6);
+        assert_eq!(FORMAT_VERSION, 9);
+        assert_eq!(TARGET_METADATA_VERSION, 7);
+    }
+
+    #[test]
+    fn previous_native_format_refuses_all_actions_without_mutation() {
+        for action in [
+            StateAction::Create,
+            StateAction::Resume,
+            StateAction::Restart,
+        ] {
+            let tmp = TempDir::new();
+            drop(tmp.create());
+            change_manifest(&tmp.path(), |value| value["format_version"] = json!(8));
+            refusal(&tmp.path(), action, "state-version:");
+        }
     }
 
     #[test]
@@ -1289,7 +1309,7 @@ mod tests {
         let state = tmp.create();
         let value = manifest(&tmp.path());
         assert_eq!(value["magic"], "RPGMIGRATE");
-        assert_eq!(value["format_version"], 8);
+        assert_eq!(value["format_version"], 9);
         assert_eq!(value["canonical_path"], tmp.path().to_str().unwrap());
         assert_eq!(value["run"].as_array().unwrap().len(), 16);
         assert_ne!(value["run"], json!(vec![0; 16]));
@@ -1299,7 +1319,7 @@ mod tests {
         assert_eq!(value.get("clone_state"), Some(&Value::Null));
         assert_eq!(value.get("operator"), Some(&Value::Null));
         assert_eq!(state.identity().canonical_path, tmp.path());
-        assert_eq!(state.identity().format_version, 8);
+        assert_eq!(state.identity().format_version, 9);
         assert_eq!(value["run"], json!(state.identity().run.0));
         let directory = fs::metadata(tmp.path()).unwrap();
         assert_eq!(value["directory_inode"], directory.ino());
@@ -1436,7 +1456,7 @@ mod tests {
     fn unknown_version_is_rejected_before_restart() {
         let tmp = TempDir::new();
         drop(tmp.create());
-        change_manifest(&tmp.path(), |value| value["format_version"] = json!(9));
+        change_manifest(&tmp.path(), |value| value["format_version"] = json!(10));
         refusal(&tmp.path(), StateAction::Restart, "state-version:");
     }
 
@@ -1821,6 +1841,8 @@ mod tests {
             table_oid: 20001,
             marker_table_oid: 20002,
             marker_index_oid: 20003,
+            large_object_table_oid: 20004,
+            large_object_index_oid: 20005,
         }
     }
 
@@ -1843,6 +1865,8 @@ mod tests {
             (4, true),
             (5, false),
             (5, true),
+            (6, false),
+            (6, true),
         ] {
             let tmp = TempDir::new();
             let mut state = tmp.create();
@@ -1868,7 +1892,7 @@ mod tests {
                 };
                 intent["binding"]["metadata_version"] = json!(version);
             });
-            assert_eq!(manifest(&tmp.path())["format_version"], 8);
+            assert_eq!(manifest(&tmp.path())["format_version"], 9);
             recovery_refusal(&tmp.path(), "state-provenance:");
             for action in [
                 StateAction::Create,
@@ -2112,7 +2136,7 @@ mod tests {
 
     #[test]
     fn recovery_refuses_v1_and_unknown_versions_without_conversion() {
-        for version in [1, 2, 3, 4, 5, 6, 7, 9] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 10] {
             let tmp = TempDir::new();
             drop(tmp.create());
             change_manifest(&tmp.path(), |value| {
@@ -2133,7 +2157,7 @@ mod tests {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
         let recovered = open_for_provenance_recovery(&tmp.path()).unwrap();
-        assert_eq!(recovered.identity().format_version, 8);
+        assert_eq!(recovered.identity().format_version, 9);
     }
 
     #[test]
@@ -2376,7 +2400,14 @@ mod tests {
 
     #[test]
     fn recovery_validates_confirmed_object_oids_and_rejects_unknown_fields() {
-        for field in ["schema_oid", "table_oid"] {
+        for field in [
+            "schema_oid",
+            "table_oid",
+            "marker_table_oid",
+            "marker_index_oid",
+            "large_object_table_oid",
+            "large_object_index_oid",
+        ] {
             let tmp = TempDir::new();
             let mut state = tmp.create();
             let intent = state.begin_target_provisioning(binding(&state)).unwrap();
@@ -2434,8 +2465,8 @@ mod tests {
         fs::write(
             &path,
             original.replace(
-                "\"metadata_version\":6",
-                "\"metadata_version\":6,\"metadata_version\":6",
+                "\"metadata_version\":7",
+                "\"metadata_version\":7,\"metadata_version\":7",
             ),
         )
         .unwrap();
@@ -2788,7 +2819,7 @@ mod tests {
         state.checked_source_binding(&desired).unwrap();
         assert_eq!(
             manifest(&tmp.path())["target_provenance"][0]["record"]["intent"]["binding"]["metadata_version"],
-            6
+            7
         );
     }
 
@@ -3157,7 +3188,7 @@ mod tests {
         for action in [StateAction::Resume, StateAction::Restart] {
             refusal(&tmp.path(), action, "state-recovery-unsupported:");
         }
-        for version in [1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
             change_manifest(&tmp.path(), |value| {
                 value["format_version"] = json!(version);
                 value.as_object_mut().unwrap().remove("source_slot");

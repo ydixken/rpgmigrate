@@ -108,10 +108,10 @@ class CliContract(unittest.TestCase):
             state = Path(directory) / "state"
             result = self.invoke(
                 "clone", "--source", self.offline_conninfo, "--target", self.offline_conninfo,
-                "--dir", str(state), "--use-copy-binary",
+                "--dir", str(state), "--roles",
             )
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("use-copy-binary", result.stderr)
+            self.assertIn("roles", result.stderr)
             self.assertIn("no database or state action was started", result.stderr)
             self.assertFalse(state.exists())
 
@@ -417,6 +417,7 @@ class CliContract(unittest.TestCase):
                         admitted_clone = parser == "cli_copy_db_getopts" and name in {
                             "source", "target", "dir", "jobs", "table-jobs", "index-jobs", "restore-jobs",
                             "no-owner", "no-acl", "no-comments", "no-tablespaces", "skip-blobs", "skip-large-objects", "restart",
+                            "large-objects-jobs", "use-copy-binary", "split-at", "split-tables-larger-than", "split-max-parts", "follow",
                         }
                         missing_clone = parser == "cli_copy_db_getopts" and name == "resume"
                         missing_compare = parser == "cli_compare_getopts" and name in {"source", "target", "dir", "json"}
@@ -458,14 +459,7 @@ class CliContract(unittest.TestCase):
                             self.assertEqual(result.stdout, "")
                             self.assertFalse(state.exists())
                         elif expected == 2:
-                            if parser == "cli_copy_db_getopts" and name == "follow":
-                                error = json.loads(result.stderr)
-                                self.assertEqual(error["category"], "BadConfig")
-                                self.assertEqual(error["exit_code"], 2)
-                                self.assertIn("follow requires explicit --skip-large-objects; no database or state action was started", error["message"])
-                                self.assertEqual(result.stdout, "")
-                            else:
-                                self.assertIn("unimplemented", result.stderr.lower())
+                            self.assertIn("unimplemented", result.stderr.lower())
                             self.assertFalse(state.exists())
                         if json_version:
                             report = json.loads(result.stdout)

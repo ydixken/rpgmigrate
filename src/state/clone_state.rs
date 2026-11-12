@@ -257,9 +257,11 @@ impl NativeState {
 
     pub(crate) fn confirm_pre_data(
         &mut self,
+        plan: &ClonePlan,
         objects: Vec<OwnedObject>,
         tables: Vec<OwnedCopyTable>,
     ) -> Result<()> {
+        validate_plan(plan)?;
         let mut next = self.checked_manifest()?;
         let clone = next
             .clone_state
@@ -270,6 +272,32 @@ impl NativeState {
                 "state-ownership: positive pre-data handoff is not pending",
             ));
         }
+        if plan.source != clone.plan.source
+            || plan.target != clone.plan.target
+            || plan.generation != clone.plan.generation
+            || plan.tables != clone.plan.tables
+            || plan.sequences != clone.plan.sequences
+            || plan.policy != clone.plan.policy
+            || plan.copy_policy != clone.plan.copy_policy
+            || plan.source != clone.ticket.source
+            || plan.generation != clone.ticket.generation
+            || plan.copy_tables != clone.plan.copy_tables
+                && clone.plan.copy_tables.iter().any(|copy| {
+                    copy.format != crate::contracts::CopyFormat::Text
+                        || copy.parts
+                            != [crate::contracts::CopyPart {
+                                number: 1,
+                                count: 1,
+                                start_block: 0,
+                                end_block: None,
+                            }]
+                })
+        {
+            return Err(bad_state(
+                "state-ownership: pre-data execution profile differs from its original snapshot and selected policy",
+            ));
+        }
+        clone.plan = plan.clone();
         clone.owned_objects = objects;
         clone.owned_tables = tables;
         clone.phase = ClonePhase::Copying;
@@ -277,7 +305,12 @@ impl NativeState {
         self.replace_manifest(next)
     }
 
-    pub(crate) fn advance_copy_generation(&mut self, ticket: &SnapshotTicket) -> Result<()> {
+    pub(crate) fn advance_copy_generation(
+        &mut self,
+        plan: &ClonePlan,
+        ticket: &SnapshotTicket,
+    ) -> Result<()> {
+        validate_plan(plan)?;
         let mut next = self.checked_manifest()?;
         let clone = next
             .clone_state
@@ -294,13 +327,22 @@ impl NativeState {
             .0
             .checked_add(1)
             .ok_or_else(|| bad_state("state-generation: copy generation exhausted"))?;
-        if ticket.source != clone.plan.source || ticket.generation != CopyGeneration(generation) {
+        if ticket.source != clone.plan.source
+            || ticket.generation != CopyGeneration(generation)
+            || plan.generation != ticket.generation
+            || plan.source != clone.plan.source
+            || plan.target != clone.plan.target
+            || plan.tables != clone.plan.tables
+            || plan.sequences != clone.plan.sequences
+            || plan.policy != clone.plan.policy
+            || plan.copy_policy != clone.plan.copy_policy
+        {
             return Err(bad_state(
                 "state-generation: fresh snapshot source or generation differs",
             ));
         }
         clone.ticket = ticket.clone();
-        clone.plan.generation = ticket.generation;
+        clone.plan = plan.clone();
         for table in &mut clone.owned_tables {
             table.generation = ticket.generation;
         }
@@ -392,6 +434,54 @@ pub(super) fn validate_plan(plan: &ClonePlan) -> Result<()> {
             return Err(bad_state(
                 "state-clone: invalid or duplicate source table identity",
             ));
+        }
+    }
+    if plan.copy_policy.split_max_parts == 0
+        || plan.copy_policy.split_max_parts > i32::MAX as u32
+        || plan.copy_tables.len() != sources.len()
+    {
+        return Err(bad_state(
+            "state-clone: invalid copy policy or execution keyset",
+        ));
+    }
+    let mut previous = 0;
+    let mut total_parts = 0_usize;
+    for copy in &plan.copy_tables {
+        total_parts = total_parts
+            .checked_add(copy.parts.len())
+            .filter(|count| *count <= crate::contracts::MAX_COPY_PARTS)
+            .ok_or_else(|| bad_state("state-clone: copy part inventory exceeds bounded workset"))?;
+        if copy.source_oid <= previous
+            || !sources.contains(&copy.source_oid)
+            || copy.parts.is_empty()
+            || copy.parts.len() > plan.copy_policy.split_max_parts as usize
+            || (!plan.copy_policy.use_copy_binary
+                && copy.format == crate::contracts::CopyFormat::Binary)
+            || (plan.copy_policy.split_tables_larger_than == 0 && copy.parts.len() != 1)
+        {
+            return Err(bad_state(
+                "state-clone: invalid or duplicate copy execution profile",
+            ));
+        }
+        previous = copy.source_oid;
+        let count = copy.parts.len() as u32;
+        let mut start = 0;
+        for (index, part) in copy.parts.iter().enumerate() {
+            if part.number != index as u32 + 1
+                || part.count != count
+                || part.start_block != start
+                || match part.end_block {
+                    Some(end) => end <= start || index + 1 == copy.parts.len(),
+                    None => index + 1 != copy.parts.len(),
+                }
+            {
+                return Err(bad_state(
+                    "state-clone: invalid copy part coverage or bounds",
+                ));
+            }
+            if let Some(end) = part.end_block {
+                start = end;
+            }
         }
     }
     Ok(())

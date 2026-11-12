@@ -700,7 +700,7 @@ class Database(clone.Database):
             raise RuntimeError("exact owned follow slot binding or WAL differs")
         return row
 
-    def authority(self, name, state, work):
+    def authority(self, name, state, work, *, candidate=False):
         path = state / "manifest.json"
         if not path.is_file():
             return None
@@ -709,7 +709,7 @@ class Database(clone.Database):
         binding = native.get("follow_state", {}).get("binding")
         if not records or not binding or records[0].get("phase") != "confirmed":
             return None
-        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != 8:
+        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != (9 if candidate else 8):
             raise RuntimeError("independent follow native identity/version differs")
         try:
             validate_identity_modes(native["clone_state"]["plan"])
@@ -744,7 +744,7 @@ class Database(clone.Database):
                                     or any(type(value) is not bool for value in cleanup.values())):
             raise RuntimeError("independent native follow cleanup receipt differs")
         stream = expected["stream"]
-        same = {"magic": "rpgmigrate", "version": 6, "run_id": "\\x" + bytes(stream["run"]).hex(),
+        same = {"magic": "rpgmigrate", "version": 7 if candidate else 6, "run_id": "\\x" + bytes(stream["run"]).hex(),
                 "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(), "source_system": stream["source"]["system_identifier"],
                 "source_database": stream["source"]["database_oid"], "generation": stream["generation"],
                 "target_system": expected["target_system_identifier"], "target_database": expected["target_database_oid"],
@@ -760,8 +760,14 @@ class Database(clone.Database):
                 or type(row.get("barrier_epoch")) is not int or not 0 <= row["barrier_epoch"] < 2**64):
             raise RuntimeError("independent target primary identity/durability policy is absent")
         owned_oids = [record["table_oid"], record["marker_table_oid"], record["marker_index_oid"]]
+        kinds = ["r", "r", "i"]
+        if candidate:
+            if expected.get("metadata_version") != 7:
+                raise RuntimeError("candidate metadata version differs")
+            owned_oids += [record["large_object_table_oid"], record["large_object_index_oid"]]
+            kinds += ["r", "i"]
         objects = self.sql(name, f"SELECT oid,relnamespace,relowner,relpersistence,relkind FROM pg_class WHERE oid IN ({','.join(map(str, owned_oids))}) ORDER BY oid;").decode().splitlines()
-        expected_objects = sorted(f"{oid}|{record['schema_oid']}|{expected['owner_oid']}|p|{kind}" for oid, kind in zip(owned_oids, ("r", "r", "i")))
+        expected_objects = sorted(f"{oid}|{record['schema_oid']}|{expected['owner_oid']}|p|{kind}" for oid, kind in zip(owned_oids, kinds))
         if sorted(objects) != expected_objects:
             raise RuntimeError("independent target owned checkpoint/marker identities differ")
         return row

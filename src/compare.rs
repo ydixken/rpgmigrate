@@ -59,10 +59,22 @@ pub(crate) fn schema(options: &CloneOptions, io: &IoControl) -> Result<SchemaCom
 pub(crate) fn data(options: &CloneOptions, io: &IoControl) -> Result<Vec<TableComparison>> {
     let options = &crate::contracts::connection_files::bind_compare(options)?;
     let started = Instant::now();
-    let (mut source, mut target, _inspection, metadata) = peers(options, io)?;
+    let (mut source, mut target, inspection, metadata) = peers(options, io)?;
     let source_tables = catalog::inspect_clone_tables(&mut source, &[], io)?;
     let target_tables = catalog::inspect_clone_tables(&mut target, &metadata, io)?;
-    let inventory = union_tables(&source_tables, &target_tables)?;
+    let inventory = verified_tables(
+        &source_tables,
+        &target_tables,
+        &inspection.clone_state.plan.copy_policy,
+        || {
+            crate::large_objects::compare(
+                &mut source,
+                &mut target,
+                &inspection.clone_state.plan.policy,
+                io,
+            )
+        },
+    )?;
     let mut sizes = Vec::with_capacity(inventory.len());
     for (left, right) in &inventory {
         let size = match left {
@@ -184,6 +196,23 @@ pub(crate) fn peers(
     let metadata =
         crate::apply::checkpoint::metadata_inventory(&mut target, &inspection.provenance, io)?;
     Ok((source, target, inspection, metadata))
+}
+
+fn verified_tables<'a>(
+    source: &'a [CloneTable],
+    target: &'a [CloneTable],
+    policy: &crate::contracts::CloneCopyPolicy,
+    compare_large_objects: impl FnOnce() -> Result<()>,
+) -> Result<Vec<(Option<&'a CloneTable>, Option<&'a CloneTable>)>> {
+    if !policy.skip_large_objects {
+        compare_large_objects()?;
+    }
+    // This path follows successful physical inventories and the selected LO check.
+    if source.is_empty() && target.is_empty() {
+        Ok(Vec::new())
+    } else {
+        union_tables(source, target)
+    }
 }
 
 fn union_tables<'a>(

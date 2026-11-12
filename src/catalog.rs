@@ -2,9 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod clone;
 pub(crate) mod follow;
+#[cfg(test)]
+pub(crate) use clone::provisional_copy_tables;
 pub(crate) use clone::{
-    analyze_clone, clone_object_inventory, inspect_clone_tables, plan_clone, read_clone_source,
-    read_clone_target, reconcile_clone_tables, sync_clone_sequences, verify_exact_exclusions,
+    analyze_clone, binary_copy_compatible, clone_object_inventory, inspect_clone_tables,
+    plan_clone, read_clone_source, read_clone_target, reconcile_clone_tables,
+    resolve_clone_copy_tables, sync_clone_sequences, verify_exact_exclusions,
 };
 pub(crate) use follow::{
     FollowRelation, check_follow_health, follow_confirmed_flush, follow_start_confirmed_flush,
@@ -2835,6 +2838,7 @@ mod tests {
             &mut target,
             CopyGeneration(1),
             policy,
+            crate::contracts::CloneCopyPolicy::default(),
             &[],
             &[],
             &io,
@@ -2850,6 +2854,11 @@ mod tests {
             operator: None,
             table_jobs: 2,
             post_data_jobs: 4,
+            use_copy_binary: false,
+            split_tables_larger_than: 0,
+            split_max_parts: 8,
+            skip_large_objects: false,
+            large_objects_jobs: 4,
             policy,
             not_consistent: false,
         };
@@ -2870,7 +2879,7 @@ mod tests {
             .mark_stage(crate::state::ClonePhase::PreDataPending, &io)
             .unwrap();
         let tables = reconcile_clone_tables(&mut target, &plan, &objects, &io).unwrap();
-        state.confirm_pre_data(objects, tables).unwrap();
+        state.confirm_pre_data(&plan, objects, tables).unwrap();
         authority.bind_tables(&state, &io).unwrap();
         let copied = crate::copy::run_tables(
             &options,

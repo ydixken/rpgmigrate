@@ -95,9 +95,11 @@ impl Fixture {
             source: source_id,
             target,
             generation: CopyGeneration(1),
+            copy_tables: catalog::provisional_copy_tables(&tables).unwrap(),
             tables,
             sequences: Vec::new(),
             policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
         };
         let options = FollowOptions {
             clone: CloneOptions {
@@ -112,6 +114,11 @@ impl Fixture {
                 post_data_jobs: 4,
                 policy: RestorePolicy::default(),
                 not_consistent: false,
+                use_copy_binary: false,
+                split_tables_larger_than: 0,
+                split_max_parts: 8,
+                skip_large_objects: false,
+                large_objects_jobs: 4,
             },
             slot_name: format!("{database}_slot"),
             publication_name: format!("{database}_pub"),

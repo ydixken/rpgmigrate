@@ -13,6 +13,11 @@ fn options() -> CloneOptions {
         post_data_jobs: 1,
         policy: super::super::RestorePolicy::default(),
         not_consistent: false,
+        use_copy_binary: false,
+        split_tables_larger_than: 0,
+        split_max_parts: 8,
+        skip_large_objects: false,
+        large_objects_jobs: 4,
     }
 }
 

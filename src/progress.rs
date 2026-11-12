@@ -1,10 +1,11 @@
 use serde::Serialize;
 
+use crate::apply::checkpoint::CloneProgress;
 use crate::catalog;
 use crate::contracts::{
     CloneOptions, Error, ErrorKind, IoControl, OperatorIdentity, OwnedObject, Result,
 };
-use crate::state::ClonePhase;
+use crate::state::{ClonePhase, CloneState};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ProgressSnapshot {
@@ -21,6 +22,37 @@ pub(crate) struct CopyProgress {
 }
 
 impl CopyProgress {
+    fn measured(
+        state: &CloneState,
+        progress: &CloneProgress,
+        indexes_total: u64,
+        indexes_done: Option<u64>,
+    ) -> Result<Self> {
+        let copied_bytes = progress.markers.iter().try_fold(0u64, |sum, marker| {
+            sum.checked_add(marker.bytes)
+                .filter(|value| *value <= i64::MAX as u64)
+                .ok_or_else(|| refusal("progress byte counter overflow"))
+        })?;
+        Ok(Self {
+            tables: Counter::new(
+                Some(state.plan.tables.len() as u64),
+                Some(crate::apply::checkpoint::completed_copy_tables(
+                    &progress.markers,
+                    state,
+                )?),
+            )?,
+            indexes: Counter::new(Some(indexes_total), indexes_done)?,
+            bytes: Counter::new(
+                if progress.durable_complete || progress.streaming {
+                    Some(copied_bytes)
+                } else {
+                    None
+                },
+                Some(copied_bytes),
+            )?,
+        })
+    }
+
     pub(crate) fn is_complete(&self) -> bool {
         self.tables.is_complete() && self.indexes.is_complete() && self.bytes.is_complete()
     }
@@ -72,11 +104,6 @@ fn read_measured(
     } else {
         None
     };
-    let copied_bytes = progress.markers.iter().try_fold(0u64, |sum, marker| {
-        sum.checked_add(marker.bytes)
-            .filter(|value| *value <= i64::MAX as u64)
-            .ok_or_else(|| refusal("progress byte counter overflow"))
-    })?;
     let current_phase = phase(
         progress.phase,
         progress.durable_complete,
@@ -89,21 +116,12 @@ fn read_measured(
         } else {
             current_phase
         },
-        copy: CopyProgress {
-            tables: Counter::new(
-                Some(inspection.clone_state.plan.tables.len() as u64),
-                Some(progress.markers.len() as u64),
-            )?,
-            indexes: Counter::new(Some(indexes_total), indexes_done)?,
-            bytes: Counter::new(
-                if progress.durable_complete || progress.streaming {
-                    Some(copied_bytes)
-                } else {
-                    None
-                },
-                Some(copied_bytes),
-            )?,
-        },
+        copy: CopyProgress::measured(
+            &inspection.clone_state,
+            &progress,
+            indexes_total,
+            indexes_done,
+        )?,
     };
     if completed.is_some() && !result.copy.is_complete() {
         return Err(refusal(
@@ -187,6 +205,176 @@ mod tests {
             kind: "i".into(),
             owner_oid: 20,
         }
+    }
+
+    fn split_progress() -> (CloneState, CloneProgress) {
+        use crate::contracts::{
+            CloneCopyPolicy, ClonePlan, CloneSource, CloneTable, CloneTableCopy, CloneTarget,
+            CopyFormat, CopyGeneration, CopyPart, OwnedCopyTable, QualifiedTable, RestorePolicy,
+            SnapshotTicket,
+        };
+        let generation = CopyGeneration(1);
+        let source = CloneSource {
+            identity: crate::identity::SourceId {
+                system_identifier: 1,
+                database_oid: 2,
+            },
+            timeline: 1,
+            major: 16,
+        };
+        let table = CloneTable {
+            source_oid: 3,
+            name: QualifiedTable {
+                schema: "public".into(),
+                table: "t".into(),
+            },
+            writable_columns: vec!["id".into()],
+            all_columns: vec!["id".into()],
+            identity_modes: vec![0],
+            partition_identity_modes: None,
+        };
+        let parts = vec![
+            CopyPart {
+                number: 1,
+                count: 2,
+                start_block: 0,
+                end_block: Some(8),
+            },
+            CopyPart {
+                number: 2,
+                count: 2,
+                start_block: 8,
+                end_block: None,
+            },
+        ];
+        let markers = parts
+            .iter()
+            .map(|part| crate::apply::checkpoint::CopyDone {
+                source_oid: table.source_oid,
+                target_oid: 4,
+                generation,
+                rows: 5,
+                bytes: 10,
+                target_namespace_oid: 2200,
+                target_owner_oid: 10,
+                format: CopyFormat::Binary,
+                part: *part,
+            })
+            .collect();
+        let state = CloneState {
+            plan: ClonePlan {
+                source: source.clone(),
+                target: CloneTarget {
+                    identity: crate::identity::SourceId {
+                        system_identifier: 5,
+                        database_oid: 6,
+                    },
+                    major: 18,
+                },
+                generation,
+                tables: vec![table.clone()],
+                sequences: vec![],
+                policy: RestorePolicy::default(),
+                copy_policy: CloneCopyPolicy {
+                    use_copy_binary: true,
+                    split_tables_larger_than: 1,
+                    ..Default::default()
+                },
+                copy_tables: vec![CloneTableCopy {
+                    source_oid: table.source_oid,
+                    format: CopyFormat::Binary,
+                    parts,
+                }],
+            },
+            ticket: SnapshotTicket {
+                token: "snapshot".into(),
+                source,
+                generation,
+            },
+            phase: ClonePhase::Copying,
+            owned_objects: vec![],
+            owned_tables: vec![OwnedCopyTable {
+                table,
+                target_oid: 4,
+                target_namespace_oid: 2200,
+                target_owner_oid: 10,
+                generation,
+            }],
+            completion: None,
+        };
+        let progress = CloneProgress {
+            generation,
+            phase: ClonePhase::Copying,
+            markers,
+            durable_complete: false,
+            streaming: false,
+        };
+        (state, progress)
+    }
+
+    #[test]
+    fn split_progress_counts_only_complete_physical_tables_and_durable_bytes() {
+        let (state, mut progress) = split_progress();
+        let last = progress.markers.pop().unwrap();
+        let partial = CopyProgress::measured(&state, &progress, 0, Some(0)).unwrap();
+        assert_eq!(
+            serde_json::to_value(partial).unwrap(),
+            serde_json::json!({
+                "tables": {"total": 1, "done": 0},
+                "indexes": {"total": 0, "done": 0},
+                "bytes": {"done": 10},
+            })
+        );
+        progress.markers.push(last);
+        let complete = CopyProgress::measured(&state, &progress, 0, Some(0)).unwrap();
+        assert_eq!(complete.tables.done, Some(1));
+        assert_eq!(complete.bytes.done, Some(20));
+        assert!(!complete.is_complete());
+        progress.streaming = true;
+        assert!(
+            CopyProgress::measured(&state, &progress, 0, Some(0))
+                .unwrap()
+                .is_complete()
+        );
+    }
+
+    #[test]
+    fn progress_rejects_duplicate_or_foreign_part_receipts() {
+        let (state, progress) = split_progress();
+        let mut duplicate = CloneProgress {
+            markers: vec![progress.markers[0].clone(); 2],
+            ..progress
+        };
+        assert!(CopyProgress::measured(&state, &duplicate, 0, None).is_err());
+        let valid = duplicate.markers[0].clone();
+        for field in 0..5 {
+            let mut marker = valid.clone();
+            match field {
+                0 => marker.generation = crate::contracts::CopyGeneration(2),
+                1 => marker.format = crate::contracts::CopyFormat::Text,
+                2 => marker.part.start_block = 1,
+                3 => marker.target_owner_oid += 1,
+                _ => marker.target_oid += 1,
+            }
+            duplicate.markers = vec![marker];
+            assert!(CopyProgress::measured(&state, &duplicate, 0, None).is_err());
+        }
+    }
+
+    #[test]
+    fn progress_checks_sum_overflow_and_keeps_empty_lo_work_incomplete() {
+        let (mut state, mut progress) = split_progress();
+        progress.markers[0].bytes = i64::MAX as u64;
+        assert!(CopyProgress::measured(&state, &progress, 0, Some(0)).is_err());
+        state.plan.tables.clear();
+        state.plan.copy_tables.clear();
+        state.owned_tables.clear();
+        progress.markers.clear();
+        assert!(!state.plan.copy_policy.skip_large_objects);
+        let copy = CopyProgress::measured(&state, &progress, 0, Some(0)).unwrap();
+        assert_eq!(copy.tables.done, Some(0));
+        assert!(!copy.is_complete());
+        assert_eq!(phase(progress.phase, false, false), "copying");
     }
 
     #[test]

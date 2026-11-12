@@ -149,6 +149,85 @@ The data-phase restart waits on the exact owned `LOCK TABLE ONLY` statement in A
 This kills a partially completed COPY phase.
 It does not claim a pause inside the blocked table's COPY stream.
 
+### M8 component profile
+
+`task test-clone`, also called by `task test-db`, requires exactly ten named component tests and a matching libtest summary with no ignored or failed cases.
+The profile retains the seven clone snapshot, COPY, and marker cases.
+The new cases check actual binary COPY row counts for empty, single-row, and multiple-row streams and row preservation across split parts.
+They also check initial copying of empty, binary, multi-chunk, and sparse large objects.
+The Rust tests use the existing disposable empty source/target databases and construct their own fixtures.
+The split component case checks complete row and distinct-key counts.
+The direct CLI split profile below checks simultaneous workers and the operator's 536870912-byte split threshold.
+The large-object component case checks initial content and retry.
+Final re-sync, metadata policies, comparison, fault recovery, and cleanup require separate runtime receipts.
+
+> [!IMPORTANT]
+> Wiring component tests does not qualify the M8 workflow or activate `copy.binary_fallback`, `copy.split`, or `copy.large_objects`.
+> Qualification requires the admitted 16:16, 18:18, and 16:18 matrix, including operator defaults and independent fault observations.
+> Preserve the historical M2/M4/M7 receipts and their formats separately from fresh M8 native format 9 / metadata 7 inputs.
+
+### M8 direct CLI workflow profile
+
+The existing clone pair tasks accept `PROFILE=disabled` (the default) or `PROFILE=m8`.
+A CLI value overrides the inherited `PROFILE` environment variable.
+Empty or unknown values fail before the harness starts.
+`CONTAINER_RUNTIME` retains the same CLI-over-environment precedence.
+The matrix task forwards the selected profile through 16 to 16, 18 to 18, and 16 to 18 sequentially and stops at the first failure.
+
+> [!WARNING]
+> Standalone workflow results apply to the exact source recorded in each receipt and its cleanup proof.
+> The retained component checkpoint passed ten Clone cases and one catalog case on PostgreSQL 16.15 and 18.6.
+> Operator deployment and capability activation require the operator closing gates in the roadmap.
+
+Use a clean committed candidate checkout and complete runtime admission before running these commands.
+The M8 outer harness builds a debug executable from that source, measures its image and utility identities, and uses fresh owned resources.
+It rejects the old Go report probe, so unset `RPGMIGRATE_E2E_REPORT_PROBE` explicitly.
+
+1. Run the first pair in its admitted runtime window.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE task test-e2e-clone-16-16 PROFILE=m8 CONTAINER_RUNTIME=podman
+   ```
+
+2. Review its receipt and cleanup proof, then run the second pair in a new admitted window.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE task test-e2e-clone-18-18 PROFILE=m8 CONTAINER_RUNTIME=podman
+   ```
+
+3. Review its receipt and cleanup proof, then run the cross-major pair in a new admitted window.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE task test-e2e-clone-16-18 PROFILE=m8 CONTAINER_RUNTIME=podman
+   ```
+
+For an explicit receipt destination, use the existing Python interface after setting `M8_RUN_DIR` to a fresh private admitted directory.
+The destination file must not exist.
+
+1. Run the selected pair with its receipt path.
+
+   ```sh
+   env -u RPGMIGRATE_E2E_REPORT_PROBE CONTAINER_RUNTIME=podman python3 tools/e2e/clone.py --pair 16-16 --profile m8 --receipt "$M8_RUN_DIR/clone-m8-16-16.json"
+   ```
+
+The [case manifest](../tests/fixtures/clone/m8-cases.json), [fixtures](../tests/fixtures/clone/), and [profile producer](../tools/e2e/copy_features.py) define six serial cases for each pair:
+
+- `binary_safe` requires unsplit binary COPY, matching independent row fingerprints, and empty large-object inventories.
+- `binary_fallback` requires binary COPY for safe columns and whole-table text fallback for an integer-array table, with matching row fingerprints.
+- `split_default` measures the heap against the 536870912-byte default threshold.
+  It observes contiguous split ranges and simultaneous held backend PIDs.
+  It compares source and target wire formats, counts, and row fingerprints.
+- `large_objects` checks five objects, including sparse content and EOF, with owner, ACL, and comments preserved initially and after follow drain.
+- `lo_only` proves empty physical user-table inventories and five matching large objects before accepting native comparison `[]`.
+  It uses `--no-owner` and retains ACL and comment checks.
+- `mixed` combines binary COPY, text fallback, and five large objects under `--no-owner --no-acl --no-comments`.
+  It does not exercise the split fixture.
+
+The three large-object cases require durable completion at the exact final follow boundary and an injected target mismatch that comparison must reject before restoration.
+All cases require stable physical inventories and matching independent table fingerprints.
+These profiles do not exercise interrupted binary relay, split restart, interrupted large-object copy, large-object reset/restart, or failure during final re-sync.
+The [roadmap](roadmap.md) retains those recovery and operator closing gates separately.
+
 ### Plain clone admission and recovery
 
 The M2 implementation targets primary source/target databases on 16 or 18 with source major no greater than target major, and matching-target-major pg_dump/pg_restore.
@@ -167,8 +246,9 @@ The admitted profile uses logged heap tables, inheritance children, and partitio
 Generated output must match canonical source bytes under the imported snapshot before the table marker and COMMIT.
 A mismatch refuses and rolls back.
 The 16 MiB row cap applies to the complete qualification row, including generated output.
-Foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables are preflight refusals.
-Binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip policies remain explicit refusals.
+The historical M2 profile refuses foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables during preflight.
+Its binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip-policy cases remain historical refusal checks.
+The M8 component and direct CLI profiles above cover the candidate implementation.
 The separate follow profile below controls `clone --follow` qualification.
 Table and post-data jobs default to four.
 Explicitly conflicting index/restore job counts fail instead of ignoring a setting.
@@ -185,7 +265,10 @@ No path adopts or repairs pgcopydb state or foreign target objects.
 Data comparison pins UTF8, ISO/YMD dates, PostgreSQL intervals, UTC, explicit float digits, and hex bytea output.
 It compares complete canonical rows and multiplicity.
 Checksum text is diagnostic output, and missing peers remain unknown with a difference result.
-An established empty table is valid, but a comparison with no planned tables refuses because an empty array cannot prove coverage.
+An established empty table is valid.
+The historical M2 profile refuses comparison with no planned tables.
+For an empty array, the M8 candidate requires empty physical user-table inventories on both peers after exact owned target exclusions.
+Any required large-object comparison must also succeed.
 Comparison byte progress estimates table coverage from measured `pg_table_size`.
 It does not measure streamed bytes or throughput.
 Progress inspection remains read-only while a worker holds its mutation lock.
@@ -207,9 +290,11 @@ The authority profile preserves the synchronous-wait cancellation case where a v
 It also checks that lazy checkpoint-only groups commit one durable frontier through both direct and pipeline authority paths without changing user rows.
 The receiver profile requires its seventy-second blocked-apply status test exactly once.
 The historical Engine profile excludes that exact native test.
+The retained executable COPY integration checks accept receipts with an explicit integer native format of 8 or 9.
+The completion output must carry the same integer state format version as the receipt.
 The current snapshot profile requires nine exact passed cases plus five independent native pgoutput fault receipts.
 The CREATE-tail receipt contains three required subphases.
-Its owned Unix relay binds the actual source publication, slot, stream, native format 8 intent, and importer/exporter process identities.
+Its owned Unix relay binds the actual source publication, slot, stream, an explicit native format 8 or 9 intent, and importer/exporter process identities.
 Missing fields or phases, an unhit post-import PID mutation, or a late fault fail that receipt check.
 A live backend, unreaped helper, or ambiguous creation retry also fails.
 An explicit child `PGAPPNAME` supports the application-name case without changing the Rust process environment.
