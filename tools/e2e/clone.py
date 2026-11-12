@@ -807,11 +807,17 @@ class RuntimeGuard:
             info = json.loads(self.raw(["info", "--format", "json"]))
             host = info.get("host", {})
             pasta = host.get("pasta") or {}
+            # A remote service is the macOS podman machine; a local one shares this Linux host's kernel and filesystem.
+            self.machine = host.get("serviceIsRemote")
+            self.storage = "/var/home/core" if self.machine else (info.get("store") or {}).get("graphRoot")
+            if type(self.machine) is not bool or not isinstance(self.storage, str) or not self.storage.startswith("/"):
+                raise RuntimeError("runtime host locality is unavailable")
+            server = versions.get("Server", {}) if self.machine else info.get("version") or {}
             if (host.get("security", {}).get("rootless") is not True or pasta.get("executable") != "/usr/bin/pasta"
-                    or self.raw(["machine", "ssh", "which", "pasta"]).strip() != b"/usr/bin/pasta"
+                    or self.host(["which", "pasta"]).strip() != b"/usr/bin/pasta"
                     or b"--network" not in self.raw(["run", "--help"])):
                 raise RuntimeError("isolated rootless pasta build networking is unavailable")
-            self.ledger["runtime_api"] = {"client": versions.get("Client", {}).get("Version"), "server": versions.get("Server", {}).get("Version"),
+            self.ledger["runtime_api"] = {"client": versions.get("Client", {}).get("Version"), "server": server.get("Version"), "machine": self.machine,
                                           "rootless": True, "network_backend": host.get("networkBackend"), "pasta_executable": pasta["executable"],
                                           "pasta_package": pasta.get("package"), "cargo_network": "pasta", "image_build_network": "private"}
             if not all(isinstance(self.ledger["runtime_api"][key], str) and self.ledger["runtime_api"][key] for key in ("client", "server")):
@@ -847,11 +853,14 @@ class RuntimeGuard:
         finally:
             os.close(descriptor)
 
-    def raw(self, arguments, timeout=5):
+    def raw(self, arguments, timeout=5, *, runtime=True):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError("owned cleanup deadline expired")
-        return run([self.runtime, *arguments], timeout=min(timeout, remaining))
+        return run([self.runtime, *arguments] if runtime else list(arguments), timeout=min(timeout, remaining))
+
+    def host(self, arguments, timeout=5):
+        return self.raw(["machine", "ssh", *arguments], timeout=timeout) if self.machine else self.raw(arguments, timeout=timeout, runtime=False)
 
     def inspect(self, cid):
         rows = json.loads(self.raw(["inspect", cid]))
@@ -1047,12 +1056,12 @@ class RuntimeGuard:
 
 
     def sample(self):
-        memory = self.raw(["machine", "ssh", "cat", "/proc/meminfo"])
+        memory = self.host(["cat", "/proc/meminfo"])
         match = re.search(rb"^MemAvailable:\s+(\d+) kB$", memory, re.MULTILINE)
-        disk = self.raw(["machine", "ssh", "df", "-B1", "/var/home/core"]).splitlines()[-1].split()
+        disk = self.host(["df", "-B1", self.storage]).splitlines()[-1].split()
         sample = {"vm_free": int(disk[3]), "host_free": shutil.disk_usage(ROOT).free,
                   "vm_available": int(match[1]) * 1024 if match else None,
-                  "vm_cpus": int(self.raw(["machine", "ssh", "getconf", "_NPROCESSORS_ONLN"]).strip())}
+                  "vm_cpus": int(self.host(["getconf", "_NPROCESSORS_ONLN"]).strip())}
         storage = {}
         for entry in self.ledger["containers"]:
             if entry.get("cleanup_status") == "absent":
@@ -1358,8 +1367,8 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
         with checksums.open("x") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write("\n".join(lines) + "\n")
-        guard.raw(["machine", "ssh", "sha256sum", "--check", "--status", str(checksums)], timeout=20)
-        guard.raw(["machine", "ssh", "test", "-r", str(envfile)])
+        guard.host(["sha256sum", "--check", "--status", str(checksums)], timeout=20)
+        guard.host(["test", "-r", str(envfile)])
         guard.ledger["shared_source_verified"] = {"files": len(lines), "sha256": hashlib.sha256(checksums.read_bytes()).hexdigest()}
         guard.persist()
         def ensure_image(reference):

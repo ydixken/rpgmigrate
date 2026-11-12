@@ -251,8 +251,8 @@ def pasta_placeholder():
 
 
 class ModelRuntime:
-    def __init__(self, root, fault=None):
-        self.root, self.fault, self.commands, self.removed = root, fault, [], []
+    def __init__(self, root, fault=None, native=False):
+        self.root, self.fault, self.commands, self.removed, self.native = root, fault, [], [], native
         self.containers = {}
         self.networks = {}
         self.images = {}
@@ -265,8 +265,21 @@ class ModelRuntime:
             self.images[identity] = {"Id": identity, "RepoTags": [], "RepoDigests": [reference], "Size": 1, "Labels": {}, "Architecture": "arm64"}
         self.images["sha256:" + "4"*64] = {"Id": "sha256:" + "4"*64, "RepoTags": ["localhost/rpgmigrate-m2-dev:stock"], "RepoDigests": [], "Size": 1, "Labels": {}, "Architecture": "arm64"}
 
+    def host(self, argv):
+        if argv[0] == "which": return b"/usr/bin/pasta\n"
+        if argv[0] in ("sha256sum", "test"): return b""
+        if argv[0] == "cat": return b"MemAvailable: 7340032 kB\n" if self.fault == "capacity" else b"MemAvailable: 25165824 kB\n"
+        if argv[0] == "df":
+            assert argv[2] == ("/home/runner/.local/share/containers/storage" if self.native else "/var/home/core"), "capacity sampled the wrong filesystem"
+            return b"Filesystem 1B-blocks Used Available Use% Mounted\nroot 100 10 40802189312 1% /\n"
+        assert argv == ["getconf", "_NPROCESSORS_ONLN"], "unexpected host probe"
+        return b"14\n"
+
     def call(self, argv, **kwargs):
         self.commands.append(list(argv))
+        if argv[0] in ("which", "cat", "df", "getconf", "sha256sum", "test"):
+            assert self.native, "a host probe bypassed the podman machine"
+            return self.host(argv)
         if argv[0] == "git":
             if argv[-1] == "--porcelain" and self.fault == "dirty": return b" M tracked-source\n"
             source = self.root / "tools/e2e/Containerfile"
@@ -283,16 +296,18 @@ class ModelRuntime:
             return b"1"*40 + b"\n" if argv[-1] == "HEAD" else b"2"*40 + b"\n" if argv[-1] == "HEAD^{tree}" else b"feat/model\n" if argv[-1] == "--show-current" else b""
         args = argv[1:]
         if args[:2] == ["version", "--format"]:
-            return json.dumps({"Client": {"Version": "6.1.4"}, "Server": {"Version": "5.8.3"}}).encode()
+            # A native podman reports no Server; its engine version is in info.
+            return json.dumps({"Client": {"Version": "4.9.3"}} if self.native else {"Client": {"Version": "6.1.4"}, "Server": {"Version": "5.8.3"}}).encode()
         if args[:2] == ["info", "--format"]:
-            return json.dumps({"host": {"security": {"rootless": True}, "networkBackend": "netavark", "pasta": {"executable": "/usr/bin/pasta", "package": "passt-model"}}}).encode()
+            return json.dumps({"host": {"security": {"rootless": True}, "networkBackend": "netavark", "pasta": {"executable": "/usr/bin/pasta", "package": "passt-model"},
+                                        **({} if self.fault == "locality" else {"serviceIsRemote": not self.native})},
+                               "store": {"graphRoot": "relative/storage" if self.fault == "storage" else
+                                         "/home/runner/.local/share/containers/storage" if self.native else "/var/home/core/.local/share/containers/storage"},
+                               "version": {"Version": "4.9.3" if self.native else "5.8.3"}}).encode()
         if args[:2] == ["run", "--help"]: return b"--network stringArray"
         if args[:2] == ["machine", "ssh"]:
-            if args[2] == "which": return b"/usr/bin/pasta\n"
-            if args[2] in ("sha256sum", "test"): return b""
-            if args[2] == "cat": return b"MemAvailable: 7340032 kB\n" if self.fault == "capacity" else b"MemAvailable: 25165824 kB\n"
-            if args[2] == "df": return b"Filesystem 1B-blocks Used Available Use% Mounted\nroot 100 10 40802189312 1% /\n"
-            return b"14\n"
+            assert not self.native, "a native host probe went through a podman machine"
+            return self.host(args[2:])
         if args[0] == "ps":
             if "--filter" in args:
                 identity = args[args.index("--filter")+1].split("=",1)[1]
@@ -466,6 +481,7 @@ class PendingCreationTests(unittest.TestCase):
             model.networks["7"*64] = {"id": "7"*64, "name": "fresh", "internal": True, "driver": "bridge", "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {}}
             guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
             guard.runtime, guard.token, guard.path = "podman", "fresh", root / "ledger.json"
+            guard.machine, guard.storage = True, "/var/home/core"
             guard.deadline, guard.work_deadline, guard.last_sample = 900, 600, clock.now
             guard.baseline = {"containers": {}, "external": [], "images": {}, "networks": {}, "volumes": {}}
             guard.ledger = {"containers": [], "samples": [], "admitted_images": [], "network": {"id": "7"*64, "name": "fresh", "cleanup_status": "pending"}}
@@ -967,13 +983,15 @@ class RuntimeOwnershipTests(unittest.TestCase):
         import copy_features
         try:
             for profile, fault, location in (("disabled", None, "default"), ("disabled", None, "root"), ("disabled", None, "nested"),
-                                             ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache")):
+                                             ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache"),
+                                             ("disabled", None, "native")):
                 with self.subTest(profile=profile, fault=fault, location=location), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
                     (root / ".env").write_text("must-not-persist")
                     (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
-                    model = ModelRuntime(root, fault)
-                    output = root / ({"default": "target/e2e/16-16.json", "root": "result.json", "nested": "nested/result.json", "cache": "target/e2e/result.json"}[location])
+                    model = ModelRuntime(root, fault, native=location == "native")
+                    output = root / ({"default": "target/e2e/16-16.json", "root": "result.json", "nested": "nested/result.json", "cache": "target/e2e/result.json",
+                                      "native": "target/e2e/result.json"}[location])
                     args = types.SimpleNamespace(pair="16-16", receipt=None if location == "default" else str(output), report_probe=None, profile=profile)
                     def execute(guard, command, **kwargs):
                         guard.checkpoint()
@@ -1011,6 +1029,10 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     self.assertEqual(model.build_ledger_path, ledger_path)
                     ledger = json.loads(ledger_path.read_text())
                     self.assertTrue(ledger["cleanup_complete"])
+                    self.assertEqual(ledger["runtime_api"]["machine"], location != "native")
+                    self.assertEqual(ledger["runtime_api"]["server"], "4.9.3" if location == "native" else "5.8.3")
+                    self.assertEqual(any(argv[1:2] == ["machine"] for argv in model.commands), location != "native")
+                    self.assertEqual(["getconf", "_NPROCESSORS_ONLN"] in model.commands, location == "native")
                     self.assertEqual(ledger["private_removed"], fault != "foreign_private")
                     self.assertEqual(ledger["secret_file_absent"], fault != "foreign_private")
                     if fault == "foreign_private":
@@ -1024,6 +1046,16 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     self.assertEqual(output.exists(), fault is None)
         finally:
             sys.path.pop(0)
+
+
+    def test_unknown_runtime_locality_or_storage_refuses_admission(self):
+        for fault, native in (("locality", False), ("storage", True)):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                model, path = ModelRuntime(Path(temporary), fault, native=native), Path(temporary) / "ledger.json"
+                with patch.object(harness, "run", side_effect=model.call), self.assertRaisesRegex(RuntimeError, "host locality"):
+                    harness.RuntimeGuard("podman", "fresh", path)
+                self.assertTrue(json.loads(path.read_text())["admission_failed"])
+                self.assertEqual([argv[1] for argv in model.commands], ["version", "info"])
 
 
     def test_source_payload_contains_only_bounded_tracked_regular_archive_files(self):

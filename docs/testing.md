@@ -100,6 +100,7 @@ The fixture pins immutable PostgreSQL server image digests, and the receipt reco
 Image setup and the first locked Cargo build require network access.
 Database execution uses a disposable internal network with no published ports, two owned server containers, and fixture credentials held outside command arguments and receipts.
 The harness removes its own containers and private network, and retains build caches and successful receipts under `target/e2e/`.
+With a remote Podman service (the macOS Podman machine), the harness samples capacity and verifies the shared source inside the machine; with a local Linux Podman it does both on the host and samples the engine's storage root.
 Failures retain redacted child stderr and safe stage/return-code/callsite metadata under `target/e2e/failures/`, using private 0700 directories and 0600 files.
 Public failure output contains no child argv, SQL, row values, or credentials.
 
