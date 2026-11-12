@@ -143,6 +143,20 @@ jobs:
           podman info
           python3 --version
           task --version
+      - name: Provision the pinned public images
+        run: |
+          python3 - <<'PYPULL'
+          import json
+          import re
+          import subprocess
+          from pathlib import Path
+          base = re.search(r"^FROM (\S+)$", Path("tools/e2e/Containerfile").read_text(), re.MULTILINE)[1]
+          images = json.loads(Path("tests/fixtures/clone/cases.json").read_text())["images"]
+          majors = sorted(set("${{ matrix.pair }}".split("-")))
+          for reference in [base, *("docker.io/library/postgres:" + major + "@" + images[major] for major in majors)]:
+              subprocess.run(["podman", "pull", "--quiet", reference], check=True)
+              subprocess.run(["podman", "image", "exists", reference], check=True)
+          PYPULL
       - name: Qualify the development engine image
         run: task test-e2e-clone-${{ matrix.pair }}
       - name: Revalidate the exact sanitized clone receipt

@@ -98,6 +98,7 @@ Its development image contains the pinned Rust base plus stock PGDG clients 16 a
 It is separate from the M5 production runner.
 The fixture pins immutable PostgreSQL server image digests, and the receipt records resolved server/runner images, actual server/client versions, and the executable's actual linked libpq version.
 Image setup and the first locked Cargo build require network access.
+The harness does not pull images: pull the digest-pinned Rust base from `tools/e2e/Containerfile` and the PostgreSQL server images from `tests/fixtures/clone/cases.json` before a run, as the CI job does.
 Database execution uses a disposable internal network with no published ports, two owned server containers, and fixture credentials held outside command arguments and receipts.
 The harness removes its own containers and private network, and retains build caches and successful receipts under `target/e2e/`.
 With a remote Podman service (the macOS Podman machine), the harness samples capacity and verifies the shared source inside the machine; with a local Linux Podman it does both on the host and samples the engine's storage root.
