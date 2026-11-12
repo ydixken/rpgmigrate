@@ -1486,7 +1486,7 @@ User decisions, 2026-11-12:
   Pinned cargo-deny 0.20.2 passed licenses and advisories for the seven new `sha2` crates, all MIT OR Apache-2.0.
   Host gate: 559 Rust tests, 28 CLI tests, 532 Python tests, `test_clone.py` 49 and `test_ffi_asan.py` 22, all passing.
   Hosted run 43215645789 passed every job except engine-e2e 16-16, 18-18 and 16-18, which stop at `validate_capacity` because the runner has four CPUs and the floor is six.
-  Blocked on a leader decision about that floor; M8 does not reach `feat/native-engine` and no M8 `dev-<sha>` image is published before it.
+  The leader resolved that floor with the `hosted-linux` capacity profile, and ENGINE-LAND2 below landed the branch.
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-INTEGRATE-20261112/SHA256SUMS`, SHA-256 `c77d615cbcce1117a0b7be7e2e9a692d552b0500732ab4ef74f4ab3c6f778598`.
 - [x] M9-JOIN: `feat/m9-join-20261112` at `0f6fa60e93cab7a558d73a9abab5620dc6e036ad`, tree `81caec021b9c021be6bb9296ce4c222237756454`, based on `41db2ac`.
   It re-picks `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5`; H1 `0c507a7` was an empty pick because `59abca5` already carries its four files.
@@ -1525,6 +1525,32 @@ User decisions, 2026-11-12:
   It adds `kindLabelFilterAllowed`, TERM receipt capture on pair 16:16, and the receipt checker in the offline kind controls; every first-parent commit is lint-clean.
   `go test ./internal/native` fails three helper tests on a changed canonical helper hash from `09094f9`; moving the `e1bd440b` pin needs a leader decision because earlier M6 evidence binds it.
   Evidence: `/private/var/tmp/rpgmigrate-OPERATOR-INTEGRATE-20261112/SHA256SUMS`, SHA-256 `18f1e4610c0d00267b123e900da7f59067e606465a1c333693ece64356fa5128`.
+
+### Wave 4 results, 2026-11-12
+
+- [x] ENGINE-LAND2: M8 landed on `feat/native-engine` at `908ada674b8bef69a9d4ca14fa1d053edc6bbaad`, fast-forwarded from `1f7982b`.
+  engine-e2e runs on `ubuntu-26.04` and refuses a Podman major below 5; the runner reported Podman 5.7.0.
+  Hosted ci.yml run 43229117047 on `feat/native-engine` passed 8 of 8 jobs, including all three engine-e2e pairs.
+  dev-runner-image run 43229117061 published `ghcr.io/ydixken/rpgmigrate:dev-908ada674b8bef69a9d4ca14fa1d053edc6bbaad-amd64` as `sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b` and `-arm64` as `sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b`; both pull anonymously by digest.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND2-20261112/SHA256SUMS`.
+- [x] M6-EXPLICIT (operator): `feat/m6-explicit-20261112` at `a6b6af7` qualified the native explicit-file binding on Linux arm64 with libpq 18.6 against PostgreSQL 16.15 and 18.6, in capped Podman containers.
+  Run `run-a6b6af7` passed 179 of 179 runtime cases and 21 focused Go tests, and every mutation control turned the checks red.
+  Receipt: `/private/var/tmp/rpgmigrate-M6-EXPLICIT-20261112/run-a6b6af7/receipt.json`, SHA-256 `08d41a568311b95815711ab5e75972a3c20c991cd8d3d51ffc8bfe99352a437a`; `SHA256SUMS` there has SHA-256 `3077f0f95e0750c86f35bb7a9f692309aa7e53a9c3f29a6aa5a1775587390bd6`.
+  amd64, containerd RuntimeDefault, kubelet secret projections and the cluster-side checks are not covered and belong to M6-RUNTIME.
+- [ ] M6-RUNTIME (operator): `feat/m6-runtime-20261112` at `67006bd` produced no qualification receipt.
+  The runner-profile driver refused in its metadata phase with `fixed host stage deadline expired`: the guard check alone took 465.1 s on the shared VM, so it cannot fit the approved deadline contract's 900 s first stage together with node admission.
+  The leader chose option (a): make the guard faster with one ssh call per node for the cgroup facts, keeping every check and the deadline contract unchanged.
+  That needs a new manager image and image lock before the run repeats; M6-DELIVERY is blocked on the same run.
+  Evidence: `/private/var/tmp/rpgmigrate-M6-RUNTIME-20261112/SHA256SUMS`, SHA-256 `ccb5827696202ecab0bbfe521025cb90630573a78e17a70705535a298b3a7f7b`.
+
+Leader decisions, 2026-11-12:
+
+- The pasta AppArmor profile stays in complain mode on throwaway CI runners only; the ci.yml step carries a `shortcut:` comment naming Launchpad #2154379 and when to drop it.
+- The development image keeps `--layers=false`, so the preservation check gains no trust logic for cached ancestor images.
+- The engine-e2e failure-summary step stays, and the public failure-output rule in [testing](../docs/testing.md) names exactly what it prints.
+- M6-EXPLICIT open items 1 and 2 are accepted.
+  A read-only empty shadow mount over `/usr/share/rpgmigrate` is refused at admission, which `TestNativeImmutableAbsenceMountShadow` covers.
+  The 0400 snapshot without an exec seal holds data only, so a missing exec seal is not a risk.
 
 M0–M5 remain closed and M6–M10 remain open.
 
