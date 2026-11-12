@@ -186,6 +186,16 @@ jobs:
                                                for entry in ledger.get("containers", [])],
                                 "network": [(ledger.get("network") or {}).get(key) for key in ("cleanup_status", "cleanup_error_kind")]},
                                sort_keys=True))
+              before, after = ledger.get("baseline") or {}, ledger.get("after") or {}
+              for kind in sorted(set(before) | set(after)):
+                  old, new = before.get(kind), after.get(kind)
+                  if old != new and isinstance(old, dict) and isinstance(new, dict):
+                      changed = {key: sorted(field for field in set(old[key]) | set(new[key]) if old[key].get(field) != new[key].get(field))
+                                 if isinstance(old[key], dict) and isinstance(new[key], dict) else "value"
+                                 for key in set(old) & set(new) if old[key] != new[key]}
+                      print(kind, {"added": sorted(set(new) - set(old)), "removed": sorted(set(old) - set(new)), "changed": changed})
+                  elif old != new:
+                      print(kind, {"added": sorted(set(new or []) - set(old or [])), "removed": sorted(set(old or []) - set(new or []))})
           for path in sorted(Path("target/e2e/failures").glob("*.json")):
               print(path.read_text())
               if json.loads(path.read_text())["callsite"]["function"] == "raw":
