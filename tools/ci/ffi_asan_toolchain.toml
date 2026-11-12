@@ -11,9 +11,9 @@ sanitizer_documentation = "https://doc.rust-lang.org/unstable-book/compiler-flag
 [compatibility]
 root_rust_version = "1.99.1"
 edition = "2024"
-lockfile_sha256 = "8308302054d40756e64e235b45e2c97c547b15266d04d900c9560cb2b20d8ce2"
+lockfile_sha256 = "b5c9dd268bd51e92d1ac69fd2916eefee762fb8f9f0fc312178b77c2af479f82"
 declared_dependency_msrv_max = "1.89.0"
-verified_registry_archive_count = 30
+verified_registry_archive_count = 37
 compilation_status = "pending"
 license_security_review = "required-before-installation"
 
