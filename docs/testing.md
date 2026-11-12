@@ -41,6 +41,9 @@ Plain CI runs this local gate with stock PGDG libpq 18 development files, prints
 
 Check the current Python executable and required ELF tools against the selected native architecture.
 Run the stock `ldd` script through its checked Bash interpreter.
+Ubuntu's `/sbin/ldconfig` is a `/bin/sh` wrapper whose last line must be `exec /sbin/ldconfig.real "$@"`, so we run the checked `ldconfig.real` ELF directly.
+A refused tool fails admission with a closed `<tool>-<reason>` detail before any child starts.
+Before running them, the symbolizer stage compares the wrapper, `ldconfig.real`, `ldd`, and Bash with the payloads of debs authenticated by the signed Ubuntu indexes.
 We require a complete `binfmt_misc` snapshot before the first child starts.
 Each registration must use magic at offset zero that contradicts the ELF prefix under its mask.
 Treat an absent mask as exact matching.

@@ -35,6 +35,15 @@ ADMISSION_SUBSTAGES = ("uid", "native-architecture", "dpkg-architecture", "os-re
                       "public-pin", "runner-image", "scratch-disk", "available-memory", "core-limit", "complete")
 BINFMT_DETAILS = ("binfmt-lookup-failed", "binfmt-enumeration-failed", "binfmt-entry-read-failed", "binfmt-entry-invalid",
                   "binfmt-budget-exceeded", "binfmt-possible-elf-handler")
+NATIVE_ELF_TOOLS = {"self": "/proc/self/exe", "dpkg": "/usr/bin/dpkg", "git": "/usr/bin/git", "curl": "/usr/bin/curl",
+                    "bash": "/bin/bash", "sh": "/bin/sh", "apt-get": "/usr/bin/apt-get", "dpkg-query": "/usr/bin/dpkg-query",
+                    "dpkg-deb": "/usr/bin/dpkg-deb", "readelf": "/usr/bin/readelf", "gpgv": "/usr/bin/gpgv",
+                    "ldconfig-real": "/sbin/ldconfig.real"}
+# Ubuntu ships both as scripts; we execute ldconfig.real directly and ldd through the checked bash.
+NATIVE_SCRIPTS = {"ldconfig": ("/sbin/ldconfig", b"#!/bin/sh\n"), "ldd": ("/usr/bin/ldd", b"#!/bin/bash\n")}
+LDCONFIG_EXEC = b'exec /sbin/ldconfig.real "$@"'
+NATIVE_TOOL_REASONS = ("unreadable", "not-regular", "not-native-elf", "interpreter-mismatch", "wrapper-target-mismatch")
+NATIVE_TOOL_DETAILS = tuple(tool + "-" + reason for tool in (*NATIVE_ELF_TOOLS, *NATIVE_SCRIPTS) for reason in NATIVE_TOOL_REASONS)
 BINFMT_ROOT = Path("/proc/sys/fs/binfmt_misc")
 BINFMT_HANDLER_LIMIT = 64
 BINFMT_RECORD_LIMIT = 4096
@@ -780,8 +789,10 @@ def authenticate_symbolizer(supervisor, target):
     packages = UbuntuPackages(supervisor, architecture)
     owner = packages.installed(SYMBOLIZER)
     require(owner == ["llvm-18", "1:18.1.3-1ubuntu1", architecture], "symbolizer")
+    tools = [packages.compare(Path(path), native_target=target if native else None)
+             for path, native in (("/sbin/ldconfig", False), ("/sbin/ldconfig.real", True), ("/usr/bin/ldd", False), ("/bin/bash", True))]
     candidates = {}
-    cache = supervisor.run(["/sbin/ldconfig", "-p"]).stdout
+    cache = supervisor.run(["/sbin/ldconfig.real", "-p"]).stdout
     for name, path in re.findall(r"^\s*(\S+) \([^\n]*\) => (/[^\s]+)$", cache, re.MULTILINE):
         candidate = Path(path).resolve()
         try:
@@ -825,7 +836,7 @@ def authenticate_symbolizer(supervisor, target):
     require(re.search(r"^(?:Ubuntu )?LLVM version 18\.1\.3(?:\s|$)", version, re.MULTILINE), "symbolizer")
     notices = packages.licenses()
     return {"candidate": "ubuntu-noble-llvm-18", "path": SYMBOLIZER.as_posix(), "version": "LLVM version 18.1.3",
-            "files": bindings, "provenance": packages.evidence()}, notices
+            "files": bindings, "tools": tools, "provenance": packages.evidence()}, notices
 
 
 def validate_controls(positive, negative, source):
@@ -862,7 +873,7 @@ def run_controls(supervisor, target):
 
 def new_attempt(target):
     require(target in asan.TARGETS)
-    return {"schema_version": 3, "kind": "rpgmigrate-asan-preparation", "scope": "native-inventory-and-symbolization-control",
+    return {"schema_version": 4, "kind": "rpgmigrate-asan-preparation", "scope": "native-inventory-and-symbolization-control",
             "qualification": "not-assessed", "target": target, "status": "failed",
             "admission_substage": None, "admission_detail": None,
             "stages": {name: {"status": "not-run", "reason": "none"} for name in STAGES},
@@ -872,14 +883,14 @@ def new_attempt(target):
 
 def validate_attempt(attempt):
     require(type(attempt) is dict and set(attempt) == set(new_attempt(next(iter(asan.TARGETS)))))
-    require(type(attempt["schema_version"]) is int and attempt["schema_version"] == 3 and
+    require(type(attempt["schema_version"]) is int and attempt["schema_version"] == 4 and
             attempt["kind"] == "rpgmigrate-asan-preparation" and attempt["scope"] == "native-inventory-and-symbolization-control" and
             attempt["qualification"] == "not-assessed" and attempt["target"] in asan.TARGETS and attempt["status"] == "failed")
     require(type(attempt["owned_children_reaped"]) is bool and type(attempt["public_pin_unchanged"]) is bool)
     substage = attempt["admission_substage"]
     require(substage is None or (type(substage) is str and substage in ADMISSION_SUBSTAGES))
     detail = attempt["admission_detail"]
-    require(detail is None or (type(detail) is str and detail in BINFMT_DETAILS))
+    require(detail is None or (type(detail) is str and detail in BINFMT_DETAILS + NATIVE_TOOL_DETAILS))
     require(type(attempt["first_failure"]) is dict and set(attempt["first_failure"]) == {"stage", "reason"} and
             attempt["first_failure"]["stage"] in (*STAGES, "none") and attempt["first_failure"]["reason"] in CODES | {"none"})
     require(type(attempt["stages"]) is dict and set(attempt["stages"]) == set(STAGES))
@@ -893,7 +904,8 @@ def validate_attempt(attempt):
     failures = [name for name in STAGES if attempt["stages"][name]["status"] in ("failed", "incomplete")]
     expected_failure = {"stage": failures[0], "reason": attempt["stages"][failures[0]]["reason"]} if failures else {"stage": "none", "reason": "none"}
     require(attempt["first_failure"] == expected_failure)
-    require(detail is None or (substage == "binfmt" and attempt["stages"]["admission"]["status"] == "failed" and
+    require(detail is None or (substage == ("binfmt" if detail in BINFMT_DETAILS else "native-architecture") and
+                               attempt["stages"]["admission"]["status"] == "failed" and
                                attempt["first_failure"] == {"stage": "admission", "reason": "admission"}))
     require(not attempt["public_pin_unchanged"] or attempt["stages"]["bindings"]["status"] == "passed")
     require(type(attempt["artifacts"]) is dict and set(attempt["artifacts"]) <= {"graphs.json", "provenance.json", "third-party-licenses.json", "public-provenance.json", "public-provenance.tar"})
@@ -985,13 +997,26 @@ def inspect_binfmt(directory=None):
 
 
 def check_native_tools(target):
-    for path in ("/proc/self/exe", "/usr/bin/dpkg", "/usr/bin/git", "/usr/bin/curl", "/bin/bash", "/usr/bin/apt-get",
-                 "/usr/bin/dpkg-query", "/usr/bin/dpkg-deb", "/usr/bin/readelf", "/usr/bin/gpgv", "/sbin/ldconfig"):
-        native_elf(path, target)
-    script = Path("/usr/bin/ldd")
-    require(script.is_file() and not script.is_symlink(), "admission")
-    with script.open("rb") as handle:
-        require(handle.readline(256) == b"#!/bin/bash\n", "admission")
+    """Raise a closed "<tool>-<reason>" detail for the first refused tool."""
+    for tool, path in NATIVE_ELF_TOOLS.items():
+        try:
+            native_elf(path, target)
+        except OSError:
+            raise RuntimeError(tool + "-unreadable") from None
+        except RuntimeError:
+            raise RuntimeError(tool + "-not-native-elf") from None
+    for tool, (path, interpreter) in NATIVE_SCRIPTS.items():
+        try:
+            script = Path(path)
+            require(script.is_file() and not script.is_symlink(), tool + "-not-regular")
+            with script.open("rb") as handle:
+                data = handle.read(BINFMT_RECORD_LIMIT + 1)
+        except OSError:
+            raise RuntimeError(tool + "-unreadable") from None
+        require(data.startswith(interpreter), tool + "-interpreter-mismatch")
+        if tool == "ldconfig":
+            require(len(data) <= BINFMT_RECORD_LIMIT and data.rstrip(b"\n").rsplit(b"\n", 1)[-1] == LDCONFIG_EXEC and
+                    data.count(b"exec ") == 1, "ldconfig-wrapper-target-mismatch")
 
 
 def admit(supervisor, target, parent, pin, attempt):
@@ -1000,7 +1025,11 @@ def admit(supervisor, target, parent, pin, attempt):
     require(os.getuid() != 0, "admission")
     attempt["admission_substage"] = "native-architecture"
     asan.native_target(target)
-    check_native_tools(target)
+    try:
+        check_native_tools(target)
+    except RuntimeError as error:
+        attempt["admission_detail"] = str(error) if str(error) in NATIVE_TOOL_DETAILS else None
+        raise RuntimeError("admission") from None
     attempt["admission_substage"] = "binfmt"
     try:
         binfmt = inspect_binfmt()

@@ -312,6 +312,36 @@ class PreparationTests(unittest.TestCase):
                     self.prep.authenticate_symbolizer(Supervisor(), TARGET)
             self.assertFalse(any(argv[0] == str(candidate) for argv in calls))
 
+    def test_symbolizer_authenticates_ldconfig_wrapper_real_ldd_and_bash_before_running_them(self):
+        events = []
+        class Supervisor:
+            def run(self, argv, **kwargs):
+                events.append(("run", argv[0]))
+                raise RuntimeError("fixture-stop")
+        def compare(path, native_target=None):
+            events.append(("compare", str(path), native_target))
+            if str(path) == refused:
+                raise RuntimeError("package-payload")
+            return {"path": str(path), "sha256": "a" * 64}
+        package = SimpleNamespace(installed=lambda _: ["llvm-18", "1:18.1.3-1ubuntu1", "amd64"], compare=compare)
+        for refused in (None, "/sbin/ldconfig.real", "/usr/bin/ldd"):
+            events.clear()
+            with self.subTest(refused=refused), patch.object(self.prep, "native_elf"), \
+                    patch.object(self.prep.SYMBOLIZER.__class__, "is_file", return_value=True), \
+                    patch.object(self.prep.SYMBOLIZER.__class__, "is_symlink", return_value=False), \
+                    patch.object(self.prep.asan, "package", return_value={"package": "llvm-18", "package_version": "1:18.1.3-1ubuntu1", "architecture": "amd64"}), \
+                    patch.object(self.prep, "UbuntuPackages", return_value=package):
+                with self.assertRaisesRegex(RuntimeError, "package-payload" if refused else "fixture-stop"):
+                    self.prep.authenticate_symbolizer(Supervisor(), TARGET)
+            compared = [event[1] for event in events if event[0] == "compare"]
+            runs = [event[1] for event in events if event[0] == "run"]
+            if refused:
+                self.assertEqual(runs, [])
+                continue
+            self.assertEqual(compared, ["/sbin/ldconfig", "/sbin/ldconfig.real", "/usr/bin/ldd", "/bin/bash"])
+            self.assertEqual([event[2] for event in events if event[0] == "compare"], [None, TARGET, None, TARGET])
+            self.assertEqual(runs, ["/sbin/ldconfig.real"])
+
     def test_source_binding_refuses_empty_missing_and_changed_source_inventories(self):
         class Supervisor:
             def __init__(self, names): self.names = names
@@ -724,7 +754,12 @@ class PreparationTests(unittest.TestCase):
             stack.enter_context(patch.object(self.prep, "reject_overrides"))
             stack.enter_context(patch.object(self.prep.asan, "load_pin", return_value=pin))
             stack.enter_context(patch.object(self.prep.asan, "native_target", side_effect=native))
-            stack.enter_context(patch.object(self.prep, "check_native_tools"))
+            def tools(target):
+                if refusal == "native-tool":
+                    raise RuntimeError("ldconfig-wrapper-target-mismatch")
+                if refusal == "native-tool-unknown":
+                    raise RuntimeError(CANARY)
+            stack.enter_context(patch.object(self.prep, "check_native_tools", side_effect=tools))
             def binfmt():
                 if refusal == "binfmt":
                     raise RuntimeError("binfmt-possible-elf-handler")
@@ -774,12 +809,12 @@ class PreparationTests(unittest.TestCase):
             with self.subTest(refusal=refusal):
                 self.assertEqual(self.admission_attempt(refusal).get("admission_substage"), expected)
 
-    def test_attempt_schema_three_requires_nullable_closed_admission_operation_details(self):
+    def test_attempt_schema_four_requires_nullable_closed_admission_operation_details(self):
         self.assertEqual(self.prep.ADMISSION_SUBSTAGES,
                          ("uid", "native-architecture", "dpkg-architecture", "os-release", "binfmt", "project-lock",
                           "public-pin", "runner-image", "scratch-disk", "available-memory", "core-limit", "complete"))
         attempt = self.prep.new_attempt(TARGET)
-        self.assertEqual(attempt["schema_version"], 3)
+        self.assertEqual(attempt["schema_version"], 4)
         self.assertIn("admission_substage", attempt)
         self.assertIsNone(attempt["admission_substage"])
         self.assertIsNone(attempt["admission_detail"])
@@ -787,8 +822,9 @@ class PreparationTests(unittest.TestCase):
                          "binfmt-entry-invalid", "binfmt-budget-exceeded", "binfmt-possible-elf-handler"))
         self.prep.validate_attempt(attempt)
         for change in ({"admission_substage": CANARY}, {"admission_substage": 1},
-                       {"admission_substage": []}, {"schema_version": 1}, {"schema_version": 2}, {"admission_substage": "uid"},
-                       {"admission_detail": CANARY}, {"admission_detail": []}, {"admission_detail": "binfmt-entry-invalid"}):
+                       {"admission_substage": []}, {"schema_version": 1}, {"schema_version": 2}, {"schema_version": 3}, {"admission_substage": "uid"},
+                       {"admission_detail": CANARY}, {"admission_detail": []}, {"admission_detail": "binfmt-entry-invalid"},
+                       {"admission_detail": "ldd-interpreter-mismatch"}):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 self.prep.validate_attempt({**attempt, **change})
         for missing in ("admission_substage", "admission_detail"):
@@ -929,23 +965,61 @@ class PreparationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "binfmt-possible-elf-handler"):
                 self.prep.inspect_binfmt(registry)
 
-    def test_native_tools_check_self_and_bash_without_treating_ldd_script_as_elf(self):
+    def native_tool_fixture(self, scripts):
         checked = []
+        def opener(path, *args, **kwargs):
+            return io.BytesIO(scripts[str(path)])
         with patch.object(self.prep.Path, "is_file", return_value=True), patch.object(self.prep.Path, "is_symlink", return_value=False), \
                 patch.object(self.prep, "native_elf", side_effect=lambda path, target: checked.append(str(path))), \
-                patch.object(self.prep.Path, "open", return_value=io.BytesIO(b"#!/bin/bash\npublic script\n")):
+                patch.object(self.prep.Path, "open", autospec=True, side_effect=opener):
             self.prep.check_native_tools(TARGET)
+        return checked
+
+    def test_native_tools_check_elf_tools_ldconfig_wrapper_and_ldd_script(self):
+        wrapper = b'#!/bin/sh\n\nif test $# = 0\nthen\n\texit 0\nfi\n\nexec /sbin/ldconfig.real "$@"\n'
+        stock = {"/sbin/ldconfig": wrapper, "/usr/bin/ldd": b"#!/bin/bash\n# public script\n"}
+        checked = self.native_tool_fixture(stock)
         self.assertEqual(checked[0], "/proc/self/exe")
-        self.assertIn("/bin/bash", checked)
+        for path in ("/bin/bash", "/bin/sh", "/sbin/ldconfig.real"):
+            self.assertIn(path, checked)
         self.assertNotIn("/usr/bin/ldd", checked)
+        self.assertNotIn("/sbin/ldconfig", checked)
         tree = ast.parse(SCRIPT.read_text())
         argv = [node.args[0] for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "run" and node.args and isinstance(node.args[0], ast.List)]
-        self.assertTrue(any([getattr(value, "value", None) for value in node.elts[:2]] == ["/bin/bash", "/usr/bin/ldd"] for node in argv))
-        with patch.object(self.prep.Path, "is_file", return_value=True), patch.object(self.prep.Path, "is_symlink", return_value=False), \
-                patch.object(self.prep, "native_elf"), patch.object(self.prep.Path, "open", return_value=io.BytesIO(b"#!/usr/bin/env bash\n")):
-            with self.assertRaises(RuntimeError):
+        heads = [[getattr(value, "value", None) for value in node.elts[:2]] for node in argv]
+        self.assertIn(["/bin/bash", "/usr/bin/ldd"], heads)
+        self.assertIn("/sbin/ldconfig.real", [head[0] for head in heads])
+        self.assertNotIn("/sbin/ldconfig", [head[0] for head in heads])
+        for change, detail in (({"/usr/bin/ldd": b"#!/usr/bin/env bash\n"}, "ldd-interpreter-mismatch"),
+                               ({"/sbin/ldconfig": b"#!/bin/bash\n" + wrapper[10:]}, "ldconfig-interpreter-mismatch"),
+                               ({"/sbin/ldconfig": wrapper.replace(b"ldconfig.real", b"ldconfig.other")}, "ldconfig-wrapper-target-mismatch"),
+                               ({"/sbin/ldconfig": wrapper + b"exec /tmp/" + CANARY.encode() + b"\n"}, "ldconfig-wrapper-target-mismatch"),
+                               ({"/sbin/ldconfig": wrapper + b"#" * 4096}, "ldconfig-wrapper-target-mismatch")):
+            with self.subTest(detail=detail), self.assertRaisesRegex(RuntimeError, "^" + detail + "$"):
+                self.native_tool_fixture({**stock, **change})
+            self.assertIn(detail, self.prep.NATIVE_TOOL_DETAILS)
+
+    def test_native_tool_refusal_names_fixed_tool_and_closed_reason(self):
+        def native(path, target):
+            if str(path) == "/sbin/ldconfig.real":
+                raise RuntimeError("admission")
+        with patch.object(self.prep, "native_elf", side_effect=native), patch.object(self.prep.subprocess, "Popen") as child:
+            with self.assertRaisesRegex(RuntimeError, "^ldconfig-real-not-native-elf$"):
                 self.prep.check_native_tools(TARGET)
+            child.assert_not_called()
+        def unreadable(path, target):
+            raise OSError(CANARY)
+        with patch.object(self.prep, "native_elf", side_effect=unreadable):
+            with self.assertRaisesRegex(RuntimeError, "^self-unreadable$"):
+                self.prep.check_native_tools(TARGET)
+        self.assertTrue(all(detail.endswith(self.prep.NATIVE_TOOL_REASONS) for detail in self.prep.NATIVE_TOOL_DETAILS))
+        for refusal, expected in (("native-tool", "ldconfig-wrapper-target-mismatch"), ("native-tool-unknown", None)):
+            with self.subTest(refusal=refusal):
+                attempt = self.admission_attempt(refusal)
+                self.assertEqual(attempt["admission_substage"], "native-architecture")
+                self.assertEqual(attempt["admission_detail"], expected)
+                self.prep.validate_attempt(attempt)
 
     def test_current_self_machine_mismatch_refuses_before_any_child(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -960,7 +1034,7 @@ class PreparationTests(unittest.TestCase):
                 checked.append(str(path))
                 return real_elf(binary, target)
             with patch.object(self.prep, "native_elf", side_effect=native), patch.object(self.prep.subprocess, "Popen") as child:
-                with self.assertRaisesRegex(RuntimeError, "admission"):
+                with self.assertRaisesRegex(RuntimeError, "^self-not-native-elf$"):
                     self.prep.check_native_tools(TARGET)
                 child.assert_not_called()
             self.assertEqual(checked, ["/proc/self/exe"])
@@ -1043,7 +1117,7 @@ class PreparationTests(unittest.TestCase):
                                   ("binfmt-unknown", "binfmt-entry-invalid")):
             with self.subTest(refusal=refusal):
                 attempt = self.admission_attempt(refusal)
-                self.assertEqual(attempt["schema_version"], 3)
+                self.assertEqual(attempt["schema_version"], 4)
                 self.assertEqual(attempt["admission_substage"], "binfmt")
                 self.assertEqual(attempt["admission_detail"], expected)
                 self.prep.validate_attempt(attempt)
@@ -1054,6 +1128,16 @@ class PreparationTests(unittest.TestCase):
             attempt["stages"]["admission"] = {"status": "failed", "reason": "admission"}
             attempt["first_failure"] = {"stage": "admission", "reason": "admission"}
             self.prep.validate_attempt(attempt)
+            with self.assertRaises(RuntimeError):
+                self.prep.validate_attempt({**attempt, "admission_substage": "native-architecture"})
+        for detail in self.prep.NATIVE_TOOL_DETAILS:
+            attempt = self.prep.new_attempt(TARGET)
+            attempt.update(admission_substage="native-architecture", admission_detail=detail,
+                           first_failure={"stage": "admission", "reason": "admission"})
+            attempt["stages"]["admission"] = {"status": "failed", "reason": "admission"}
+            self.prep.validate_attempt(attempt)
+            with self.assertRaises(RuntimeError):
+                self.prep.validate_attempt({**attempt, "admission_substage": "binfmt"})
 
     def test_workflow_is_feature_only_fixed_native_readonly_and_failure_preserving(self):
         workflow = SCRIPT.parents[2] / ".github/workflows/asan-prepare.yml"
