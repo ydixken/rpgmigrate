@@ -148,9 +148,11 @@ jobs:
           test "$podman_major" -ge 5
       - name: Let rootless Podman stop its pasta network helper
         run: |
-          # Ubuntu's passt AppArmor profile denies podman's signal to pasta (Launchpad #2154379).
+          # Ubuntu's pasta AppArmor profile denies podman's SIGTERM at netns teardown (Launchpad #2154379).
           # The profile has no local include, so the ephemeral runner logs instead of enforcing it.
-          sudo apparmor_parser --replace --complain /etc/apparmor.d/usr.bin.passt
+          profile=$(grep -lE '^profile pasta[ ]' /etc/apparmor.d/*)
+          test -n "$profile"
+          sudo apparmor_parser --replace --complain "$profile"
       - name: Provision the pinned public images
         run: |
           python3 - <<'PYPULL'
