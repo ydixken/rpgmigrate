@@ -1091,6 +1091,8 @@ class FollowHarnessTests(unittest.TestCase):
                     def watch(self, *_args):
                         pass
                     def ready(self, _process):
+                        if events[-1] == "resume" and hasattr(_process, "follow_target_wire"):
+                            raise AssertionError("recovery retained a target fault gate outside its actual connection")
                         self.reports.append(report["report_validation"]["reports"][0])
                     def stop(self, _process, *, crash=False):
                         events.append("crash" if crash else "stop")
@@ -1689,10 +1691,15 @@ class FollowHarnessTests(unittest.TestCase):
 
     def test_m9_harness_options_keep_durability_omission_distinct(self):
         for extra, mode in (([], None), (["--durability", "durable"], "durable"), (["--durability", "replay-safe"], "replay-safe")):
-            with patch.object(sys, "argv", ["follow.py", "--pair", "16-16", "--profile", "m9", *extra]), patch.object(harness.clone, "outer") as outer:
+            with patch.object(sys, "argv", ["follow.py", "--pair", "16-16", "--profile", "m9", *extra]), patch.object(harness.clone, "outer") as outer, \
+                    patch.object(harness, "load_manifest", return_value=harness.load_manifest()) as load, \
+                    patch.object(harness, "validate_receipt") as validate:
                 self.assertEqual(harness.main(), 0)
                 self.assertEqual(outer.call_args.args[0].profile, "m9")
                 self.assertEqual(outer.call_args.args[0].durability, mode)
+                self.assertEqual(load.call_args.kwargs, {"profile": "m9", "durability": mode})
+                outer.call_args.kwargs["receipt_validator"]({}, outer.call_args.kwargs["manifest"])
+                self.assertEqual(validate.call_args.kwargs, {"diagnostic_case": None, "profile": "m9", "durability": mode})
         for extra in (("--durability", "durable"), ("--profile", "legacy-m3", "--durability", "replay-safe"), ("--profile", "m8")):
             with patch.object(sys, "argv", ["follow.py", "--pair", "16-16", *extra]), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 harness.main()
@@ -1711,6 +1718,179 @@ class FollowHarnessTests(unittest.TestCase):
         with self.assertRaises(RuntimeError), patch.object(harness.clone.Driver, "start") as start:
             driver.start("source", "target", Path("owned"))
         start.assert_not_called()
+
+    def test_follow_driver_preserves_default_lo_skip_and_forwards_explicit_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = harness.Driver(Path("/portable/engine"), {}, Path(temporary))
+            for policy in (None, True, False):
+                with self.subTest(skip_large_objects=policy), patch.object(harness.subprocess, "Popen", return_value=SimpleNamespace()) as spawn:
+                    keywords = {} if policy is None else {"skip_large_objects": policy}
+                    driver.start("source", "target", Path(temporary) / "owned", **keywords)
+                    self.assertEqual("--skip-large-objects" in spawn.call_args.args[0], policy is not False)
+                    self.assertIn("--follow", spawn.call_args.args[0])
+
+    def test_m9_manifest_selects_exact_mode_inventory_and_rejects_missing_or_changed_cases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary)
+            (fixture / "cases.json").write_bytes((harness.FIXTURES / "cases.json").read_bytes())
+            path = fixture / "m9-cases.json"
+            expected = {"version": 1, "durable": list(harness.CASES),
+                        "replay-safe": [*harness.CASES, "m9_async_visible_ack_oracle"]}
+            path.write_text(json.dumps(expected))
+            with patch.object(harness, "FIXTURES", fixture):
+                self.assertEqual(harness.load_manifest()["cases"], list(harness.CASES))
+                for mode in (None, "durable", "replay-safe"):
+                    selected = harness.load_manifest(profile="m9", durability=mode)
+                    self.assertEqual(selected["cases"], expected[mode or "durable"])
+                    self.assertEqual(selected["tables"], ["empty", "rows", "wide", "indexed", "full_rows", "truncated"])
+                for invalid in ({**expected, "durable": []}, {**expected, "durable": expected["replay-safe"]},
+                                {**expected, "replay-safe": list(harness.CASES)}, {**expected, "extra": []},
+                                {**expected, "version": True}):
+                    path.write_text(json.dumps(invalid))
+                    with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                        harness.load_manifest(profile="m9")
+                path.unlink()
+                with self.assertRaises((OSError, RuntimeError)):
+                    harness.load_manifest(profile="m9")
+                self.assertEqual(harness.load_manifest()["cases"], list(harness.CASES))
+                with self.assertRaises(RuntimeError):
+                    harness.load_manifest(durability="durable")
+
+    def test_m9_cutover_outer_dispatch_forwards_profile_and_durability_to_both_boundaries(self):
+        import cutover
+        for mode in (None, "durable", "replay-safe"):
+            extra = [] if mode is None else ["--durability", mode]
+            selected, received = {"cases": ["portable-m9-cutover"]}, []
+            def outer(_args, *, manifest, receipt_validator, **_kwargs):
+                self.assertIs(manifest, selected)
+                receipt_validator({"portable": True}, manifest)
+            def validate(report, manifest, **keywords):
+                received.append((report, manifest, keywords))
+            with self.subTest(mode=mode), patch.object(sys, "argv", ["follow.py", "--pair", "16-16", "--cutover", "--profile", "m9", *extra]), \
+                    patch.object(cutover, "load_manifest", return_value=selected) as load, \
+                    patch.object(cutover, "validate_receipt", side_effect=validate), patch.object(harness.clone, "outer", side_effect=outer):
+                self.assertEqual(harness.main(), 0)
+            self.assertEqual(load.call_args.kwargs, {"profile": "m9", "durability": mode})
+            self.assertEqual(received, [({"portable": True}, selected, {"require_images": True, "profile": "m9", "durability": mode})])
+
+    def test_m9_cutover_inner_preserves_exact_fault_gate_oracle_lo_policy_and_receipt_binding(self):
+        import cutover
+        with tempfile.TemporaryDirectory() as temporary:
+            root, launches, validated = Path(temporary), [], []
+            settings, artifact = self.m9_settings(), {"input": {"portable": True}}
+            selected = harness.load_manifest()
+            class Wire:
+                def __init__(self, host, mode):
+                    self.host, self.mode = host, mode
+                    self.copy_release = threading.Event()
+                    self.ack_oracle = self.side = None
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    pass
+                def attach_ack_oracle(self, oracle, side):
+                    self.ack_oracle, self.side = oracle, side
+                def connection(self, connection):
+                    if connection != "host=" + self.host:
+                        raise AssertionError("launcher rewrote an already routed connection")
+                    return connection + " portable-gate=" + self.mode
+                def hold_copy(self, relation):
+                    self.relation = relation
+            class Driver:
+                def __init__(self, *_args, **_kwargs):
+                    self.work, self.reports = {}, []
+                    self.m9_settings, self.m9_artifact = settings, artifact
+                def start(self, source, target, state, *arguments, **keywords):
+                    launches.append((source, target, keywords))
+                    return SimpleNamespace(poll=lambda: None)
+                def watch(self, *_args):
+                    pass
+                def ready(self, _worker):
+                    pass
+            database = SimpleNamespace(sql=lambda _name, query: b"16.15" if query == "SHOW server_version;" else b"{}",
+                                       create=lambda name, *_args: "host=source" if name.startswith("src_") else "host=target")
+            def run(_args, _source, _target, manifest, _case, launch, driver):
+                self.assertIs(manifest, selected)
+                for policy in (True, False):
+                    source_gate, target_gate = Wire("source", "observe"), Wire("target", "before_commit")
+                    worker = launch("host=source", "host=target", root / "state", wire=source_gate, target_wire=target_gate,
+                                    skip_large_objects=policy, source_name="explicit-source", target_name="explicit-target")
+                    self.assertIs(worker.follow_wire, source_gate)
+                    self.assertIs(worker.follow_target_wire, target_gate)
+                    self.assertIs(source_gate.ack_oracle, target_gate.ack_oracle)
+                    self.assertIs(worker.follow_ack_oracle, source_gate.ack_oracle)
+                    self.assertEqual((source_gate.side, target_gate.side), ("source", "target"))
+                    self.assertEqual(launches[-1], ("host=source portable-gate=observe", "host=target portable-gate=before_commit",
+                                                  {"gate": None, "skip_large_objects": policy}))
+                return {"portable": {"observed": True}}
+            args = SimpleNamespace(pair="16-16", profile="m9", durability=None, cutover=True, binary="portable", report_probe=None,
+                                   receipt=str(root / "receipt.json"), smoke=False, diagnostic_case=None)
+            with patch.dict(harness.os.environ, {"PGPASSWORD": "portable"}), patch.object(harness, "Database", return_value=database), \
+                    patch.object(harness, "Driver", Driver), patch.object(harness, "WireGate", Wire), \
+                    patch.object(harness.clone, "run", return_value=b"libpq.so.5 => /portable/libpq.so.5"), \
+                    patch.object(harness.ctypes, "CDLL", return_value=SimpleNamespace(PQlibVersion=lambda: 160015)), \
+                    patch.object(harness.clone, "tool_version", return_value="16.15"), patch.object(harness.clone, "validate_receipt"), \
+                    patch.object(cutover, "load_manifest", return_value=selected) as load, patch.object(cutover, "run", side_effect=run), \
+                    patch.object(cutover, "source_inventory", return_value={"file_count": 1, "sha256": "a" * 64}), \
+                    patch.object(cutover, "validate_receipt", side_effect=lambda *a, **k: validated.append((a, k))), redirect_stdout(io.StringIO()):
+                harness.inner(args)
+            self.assertEqual(load.call_args.kwargs, {"profile": "m9", "durability": None})
+            receipt = json.loads(Path(args.receipt).read_text())
+            self.assertEqual((receipt["profile"], receipt["settings"], receipt["artifact"]), ("m9", settings, artifact))
+            self.assertEqual((receipt["receipt_scope"], receipt["independent_go_evidence"], receipt["power_loss_tested"]),
+                             ("engine_producer", "pending_qualified_m6_reader", False))
+            self.assertEqual(validated[0][1], {"profile": "m9", "durability": None})
+
+    def test_m9_registered_replay_safe_case_executes_the_real_helper_boundary(self):
+        import cutover
+        class ReachedHelper(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected = {**harness.load_manifest(), "cases": [*harness.CASES, "m9_async_visible_ack_oracle"]}
+            drivers = []
+            class Driver:
+                def __init__(self, *_args, **_kwargs):
+                    self.work, self.reports = {}, []
+                    drivers.append(self)
+                def start(self, source, target, state, **_keywords):
+                    return SimpleNamespace(poll=lambda: None)
+                def watch(self, *_args):
+                    pass
+                def ready(self, _worker):
+                    self.m9_settings = FollowHarnessTests.m9_settings(durability="replay-safe", barrier_interval_ms=100)
+            class Wire:
+                def __init__(self, host, mode):
+                    self.host, self.mode, self.copy_release = host, mode, threading.Event()
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    pass
+                def connection(self, connection):
+                    return connection
+                def attach_ack_oracle(self, oracle, side):
+                    self.ack_oracle, self.side = oracle, side
+                def hold_copy(self, _relation):
+                    pass
+            database = SimpleNamespace(sql=lambda _name, query: b"16.15" if query == "SHOW server_version;" else b"{}",
+                                       create=lambda name, *_args: "host=source" if name.startswith("src_") else "host=target")
+            args = SimpleNamespace(pair="16-16", profile="m9", durability="replay-safe", cutover=False, binary="portable", report_probe=None,
+                                   receipt=str(root / "receipt.json"), smoke=False, diagnostic_case=None)
+            database.fingerprint = lambda *_args: self.fail("registered async helper was skipped before the default flow")
+            with patch.dict(harness.os.environ, {"PGPASSWORD": "portable"}), patch.object(harness, "Database", return_value=database), \
+                    patch.object(harness, "Driver", Driver), patch.object(harness, "WireGate", Wire), \
+                    patch.object(harness, "load_manifest", return_value=selected), \
+                    patch.object(harness.clone, "run", return_value=b"libpq.so.5 => /portable/libpq.so.5"), \
+                    patch.object(harness.ctypes, "CDLL", return_value=SimpleNamespace(PQlibVersion=lambda: 160015)), \
+                    patch.object(harness.clone, "tool_version", return_value="16.15"), patch.object(harness.clone, "validate_receipt"), \
+                    patch.object(harness, "m9_async_visible_ack_oracle", side_effect=ReachedHelper) as helper, self.assertRaises(ReachedHelper):
+                harness.inner(args)
+            arguments = helper.call_args.args
+            self.assertIs(arguments[5], drivers[0])
+            self.assertEqual(arguments[2:4], ("src_m9_async_visible", "dst_m9_async_visible"))
+            self.assertIs(arguments[7].ack_oracle, arguments[8].ack_oracle)
+            self.assertEqual((arguments[7].side, arguments[8].side, arguments[8].mode), ("source", "target", "before_sync_commit"))
+            self.assertIs(arguments[9], selected)
 
     def test_m9_async_visible_checkpoint_cannot_cover_early_ack(self):
         row = self.checkpoint_row(version=7, applied_order=2, last_xid=4, begin_ordinal=32,
@@ -1777,14 +1957,18 @@ class FollowHarnessTests(unittest.TestCase):
 
     def test_m9_artifact_binding_refuses_absent_changed_or_unbound_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            binary, packet = root / "binary", root / "m9-input.json"
+            root = Path(temporary) / "source"
+            root.mkdir()
+            binary, packet = Path(temporary) / "binary", Path(temporary) / "m9-input.json"
             binary.write_bytes(b"portable candidate bytes")
             binary.chmod(0o700)
             for name in ("clone/cases.json", "clone/schema.sql", "follow/cases.json", "follow/schema.sql"):
                 path = root / "tests/fixtures" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("portable fixture " + name)
+            new_inventory = root / "tests/fixtures/follow/m9-cases.json"
+            new_inventory.write_text(json.dumps({"version": 1, "durable": list(harness.CASES),
+                                                 "replay-safe": [*harness.CASES, "m9_async_visible_ack_oracle"]}))
             observed = [{"system_identifier": str(7000000000000000000 + index), "version": "16.15",
                          "data_directory": "/var/lib/postgresql/data", "wal_level": "logical"} for index in range(2)]
             import cutover
@@ -1811,6 +1995,33 @@ class FollowHarnessTests(unittest.TestCase):
                     packet.write_text(json.dumps(bad))
                     with self.subTest(bad=bad), self.assertRaises(RuntimeError):
                         harness.m9_artifact_binding(binary, settings, observed, packet=packet, source_root=root)
+            packet.write_text(json.dumps(value))
+            artifact = harness.m9_artifact_binding(binary, settings, observed, packet=packet, source_root=root)
+            self.assertEqual(artifact["input"], value)
+            receipt = {"profile": "m9", "settings": settings, "artifact": artifact}
+            with patch.object(harness.clone, "ROOT", root):
+                self.assertEqual(harness.validate_m9_receipt_artifact(receipt), settings)
+                self.assertEqual(harness.validate_m9_receipt_artifact(receipt, durability="durable"), settings)
+                for bad in ({**receipt, "profile": "legacy-m3"}, {**receipt, "settings": self.m9_settings(apply_group_txns=99)},
+                            {**receipt, "artifact": {**artifact, "input": {**value, "extra": True}}},
+                            {**receipt, "artifact": {**artifact, "input_sha256": None}}):
+                    with self.subTest(receipt=bad), self.assertRaises(RuntimeError):
+                        harness.validate_m9_receipt_artifact(bad)
+                with self.assertRaises(RuntimeError):
+                    harness.validate_m9_receipt_artifact(receipt, durability="replay-safe")
+                diagnostic = self.diagnostic_receipt()
+                diagnostic.update(receipt)
+                for record in diagnostic["report_validation"]["reports"]:
+                    report = json.loads(record["raw_json"])
+                    report.update(settings=settings, capabilities=["clone.single_db", "durability.status.v1"])
+                    record["raw_json"] = json.dumps(report)
+                with self.assertRaisesRegex(RuntimeError, "independent synchronous ACK"):
+                    harness.validate_receipt(diagnostic, harness.load_manifest(), diagnostic_case="before_commit_rollback", profile="m9")
+            new_inventory.write_text(json.dumps({"version": 1, "durable": [], "replay-safe": []}))
+            self.assertEqual(harness.m9_fixture_sha256(root), value["fixture_sha256"])
+            self.assertNotEqual(cutover.source_inventory(root)["sha256"], value["source_tree_sha256"])
+            with self.assertRaises(RuntimeError):
+                harness.m9_artifact_binding(binary, settings, observed, packet=packet, source_root=root)
 
     def test_m9_startup_baseline_uses_only_positive_sync_and_rejects_visible_max(self):
         for condition in ("positive", "missing_proof", "slot_ahead"):
@@ -1898,6 +2109,12 @@ class FollowHarnessTests(unittest.TestCase):
         process = SimpleNamespace(poll=lambda: None)
         with patch.object(harness, "m9_artifact_binding", return_value={"portable": True}):
             result = harness.m9_async_visible_ack_oracle(source, target, "source", "target", state, driver, process, wire, fault, {})
+        harness.validate_m9_async_visible_case(result)
+        for key, value in (("early_ack_rejected", False), ("synthetic_scope", "live_source_feedback"),
+                           ("real_postproof_ack", False), ("visible_frontier", 24), ("prior_synchronous_prefix", 40),
+                           ("feedback", {}), ("async_commit", {}), ("fingerprints", {})):
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                harness.validate_m9_async_visible_case({**result, key: value})
         self.assertTrue(result["legacy_shortcut_detected"] and result["early_ack_rejected"] and result["no_retroactive_coverage"] and result["real_postproof_ack"])
         self.assertEqual(result["synthetic_scope"], "oracle_only_no_source_feedback")
         self.assertTrue(all(record["safe"] for record in oracle.evidence()["statuses"]))
