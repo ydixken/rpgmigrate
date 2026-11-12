@@ -530,8 +530,18 @@ class PreparationTests(unittest.TestCase):
         source.write_bytes(lzma.compress(b"public source bytes\n"))
         supervisor = SimpleNamespace(run_dir=root, remaining=lambda: 60, check_scratch=lambda: None)
         public = self.prep.PublicProvenance(supervisor, "amd64")
-        origin = "https://archive.ubuntu.com/ubuntu/dists/noble/universe/binary-amd64/Packages.xz"
+        origin = "https://archive.ubuntu.com/ubuntu/dists/noble/universe/binary-amd64/by-hash/SHA256/" + self.prep.sha256(source)
         return public, source, origin
+
+    def test_package_index_origin_is_the_immutable_by_hash_path_of_its_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            public, source, origin = self.public_fixture(Path(temporary))
+            digest = self.prep.sha256(source)
+            for changed in (origin.replace(digest, "0" * 64), "https://archive.ubuntu.com/ubuntu/dists/noble/universe/binary-amd64/Packages.xz",
+                            origin.replace("binary-amd64", "binary-arm64")):
+                with self.subTest(origin=changed), self.assertRaisesRegex(RuntimeError, "retention"):
+                    public.add("package-index", source, changed, digest)
+            self.assertEqual(public.add("package-index", source, origin, digest), "package-index-0000.packages.xz")
 
     def test_public_bundle_keeps_exact_original_bytes_and_only_allowlisted_names(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -506,7 +506,7 @@ def validate_public_entry(entry, architecture):
     elif role == "signed-release":
         require(origin in {base + "dists/" + suite + "/InRelease" for suite in ("noble", "noble-updates", "noble-security")}, "retention")
     elif role == "package-index":
-        require(origin in {base + "dists/" + suite + "/" + component + "/binary-" + architecture + "/Packages.xz"
+        require(origin in {base + "dists/" + suite + "/" + component + "/binary-" + architecture + "/by-hash/SHA256/" + entry["sha256"]
                            for suite in ("noble", "noble-updates", "noble-security") for component in ("main", "universe")}, "retention")
     else:
         require(origin.startswith(base) and re.fullmatch(r"pool/[A-Za-z0-9_./+~%-]+\.deb", origin.removeprefix(base)) and
@@ -719,10 +719,12 @@ APT::Update::Error-Mode "any";
                 index = self.root / "public-indexes" / (suite + "-" + component + ".packages.xz")
                 index_hash, index_size = checksums[meta + ".xz"]
                 require(self.public.total + index_size <= PUBLIC_LIMIT - 1024 ** 2, "retention")
-                download(supervisor, self.base + "dists/" + suite + "/" + meta + ".xz", index, index_hash)
+                # by-hash paths are immutable, so a mirror sync after apt-get update cannot change the bytes.
+                origin = self.base + "dists/" + suite + "/" + component + "/binary-" + architecture + "/by-hash/SHA256/" + index_hash
+                download(supervisor, origin, index, index_hash)
                 require(index.stat().st_size == index_size, "package-authentication")
                 actual = package_index_records(index, *checksums[meta], supervisor)
-                self.public.add("package-index", index, self.base + "dists/" + suite + "/" + meta + ".xz", index_hash)
+                self.public.add("package-index", index, origin, index_hash)
                 for record in actual:
                     merge_package_record(self.records, record)
 
