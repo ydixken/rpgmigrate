@@ -168,7 +168,7 @@ jobs:
           python3 - <<'PYLEDGER'
           import json
           from pathlib import Path
-          # Statuses and exception kinds only; the ledger itself stays on the runner.
+          # Statuses, exception kinds and failure callsites only; ledgers and stderr stay on the runner.
           for path in sorted(Path("target/e2e").glob("*.runtime.json")):
               ledger = json.loads(path.read_text())
               print(json.dumps({"stage": ledger.get("stage"), "cleanup_complete": ledger.get("cleanup_complete"),
@@ -178,6 +178,8 @@ jobs:
                                                for entry in ledger.get("containers", [])],
                                 "network": [(ledger.get("network") or {}).get(key) for key in ("cleanup_status", "cleanup_error_kind")]},
                                sort_keys=True))
+          for path in sorted(Path("target/e2e/failures").glob("*.json")):
+              print(path.read_text())
           PYLEDGER
       - name: Revalidate the exact sanitized clone receipt
         run: |
