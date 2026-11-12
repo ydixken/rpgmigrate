@@ -168,6 +168,379 @@ def producer_receipt():
                 for phase in ("streaming", "completed")]}}
 
 
+M9_REPORTS = clone.ROOT / "tests/fixtures/native/v1/payloads"
+M9_FAILURES = ("m9_final_sequence_sync_failure", "m9_final_large_object_sync_failure")
+
+
+def m9_frame(mode, command):
+    raw = (M9_REPORTS / f"m9-{mode}-{command}.json").read_bytes()
+    return b"native-report: " + raw.rstrip(b"\n") + b"\n"
+
+
+def m9_wire(value, prefix, *, ordinal=4):
+    wire = value["wire"]
+    positions = wire["logical"]["streams"][0]["statuses"]
+    proof = {"ordinal": ordinal, "connection": 2, "backend_pid": 123, "prefix": prefix}
+    commit = {**proof, "mode": "sync", "writing": True, "warning_free": True}
+    wire.update(statuses=positions, ack_oracle={"profile": "m9", "bound": True, "invalid": False, "overflow": False,
+        "ordinal": ordinal + len(positions), "proofs": [proof], "commits": [commit],
+        "statuses": [{"ordinal": ordinal + index, "connection": 1, "positions": item, "prefix": prefix,
+                      "proof_ordinal": ordinal, "safe": True, "forwarded": True} for index, item in enumerate(positions, 1)]})
+    return wire
+
+
+def m9_producer_authority(value, settings):
+    handoff = value["producer_authority"]
+    row = handoff["checkpoint_row"]
+    row.update(version=7, source_system=101, source_database=41, target_system=100, target_database=42,
+               owner_oid=10, schema_oid=6, table_oid=7, run_id="\\x" + WORK["run_id"])
+    handoff.update(native_format=10, metadata_version=7)
+    handoff["follow_state"]["effective_settings"] = settings
+    provenance = handoff["target_provenance"]
+    provenance.update(large_object_table_oid=10, large_object_index_oid=11, schema_oid=6,
+                      intent={"binding": {"metadata_version": 7, "table_name": "checkpoint", "owner_oid": 10}})
+    handoff["catalog"]["objects"] = [
+        {"oid": oid, "relnamespace": 6, "relowner": 10, "relkind": kind, "relname": name, "relpersistence": "p",
+         "index_parent": {9: 8, 11: 10}.get(oid)}
+        for oid, kind, name in ((7, "r", "checkpoint"), (8, "r", "copy_done"), (9, "i", "copy_done_pkey"),
+                                (10, "r", "large_object_done"), (11, "i", "large_object_done_pkey"))]
+    return handoff
+
+
+def m9_failure_receipt(name):
+    legacy = producer_receipt()["cases"]
+    value = copy.deepcopy(legacy[cutover.CASES[7]])
+    settings = json.loads(m9_frame("durable", "clone-streaming")[15:])["settings"]
+    artifact = {"input_sha256": "a" * 64, "input": {"source_commit": "b" * 40, "source_git_tree": "c" * 40}}
+    row = value["target_row"]
+    row.update(drain_end_lsn="0/30", drain_witness_lsn="0/40", certified_lsn="0/40", follow_completed=False)
+    baseline = {**row, "barrier_counter": 2, "drain_end_lsn": None, "drain_witness_lsn": None, "drain_kind": None}
+    handoff = m9_producer_authority(value, settings)
+    handoff["checkpoint_row"].update(row)
+    handoff["checkpoint_row"]["clone_state"] = json.dumps({"large_objects": {
+        "generation": 1, "initial": {"objects": 0, "bytes": 0}, "final_sync": None}})
+    value["wire"]["logical"]["streams"][0]["keepalives"] = [{"lsn": 64, "idle": True, "forwarded": True}]
+    wire = m9_wire(value, 64, ordinal=9)
+    raw = json.loads(m9_frame("durable", "clone-streaming")[15:])
+    raw["work"] = WORK
+    output = framed(raw)
+    sequence = name == M9_FAILURES[0]
+    code = 4 if sequence else 7
+    message = "fixture failure (SQLSTATE 22003)" if sequence else "target-large-object: unrecorded target object identity refuses admission"
+    error = json.dumps({"level": "error", "category": "Pgsql" if sequence else "Target", "exit_code": code, "message": message}).encode()
+    value["data_fault"]["fault"]["connection"] = 2
+    result = {
+        "observed": True, "scope": name, "caller_goal": {"end_lsn": "0/30", "work": WORK},
+        "local_endpos": {"end_lsn": 48, "sealed": True}, "before_drain": baseline,
+        "producer_authority": handoff, "wire": wire, "data_fault": value["data_fault"],
+        "drain_start_ordinal": 8, "worker_reaped": True,
+        "worker_result": cutover.command_observation(subprocess.CompletedProcess([], code, output, error)),
+        "worker_reports": [{"binding": {"command": "clone", "work": WORK}, "raw_json": output[15:-1].decode(), "probe_checked": False}],
+        "source_slot": {"confirmed_flush_lsn": "0/28", "restart_lsn": "0/8"},
+    }
+    if sequence:
+        result["sequence_identity"] = {"source": {"oid": 50, "namespace_oid": 51, "owner_oid": 10},
+                                       "target": {"oid": 52, "namespace_oid": 53, "owner_oid": 10}}
+        binding = {"case": name, "source_commit": "b" * 40, "source_tree": "c" * 40,
+                   "artifact_inputs_sha256": "a" * 64, "work_identity": WORK,
+                   "source_identity": {"system_identifier": 101, "database_oid": 41},
+                   "target_identity": {"system_identifier": 100, "database_oid": 42},
+                   "sequence_identity": result["sequence_identity"],
+                   "target_sequence_facts": {"maximum": 1000, "current": 1000, "start": 1, "is_called": True},
+                   "source_sequence_facts": {"current": 1001, "is_called": True},
+                   "applied_transaction": result["data_fault"]["source"], "endpos": "0/30"}
+        result["sequence_failure"] = {
+            "version": 1, "statement_class": "final_sequence_setval",
+            "fixture_binding_sha256": hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            "statement_sha256": hashlib.sha256(b"""SELECT pg_catalog.setval('"M2 space"."rows_id_seq"'::pg_catalog.regclass,1001,true)""").hexdigest(),
+            "connection": 2, "backend_pid": 123, "parameter_count": 0, "parse_forwarded": True, "bind_forwarded": True,
+            "execute_forwarded": True, "error_observed": True, "sqlstate": "22003", "invalid": False,
+            "overflow": False, "matches": 1, "pre_error_ack": copy.deepcopy(wire["ack_oracle"])}
+        wire["ack_oracle"].update(invalid=True, ordinal=12)
+    else:
+        result["lo_setup"] = {"initial": {"objects": 0, "bytes": 0}, "before": [[], [], 0], "introduced": [
+            [90007, hashlib.sha256(b"\x01").hexdigest()], [90007, hashlib.sha256(b"\x02").hexdigest()], 0]}
+        result["lo_after"] = copy.deepcopy(result["lo_setup"]["introduced"])
+    return result, settings, artifact
+
+
+def m9_cutover_receipt():
+    from follow import M9_INPUT_FIELDS, m9_fixture_sha256, m9_settings_sha256
+    value = producer_receipt()
+    manifest = {**cutover.load_manifest(), "cases": [*cutover.CASES, *M9_FAILURES]}
+    records = []
+    for phase in ("streaming", "completed"):
+        body = json.loads(m9_frame("durable", "clone-" + phase)[15:])
+        body["work"] = WORK
+        records.append({"binding": {"command": "clone", "work": WORK}, "raw_json": json.dumps(body), "probe_checked": False})
+    settings = body["settings"]
+    for index in (1, 2, *range(4, 9)):
+        case = value["cases"][cutover.CASES[index]]
+        m9_producer_authority(case, settings)
+        for record in case["reports"]:
+            body = json.loads(record["raw_json"])
+            body["capabilities"].append("durability.status.v1")
+            body["settings"] = settings
+            record["raw_json"] = json.dumps(body)
+        m9_wire(case, cutover.lsn(body["replication"]["durable_replay_lsn"]))
+        case["worker_reports"] = copy.deepcopy(records)
+        case["large_objects"] = {"source": {}, "target": {}, "lo_verified": True}
+    close = value["cases"][cutover.CASES[9]]
+    row = value["cases"][cutover.CASES[8]]["producer_authority"]["checkpoint_row"]
+    for phase in ("before", "after", "recovered"):
+        close[phase]["authority"] = copy.deepcopy(row)
+    close["fault_free_resume"]["raw_json"] = records[-1]["raw_json"]
+    for name in M9_FAILURES:
+        case, _, artifact = m9_failure_receipt(name)
+        value["cases"][name] = case
+        records.extend(record for record in case["worker_reports"] if record not in records)
+    packet = dict.fromkeys(M9_INPUT_FIELDS, "d" * 64)
+    packet.update(artifact["input"], source_tree_sha256=value["source_tree"]["sha256"],
+                  settings_sha256=m9_settings_sha256(settings), fixture_sha256=m9_fixture_sha256(clone.ROOT))
+    artifact.update(input=packet, schema_sha256=hashlib.sha256(json.dumps(sorted(M9_INPUT_FIELDS), separators=(",", ":")).encode()).hexdigest())
+    value.update(profile="m9", artifact=artifact, settings=settings)
+    value["report_validation"]["reports"] = records
+    return value, manifest
+
+
+class M9CutoverTests(unittest.TestCase):
+    def test_runner_uses_original_conninfo_and_exact_gates_for_m9(self):
+        import follow
+        class ReachedWorker(Exception):
+            pass
+
+        def no_rewrite(_):
+            self.fail("cutover rewrote a conninfo before the shared launcher")
+        source_wire = SimpleNamespace(connection=no_rewrite)
+        fault = SimpleNamespace(connection=no_rewrite)
+        from contextlib import nullcontext
+        def gate(host, mode):
+            return nullcontext({("source", "observe"): source_wire, ("target", "before_commit"): fault}[host, mode])
+        worker = SimpleNamespace(follow_target_wire=fault, follow_wire=source_wire)
+        def launch(source, target, state, **kwargs):
+            self.assertEqual((source, target, state), ("source-original", "target-original", Path("private-state")))
+            self.assertEqual(kwargs, {"source_name": "src", "target_name": "dst", "wire": source_wire,
+                                      "target_wire": fault, "skip_large_objects": True})
+            return worker
+        def ready(actual):
+            self.assertIs(actual, worker)
+            raise ReachedWorker
+        driver = SimpleNamespace(ready=ready, report_probe=None)
+        case = lambda _: ("src", "dst", "source-original", "target-original", Path("private-state"))
+        args = SimpleNamespace(profile="m9", durability=None, report_probe=None)
+        manifest = {"cases": [*cutover.CASES, *M9_FAILURES]}
+        with patch.object(follow, "WireGate", side_effect=gate), self.assertRaises(ReachedWorker):
+            cutover.run(args, None, None, manifest, case, launch, driver)
+
+    def test_m9_receipt_rejects_missing_case_comparison_and_worker_completion(self):
+        value, manifest = m9_cutover_receipt()
+        cutover.validate_receipt(value, manifest, profile="m9")
+        for action in (
+            lambda bad: bad["cases"].pop(M9_FAILURES[0]),
+            lambda bad: bad["cases"][M9_FAILURES[1]].update(observed=False),
+            lambda bad: bad["cases"][cutover.CASES[1]].pop("large_objects"),
+            lambda bad: bad["cases"][cutover.CASES[1]]["target_fingerprints"].pop("sequences"),
+            lambda bad: bad["cases"][cutover.CASES[1]]["worker_reports"].pop(),
+            lambda bad: bad["cases"][cutover.CASES[1]].update(worker_completed=False),
+            lambda bad: bad["cases"][cutover.CASES[1]]["wire"]["ack_oracle"].update(invalid=True),
+            lambda bad: bad["artifact"]["input"].update(settings_sha256="f" * 64),
+            lambda bad: bad["artifact"]["input"].update(source_tree_sha256="f" * 64),
+        ):
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                bad = copy.deepcopy(value)
+                action(bad)
+                cutover.validate_receipt(bad, manifest, profile="m9")
+
+    def test_m9_artifact_refuses_new_manifest_changes_without_fixture_hash_change(self):
+        from follow import m9_artifact_binding, m9_fixture_sha256, m9_settings_sha256
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "source"
+            for name in ("clone/cases.json", "clone/schema.sql", "follow/cases.json", "follow/schema.sql"):
+                path = checkout / "tests/fixtures" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((clone.ROOT / "tests/fixtures" / name).read_bytes())
+            registry = checkout / "tests/fixtures/follow/m9-cutover-cases.json"
+            registry.write_text(json.dumps({"version": 1, "cases": [*cutover.CASES, *M9_FAILURES]}))
+            binary = root / "private-binary"
+            binary.write_bytes(b"never executed")
+            binary.chmod(0o700)
+            settings = json.loads(m9_frame("durable", "clone-streaming")[15:])["settings"]
+            images = ["a" * 64, "b" * 64]
+            servers = [{"system_identifier": str(index), "version": "18.6", "data_directory": "/fixture", "wal_level": "logical",
+                        "id": str(index) * 64, "image": image, "role": role, "started_at": "2026-11-10T00:00:00Z",
+                        "pgdata_permissions": "700|postgres"}
+                       for index, role, image in zip((1, 2), ("source", "target"), images)]
+            fixture = m9_fixture_sha256(checkout)
+            packet = root / "packet.json"
+            packet.write_text(json.dumps({
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "source_tree_sha256": cutover.source_inventory(checkout)["sha256"], "source_commit": "c" * 40,
+                "source_git_tree": "d" * 40, "runner_image_id": "e" * 64, "server_image_ids": images, "servers": servers,
+                "run": "f" * 32, "settings_sha256": m9_settings_sha256(settings), "fixture_sha256": fixture,
+            }))
+            m9_artifact_binding(binary, settings, servers, packet=packet, source_root=checkout)
+            registry.write_text(registry.read_text() + "\n")
+            self.assertEqual(m9_fixture_sha256(checkout), fixture)
+            with self.assertRaisesRegex(RuntimeError, "artifact inputs differ"):
+                m9_artifact_binding(binary, settings, servers, packet=packet, source_root=checkout)
+
+    def test_finalization_failure_needs_exact_drain_and_error_on_top_of_applied_c(self):
+        for name in M9_FAILURES:
+            value, settings, artifact = m9_failure_receipt(name)
+            def check(candidate):
+                cutover.validate_finalization_failure(candidate, name, mode="durable", settings=settings, artifact=artifact)
+            check(value)
+            for mutation in (
+                lambda bad: bad.update(worker_reaped=False),
+                lambda bad: bad.update(worker_reports=[]),
+                lambda bad: bad["worker_result"]["errors"][0].update(exit_code=12),
+                lambda bad: bad["caller_goal"].update(end_lsn="0/31"),
+                lambda bad: bad["local_endpos"].update(sealed=False),
+                lambda bad: bad["producer_authority"]["checkpoint_row"].update(drain_end_lsn=None),
+                lambda bad: bad["producer_authority"]["checkpoint_row"].update(follow_completed=True),
+                lambda bad: bad["before_drain"].update(source_end_lsn=None),
+                lambda bad: bad["source_slot"].update(confirmed_flush_lsn="0/50"),
+                lambda bad: bad.update(drain_start_ordinal=9),
+            ):
+                with self.subTest(case=name, mutation=mutation), self.assertRaises(RuntimeError):
+                    bad = copy.deepcopy(value)
+                    mutation(bad)
+                    check(bad)
+
+    def test_sequence_error_cannot_replace_prior_ack_or_exact_statement_witness(self):
+        name = M9_FAILURES[0]
+        value, settings, artifact = m9_failure_receipt(name)
+        for target, fields in (("sequence_failure", {"connection": 3}), ("sequence_failure", {"sqlstate": "23505"}),
+                               ("sequence_failure", {"matches": True}), ("sequence_failure", {"statement_sha256": "0" * 64}),
+                               ("sequence_failure", {"fixture_binding_sha256": "0" * 64}),
+                               ("sequence_failure", {"parameter_count": 3}), ("sequence_failure", {"error_observed": False}),
+                               ("sequence_failure", {"pre_error_ack": {}}),
+                               ("worker_result", {"errors": [{"category": "Pgsql", "exit_code": 4}]})):
+            with self.subTest(target=target, fields=fields), self.assertRaises(RuntimeError):
+                bad = copy.deepcopy(value)
+                bad[target].update(fields)
+                cutover.validate_finalization_failure(bad, name, mode="durable", settings=settings, artifact=artifact)
+        for field, mutation in (("pre_error_ack", {"invalid": True}), ("final_ack", {"invalid": False}),
+                                ("final_ack", {"proofs": []})):
+            with self.subTest(field=field, mutation=mutation), self.assertRaises(RuntimeError):
+                bad = copy.deepcopy(value)
+                target = bad["sequence_failure"]["pre_error_ack"] if field == "pre_error_ack" else bad["wire"]["ack_oracle"]
+                target.update(mutation)
+                cutover.validate_finalization_failure(bad, name, mode="durable", settings=settings, artifact=artifact)
+
+    def test_large_object_collision_requires_empty_initial_owned_receipts_and_exact_refusal(self):
+        name = M9_FAILURES[1]
+        value, settings, artifact = m9_failure_receipt(name)
+        for section, mutation in (("lo_setup", {"before": [[], [], 1]}), ("lo_setup", {"initial": None}),
+                                  ("lo_setup", {"introduced": [[], [], 0]}),
+                                  ("worker_result", {"errors": [{"category": "Target", "exit_code": 7, "diagnostic": "other"}]})):
+            with self.subTest(section=section, mutation=mutation), self.assertRaises(RuntimeError):
+                bad = copy.deepcopy(value)
+                bad[section].update(mutation)
+                cutover.validate_finalization_failure(bad, name, mode="durable", settings=settings, artifact=artifact)
+        bad = copy.deepcopy(value)
+        control = json.loads(bad["producer_authority"]["checkpoint_row"]["clone_state"])
+        control["large_objects"]["final_sync"] = {"objects": 1, "bytes": 1}
+        bad["producer_authority"]["checkpoint_row"]["clone_state"] = json.dumps(control)
+        with self.assertRaises(RuntimeError):
+            cutover.validate_finalization_failure(bad, name, mode="durable", settings=settings, artifact=artifact)
+
+    def test_native10_authority_has_exact_checkpoint_and_owned_object_inventory(self):
+        case = producer_receipt()["cases"][cutover.CASES[1]]
+        settings = json.loads(m9_frame("durable", "clone-streaming")[15:])["settings"]
+        handoff = m9_producer_authority(case, settings)
+        cutover.require_producer_authority(handoff, case["caller_goal"]["work"], case["target_row"], mode="durable", settings=settings)
+        for field, mutation in (
+            ("format", lambda bad: bad.update(native_format=8)),
+            ("metadata", lambda bad: bad.update(metadata_version=6)),
+            ("row", lambda bad: bad["checkpoint_row"].update(version=6)),
+            ("object", lambda bad: bad["catalog"]["objects"].pop()),
+            ("duplicate", lambda bad: bad["catalog"]["objects"].append(bad["catalog"]["objects"][-1])),
+            ("owner", lambda bad: bad["catalog"]["objects"][-1].update(relowner=11)),
+            ("index-parent", lambda bad: bad["catalog"]["objects"][-1].update(index_parent=8)),
+            ("name", lambda bad: bad["catalog"]["objects"][-1].update(relname="foreign")),
+            ("column", lambda bad: bad["catalog"]["columns"][-1].update(attname="other")),
+            ("stored-settings", lambda bad: bad["follow_state"]["effective_settings"].update(apply_group_txns=1)),
+        ):
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                bad = copy.deepcopy(handoff)
+                mutation(bad)
+                cutover.require_producer_authority(bad, case["caller_goal"]["work"], case["target_row"], mode="durable", settings=settings)
+
+    def test_m9_frontier_requires_a_real_writing_proof_covering_the_row(self):
+        case = producer_receipt()["cases"][cutover.CASES[6]]
+        wire = m9_wire(case, 16)
+        cutover.require_sync_prefix(wire, 16)
+        for change in (lambda evidence: evidence.update(proofs=[]),
+                       lambda evidence: evidence.update(invalid=True),
+                       lambda evidence: evidence["proofs"][0].update(ordinal=evidence["ordinal"]),
+                       lambda evidence: evidence["commits"][0].update(writing=False),
+                       lambda evidence: evidence["commits"][0].update(mode="async"),
+                       lambda evidence: evidence["commits"][0].update(warning_free=False)):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                bad = copy.deepcopy(wire)
+                change(bad["ack_oracle"])
+                cutover.require_sync_prefix(bad, 16)
+        with self.assertRaises(RuntimeError):
+            cutover.require_sync_prefix(wire, 48)
+
+    def test_manifest_selects_twelve_cases_only_for_explicit_m9(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "m9-cutover-cases.json"
+            required = [*cutover.CASES, *M9_FAILURES]
+            path.write_text(json.dumps({"version": 1, "cases": required}))
+            for durability in (None, "durable", "replay-safe"):
+                self.assertEqual(cutover.load_manifest(path, profile="m9", durability=durability)["cases"], required)
+            for profile, cases in ((None, required), ("m9", required[:-1]), ("m9", required[::-1]), ("m9", {})):
+                with self.subTest(profile=profile, cases=cases), self.assertRaises(RuntimeError):
+                    path.write_text(json.dumps({"version": 1, "cases": cases}))
+                    cutover.load_manifest(path, profile=profile)
+            self.assertEqual(cutover.load_manifest()["cases"], list(cutover.CASES))
+
+    def test_m9_completion_requires_both_actual_frames_and_equal_settings(self):
+        for mode in ("durable", "replay-safe"):
+            start = m9_frame(mode, "clone-streaming")
+            final = m9_frame(mode, "clone-completed")
+            body = json.loads(final[15:])
+            binding = {key: body[key] for key in ("command", "work")}
+            self.assertEqual(cutover.completed_output(start + final, binding, profile="m9", durability=mode), final)
+            self.assertEqual(cutover.completed_output(final, binding, profile="m9", durability=mode, already_completed=True), final)
+            bad = copy.deepcopy(body)
+            bad["copy"]["tables"]["done"] -= 1
+            mismatched = copy.deepcopy(body)
+            mismatched["settings"]["apply_group_txns"] += 1
+            for output in (start + framed(bad), start + framed(mismatched), final, start + final + final):
+                with self.subTest(mode=mode, output=output), self.assertRaises(RuntimeError):
+                    cutover.completed_output(output, binding, profile="m9", durability=mode)
+            with self.assertRaises(RuntimeError):
+                cutover.completed_output(start + final, binding, profile="m9", durability="durable" if mode == "replay-safe" else "replay-safe")
+            with self.assertRaises(RuntimeError):
+                cutover.completed_output(start + final, binding)
+
+    def test_m9_actual_sentinel_keeps_later_begin_out_of_durable_replay(self):
+        for mode in ("durable", "replay-safe"):
+            for command in ("sentinel-get", "sentinel-set"):
+                output = m9_frame(mode, command)
+                report = json.loads(output[15:])
+                binding = {key: report[key] for key in ("command", "work")}
+                value = report["replication"]
+                self.assertLess(cutover.lsn(value["durable_replay_lsn"]), cutover.lsn(value["end_lsn"]))
+                self.assertGreater(cutover.lsn(value["drain_proof"]["replay_lsn"]), cutover.lsn(value["end_lsn"]))
+                self.assertEqual(cutover.replication_output(output, binding, value["end_lsn"], profile="m9", durability=mode), report)
+                malformed = [output.replace(b'"settings":', b'"settings":{},"settings":'),
+                             output.replace(b'"channel_messages":17', b'"channel_messages":1e1'),
+                             framed({**report, "capabilities": ["cutover.v1"]}),
+                             framed({**report, "unexpected": True}),
+                             framed({**report, "replication": {**value, "drained": False}})]
+                bad_work = {**report["work"], "foreign": True}
+                forged = {**report, "work": bad_work, "replication": {**value, "drain_proof": {**value["drain_proof"], "work": bad_work}}}
+                with self.assertRaises(RuntimeError):
+                    cutover.replication_output(framed(forged), {**binding, "work": bad_work}, value["end_lsn"], profile="m9", durability=mode)
+                for candidate in malformed:
+                    with self.subTest(mode=mode, command=command, candidate=candidate), self.assertRaises(RuntimeError):
+                        cutover.replication_output(candidate, binding, value["end_lsn"], profile="m9", durability=mode)
+
 class CutoverHarnessTests(unittest.TestCase):
     def test_completion_requires_exact_startup_and_final_frames(self):
         binding = {"command": "clone", "work": WORK}

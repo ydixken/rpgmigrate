@@ -98,6 +98,44 @@ class CopyFeatureTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 decode(bad)
 
+    def test_lo_inventory_producer_serializes_outer_result_as_one_jsonb_record(self):
+        fixtures = [lo_lines(b""), lo_lines(b"\0\xff", oid=90002)]
+        for count in (0, 1, 2):
+            with self.subTest(objects=count):
+                records = [{"kind": "inventory", "objects": [value[0]["objects"][0] for value in fixtures[:count]]}]
+                records.extend(record for value in fixtures[:count] for record in value[1:])
+                raw = b"\n".join(json.dumps(record).encode() for record in records)
+
+                def sql(name, query):
+                    self.assertEqual(name, "fixture_db")
+                    inventory = query[query.index("SELECT json_build_object('kind','inventory'"):].split(" FROM (", 1)[0]
+                    self.assertRegex(inventory, r"^SELECT json_build_object\('kind','inventory',.*\)::jsonb$")
+                    return raw
+
+                actual = harness.large_object_fingerprint(types.SimpleNamespace(sql=sql), "fixture_db")
+                expected = {
+                    90001: {"oid": 90001, "length": 0, "owner": "source_owner", "acl_default": True,
+                            "acl": [acl("source_owner", "source_owner", "SELECT"), acl("source_owner", "source_owner", "UPDATE")],
+                            "comment": "", "sha256": hashlib.sha256(b"").hexdigest()},
+                    90002: {"oid": 90002, "length": 2, "owner": "source_owner", "acl_default": True,
+                            "acl": [acl("source_owner", "source_owner", "SELECT"), acl("source_owner", "source_owner", "UPDATE")],
+                            "comment": "", "sha256": hashlib.sha256(b"\0\xff").hexdigest()},
+                }
+                self.assertEqual(actual, {oid: expected[oid] for oid in tuple(expected)[:count]})
+
+    def test_lo_inventory_composite_newlines_remain_invalid_record_framing(self):
+        fixtures = [lo_lines(b""), lo_lines(b"\0\xff", oid=90002)]
+        for count in (1, 2):
+            with self.subTest(objects=count):
+                objects = [value[0]["objects"][0] for value in fixtures[:count]]
+                # json_agg(composite) inserts physical LFs between ACL and inventory records.
+                inventory = b'{"kind" : "inventory", "objects" : [' + b", \n ".join(
+                    json.dumps(row).encode().replace(b"}, {", b"}, \n {") for row in objects) + b"]}"
+                self.assertEqual(json.loads(inventory), {"kind": "inventory", "objects": objects})
+                tail = [record for value in fixtures[:count] for record in value[1:]]
+                with self.assertRaisesRegex(RuntimeError, "independent LO inventory, content, or EOF observation is missing or invalid"):
+                    harness.decode_large_objects(b"\n".join([inventory, *(json.dumps(record).encode() for record in tail)]))
+
     def test_mismatch_refusal_requires_changed_lo_matching_tables_and_successful_restore(self):
         proof = {"returncode": 7, "source_lo": {"90005": {"sha256": "a" * 64}}, "target_lo": {"90005": {"sha256": "b" * 64}},
                  "source_tables": {"public.items": {"rows": 3, "sha256": "c" * 64}}, "target_tables": {"public.items": {"rows": 3, "sha256": "c" * 64}},

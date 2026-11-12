@@ -48,10 +48,24 @@ def check_workload(source, name, manifest):
     clone.require_equal(before, source.fingerprint(name, manifest))
 
 
-def load_manifest(path=FIXTURES / "cases.json"):
-    manifest = clone.load_manifest(path)
+def load_manifest(path=None, *, profile=None, durability=None):
+    profile = follow_profile(profile)
+    if durability not in (None, "durable", "replay-safe") or durability is not None and profile != "m9":
+        raise RuntimeError("explicit harness durability requires M9")
+    manifest = clone.load_manifest(FIXTURES / "cases.json" if profile == "m9" or path is None else path)
     if tuple(manifest["cases"]) != CASES:
         raise RuntimeError("follow case inventory differs from reviewed coverage")
+    if profile == "m9":
+        path = FIXTURES / "m9-cases.json" if path is None else Path(path)
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 65536:
+            raise RuntimeError("M9 follow case inventory is absent or replaced")
+        value = json.loads(path.read_bytes(), object_pairs_hook=clone.unique_object)
+        expected = {"durable": list(CASES), "replay-safe": [*CASES, "m9_async_visible_ack_oracle"]}
+        if (not isinstance(value, dict) or set(value) != {"version", *expected}
+                or type(value["version"]) is not int or value["version"] != 1
+                or any(value[mode] != cases for mode, cases in expected.items())):
+            raise RuntimeError("M9 follow case inventory differs from reviewed mode coverage")
+        manifest = {**manifest, "cases": value[durability or "durable"]}
     return manifest
 
 
@@ -244,6 +258,34 @@ def m9_async_visible_ack_oracle(source, target, srcname, dstname, state, driver,
             "synthetic_scope": "oracle_only_no_source_feedback", "legacy_shortcut_detected": True,
             "early_ack_rejected": True, "no_retroactive_coverage": True, "real_postproof_ack": True,
             "feedback": {key: real[key] for key in ("statuses", "ack_oracle")}, "fingerprints": expected}
+
+
+def validate_m9_async_visible_case(value):
+    try:
+        keys = {"observed", "async_commit", "visible_frontier", "prior_synchronous_prefix", "synthetic_scope",
+                "legacy_shortcut_detected", "early_ack_rejected", "no_retroactive_coverage", "real_postproof_ack", "feedback", "fingerprints"}
+        commit, ahead, prior = (value[key] for key in ("async_commit", "visible_frontier", "prior_synchronous_prefix"))
+        if (set(value) != keys or value["synthetic_scope"] != "oracle_only_no_source_feedback"
+                or any(value[key] is not True for key in ("observed", "legacy_shortcut_detected", "early_ack_rejected", "no_retroactive_coverage", "real_postproof_ack"))
+                or type(ahead) is not int or type(prior) is not int or not 0 < prior < ahead < 2**64
+                or not isinstance(value["fingerprints"], dict) or not value["fingerprints"]
+                or set(commit) != {"ordinal", "connection", "backend_pid", "mode", "writing", "warning_free", "prefix"}
+                or any(type(commit[key]) is not int for key in ("ordinal", "connection", "backend_pid", "prefix"))
+                or not 0 < commit["ordinal"] < 2**64 or not 0 < commit["connection"] <= 64
+                or not 0 < commit["backend_pid"] < 2**31 or not ahead <= commit["prefix"] < 2**64
+                or commit["mode"] != "async" or commit["writing"] is not True or commit["warning_free"] is not True
+                or synchronous_feedback(value["feedback"]) is None):
+            raise ValueError
+        oracle = value["feedback"]["ack_oracle"]
+        if (commit not in oracle["commits"]
+                or not any(proof["prefix"] == prior and proof["ordinal"] < commit["ordinal"] for proof in oracle["proofs"])
+                or not any(proof["prefix"] >= ahead and proof["ordinal"] > commit["ordinal"]
+                           and (proof["connection"], proof["backend_pid"]) == (commit["connection"], commit["backend_pid"])
+                           for proof in oracle["proofs"])
+                or not any(status[1] >= ahead for status in value["feedback"]["statuses"])):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError("M9 async-visible case lacks its independent replay-safe evidence") from None
 
 
 def validate_drain_row(row):
@@ -678,18 +720,30 @@ def require_data_fault(initial, current, fault, previous, work, session):
         raise RuntimeError("held COMMIT is not the newly forwarded fixture DATA transaction") from None
 
 
-def validate_receipt(report, manifest, *, diagnostic_case=None, profile=None):
+def validate_m9_receipt_artifact(report, *, durability=None):
+    artifact = report.get("artifact", {})
+    settings = validate_settings(report.get("settings"))
+    packet = artifact.get("input", {})
+    if (report.get("profile") != "m9" or not isinstance(packet, dict) or set(packet) != M9_INPUT_FIELDS
+            or packet.get("settings_sha256") != m9_settings_sha256(settings)
+            or packet.get("fixture_sha256") != m9_fixture_sha256(clone.ROOT)
+            or artifact.get("schema_sha256") != hashlib.sha256(json.dumps(sorted(M9_INPUT_FIELDS), separators=(",", ":")).encode()).hexdigest()
+            or not isinstance(artifact.get("input_sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", artifact["input_sha256"])):
+        raise RuntimeError("M9 receipt lacks exact private candidate artifact binding")
+    if durability not in (None, "durable", "replay-safe") or settings["durability"] != (durability or "durable"):
+        raise RuntimeError("M9 receipt settings differ from the selected harness durability")
+    return settings
+
+
+def validate_receipt(report, manifest, *, diagnostic_case=None, profile=None, durability=None):
     profile = follow_profile(profile)
+    if durability is not None and profile != "m9":
+        raise RuntimeError("explicit harness durability requires M9")
     if profile == "m9":
-        artifact = report.get("artifact", {})
-        settings = validate_settings(report.get("settings"))
-        packet = artifact.get("input", {})
-        if (report.get("profile") != "m9" or not isinstance(packet, dict) or set(packet) != M9_INPUT_FIELDS
-                or packet.get("settings_sha256") != m9_settings_sha256(settings)
-                or packet.get("fixture_sha256") != m9_fixture_sha256(clone.ROOT)
-                or artifact.get("schema_sha256") != hashlib.sha256(json.dumps(sorted(M9_INPUT_FIELDS), separators=(",", ":")).encode()).hexdigest()
-                or not isinstance(artifact.get("input_sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", artifact["input_sha256"])):
-            raise RuntimeError("M9 receipt lacks exact private candidate artifact binding")
+        validate_m9_receipt_artifact(report, durability=durability)
+        expected = [*CASES, "m9_async_visible_ack_oracle"] if durability == "replay-safe" else list(CASES)
+        if manifest["cases"] != expected:
+            raise RuntimeError("M9 receipt case inventory differs from the selected harness durability")
     scope = report.get("receipt_scope", "full")
     if diagnostic_case is not None:
         if diagnostic_case != "before_commit_rollback" or scope != "diagnostic" or report.get("diagnostic_case") != diagnostic_case:
@@ -719,6 +773,10 @@ def validate_receipt(report, manifest, *, diagnostic_case=None, profile=None):
         if name in report["cases"]:
             validate_data_fault(report["cases"][name].get("data_fault", {}), boundary, runs)
     for name, value in report["cases"].items():
+        if name == "m9_async_visible_ack_oracle":
+            if profile != "m9" or durability != "replay-safe":
+                raise RuntimeError("M9 async-visible case requires explicit private replay-safe execution")
+            validate_m9_async_visible_case(value)
         if profile == "m9" and name in ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_oids", "repeated_restart", "before_commit_rollback", "after_commit_before_feedback", "partial_receive_transaction", "backpressure"):
             if synchronous_feedback(value.get("feedback")) is None:
                 raise RuntimeError("M9 case lacks complete independent synchronous ACK evidence")
@@ -1049,14 +1107,15 @@ class Database(clone.Database):
 
 
 class Driver(clone.Driver):
-    def start(self, source, target, state, *arguments, gate=None):
+    def start(self, source, target, state, *arguments, gate=None, skip_large_objects=True):
         profile = follow_profile(getattr(self, "profile", None))
         durability = getattr(self, "durability", None)
         if durability is not None:
             if profile != "m9" or durability not in ("durable", "replay-safe"):
                 raise RuntimeError("explicit harness durability requires M9")
             arguments = ("--durability", durability, *arguments)
-        process = super().start(source, target, state, "--follow", "--plugin", "pgoutput", *arguments, gate=gate)
+        process = super().start(source, target, state, "--follow", "--plugin", "pgoutput", *arguments,
+                                gate=gate, skip_large_objects=skip_large_objects)
         process.follow_state = state
         return process
 
@@ -1295,11 +1354,13 @@ class Driver(clone.Driver):
 
 def inner(args):
     profile = follow_profile(getattr(args, "profile", None))
+    durability = getattr(args, "durability", None)
     diagnostic_case = getattr(args, "diagnostic_case", None)
     cutover_mode = getattr(args, "cutover", False)
+    profile_arguments = {"profile": profile, "durability": durability} if profile == "m9" else {}
     if cutover_mode:
         import cutover
-    manifest = cutover.load_manifest() if cutover_mode else load_manifest()
+    manifest = cutover.load_manifest(**profile_arguments) if cutover_mode else load_manifest(profile=profile, durability=durability)
     bindir = Path("/usr/lib/postgresql") / args.pair.split("-")[1] / "bin"
     environment = {key: value for key, value in os.environ.items() if not key.startswith(("PG", "RPGMIGRATE_"))}
     environment.update(PGPASSWORD=os.environ["PGPASSWORD"], PG_BINDIR=str(bindir), PATH=str(bindir) + os.pathsep + os.environ["PATH"], LC_ALL="C.UTF-8")
@@ -1327,7 +1388,7 @@ def inner(args):
         def case(name):
             srcname, dstname = "src_" + name, "dst_" + name
             return srcname, dstname, source.create(srcname, True), target.create(dstname), root / name
-        def launch(src, dst, state, *arguments, gate=None, wire=None, target_wire=None, source_name=None, target_name=None):
+        def launch(src, dst, state, *arguments, gate=None, wire=None, target_wire=None, skip_large_objects=True, source_name=None, target_name=None):
             source_name = srcname if source_name is None else source_name
             target_name = dstname if target_name is None else target_name
             if "--resume" in arguments:
@@ -1347,7 +1408,6 @@ def inner(args):
                 target_wire = cleanup.enter_context(WireGate("target", "observe")) if target_wire is None else target_wire
                 wire.attach_ack_oracle(oracle, "source")
                 target_wire.attach_ack_oracle(oracle, "target")
-                src, dst = wire.connection(src), target_wire.connection(dst)
                 resume_native = json.loads((state / "manifest.json").read_text()) if "--resume" in arguments and state.is_dir() else None
                 if (resume_native is not None and resume_native.get("clone_state", {}).get("phase") == "analyzing"
                         and target.authority(target_name, state, driver.work[state], profile=profile) is not None):
@@ -1357,9 +1417,15 @@ def inner(args):
                     wire.hold_copy(["M2 space", "rows"])
                     cleanup.callback(wire.copy_release.set)
                     fresh_bind = True
-            process = driver.start(src, dst, state, *arguments, gate=gate)
+            if wire is not None:
+                src = wire.connection(src)
+            if target_wire is not None:
+                dst = target_wire.connection(dst)
+            process = driver.start(src, dst, state, *arguments, gate=gate, skip_large_objects=skip_large_objects)
             if wire is not None:
                 process.follow_wire = wire
+            if target_wire is not None:
+                process.follow_target_wire = target_wire
             if oracle is not None:
                 process.follow_ack_oracle, process.follow_target_wire = oracle, target_wire
                 if fresh_bind:
@@ -1390,7 +1456,7 @@ def inner(args):
                 receipt["report_validation"]["probe_sha256"] = hashlib.sha256(Path(args.report_probe).read_bytes()).hexdigest()
             if profile == "m9":
                 receipt.update(profile=profile, artifact=driver.m9_artifact, settings=driver.m9_settings)
-            validate_receipt(receipt, manifest, diagnostic_case=diagnostic_case, profile=profile)
+            validate_receipt(receipt, manifest, diagnostic_case=diagnostic_case, profile=profile, durability=durability)
             with Path(args.receipt).open("x" if diagnostic_case else "w") as stream:
                 stream.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 
@@ -1424,15 +1490,26 @@ def inner(args):
             receipt.update(mode="cutover", successful_follow_exit=True, receipt_scope="engine_producer", probe_checked=False,
                            independent_go_evidence="pending_qualified_m6_reader", source_tree=cutover.source_inventory(clone.ROOT))
             receipt["report_validation"] = {"mode": "local_m4_producer", "reports": driver.reports}
-            cutover.validate_receipt(receipt, manifest)
+            if profile == "m9":
+                receipt.update(profile=profile, artifact=driver.m9_artifact, settings=driver.m9_settings)
+            cutover.validate_receipt(receipt, manifest, **profile_arguments)
             Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
             print(json.dumps({"follow_e2e": "engine_producer_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
             return
+        if not diagnostic_case and not args.smoke and "m9_async_visible_ack_oracle" in manifest["cases"]:
+            srcname, dstname, src, dst, state = case("m9_async_visible")
+            wire = cleanup.enter_context(WireGate("source", "observe"))
+            fault = cleanup.enter_context(WireGate("target", "before_sync_commit"))
+            process = launch(src, dst, state, wire=wire, target_wire=fault)
+            driver.ready(process)
+            receipt["cases"]["m9_async_visible_ack_oracle"] = m9_async_visible_ack_oracle(
+                source, target, srcname, dstname, state, driver, process, wire, fault, manifest)
+            driver.stop(process)
         if not diagnostic_case:
             srcname, dstname, src, dst, state = case("dml")
             check_workload(source, srcname, manifest)
             wire = cleanup.enter_context(WireGate("source", "observe"))
-            process = launch(wire.connection(src), dst, state, wire=wire)
+            process = launch(src, dst, state, wire=wire)
             driver.ready(process)
             source.sql(srcname, "BEGIN;\n" + INITIAL_DML + "\nCOMMIT;")
             receipt["cases"]["initial_copy_dml"] = {**converge(srcname, dstname, state, wire, process), "workload_preflight": "rolled_back"}
@@ -1451,7 +1528,7 @@ def inner(args):
             receipt["cases"]["target_type_oids"] = converge(srcname, dstname, state, wire, process)
             for _ in range(3):
                 driver.stop(process, crash=True)
-                process = launch(wire.connection(src), dst, state, "--resume", "--not-consistent", wire=wire)
+                process = launch(src, dst, state, "--resume", "--not-consistent", wire=wire)
                 driver.ready(process)
                 source.sql(srcname, 'UPDATE "M2 space".wide SET changed=changed+1 WHERE id=1;')
                 result = converge(srcname, dstname, state, wire, process)
@@ -1470,10 +1547,8 @@ def inner(args):
             srcname, dstname, src, dst, state = case(name)
             fault = cleanup.enter_context(WireGate(side, mode))
             observed = fault if side == "source" else cleanup.enter_context(WireGate("source", "observe"))
-            process = launch(observed.connection(src), fault.connection(dst) if side == "target" else dst, state,
+            process = launch(src, dst, state,
                              wire=observed, target_wire=fault if side == "target" else None)
-            if side == "target":
-                process.follow_target_wire = fault
             driver.ready(process)
             source.sql(srcname, 'UPDATE "M2 space".wide SET changed=1 WHERE id=1;')
             baseline = converge(srcname, dstname, state, observed, process)
@@ -1521,9 +1596,7 @@ def inner(args):
                 fault.release.set()
             preservation = target.require_crash_preservation(dstname, state, driver.work[state], manifest, held_baseline,
                                 outcome="rolled_back" if mode == "before_commit" else "committed_preserved") if side == "target" else None
-            process = launch(observed.connection(src), dst, state, "--resume", "--not-consistent", wire=observed)
-            if side == "target":
-                process.follow_target_wire = fault
+            process = launch(src, dst, state, "--resume", "--not-consistent", wire=observed)
             driver.ready(process)
             receipt["cases"][name] = {**converge(srcname, dstname, state, observed, process),
                                       "fault_hits": fault.evidence()["hits"], "feedback_held": True}
@@ -1586,7 +1659,7 @@ def inner(args):
             lock.communicate(timeout=10)
         source.sql(srcname, 'UPDATE "M2 space".wide SET changed=9 WHERE id=1;')
         observed = cleanup.enter_context(WireGate("source", "observe"))
-        process = launch(observed.connection(src), dst, state, "--resume", "--not-consistent", wire=observed)
+        process = launch(src, dst, state, "--resume", "--not-consistent", wire=observed)
         driver.ready(process)
         current = json.loads((state / "manifest.json").read_text())
         fresh_binding = current["follow_state"]["binding"]
@@ -1597,7 +1670,7 @@ def inner(args):
         srcname, dstname, src, dst, state = case("backpressure")
         fault = cleanup.enter_context(WireGate("target", "before_commit"))
         observed = cleanup.enter_context(WireGate("source", "observe"))
-        process = launch(observed.connection(src), fault.connection(dst), state, wire=observed, target_wire=fault)
+        process = launch(src, dst, state, wire=observed, target_wire=fault)
         driver.ready(process)
         source.sql(srcname, 'UPDATE "M2 space".wide SET changed=1 WHERE id=1;')
         converge(srcname, dstname, state, observed, process)
@@ -1634,7 +1707,7 @@ def inner(args):
         for name in ("confirmed_flush_gap", "source_wal_loss"):
             srcname, dstname, src, dst, state = case(name)
             observed = cleanup.enter_context(WireGate("source", "observe"))
-            process = launch(observed.connection(src), dst, state, wire=observed)
+            process = launch(src, dst, state, wire=observed)
             driver.ready(process)
             source.sql(srcname, 'UPDATE "M2 space".wide SET changed=1 WHERE id=1;')
             converge(srcname, dstname, state, observed, process)
@@ -1727,11 +1800,14 @@ def main():
     else:
         if args.cutover:
             import cutover
-            manifest = cutover.load_manifest()
-            validator = lambda report, manifest: cutover.validate_receipt(report, manifest, require_images=True)
+            profile_arguments = {"profile": args.profile, "durability": args.durability} if args.profile == "m9" else {}
+            manifest = cutover.load_manifest(**profile_arguments)
+            validator = lambda report, manifest: cutover.validate_receipt(report, manifest, require_images=True,
+                                                                         **profile_arguments)
         else:
-            manifest = load_manifest()
-            validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case, profile=args.profile)
+            manifest = load_manifest(profile=args.profile, durability=args.durability)
+            validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case,
+                                                                 profile=args.profile, durability=args.durability)
         clone.outer(args, program="follow", manifest=manifest,
                     receipt_validator=validator,
                     server_arguments=("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s"))

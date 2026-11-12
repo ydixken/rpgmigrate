@@ -29,18 +29,80 @@ CASES = (
 )
 
 
-def load_manifest(path=None):
+M9_CASES = (*CASES, "m9_final_sequence_sync_failure", "m9_final_large_object_sync_failure")
+
+M9_CHECKPOINT_COLUMNS = frozenset((
+    "magic", "version", "run_id", "nonce", "source_system", "source_database", "generation", "target_system",
+    "target_database", "owner_oid", "schema_oid", "table_oid", "applied_order", "last_xid", "begin_ordinal",
+    "source_commit_lsn", "source_end_lsn", "barrier_epoch", "barrier_counter", "copy_snapshot_token",
+    "copy_consistent_point", "copy_plan_nonce", "clone_state", "certified_lsn", "follow_binding", "drain_end_lsn",
+    "drain_witness_lsn", "drain_kind", "follow_completed",
+))
+APPLIED_FIELDS = ("applied_order", "last_xid", "begin_ordinal", "source_commit_lsn", "source_end_lsn")
+CUTOVER_ROW_FIELDS = ("generation", "barrier_epoch", "barrier_counter", *APPLIED_FIELDS,
+                      "certified_lsn", "copy_consistent_point", "drain_end_lsn", "drain_witness_lsn", "drain_kind", "follow_completed")
+SEQUENCE = '"M2 space"."rows_id_seq"'
+SEQUENCE_SQL = f"SELECT pg_catalog.setval('{SEQUENCE}'::pg_catalog.regclass,1001,true)".encode()
+LO_REFUSAL = "target-large-object: unrecorded target object identity refuses admission"
+LO_COLLISION = [[90007, hashlib.sha256(bytes([byte])).hexdigest()] for byte in (1, 2)] + [0]
+EMPTY_LO = {"objects": 0, "bytes": 0}
+OWNED_OIDS = ("table_oid", "marker_table_oid", "marker_index_oid")
+M9_OWNED_OIDS = (*OWNED_OIDS, "large_object_table_oid", "large_object_index_oid")
+
+
+def cutover_mode(profile, durability):
+    from follow import follow_profile
+    if follow_profile(profile) == "m9":
+        if durability not in (None, "durable", "replay-safe"):
+            raise RuntimeError("M9 cutover durability differs")
+        return durability or "durable"
+    if durability is not None:
+        raise RuntimeError("explicit cutover durability requires M9")
+    return None
+
+
+def load_manifest(path=None, *, profile=None, durability=None):
     from follow import load_manifest as ongoing_manifest
-    path = clone.ROOT / "tests/fixtures/follow/cutover-cases.json" if path is None else path
+    mode = cutover_mode(profile, durability)
+    required = M9_CASES if mode else CASES
+    if path is None:
+        path = clone.ROOT / "tests/fixtures/follow" / ("m9-cutover-cases.json" if mode else "cutover-cases.json")
+    if mode and (path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 65536):
+        raise RuntimeError("M9 cutover case inventory is absent or replaced")
     value = json.loads(path.read_bytes(), object_pairs_hook=clone.unique_object)
-    if not isinstance(value, dict) or set(value) != {"version", "cases"} or type(value["version"]) is not int or value["version"] != 1 or tuple(value["cases"]) != CASES:
+    if (not isinstance(value, dict) or set(value) != {"version", "cases"} or type(value["version"]) is not int
+            or value["version"] != 1 or value["cases"] != list(required)):
         raise RuntimeError("cutover case inventory differs from required producer coverage")
-    return {**ongoing_manifest(), "cases": list(CASES)}
+    return {**ongoing_manifest(), "cases": list(required)}
 
 
-def validate_receipt(report, manifest, *, require_independent_go=False, require_images=False):
+def require_settings(report, mode, expected=None):
+    from follow import validate_settings
+    actual = validate_settings(report.get("settings"))
+    if actual["durability"] != mode or expected is not None and actual != expected:
+        raise RuntimeError("cutover report settings differ from selected or stored settings")
+    return actual
+
+
+def require_m9_work(work):
+    if not isinstance(work, dict) or set(work) != {"migration_uid", "run_id", "workdir_id", "checkpoint_generation"}:
+        raise RuntimeError("M9 cutover lacks the exact caller work identity")
+    uid, run, directory, generation = (work[key] for key in ("migration_uid", "run_id", "workdir_id", "checkpoint_generation"))
+    if (not isinstance(uid, str) or not re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", uid)
+            or run != uid.replace("-", "") or not isinstance(directory, str) or not directory.strip()
+            or len(directory.encode()) > 256 or directory.strip() != directory
+            or re.search(r"[\x00-\x1f\x7f/\\]", directory) or type(generation) is not int or generation != 1):
+        raise RuntimeError("M9 cutover caller work identity differs")
+
+
+def validate_receipt(report, manifest, *, require_independent_go=False, require_images=False, profile=None, durability=None):
+    from follow import validate_follow_report, validate_m9_receipt_artifact
+    mode = cutover_mode(profile, durability)
     if require_independent_go:
         raise RuntimeError("M4 closing requires the qualified independent M6 reader and actual positive Go evidence")
+    settings = validate_m9_receipt_artifact(report, durability=durability) if mode else None
+    if mode and manifest["cases"] != list(M9_CASES):
+        raise RuntimeError("M9 cutover receipt lacks the exact successor inventory")
     clone.validate_receipt(report, manifest, require_reports=False)
     if (report.get("receipt_scope") != "engine_producer" or report.get("mode") != "cutover"
             or report.get("successful_follow_exit") is not True or report.get("power_loss_tested") is not False
@@ -52,61 +114,95 @@ def validate_receipt(report, manifest, *, require_independent_go=False, require_
             or type(source["file_count"]) is not int or not 0 < source["file_count"] <= 4096
             or not isinstance(source["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", source["sha256"])):
         raise RuntimeError("cutover receipt lacks the actual bounded source-tree identity")
+    if mode and source["sha256"] != report["artifact"]["input"]["source_tree_sha256"]:
+        raise RuntimeError("M9 cutover source inventory differs from the artifact")
     if require_images:
         identities = [report.get("runner_image_id"), *report.get("server_image_ids", [])]
         if len(identities) != 3 or any(not isinstance(value, str) or not re.fullmatch(r"(?:sha256:)?[a-f0-9]{64}", value) for value in identities):
             raise RuntimeError("cutover receipt lacks actual immutable runner/source/target image identities")
-    validate_cases(report["cases"])
+        if mode and identities != [report["artifact"]["input"]["runner_image_id"], *report["artifact"]["input"]["server_image_ids"]]:
+            raise RuntimeError("M9 cutover images differ from the artifact")
+    validate_cases(report["cases"], manifest, profile=profile, durability=durability, settings=settings, artifact=report.get("artifact"))
     records = report.get("report_validation", {}).get("reports", [])
     if report.get("report_validation", {}).get("mode") != "local_m4_producer" or not records:
         raise RuntimeError("actual cutover startup/completion reports are absent")
     phases = []
     for record in records:
-        phase = json.loads(record["raw_json"])["phase"]
+        phase = json.loads(record["raw_json"], object_pairs_hook=clone.unique_object)["phase"]
         if phase not in ("streaming", "completed") or record.get("probe_checked") is not False:
             raise RuntimeError("cutover producer report claims unsupported Go evidence or lifecycle")
-        clone.validate_operator_report(record["raw_json"], record["binding"], "clone", phase == "completed", phases=(phase,))
+        checked = validate_follow_report(record["raw_json"], record["binding"], "clone", phase == "completed", profile=profile, phases=(phase,))
+        if mode:
+            require_m9_work(checked["work"])
+            require_settings(checked, mode, settings)
         phases.append(phase)
     if "streaming" not in phases or "completed" not in phases:
         raise RuntimeError("cutover producer receipt lacks both streaming and completed lifecycle reports")
+    if mode:
+        for case in report["cases"].values():
+            for record in case.get("worker_reports", []):
+                if record not in records:
+                    raise RuntimeError("M9 cutover worker frame was not retained in the bound producer reports")
 
 
-def completed_output(output, binding, *, already_completed=False):
+def completed_output(output, binding, *, already_completed=False, profile=None, durability=None, settings=None):
+    from follow import validate_follow_report
+    mode = cutover_mode(profile, durability)
     lines = output.splitlines(keepends=True)
     if len(lines) != (1 if already_completed else 2) or any(not line.startswith(b"native-report: ") or not line.endswith(b"\n") for line in lines):
         raise RuntimeError("successful follow requires exact startup and completed report frames")
+    if mode:
+        require_m9_work(binding["work"])
     if not already_completed:
-        clone.validate_operator_report(lines[0][15:], binding, "clone", False, phases=("streaming",))
-    clone.validate_operator_report(lines[-1][15:], binding, "clone", True)
+        startup = validate_follow_report(lines[0][15:], binding, "clone", False, profile=profile, phases=("streaming",))
+        if mode:
+            settings = require_settings(startup, mode, settings)
+    final = validate_follow_report(lines[-1][15:], binding, "clone", True, profile=profile)
+    if mode:
+        require_settings(final, mode, settings)
     return lines[-1]
 
 
-def bound_report(output, binding, command, payload, capability):
+def bound_report(output, binding, command, payload, capability, *, mode=None, settings=None):
     lines = output.splitlines(keepends=True)
     if len(lines) != 1 or not lines[0].startswith(b"native-report: ") or not lines[0].endswith(b"\n"):
         raise RuntimeError("cutover command requires exactly one complete report frame")
     report = json.loads(lines[0][15:], object_pairs_hook=clone.unique_object)
-    if (not isinstance(report, dict)
-            or set(report) != {"protocol_version", "engine_version", "command", "capabilities", "work", "phase", payload}
+    fields = {"protocol_version", "engine_version", "command", "capabilities", "work", "phase", payload}
+    capabilities = [capability]
+    if mode:
+        fields.add("settings")
+        capabilities.append("durability.status.v1")
+    if (not isinstance(report, dict) or set(report) != fields
             or type(report["protocol_version"]) is not int or report["protocol_version"] != 1
             or not isinstance(report["engine_version"], str) or not report["engine_version"]
             or binding["command"] != command or report["command"] != command or report["work"] != binding["work"]
-            or type(report["work"].get("checkpoint_generation")) is not int
-            or report["capabilities"] != [capability] or report["phase"] != "completed"):
+            or not isinstance(report["work"], dict) or type(report["work"].get("checkpoint_generation")) is not int
+            or report["capabilities"] != capabilities or report["phase"] != "completed"):
         raise RuntimeError("cutover report differs from its trusted caller binding")
+    if mode:
+        require_m9_work(report["work"])
+        require_settings(report, mode, settings)
     return report
 
 
-def replication_output(output, binding, end, *, certified_floor=0):
+def replication_output(output, binding, end, *, certified_floor=0, profile=None, durability=None, settings=None):
     if binding["command"] not in ("stream sentinel get", "stream sentinel set endpos"):
         raise RuntimeError("cutover acknowledgment has a different caller command")
-    report = bound_report(output, binding, binding["command"], "replication", "cutover.v1")
+    mode = cutover_mode(profile, durability)
+    report = bound_report(output, binding, binding["command"], "replication", "cutover.v1", mode=mode, settings=settings)
     value = report["replication"]
     if (not isinstance(value, dict)
             or set(value) != {"certified_lsn", "durable_replay_lsn", "end_lsn", "end_persisted", "drained", "checkpoint_id", "drain_proof"}
             or value["end_lsn"] != end or value["end_persisted"] is not True or value["drained"] is not True
             or not isinstance(value["checkpoint_id"], str) or not re.fullmatch(r"[0-9]+:[0-9]+:[0-9]+", value["checkpoint_id"])):
         raise RuntimeError("cutover acknowledgment lacks the exact persisted endpos")
+    if mode:
+        generation, epoch, counter = value["checkpoint_id"].split(":")
+        if (not lsn(end) or generation != str(binding["work"]["checkpoint_generation"])
+                or any(len(part) > 20 or part != str(int(part)) or int(part) >= 2**64 for part in (epoch, counter))
+                or counter == "0"):
+            raise RuntimeError("M9 cutover acknowledgment has an invalid checkpoint token")
     certified, durable = lsn(value["certified_lsn"]), lsn(value["durable_replay_lsn"])
     if certified < certified_floor or durable < certified:
         raise RuntimeError("cutover acknowledgment regresses independent durable certification")
@@ -164,7 +260,7 @@ def check_diagnostics(stdout, stderr, environment, status):
             subprocess.CompletedProcess([], status, stdout, stderr))).encode(), environment, sys._getframe()))
 
 
-def finish_completed(driver, worker, *, already_completed=False):
+def finish_completed(driver, worker, *, already_completed=False, profile=None, durability=None):
     try:
         status = worker.wait(timeout=120)
     except subprocess.TimeoutExpired:
@@ -175,8 +271,14 @@ def finish_completed(driver, worker, *, already_completed=False):
     stdout, stderr = worker.output.read_bytes(), worker.error_output.read_bytes()
     check_diagnostics(stdout, stderr, worker.environment, status)
     binding = json.loads(worker.binding.read_text())
-    final = completed_output(stdout, binding, already_completed=already_completed)
-    return driver.report(final, worker.binding, "clone", True)
+    mode = cutover_mode(profile, durability)
+    settings = driver.m9_settings if mode else None
+    final = completed_output(stdout, binding, already_completed=already_completed, profile=profile, durability=durability, settings=settings)
+    if not mode:
+        return driver.report(final, worker.binding, "clone", True)
+    raw = final[15:].rstrip(b"\n")
+    driver.reports.append({"binding": binding, "raw_json": raw.decode(), "probe_checked": False})
+    return json.loads(raw, object_pairs_hook=clone.unique_object)
 
 
 def persisted_endpos(driver, state, end):
@@ -196,7 +298,8 @@ def command_observation(result):
              "state-control: boundary is below admission floor or cleanup is terminal": "admission_floor_or_cleanup",
              "state-control: control lock is busy": "control_lock_busy",
              "stream commands require existing native state": "existing_state_required",
-             "--target is required for measured stream state": "target_required"}
+             "--target is required for measured stream state": "target_required",
+             LO_REFUSAL: "unrecorded_large_object_identity"}
     value = {"returncode": result.returncode, "errors": []}
     for name in ("stdout", "stderr"):
         data = getattr(result, name)
@@ -235,9 +338,11 @@ def diagnostic_authority(driver, target, name, state, deadline):
     target._observation_deadline = min(previous, deadline) if previous is not None else deadline
     try:
         row = target.authority(name, state, driver.work[state])
-        evidence = producer_authority(target, name, state, driver.work[state], row)
+        profile = getattr(driver, "profile", None)
+        extra = {"profile": profile, "durability": driver.durability, "settings": driver.m9_settings} if profile == "m9" else {}
+        evidence = producer_authority(target, name, state, driver.work[state], row, **extra)
         catalog = evidence["catalog"]
-        return {"scope": "diagnostic", "durability_confirmed": False, "checkpoint": checkpoint_observation(row),
+        return {"scope": "diagnostic", "durability_confirmed": False, "checkpoint": checkpoint_observation(row, profile=profile),
                 "catalog": {"sha256": hashlib.sha256(json.dumps(catalog, sort_keys=True).encode()).hexdigest(),
                             **{key: len(catalog[key]) for key in ("objects", "columns", "constraints", "indexes")}},
                 "provenance_sha256": hashlib.sha256(json.dumps(evidence["target_provenance"], sort_keys=True).encode()).hexdigest()}
@@ -368,7 +473,7 @@ def active_fence_request(driver, state, target, worker, gate, end, *, observe=No
             "local_request_retained": True, "control_lock_released": True, "fault_hits": 1}
 
 
-def completed_retry(driver, state, target, end, *, certified_floor=0):
+def completed_retry(driver, state, target, end, *, certified_floor=0, profile=None, durability=None):
     if driver.report_probe is not None:
         raise RuntimeError("positive cutover Go validation requires a qualified independent M6 reader binding")
     reports = []
@@ -378,7 +483,8 @@ def completed_retry(driver, state, target, end, *, certified_floor=0):
         if result.returncode != 0:
             raise RuntimeError("identical endpos retry failed after worker completion")
         binding = json.loads(binding_path.read_text())
-        value = replication_output(result.stdout, binding, end, certified_floor=certified_floor)
+        value = replication_output(result.stdout, binding, end, certified_floor=certified_floor, profile=profile,
+                                   durability=durability, settings=getattr(driver, "m9_settings", None))
         if first is not None and value["replication"] != first:
             raise RuntimeError("completed retry changed immutable drain or checkpoint authority")
         first = value["replication"]
@@ -420,7 +526,7 @@ def require_wire_witness(evidence, report):
         raise RuntimeError("drain lacks independently forwarded coverage or promoted its witness into feedback") from None
 
 
-def certification_race(driver, source, target, srcname, dstname, state, worker, *, end):
+def certification_race(driver, source, target, srcname, dstname, state, worker, *, end, **profile_args):
     if not lsn(end):
         raise RuntimeError("certification race requires the caller's saved endpos")
     marker = source.sql("postgres", "SELECT pg_logical_emit_message(false,'rpgmigrate_m4','certification-race');").decode().strip()
@@ -442,8 +548,8 @@ def certification_race(driver, source, target, srcname, dstname, state, worker, 
     if result.returncode != 0 or result.stdout != (end + "\n").encode():
         raise RuntimeError("certification above endpos prevented the unchanged explicit request")
     persisted_endpos(driver, state, end)
-    finish_completed(driver, worker)
-    retry = completed_retry(driver, state, target.connection(dstname), end, certified_floor=lsn(row["certified_lsn"]))
+    finish_completed(driver, worker, **profile_args)
+    retry = completed_retry(driver, state, target.connection(dstname), end, certified_floor=lsn(row["certified_lsn"]), **profile_args)
     return {**retry, "scope": "actual_sampled_lsn_certification_race", "sampled_end_lsn": end,
             "certified_before_request": row["certified_lsn"], "unrelated_wal_lsn": marker,
             "applied_anchor_floor": floor, "worker_completed": True}
@@ -520,14 +626,14 @@ EXISTS(SELECT FROM pg_locks WHERE {lock})) FROM ONLY {table};
             "power_loss_tested": False, "unflushed_wal_proven": False}
 
 
-def require_runtime_frontiers(row, slot, report):
+def require_runtime_frontiers(row, slot, report, *, completed=True):
     value = report["replication"]
     proof = value["drain_proof"]
     applied = lsn(row["source_end_lsn"]) if row["source_end_lsn"] is not None else 0
     certified = lsn(row["certified_lsn"]) if row["certified_lsn"] is not None else 0
     durable = max(applied, certified, lsn(row["copy_consistent_point"]))
     token = f"{row['generation']}:{row['barrier_epoch']}:{row['barrier_counter']}"
-    if (row["follow_completed"] is not True or row["drain_end_lsn"] != value["end_lsn"]
+    if (row["follow_completed"] is not completed or row["drain_end_lsn"] != value["end_lsn"]
             or row["drain_witness_lsn"] != proof["replay_lsn"] or row["drain_kind"] != proof["kind"]
             or token != value["checkpoint_id"] or certified != lsn(value["certified_lsn"])
             or durable != lsn(value["durable_replay_lsn"])
@@ -638,7 +744,7 @@ def require_checked_close_refusal(value):
         raise RuntimeError("completed resume close must refuse with Pgsql exit4 and empty stdout")
 
 
-def validate_completed_close(value, clean):
+def validate_completed_close(value, clean, *, profile=None, durability=None, settings=None):
     try:
         fields = {"observed", "scope", "work", "caller_goal", "before", "after", "recovered", "fault_held", "fault",
                   "fault_hits", "target_wire", "backend_absence", "worker_result", "worker_reaped", "relay_workers_reaped",
@@ -692,15 +798,183 @@ def validate_completed_close(value, clean):
         if (not isinstance(record, dict) or record.get("probe_checked") is not False or record.get("independent_go_evidence") != "pending_qualified_m6_reader"
                 or record["binding"] != {"command": "clone", "work": value["work"]}):
             raise RuntimeError("completed resume close lacks bound fault-free producer completion")
-        completed_output(b"native-report: " + record["raw_json"].encode().rstrip(b"\n") + b"\n", record["binding"], already_completed=True)
+        completed_output(b"native-report: " + record["raw_json"].encode().rstrip(b"\n") + b"\n", record["binding"],
+                         already_completed=True, profile=profile, durability=durability, settings=settings)
     except (KeyError, TypeError, ValueError):
         raise RuntimeError("completed resume close receipt is missing or malformed") from None
 
 
-def validate_cases(cases):
+def require_producer_authority(handoff, work, row, *, mode=None, settings=None):
+    catalog = handoff["catalog"]
+    full = handoff["checkpoint_row"]
+    provenance = handoff["target_provenance"]
+    native_format, metadata_version = (10, 7) if mode else (8, 6)
+    keys = M9_OWNED_OIDS if mode else OWNED_OIDS
+    if (handoff.get("receipt_scope") != "engine_producer" or handoff.get("independent_go_evidence") != "pending_qualified_m6_reader"
+            or type(handoff.get("native_format")) is not int or handoff["native_format"] != native_format
+            or type(handoff.get("metadata_version")) is not int or handoff["metadata_version"] != metadata_version
+            or handoff.get("work") != work or type(full.get("version")) is not int
+            or full["version"] != metadata_version or len(full) != 29
+            or any(full.get(key) != item for key, item in row.items())
+            or {item["attname"] for item in catalog["columns"]} != set(full) or len(catalog["columns"]) != 29
+            or {item["oid"] for item in catalog["objects"]} != {provenance[key] for key in keys}
+            or not catalog["constraints"] or not catalog["indexes"] or not isinstance(handoff["follow_state"]["binding"], dict)):
+        raise RuntimeError("cutover producer omitted its actual catalog/provenance handoff")
+    if mode:
+        require_settings({"settings": handoff["follow_state"].get("effective_settings")}, mode, settings)
+        binding = provenance["intent"]["binding"]
+        names = (binding["table_name"], "copy_done", "copy_done_pkey", "large_object_done", "large_object_done_pkey")
+        parents = (None, None, provenance["marker_table_oid"], None, provenance["large_object_table_oid"])
+        expected = {provenance[key]: (name, kind, provenance["schema_oid"], binding["owner_oid"], "p", parent)
+                    for key, name, kind, parent in zip(keys, names, ("r", "r", "i", "r", "i"), parents)}
+        fields = ("relname", "relkind", "relnamespace", "relowner", "relpersistence", "index_parent")
+        observed = {item["oid"]: tuple(item[field] for field in fields) for item in catalog["objects"]}
+        if (set(full) != M9_CHECKPOINT_COLUMNS or type(binding["metadata_version"]) is not int or binding["metadata_version"] != 7
+                or len(expected) != 5 or len(catalog["objects"]) != 5 or expected != observed
+                or any(type(oid) is not int or not 0 < oid < 2**32 for oid in expected)
+                or full["table_oid"] != provenance["table_oid"] or full["schema_oid"] != provenance["schema_oid"]
+                or full["owner_oid"] != binding["owner_oid"] or full["run_id"] != "\\x" + work["run_id"]):
+            raise RuntimeError("M9 cutover lacks the exact 29 columns and five owned object identities")
+
+
+def require_sync_prefix(evidence, prefix, *, after=0, session=None):
+    from follow import synchronous_feedback
+    statuses = synchronous_feedback(evidence)
+    if (statuses is None or statuses != [tuple(position) for stream in evidence["logical"]["streams"] for position in stream["statuses"]]):
+        raise RuntimeError("M9 cutover lacks complete independently observed synchronous feedback")
+    oracle = evidence["ack_oracle"]
+    commits = oracle["commits"]
+    if not isinstance(commits, list) or not 0 < len(commits) <= 256:
+        raise RuntimeError("M9 cutover lacks a bounded target writing COMMIT inventory")
+    for proof in oracle["proofs"]:
+        corresponding = [commit for commit in commits if commit["ordinal"] == proof["ordinal"]]
+        expected = {**proof, "mode": "sync", "writing": True, "warning_free": True}
+        if corresponding != [expected]:
+            raise RuntimeError("M9 cutover proof lacks the corresponding warning-free synchronous writing COMMIT")
+    if not any(proof["ordinal"] > after and proof["prefix"] == prefix
+               and (session is None or (proof["connection"], proof["backend_pid"]) == session)
+               for proof in oracle["proofs"]):
+        raise RuntimeError("M9 cutover row has no covering synchronous writing COMMIT proof")
+
+
+def sequence_binding(value, artifact):
+    row = value["producer_authority"]["checkpoint_row"]
+    identity = value["sequence_identity"]
+    if (set(identity) != {"source", "target"}
+            or any(set(item) != {"oid", "namespace_oid", "owner_oid"}
+                   or any(type(oid) is not int or not 0 < oid < 2**32 for oid in item.values())
+                   for item in identity.values())):
+        raise RuntimeError("sequence failure lacks its independently measured fixture identities")
+    packet = artifact["input"]
+    binding = {
+        "case": value["scope"], "source_commit": packet["source_commit"], "source_tree": packet["source_git_tree"],
+        "artifact_inputs_sha256": artifact["input_sha256"], "work_identity": value["caller_goal"]["work"],
+        "source_identity": {"system_identifier": row["source_system"], "database_oid": row["source_database"]},
+        "target_identity": {"system_identifier": row["target_system"], "database_oid": row["target_database"]},
+        "sequence_identity": identity,
+        "target_sequence_facts": {"maximum": 1000, "current": 1000, "start": 1, "is_called": True},
+        "source_sequence_facts": {"current": 1001, "is_called": True},
+        "applied_transaction": value["data_fault"]["source"], "endpos": value["caller_goal"]["end_lsn"],
+    }
+    return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def streaming_frame(record, work, mode, settings):
+    from follow import validate_follow_report
+    binding = {"command": "clone", "work": work}
+    if record["binding"] != binding or record.get("probe_checked") is not False or "\n" in record["raw_json"]:
+        raise RuntimeError("M9 failure lacks the actual bound streaming frame")
+    raw = record["raw_json"].encode()
+    report = validate_follow_report(raw, binding, "clone", False, profile="m9", phases=("streaming",))
+    require_m9_work(report["work"])
+    require_settings(report, mode, settings)
+    return b"native-report: " + raw + b"\n"
+
+
+def validate_finalization_failure(value, name, *, mode, settings, artifact):
+    from follow import authority_frontier, validate_data_fault, validate_drain_row
+    try:
+        sequence = name == M9_CASES[-2]
+        work, end = (value["caller_goal"][key] for key in ("work", "end_lsn"))
+        frames = value["worker_reports"]
+        if (name not in M9_CASES[-2:] or value["scope"] != name or value["observed"] is not True
+                or value["worker_reaped"] is not True or len(frames) != 1
+                or value["local_endpos"] != {"end_lsn": lsn(end), "sealed": True}
+                or "reports" in value or "worker_completed" in value):
+            raise RuntimeError("M9 finalization failure lost the exact saved request or joined incomplete worker")
+        stdout = streaming_frame(frames[0], work, mode, settings)
+        result = value["worker_result"]
+        code, category = (4, "Pgsql") if sequence else (7, "Target")
+        error_key, reason = ("sqlstate", "22003") if sequence else ("diagnostic", "unrecorded_large_object_identity")
+        errors = result["errors"]
+        stderr = result["stderr"]
+        if (type(result["returncode"]) is not int or result["returncode"] != code
+                or result["stdout"] != {"bytes": len(stdout), "sha256": hashlib.sha256(stdout).hexdigest()}
+                or set(stderr) != {"bytes", "sha256"} or type(stderr["bytes"]) is not int or not 0 < stderr["bytes"] <= 1024 * 1024
+                or not re.fullmatch(r"[a-f0-9]{64}", stderr["sha256"])
+                or len(errors) != 1 or set(errors[0]) - {"category", "exit_code", error_key, "error_origin"}
+                or errors[0]["category"] != category or type(errors[0]["exit_code"]) is not int
+                or errors[0]["exit_code"] != code or errors[0][error_key] != reason):
+            raise RuntimeError("M9 finalization failure differs from the exact engine refusal")
+
+        data = value["data_fault"]
+        validate_data_fault(data, "before_commit", {work["run_id"]})
+        transaction, before = data["source"], value["before_drain"]
+        authority = value["producer_authority"]
+        row = authority["checkpoint_row"]
+        require_producer_authority(authority, work, row, mode=mode, settings=settings)
+        validate_drain_row(before)
+        validate_drain_row(row)
+        if (set(before) != set(CUTOVER_ROW_FIELDS) or before["follow_completed"] is not False
+                or before["drain_end_lsn"] is not None or authority_frontier(before) <= 0
+                or not 0 < transaction["end_lsn"] == lsn(before["source_end_lsn"]) <= lsn(end)
+                or lsn(before["source_commit_lsn"]) != transaction["commit_lsn"] or before["last_xid"] != transaction["xid"]
+                or data["session"]["database_oid"] != row["target_database"]
+                or any(before[key] != row[key] for key in (*APPLIED_FIELDS, "generation", "barrier_epoch", "copy_consistent_point"))
+                or type(row["barrier_counter"]) is not int or not 0 < before["barrier_counter"] < row["barrier_counter"] < 2**64
+                or type(value["drain_start_ordinal"]) is not int or value["drain_start_ordinal"] <= 0):
+            raise RuntimeError("M9 finalization failure lacks independently applied and retained C before durable drain")
+        frontier = max(authority_frontier(row), lsn(row["copy_consistent_point"]))
+        certified = lsn(row["certified_lsn"]) if row["certified_lsn"] is not None else 0
+        proof = {"replication": {"end_lsn": end, "certified_lsn": f"{certified >> 32:X}/{certified & 0xffffffff:X}",
+                                 "durable_replay_lsn": f"{frontier >> 32:X}/{frontier & 0xffffffff:X}",
+                                 "checkpoint_id": f"{row['generation']}:{row['barrier_epoch']}:{row['barrier_counter']}",
+                                 "drain_proof": {"replay_lsn": row["drain_witness_lsn"], "kind": row["drain_kind"]}}}
+        require_runtime_frontiers(row, value["source_slot"], proof, completed=False)
+        require_wire_witness(value["wire"], proof)
+        session = (data["fault"]["connection"], data["session"]["pid"])
+        evidence = value["wire"]
+        if sequence:
+            witness = value["sequence_failure"]
+            pre, final = witness["pre_error_ack"], evidence["ack_oracle"]
+            expected = {"version": 1, "statement_class": "final_sequence_setval",
+                        "fixture_binding_sha256": sequence_binding(value, artifact),
+                        "statement_sha256": hashlib.sha256(SEQUENCE_SQL).hexdigest(),
+                        "connection": session[0], "backend_pid": session[1], "parameter_count": 0,
+                        "parse_forwarded": True, "bind_forwarded": True, "execute_forwarded": True, "error_observed": True,
+                        "sqlstate": "22003", "invalid": False, "overflow": False, "matches": 1, "pre_error_ack": pre}
+            if (witness != expected or any(type(witness[key]) is not type(item) for key, item in expected.items())
+                    or final["invalid"] is not True or type(final["ordinal"]) is not int or final["ordinal"] <= pre["ordinal"]
+                    or final != {**pre, "invalid": True, "ordinal": final["ordinal"]}):
+                raise RuntimeError("M9 sequence failure lacks the exact backend witness and retained global ACK invalidation")
+            evidence = {**evidence, "ack_oracle": pre}
+        else:
+            control = json.loads(row["clone_state"], object_pairs_hook=clone.unique_object)["large_objects"]
+            lo = value["lo_setup"]
+            if (lo != {"initial": EMPTY_LO, "before": [[], [], 0], "introduced": LO_COLLISION}
+                    or value["lo_after"] != LO_COLLISION or control["initial"] != EMPTY_LO or control["final_sync"] is not None):
+                raise RuntimeError("M9 LO failure lacks independent empty initial completion and retained unowned collision")
+        require_sync_prefix(evidence, frontier, after=value["drain_start_ordinal"], session=session)
+    except (KeyError, TypeError, ValueError, IndexError):
+        raise RuntimeError("M9 finalization failure evidence is absent or malformed") from None
+
+
+def validate_cases(cases, manifest=None, *, profile=None, durability=None, settings=None, artifact=None):
     from follow import authority_frontier, validate_crash_sessions, validate_drain_row, validate_data_fault
-    manifest = load_manifest()
-    if set(cases) != set(CASES):
+    mode = cutover_mode(profile, durability)
+    if manifest is None:
+        manifest = load_manifest(profile=profile, durability=durability)
+    if set(cases) != set(M9_CASES if mode else CASES):
         raise RuntimeError("cutover producer case inventory is missing or unexpected")
 
     def oracles(value):
@@ -732,7 +1006,8 @@ def validate_cases(cases):
             if record.get("probe_checked") is not False or record.get("independent_go_evidence") != "pending_qualified_m6_reader":
                 raise RuntimeError("local producer evidence fabricated positive independent Go validation")
             raw = record["raw_json"].encode()
-            report = replication_output(b"native-report: " + raw + (b"" if raw.endswith(b"\n") else b"\n"), record["binding"], value["end_lsn"])
+            report = replication_output(b"native-report: " + raw + (b"" if raw.endswith(b"\n") else b"\n"), record["binding"], value["end_lsn"],
+                                        profile=profile, durability=durability, settings=settings)
             if previous is not None and previous != report["replication"]:
                 raise RuntimeError("identical completed acknowledgment changed its immutable row/token")
             previous = report["replication"]
@@ -742,20 +1017,19 @@ def validate_cases(cases):
             authority_frontier(value["target_row"])
             require_runtime_frontiers(value["target_row"], value["source_slot"], report)
             require_wire_witness(value["wire"], report)
-        handoff = value["producer_authority"]
-        catalog = handoff["catalog"]
-        full_row = handoff["checkpoint_row"]
-        provenance = handoff["target_provenance"]
-        if (handoff.get("receipt_scope") != "engine_producer" or handoff.get("independent_go_evidence") != "pending_qualified_m6_reader"
-                or type(handoff.get("native_format")) is not int or handoff["native_format"] != 8
-                or type(handoff.get("metadata_version")) is not int or handoff["metadata_version"] != 6
-                or handoff.get("work") != value["caller_goal"]["work"] or type(full_row.get("version")) is not int
-                or full_row["version"] != 6 or len(full_row) != 29
-                or any(full_row.get(key) != item for key, item in value["target_row"].items())
-                or {item["attname"] for item in catalog["columns"]} != set(full_row) or len(catalog["columns"]) != 29
-                or {item["oid"] for item in catalog["objects"]} != {provenance[key] for key in ("table_oid", "marker_table_oid", "marker_index_oid")}
-                or not catalog["constraints"] or not catalog["indexes"] or not isinstance(handoff["follow_state"]["binding"], dict)):
-            raise RuntimeError("cutover producer omitted its actual native8 catalog/provenance handoff")
+        require_producer_authority(value["producer_authority"], value["caller_goal"]["work"], value["target_row"],
+                                   mode=mode, settings=settings)
+        if mode:
+            require_sync_prefix(value["wire"], lsn(report["replication"]["durable_replay_lsn"]))
+            if value["large_objects"] != {"source": {}, "target": {}, "lo_verified": True}:
+                raise RuntimeError("M9 cutover lacks the independent final LO inventory comparison")
+            frames = value["worker_reports"]
+            binding = {"command": "clone", "work": value["caller_goal"]["work"]}
+            if (not isinstance(frames, list) or len(frames) != 2
+                    or any(item.get("binding") != binding or item.get("probe_checked") is not False for item in frames)):
+                raise RuntimeError("M9 cutover lacks the joined worker's exact report bindings")
+            output = b"".join(b"native-report: " + item["raw_json"].encode().rstrip(b"\n") + b"\n" for item in frames)
+            completed_output(output, binding, profile=profile, durability=durability, settings=settings)
         oracles(value)
         return report
 
@@ -838,7 +1112,10 @@ def validate_cases(cases):
         for record in records:
             raw = record["raw_json"].encode()
             cleanup_output(b"native-report: " + raw + (b"" if raw.endswith(b"\n") else b"\n"), record["binding"], clean["obligations"])
-        validate_completed_close(cases[CASES[9]], clean)
+        validate_completed_close(cases[CASES[9]], clean, profile=profile, durability=durability, settings=settings)
+        if mode:
+            for name in M9_CASES[-2:]:
+                validate_finalization_failure(cases[name], name, mode=mode, settings=settings, artifact=artifact)
     except (KeyError, TypeError, ValueError):
         raise RuntimeError("cutover producer evidence is missing or malformed") from None
 
@@ -893,10 +1170,11 @@ def source_inventory(root):
     return {"file_count": len(entries), "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def completion(driver, source, target, srcname, dstname, state, worker, wire, end, expected, *, retry=None):
+def completion(driver, source, target, srcname, dstname, state, worker, wire, end, expected, *, retry=None, profile=None, durability=None):
     if worker.poll() != 0:
         raise RuntimeError("completion evidence requires a positively joined successful worker")
-    retry = completed_retry(driver, state, target.connection(dstname), end) if retry is None else retry
+    mode = cutover_mode(profile, durability)
+    retry = completed_retry(driver, state, target.connection(dstname), end, profile=profile, durability=durability) if retry is None else retry
     report = json.loads(retry["reports"][0]["raw_json"])
     row = target.authority(dstname, state, driver.work[state])
     slot = clone.wait_for(lambda: (value if (value := source.slot(srcname, state))["active"] is False else None),
@@ -907,14 +1185,24 @@ def completion(driver, source, target, srcname, dstname, state, worker, wire, en
         raise RuntimeError("cutover witness capture is incomplete, ambiguous or over its bound")
     require_runtime_frontiers(row, slot, report)
     require_wire_witness(evidence, report)
-    actual = target.fingerprint(dstname, load_manifest())
+    actual = target.fingerprint(dstname, load_manifest(profile=profile, durability=durability))
     clone.require_equal(expected, actual)
-    fields = ("generation", "barrier_epoch", "barrier_counter", "applied_order", "last_xid", "begin_ordinal",
-              "source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "drain_end_lsn",
-              "drain_witness_lsn", "drain_kind", "follow_completed")
-    return {**retry, "caller_goal": saved_goal(driver, state, end), "worker_completed": True,
+    m9 = {}
+    if mode:
+        from copy_features import observe_large_objects
+        require_sync_prefix(evidence, lsn(report["replication"]["durable_replay_lsn"]))
+        binding = json.loads(worker.binding.read_bytes(), object_pairs_hook=clone.unique_object)
+        stdout = worker.output.read_bytes()
+        completed_output(stdout, binding, profile=profile, durability=durability, settings=driver.m9_settings)
+        request = persisted_endpos(driver, state, end)
+        if request.get("sealed") is not True:
+            raise RuntimeError("M9 cutover local endpos was not sealed")
+        m9 = {"worker_reports": [{"binding": binding, "raw_json": line[15:].decode(), "probe_checked": False}
+                                 for line in stdout.splitlines()],
+              "large_objects": observe_large_objects(source, target, srcname, dstname, {})}
+    return {**retry, **m9, "caller_goal": saved_goal(driver, state, end), "worker_completed": True,
             "source_fingerprints": expected, "target_fingerprints": actual,
-            "target_row": {key: row[key] for key in fields}, "wire": evidence,
+            "target_row": {key: row[key] for key in CUTOVER_ROW_FIELDS}, "wire": evidence,
             "source_slot": {key: slot[key] for key in ("confirmed_flush_lsn", "restart_lsn")}}
 
 
@@ -927,7 +1215,7 @@ def resource_snapshot(source, srcname, state):
 
 
 
-def completed_resumes(driver, source, target, srcname, dstname, state, launch, expected):
+def completed_resumes(driver, source, target, srcname, dstname, state, launch, expected, **profile_args):
     before = target.authority(dstname, state, driver.work[state])
     if not before or before["follow_completed"] is not True:
         raise RuntimeError("single-frame completed resume requires an already completed exact owned row")
@@ -938,10 +1226,10 @@ def completed_resumes(driver, source, target, srcname, dstname, state, launch, e
     for _ in range(2):
         worker = launch(source.connection(srcname), target.connection(dstname), state, "--resume", "--not-consistent", *extra,
                         source_name=srcname, target_name=dstname)
-        finish_completed(driver, worker, already_completed=True)
+        finish_completed(driver, worker, already_completed=True, **profile_args)
         if target.authority(dstname, state, driver.work[state]) != before or resource_snapshot(source, srcname, state) != inventory:
             raise RuntimeError("completed resume changed immutable authority or source resource inventory")
-        clone.require_equal(expected, target.fingerprint(dstname, load_manifest()))
+        clone.require_equal(expected, target.fingerprint(dstname, load_manifest(**profile_args)))
     return {"completed_resumes": 2, "resume_row_unchanged": True}
 
 
@@ -978,24 +1266,36 @@ def idle_certification(driver, source, target, srcname, dstname, state, worker):
     return clone.wait_for(certified, "fresh independently observed idle target certification", timeout=90)
 
 
-def producer_authority(target, name, state, work, row):
+def producer_authority(target, name, state, work, row, *, profile=None, durability=None, settings=None):
     native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
-    record = native["target_provenance"][0]["record"]
-    if native["format_version"] != 8 or len(row) != 29 or row["version"] != 6:
-        raise RuntimeError("M6 producer handoff requires the exact native8 metadata6 layout")
+    mode = cutover_mode(profile, durability)
+    native_format, metadata_version = (10, 7) if mode else (8, 6)
+    records = native["target_provenance"]
+    if (native["format_version"] != native_format or not isinstance(row, dict) or len(row) != 29
+            or row["version"] != metadata_version or mode and (len(records) != 1 or records[0].get("phase") != "confirmed")):
+        raise RuntimeError("cutover producer handoff has a different native/metadata layout")
+    record = records[0]["record"]
+    keys = M9_OWNED_OIDS if mode else OWNED_OIDS
+    oids = [record[key] for key in keys]
+    if len(set(oids)) != len(keys) or any(type(oid) is not int or not 0 < oid < 2**32 for oid in oids):
+        raise RuntimeError("cutover producer catalog has an invalid owned identity")
     oid = record["table_oid"]
+    index_parent = ",(SELECT indrelid::bigint FROM pg_catalog.pg_index WHERE indexrelid=pg_class.oid) AS index_parent" if mode else ""
     catalog = json.loads(target.sql(name, f"""SELECT json_build_object(
-'objects',(SELECT json_agg(c ORDER BY c.oid) FROM (SELECT oid::bigint,relnamespace::bigint,relowner::bigint,relname,relkind,relpersistence,relrowsecurity,relforcerowsecurity,relreplident,relam::bigint FROM pg_class WHERE oid IN ({oid},{record['marker_table_oid']},{record['marker_index_oid']})) c),
+'objects',(SELECT json_agg(c ORDER BY c.oid) FROM (SELECT oid::bigint,relnamespace::bigint,relowner::bigint,relname,relkind,relpersistence,relrowsecurity,relforcerowsecurity,relreplident,relam::bigint{index_parent} FROM pg_class WHERE oid IN ({','.join(map(str, oids))})) c),
 'columns',(SELECT json_agg(a ORDER BY a.attnum) FROM (SELECT attnum,attname,atttypid::bigint,atttypmod,attnotnull,attcollation::bigint,attisdropped,attgenerated,attidentity,atthasdef FROM pg_attribute WHERE attrelid={oid} AND attnum>0) a),
 'constraints',(SELECT coalesce(json_agg(c ORDER BY c.oid),'[]') FROM (SELECT oid::bigint,contype,conkey,convalidated FROM pg_constraint WHERE conrelid={oid}) c),
 'indexes',(SELECT json_agg(i ORDER BY i.indexrelid) FROM (SELECT indexrelid::bigint,indisunique,indisprimary,indisvalid,indisready,indkey::text FROM pg_index WHERE indrelid={oid}) i));"""))
-    if (not isinstance(catalog, dict) or len(catalog.get("objects", [])) != 3
+    if (not isinstance(catalog, dict) or len(catalog.get("objects", [])) != len(keys)
             or len(catalog.get("columns", [])) != 29 or not catalog.get("indexes") or not catalog.get("constraints")):
         raise RuntimeError("actual M6 producer catalog/provenance output is incomplete")
-    return {"receipt_scope": "engine_producer", "probe_checked": False, "independent_go_evidence": "pending_qualified_m6_reader",
-            "native_format": 8, "metadata_version": 6, "work": work, "target_provenance": record,
+    value = {"receipt_scope": "engine_producer", "probe_checked": False, "independent_go_evidence": "pending_qualified_m6_reader",
+            "native_format": native_format, "metadata_version": metadata_version, "work": work, "target_provenance": record,
             "follow_state": native["follow_state"], "checkpoint_row": row, "catalog": catalog}
 
+    if mode:
+        require_producer_authority(value, work, row, mode=mode, settings=settings)
+    return value
 
 def set_goal(driver, state, target, end):
     saved_goal(driver, state, end)
@@ -1013,28 +1313,35 @@ def foreign_resource_inventory(source, srcname, foreign):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def completed_resume_close(driver, source, target, srcname, dstname, state, launch, clean):
+def completed_resume_close(driver, source, target, srcname, dstname, state, launch, clean, **profile_args):
     from follow import WireGate
     work, end = driver.work[state], clean["end_lsn"]
     native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
-    if (native.get("format_version") != 8
+    mode = cutover_mode(profile_args.get("profile"), profile_args.get("durability"))
+    if (native.get("format_version") != (10 if mode else 8)
             or native["follow_state"].get("cleanup") != {"slot_removed": True, "publication_removed": True}):
-        raise RuntimeError("completed close fault requires exact source cleanup and native8 state")
+        raise RuntimeError("completed close fault requires exact source cleanup and native state")
     origin = native["follow_state"]["origin_name"]
     extra = ("--origin", origin) if origin is not None else ()
     suffix = work["run_id"][:16]
     foreign = {kind: "m4_foreign_" + kind + "_" + suffix for kind in ("slot", "publication", "origin")}
     def snapshot():
+        native_bytes = (state / "manifest.json").read_bytes()
+        if mode:
+            observed = json.loads(native_bytes, object_pairs_hook=clone.unique_object)
+            if observed.get("format_version") != 10:
+                raise RuntimeError("M9 completed close lost its exact native format")
+            require_settings({"settings": observed["follow_state"].get("effective_settings")}, mode, driver.m9_settings)
         request = json.loads((state / "control/endpos.json").read_bytes(), object_pairs_hook=clone.unique_object)
-        if type(request.get("end_lsn")) is not int or request["end_lsn"] != lsn(end):
+        if type(request.get("end_lsn")) is not int or request["end_lsn"] != lsn(end) or mode and request.get("sealed") is not True:
             raise RuntimeError("completed close fault lost the saved exact endpos")
         return {"authority": target.authority(dstname, state, work),
-                "native_manifest_sha256": hashlib.sha256((state / "manifest.json").read_bytes()).hexdigest(),
+                "native_manifest_sha256": hashlib.sha256(native_bytes).hexdigest(),
                 "local_endpos_sha256": hashlib.sha256((state / "control/endpos.json").read_bytes()).hexdigest(),
                 "source_resources": json.loads(resource_snapshot(source, srcname, state)),
                 "foreign_inventory": json.loads(foreign_resource_inventory(source, srcname, foreign)),
-                "source_fingerprints": source.fingerprint(srcname, load_manifest()),
-                "target_fingerprints": target.fingerprint(dstname, load_manifest())}
+                "source_fingerprints": source.fingerprint(srcname, load_manifest(**profile_args)),
+                "target_fingerprints": target.fingerprint(dstname, load_manifest(**profile_args))}
     before = snapshot()
     if (before["authority"] != clean["producer_authority"]["checkpoint_row"]
             or before["authority"].get("follow_completed") is not True or before["source_resources"] != [None, None]
@@ -1054,8 +1361,10 @@ def completed_resume_close(driver, source, target, srcname, dstname, state, laun
             return budget
         gate.arm()
         try:
-            worker = launch(source.connection(srcname), gate.connection(target.connection(dstname)), state,
-                            "--resume", "--not-consistent", *extra, source_name=srcname, target_name=dstname)
+            dst = target.connection(dstname)
+            worker = launch(source.connection(srcname), dst if mode else gate.connection(dst), state,
+                            "--resume", "--not-consistent", *extra, source_name=srcname, target_name=dstname,
+                            **({"target_wire": gate} if mode else {}))
             worker.follow_target_wire = gate
             if not gate.held.wait(timeout=remaining()):
                 raise RuntimeError("completed resume did not hold the second COMMIT/Idle within ten seconds")
@@ -1121,7 +1430,7 @@ def completed_resume_close(driver, source, target, srcname, dstname, state, laun
         try:
             if value["worker_result"]["returncode"] == 0:
                 binding = json.loads(worker.binding.read_bytes(), object_pairs_hook=clone.unique_object)
-                completed_report = json.loads(completed_output(stdout, binding, already_completed=True)[15:])
+                completed_report = json.loads(completed_output(stdout, binding, already_completed=True, **profile_args)[15:])
         except (RuntimeError, ValueError):
             pass
         details = {key: value[key] for key in ("scope", "work", "caller_goal", "fault_held", "fault", "fault_hits",
@@ -1138,16 +1447,16 @@ def completed_resume_close(driver, source, target, srcname, dstname, state, laun
                                      json.dumps(details).encode(), worker.environment, sys._getframe())) from None
     recovery = launch(source.connection(srcname), target.connection(dstname), state, "--resume", "--not-consistent", *extra,
                       source_name=srcname, target_name=dstname)
-    finish_completed(driver, recovery, already_completed=True)
+    finish_completed(driver, recovery, already_completed=True, **profile_args)
     value["fault_free_resume"] = {"binding": json.loads(recovery.binding.read_bytes()),
                                  "raw_json": recovery.output.read_bytes()[15:].decode().rstrip("\n"),
                                  "probe_checked": False, "independent_go_evidence": "pending_qualified_m6_reader"}
     value["recovered"] = snapshot()
-    validate_completed_close(value, clean)
+    validate_completed_close(value, clean, settings=getattr(driver, "m9_settings", None), **profile_args)
     return value
 
 
-def cleanup_case(driver, source, target, srcname, dstname, state, launch, completed):
+def cleanup_case(driver, source, target, srcname, dstname, state, launch, completed, **profile_args):
     native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
     binding = native["follow_state"]["binding"]
     owned_slot = binding["slot"]["intent"]["binding"]["slot_name"]
@@ -1186,9 +1495,9 @@ def cleanup_case(driver, source, target, srcname, dstname, state, launch, comple
             raise RuntimeError("cleanup retained an owned resource or changed an exact foreign resource")
         if not state.is_dir() or target.authority(dstname, state, driver.work[state]) != row:
             raise RuntimeError("cleanup removed the retained workdir or changed target authority")
-        clone.require_equal(expected, target.fingerprint(dstname, load_manifest()))
+        clone.require_equal(expected, target.fingerprint(dstname, load_manifest(**profile_args)))
     comparisons_after = compare()
-    resumes = completed_resumes(driver, source, target, srcname, dstname, state, launch, expected)
+    resumes = completed_resumes(driver, source, target, srcname, dstname, state, launch, expected, **profile_args)
     after = foreign_inventory()
     return {**completed, **resumes, "cleanup_reports": records, "obligations": obligations,
             "retained_workdir": True, "metadata_retained": True, "owned_resources_absent": True,
@@ -1199,25 +1508,163 @@ def cleanup_case(driver, source, target, srcname, dstname, state, launch, comple
             "foreign_inventory_after_sha256": hashlib.sha256(after).hexdigest()}
 
 
+def sequence_state(database, name):
+    return json.loads(database.sql(name, f"""SELECT json_build_object('oid',c.oid::bigint,'namespace_oid',c.relnamespace::bigint,
+'owner_oid',c.relowner::bigint,'start',q.seqstart,'maximum',q.seqmax,'current',v.last_value,'is_called',v.is_called)
+FROM pg_catalog.pg_sequence q JOIN pg_catalog.pg_class c ON c.oid=q.seqrelid CROSS JOIN {SEQUENCE} v
+WHERE c.oid='{SEQUENCE}'::pg_catalog.regclass AND c.relkind='S';"""), object_pairs_hook=clone.unique_object)
+
+
+def prepare_sequence_failure(source, target, srcname, dstname, native):
+    original = [sequence_state(db, name) for db, name in ((source, srcname), (target, dstname))]
+    fields = ("oid", "namespace_oid", "owner_oid")
+    identities = [{key: row[key] for key in fields} for row in original]
+    owned = {"class_oid": 1259, "object_oid": identities[1]["oid"], "object_sub_id": 0,
+             "namespace_oid": identities[1]["namespace_oid"], "namespace_name": "M2 space",
+             "name": "rows_id_seq", "kind": "S", "owner_oid": identities[1]["owner_oid"]}
+    state = native["clone_state"]
+    if (state["plan"]["sequences"] != [{"schema": "M2 space", "table": "rows_id_seq"}]
+            or state["owned_objects"].count(owned) != 1
+            or any(row["current"] != 1000 or row["is_called"] is not True or row["start"] != 1
+                   or row["maximum"] <= 1001 for row in original)):
+        raise RuntimeError("sequence failure requires the exact owned initial fixture sequence")
+    target.sql(dstname, f"ALTER SEQUENCE {SEQUENCE} MAXVALUE 1000;")
+    if source.sql(srcname, SEQUENCE_SQL.decode() + ";").strip() != b"1001":
+        raise RuntimeError("sequence failure did not establish the requested source value")
+    expected = [{**original[0], "current": 1001}, {**original[1], "maximum": 1000}]
+    if [sequence_state(db, name) for db, name in ((source, srcname), (target, dstname))] != expected:
+        raise RuntimeError("sequence failure setup changed ownership or missed the target bound")
+    return dict(zip(("source", "target"), identities)), expected
+
+
+def lo_observation(source, target, srcname, dstname, provenance):
+    from copy_features import large_object_fingerprint
+    expected = provenance["intent"]["binding"]
+    table = clone.quote(expected["schema_name"]) + '."large_object_done"'
+    oid = provenance["large_object_table_oid"]
+    if type(oid) is not int or not 0 < oid < 2**32:
+        raise RuntimeError("LO failure lacks the exact owned receipt relation")
+    row = json.loads(target.sql(dstname, f"""SELECT json_build_array(c.oid::bigint,(SELECT count(*) FROM ONLY {table}))
+FROM pg_catalog.pg_class c WHERE c.oid={oid} AND c.oid='{table}'::pg_catalog.regclass;"""), object_pairs_hook=clone.unique_object)
+    if not isinstance(row, list) or len(row) != 2 or row[0] != oid or type(row[1]) is not int or row[1] != 0:
+        raise RuntimeError("LO failure has an unexpected exact owned receipt")
+    inventories = [large_object_fingerprint(db, name) for db, name in ((source, srcname), (target, dstname))]
+    result = []
+    for inventory in inventories:
+        if not inventory:
+            result.append([])
+        elif set(inventory) == {90007} and inventory[90007]["length"] == 1:
+            result.append([90007, inventory[90007]["sha256"]])
+        else:
+            raise RuntimeError("LO failure fixture contains an unexpected independent inventory")
+    return [*result, row[1]]
+
+
+def finalization_failure(driver, source, target, srcname, dstname, state, worker, wire, fault, data, initial_lo=None):
+    from follow import require_feedback
+    durability = driver.durability
+    mode = cutover_mode("m9", durability)
+    work = driver.work[state]
+    native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
+    record = native["target_provenance"][0]["record"]
+    transaction = data["source"]
+
+    def applied():
+        if worker.poll() is not None:
+            raise RuntimeError("worker exited before positive applied C")
+        row = target.authority(dstname, state, work)
+        if (row and row["last_xid"] == transaction["xid"] and row["source_end_lsn"] is not None
+                and lsn(row["source_end_lsn"]) == transaction["end_lsn"]
+                and require_feedback(wire.evidence(), row, transaction["end_lsn"], profile="m9")):
+            return row
+        return None
+
+    fault.release.set()
+    clone.wait_for(applied, "independent finalization fixture applied and acknowledged C", timeout=90)
+    sequence = initial_lo is None
+    name = M9_CASES[-2 if sequence else -1]
+    setup = {}
+    if sequence:
+        setup["sequence_identity"], expected = prepare_sequence_failure(source, target, srcname, dstname, native)
+    else:
+        if (lo_observation(source, target, srcname, dstname, record) != [[], [], 0]
+                or native["clone_state"]["plan"]["copy_policy"]["skip_large_objects"] is not False):
+            raise RuntimeError("LO collision was present before the fixture introduced its exact OID")
+        for db, dbname, payload in ((source, srcname, "01"), (target, dstname, "02")):
+            result = db.sql(dbname, f"SELECT pg_catalog.lo_from_bytea(90007,pg_catalog.decode('{payload}','hex'));")
+            if result.strip() != b"90007":
+                raise RuntimeError("fixture failed to create its exact collision OID")
+        introduced = lo_observation(source, target, srcname, dstname, record)
+        if introduced != LO_COLLISION:
+            raise RuntimeError("LO failure missed its independently measured unowned collision")
+        setup["lo_setup"] = {"initial": EMPTY_LO, "before": initial_lo, "introduced": introduced}
+    end = frozen_end(source, srcname)
+    goal = saved_goal(driver, state, end)
+    before = target.authority(dstname, state, work)
+    value = {"observed": True, "scope": name, "caller_goal": goal, "data_fault": data,
+             "before_drain": {key: before[key] for key in CUTOVER_ROW_FIELDS}, **setup}
+    if sequence:
+        binding = sequence_binding({**value, "producer_authority": {"checkpoint_row": before}}, driver.m9_artifact)
+        fault.observe_sequence_failure(SEQUENCE_SQL, binding)
+    value["drain_start_ordinal"] = wire.evidence()["ack_oracle"]["ordinal"]
+    set_goal(driver, state, target.connection(dstname), end)
+    try:
+        status = worker.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        driver.kill(worker)
+        raise RuntimeError("M9 finalization failure worker exceeded its join deadline") from None
+    stdout, stderr = worker.output.read_bytes(), worker.error_output.read_bytes()
+    check_diagnostics(stdout, stderr, worker.environment, status)
+    binding = json.loads(worker.binding.read_bytes(), object_pairs_hook=clone.unique_object)
+    value["worker_reports"] = [{"binding": binding, "raw_json": line[15:].decode(), "probe_checked": False}
+                               for line in stdout.splitlines() if line.startswith(b"native-report: ")]
+    value["worker_reaped"] = worker.poll() == status
+    value["worker_result"] = command_observation(subprocess.CompletedProcess([], status, stdout, stderr))
+    request = persisted_endpos(driver, state, end)
+    value["local_endpos"] = {key: request[key] for key in ("end_lsn", "sealed")}
+    slot = clone.wait_for(lambda: (row if (row := source.slot(srcname, state))["active"] is False else None),
+                          "failed finalization source walsender stopped", timeout=10)
+    value["source_slot"] = {key: slot[key] for key in ("confirmed_flush_lsn", "restart_lsn")}
+    row = target.authority(dstname, state, work)
+    value["producer_authority"] = producer_authority(target, dstname, state, work, row, profile="m9",
+                                                      durability=durability, settings=driver.m9_settings)
+    if sequence:
+        value["sequence_failure"] = fault.sequence_failure_evidence(timeout=0.02)
+        if [sequence_state(db, dbname) for db, dbname in ((source, srcname), (target, dstname))] != expected:
+            raise RuntimeError("failed final sequence operation changed its measured fixture state")
+    else:
+        value["lo_after"] = lo_observation(source, target, srcname, dstname, record)
+    value["wire"] = wire.evidence(timeout=0.02)
+    validate_finalization_failure(value, name, mode=mode, settings=driver.m9_settings, artifact=driver.m9_artifact)
+    return value
+
+
 def run(args, source, target, manifest, case, launch, driver):
     from contextlib import ExitStack
     from follow import WireGate, require_data_fault
     if args.report_probe is not None or getattr(driver, "report_probe", None) is not None:
         raise RuntimeError("cutover producer checks cannot use the clone-only Go probe")
+    profile = getattr(args, "profile", None)
+    durability = getattr(args, "durability", None)
+    mode = cutover_mode(profile, durability)
+    profile_args = {"profile": profile, "durability": durability} if mode else {}
+    if manifest["cases"] != list(M9_CASES if mode else CASES):
+        raise RuntimeError("cutover runner lacks its exact selected case inventory")
     cases = {}
     srcname, dstname, src, dst, state = case("cutover_retry")
     with ExitStack() as gates:
-        def start(srcname, dstname, src, dst, state, wire, *, fault=None):
-            worker = launch(wire.connection(src), fault.connection(dst) if fault else dst, state,
-                            source_name=srcname, target_name=dstname, wire=wire)
-            if fault is not None:
-                worker.follow_target_wire = fault
+        def start(srcname, dstname, src, dst, state, wire, *, fault=None, skip_large_objects=True):
+            worker = launch(src, dst, state, source_name=srcname, target_name=dstname, wire=wire, target_wire=fault,
+                            skip_large_objects=skip_large_objects)
+            if fault is not None and worker.follow_target_wire is not fault:
+                raise RuntimeError("cutover worker did not use the exact selected target gate")
             driver.ready(worker)
             return worker
         def collect(srcname, dstname, state, worker, wire, end, expected, **arguments):
-            result = completion(driver, source, target, srcname, dstname, state, worker, wire, end, expected, **arguments)
+            result = completion(driver, source, target, srcname, dstname, state, worker, wire, end, expected, **profile_args, **arguments)
             row = target.authority(dstname, state, driver.work[state])
-            result["producer_authority"] = producer_authority(target, dstname, state, driver.work[state], row)
+            result["producer_authority"] = producer_authority(target, dstname, state, driver.work[state], row, **profile_args,
+                                                               settings=getattr(driver, "m9_settings", None))
             return result
         def hold_data(srcname, dstname, state, worker, wire, fault):
             idle_certification(driver, source, target, srcname, dstname, state, worker)
@@ -1242,12 +1689,12 @@ def run(args, source, target, manifest, case, launch, driver):
                               observe=lambda deadline: diagnostic_authority(driver, target, dstname, state, deadline)),
                           "caller_goal": goal, "data_fault": data}
         fault.release.set()
-        finish_completed(driver, worker)
+        finish_completed(driver, worker, **profile_args)
         completed = collect(srcname, dstname, state, worker, wire, end, expected)
         cases[CASES[1]] = completed
         cases[CASES[3]] = async_visible_refusal(driver, target, dstname, state)
-        cases[CASES[8]] = cleanup_case(driver, source, target, srcname, dstname, state, launch, completed)
-        cases[CASES[9]] = completed_resume_close(driver, source, target, srcname, dstname, state, launch, cases[CASES[8]])
+        cases[CASES[8]] = cleanup_case(driver, source, target, srcname, dstname, state, launch, completed, **profile_args)
+        cases[CASES[9]] = completed_resume_close(driver, source, target, srcname, dstname, state, launch, cases[CASES[8]], **profile_args)
 
         srcname, dstname, src, dst, state = case("cutover_certification")
         wire = gates.enter_context(WireGate("source", "observe"))
@@ -1255,7 +1702,7 @@ def run(args, source, target, manifest, case, launch, driver):
         end = frozen_end(source, srcname)
         saved_goal(driver, state, end)
         expected = source.fingerprint(srcname, manifest)
-        retry = certification_race(driver, source, target, srcname, dstname, state, worker, end=end)
+        retry = certification_race(driver, source, target, srcname, dstname, state, worker, end=end, **profile_args)
         cases[CASES[2]] = collect(srcname, dstname, state, worker, wire, end, expected, retry=retry)
 
         for index, setting in ((4, "on"), (5, "off")):
@@ -1266,7 +1713,7 @@ def run(args, source, target, manifest, case, launch, driver):
             end = frozen_end(source, srcname)
             expected = source.fingerprint(srcname, manifest)
             set_goal(driver, state, dst, end)
-            finish_completed(driver, worker)
+            finish_completed(driver, worker, **profile_args)
             cases[CASES[index]] = {**collect(srcname, dstname, state, worker, wire, end, expected),
                                   "writer": writer, "source_write_freeze": True, "outstanding_transactions": 0,
                                   "oracle_scope": "post_freeze_complete_source"}
@@ -1290,7 +1737,7 @@ def run(args, source, target, manifest, case, launch, driver):
         if later_oracle == expected:
             raise RuntimeError("later source transaction did not change the saved pre-later oracle")
         wire.release.set()
-        finish_completed(driver, worker)
+        finish_completed(driver, worker, **profile_args)
         value = collect(srcname, dstname, state, worker, wire, end, expected)
         streams = value["wire"]["logical"]["streams"]
         begins = [tx for stream in streams for tx in stream["transactions"]]
@@ -1313,10 +1760,28 @@ def run(args, source, target, manifest, case, launch, driver):
         expected = source.fingerprint(srcname, manifest)
         set_goal(driver, state, dst, end)
         fault.release.set()
-        finish_completed(driver, worker)
+        finish_completed(driver, worker, **profile_args)
         value = collect(srcname, dstname, state, worker, wire, end, expected)
         canonical = {key: item for key, item in transaction.items() if key != "baseline_end"}
         cases[CASES[7]] = {**value, "scope": "algorithm_fault_scope_crossing_commit_record", "transaction": canonical,
-                           "data_fault": data, **completed_resumes(driver, source, target, srcname, dstname, state, launch, expected)}
-    validate_cases(cases)
+                           "data_fault": data, **completed_resumes(driver, source, target, srcname, dstname, state, launch, expected, **profile_args)}
+        if mode:
+            for lo in (False, True):
+                srcname, dstname, src, dst, state = case("cutover_final_lo" if lo else "cutover_final_sequence")
+                wire = gates.enter_context(WireGate("source", "observe"))
+                fault = gates.enter_context(WireGate("target", "before_commit"))
+                worker = start(srcname, dstname, src, dst, state, wire, fault=fault, skip_large_objects=not lo)
+                initial_lo = None
+                if lo:
+                    row = target.authority(dstname, state, driver.work[state])
+                    handoff = producer_authority(target, dstname, state, driver.work[state], row, **profile_args,
+                                                  settings=driver.m9_settings)
+                    control = json.loads(row["clone_state"], object_pairs_hook=clone.unique_object)["large_objects"]
+                    initial_lo = lo_observation(source, target, srcname, dstname, handoff["target_provenance"])
+                    if initial_lo != [[], [], 0] or control["initial"] != EMPTY_LO or control["final_sync"] is not None:
+                        raise RuntimeError("LO failure requires an independently proved empty initial completion")
+                data = hold_data(srcname, dstname, state, worker, wire, fault)
+                value = finalization_failure(driver, source, target, srcname, dstname, state, worker, wire, fault, data, initial_lo)
+                cases[M9_CASES[-1 if lo else -2]] = value
+    validate_cases(cases, manifest, **profile_args, settings=getattr(driver, "m9_settings", None), artifact=getattr(driver, "m9_artifact", None))
     return cases
