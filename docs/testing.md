@@ -101,6 +101,13 @@ Image setup and the first locked Cargo build require network access.
 Database execution uses a disposable internal network with no published ports, two owned server containers, and fixture credentials held outside command arguments and receipts.
 The harness removes its own containers and private network, and retains build caches and successful receipts under `target/e2e/`.
 With a remote Podman service (the macOS Podman machine), the harness samples capacity and verifies the shared source inside the machine; with a local Linux Podman it does both on the host and samples the engine's storage root.
+`RPGMIGRATE_E2E_CAPACITY` selects the container CPU caps, and the harness never picks them from host facts.
+Unset selects `local`: 2 CPUs each for the build, source, target and runner containers.
+`hosted-linux` keeps the build and runner at 2 CPUs and gives the source and target 1 CPU each.
+Admission refuses a host with fewer CPUs than the source, target and runner caps together: 6 for `local`, 4 for `hosted-linux`.
+Any other value is refused, and the runtime ledger and receipt record the selected profile.
+We run CI with `hosted-linux` because the GitHub `ubuntu-24.04` runner has 4 CPUs.
+Both profiles keep the same memory caps and memory and disk floors, because that runner reports about 14 GiB free memory and about 86 GiB free on the Podman storage root.
 Failures retain redacted child stderr and safe stage/return-code/callsite metadata under `target/e2e/failures/`, using private 0700 directories and 0600 files.
 Public failure output contains no child argv, SQL, row values, or credentials.
 

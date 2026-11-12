@@ -252,7 +252,7 @@ def pasta_placeholder():
 
 class ModelRuntime:
     def __init__(self, root, fault=None, native=False):
-        self.root, self.fault, self.commands, self.removed, self.native = root, fault, [], [], native
+        self.root, self.fault, self.commands, self.removed, self.native, self.cpus = root, fault, [], [], native, 14
         self.containers = {}
         self.networks = {}
         self.images = {}
@@ -273,7 +273,7 @@ class ModelRuntime:
             assert argv[2] == ("/home/runner/.local/share/containers/storage" if self.native else "/var/home/core"), "capacity sampled the wrong filesystem"
             return b"Filesystem 1B-blocks Used Available Use% Mounted\nroot 100 10 40802189312 1% /\n"
         assert argv == ["getconf", "_NPROCESSORS_ONLN"], "unexpected host probe"
-        return b"14\n"
+        return str(self.cpus).encode() + b"\n"
 
     def call(self, argv, **kwargs):
         self.commands.append(list(argv))
@@ -375,7 +375,7 @@ class ModelRuntime:
                     network["containers"][cid] = {"name": name}
                     networks[network_name] = {"NetworkID": network["id"], "Aliases": [role]}
             self.containers[cid] = {"Id": cid, "Name": name, "Image": image, "Config": {"Labels": {"io.rpgmigrate.e2e": label}, "Env": ["PASSWORD=must-not-persist"]},
-                "Mounts": mounts, "HostConfig": {"Memory": memory, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "pasta" if role == "build" else "bridge", "PortBindings": {}},
+                "Mounts": mounts, "HostConfig": {"Memory": memory, "NanoCpus": int(args[args.index("--cpus")+1]) * 1000000000, "Privileged": False, "NetworkMode": "pasta" if role == "build" else "bridge", "PortBindings": {}},
                 "NetworkSettings": {"Ports": {}, "Networks": networks}, "Created": datetime.fromtimestamp(harness.time.time(), timezone.utc).isoformat(), "RestartCount": 0,
                 "State": {"Running": False, "Status": "created", "StartedAt": "0001-01-01T00:00:00Z", "FinishedAt": "0001-01-01T00:00:00Z", "Pid": 0}}
             self.containers[cid]["model_role"] = role
@@ -409,7 +409,7 @@ class ModelRuntime:
             return b""
         if args[0] == "exec":
             actual = self.containers[args[1]]
-            if args[2] == "cat": return b"200000 100000\n" + str(actual["HostConfig"]["Memory"]).encode() + b"\n"
+            if args[2] == "cat": return str(actual["HostConfig"]["NanoCpus"] // 10000).encode() + b" 100000\n" + str(actual["HostConfig"]["Memory"]).encode() + b"\n"
             if args[2] == "stat": return b"700|postgres\n"
             if "pg_ls_waldir" in args[-1]: return b"1000|1000\n"
             role = actual["model_role"]
@@ -480,7 +480,7 @@ class PendingCreationTests(unittest.TestCase):
             model = ModelRuntime(root)
             model.networks["7"*64] = {"id": "7"*64, "name": "fresh", "internal": True, "driver": "bridge", "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {}}
             guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
-            guard.runtime, guard.token, guard.path = "podman", "fresh", root / "ledger.json"
+            guard.runtime, guard.token, guard.path, guard.capacity = "podman", "fresh", root / "ledger.json", harness.capacity_profile({})
             guard.machine, guard.storage = True, "/var/home/core"
             guard.deadline, guard.work_deadline, guard.last_sample = 900, 600, clock.now
             guard.baseline = {"containers": {}, "external": [], "images": {}, "networks": {}, "volumes": {}}
@@ -835,7 +835,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
     def test_exact_container_identity_caps_and_mounts_are_required(self):
         self.assertTrue(callable(getattr(harness, "validate_owned_container", None)), "missing exact ownership admission")
-        entry = {"id": "a" * 64, "image": "sha256:" + "b" * 64, "name": "fresh-source", "memory": 1073741824, "mounts": [], "network": {"name": "fresh", "id": "c"*64}}
+        entry = {"id": "a" * 64, "image": "sha256:" + "b" * 64, "name": "fresh-source", "memory": 1073741824, "cpus": 2, "mounts": [], "network": {"name": "fresh", "id": "c"*64}}
         actual = {"Id": entry["id"], "Image": entry["image"], "Name": entry["name"], "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
                   "Mounts": [], "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "fresh", "PortBindings": {}},
                   "NetworkSettings": {"Ports": {"5432/tcp": None}, "Networks": {"fresh": {"NetworkID": "c"*64}}}}
@@ -854,6 +854,10 @@ class RuntimeOwnershipTests(unittest.TestCase):
             harness.validate_owned_container(actual, entry, "fresh", {entry["id"]})
         cfs = copy.deepcopy(actual); cfs["HostConfig"].update(NanoCpus=0, CpuPeriod=100000, CpuQuota=200000)
         harness.validate_owned_container(cfs, entry, "fresh", set())
+        with self.assertRaises(RuntimeError):
+            harness.validate_owned_container(actual, {**entry, "cpus": 1}, "fresh", set())
+        one = copy.deepcopy(actual); one["HostConfig"].update(NanoCpus=1000000000)
+        harness.validate_owned_container(one, {**entry, "cpus": 1}, "fresh", set())
 
     def test_network_cleanup_requires_exact_identity_label_internal_and_empty_membership(self):
         self.assertTrue(callable(getattr(harness, "validate_owned_network", None)), "missing exact network admission")
@@ -870,13 +874,41 @@ class RuntimeOwnershipTests(unittest.TestCase):
         self.assertTrue(callable(getattr(harness, "validate_capacity", None)), "missing capacity admission")
         gib = 1024 ** 3
         initial = {"vm_free": 38*gib, "host_free": 57*gib, "vm_available": 24*gib, "vm_cpus": 14}
-        harness.validate_capacity(initial, initial, initial=True)
+        local = harness.capacity_profile({})
+        harness.validate_capacity(initial, initial, local, initial=True)
         for change in ({"vm_free": 31*gib}, {"host_free": 31*gib}, {"vm_available": 11*gib}, {"vm_cpus": 5}):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
-                harness.validate_capacity({**initial, **change}, initial, initial=True)
+                harness.validate_capacity({**initial, **change}, initial, local, initial=True)
         for change in ({"vm_free": 19*gib}, {"host_free": 19*gib}, {"vm_available": 7*gib}, {"host_free": 44*gib}, {"vm_free": 25*gib}, {"vm_free": None}):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
-                harness.validate_capacity({**initial, **change}, initial)
+                harness.validate_capacity({**initial, **change}, initial, local)
+
+    def test_capacity_profile_is_explicit_and_floor_is_the_sum_of_concurrent_caps(self):
+        self.assertEqual(harness.capacity_profile({}), {"name": "local", "selected_by": "default", "cpus": {"build": 2, "source": 2, "target": 2, "runner": 2}})
+        hosted = harness.capacity_profile({"RPGMIGRATE_E2E_CAPACITY": "hosted-linux"})
+        self.assertEqual((hosted["selected_by"], hosted["cpus"]), ("RPGMIGRATE_E2E_CAPACITY", {"build": 2, "source": 1, "target": 1, "runner": 2}))
+        for value in ("", "Local", "hosted", "auto"):
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeError, "must be local or hosted-linux"):
+                harness.capacity_profile({"RPGMIGRATE_E2E_CAPACITY": value})
+        gib = 1024 ** 3
+        sample = {"vm_free": 86*gib, "host_free": 86*gib, "vm_available": 14*gib}
+        for profile, floor in ((harness.capacity_profile({}), 6), (hosted, 4)):
+            harness.validate_capacity({**sample, "vm_cpus": floor}, {**sample, "vm_cpus": floor}, profile, initial=True)
+            with self.subTest(profile=profile["name"]), self.assertRaisesRegex(RuntimeError, "capacity floor"):
+                harness.validate_capacity({**sample, "vm_cpus": floor - 1}, {**sample, "vm_cpus": floor - 1}, profile, initial=True)
+
+    def test_hosted_profile_admission_refuses_a_host_below_its_floor(self):
+        for cpus, environment in ((3, {"RPGMIGRATE_E2E_CAPACITY": "hosted-linux"}), (4, {})):
+            with self.subTest(cpus=cpus), tempfile.TemporaryDirectory() as temporary:
+                model, path = ModelRuntime(Path(temporary), native=True), Path(temporary) / "ledger.json"
+                model.cpus = cpus
+                with patch.object(harness, "run", side_effect=model.call), patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*harness.GIB)), \
+                        self.assertRaisesRegex(RuntimeError, "capacity floor"):
+                    harness.RuntimeGuard("podman", "fresh", path, harness.capacity_profile(environment))
+                ledger = json.loads(path.read_text())
+                self.assertTrue(ledger["admission_failed"])
+                self.assertEqual(ledger["capacity"]["name"], "hosted-linux" if environment else "local")
+                self.assertFalse([argv for argv in model.commands if argv[1:2] in (["create"], ["build"], ["run"]) and "--help" not in argv])
 
     def test_build_cpu_caps_require_supported_cfs_options(self):
         self.assertTrue(callable(getattr(harness, "build_cpu_arguments", None)), "missing supported build CPU admission")
@@ -914,7 +946,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 guard.path = Path(temporary) / "ledger.json"
                 guard.deadline = harness.time.monotonic() + 30
                 guard.baseline = {"containers": {}, "networks": {}}
-                entry = {"id": "a"*64, "image": "sha256:" + "b"*64, "name": "fresh-source", "memory": 1073741824, "mounts": [], "role": "source"}
+                entry = {"id": "a"*64, "image": "sha256:" + "b"*64, "name": "fresh-source", "memory": 1073741824, "cpus": 2, "mounts": [], "role": "source"}
                 guard.ledger = {"containers": [entry]}
                 actual = {"Id": entry["id"], "Image": entry["image"], "Name": entry["name"], "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}}, "Mounts": [],
                           "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "fresh", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
@@ -984,14 +1016,17 @@ class RuntimeOwnershipTests(unittest.TestCase):
         try:
             for profile, fault, location in (("disabled", None, "default"), ("disabled", None, "root"), ("disabled", None, "nested"),
                                              ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache"),
-                                             ("disabled", None, "native")):
+                                             ("disabled", None, "native"), ("disabled", None, "hosted")):
                 with self.subTest(profile=profile, fault=fault, location=location), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
                     (root / ".env").write_text("must-not-persist")
                     (root / "tools/e2e/Containerfile").write_text("FROM example.invalid/rust@sha256:" + "6"*64 + "\n")
-                    model = ModelRuntime(root, fault, native=location == "native")
+                    native = location in ("native", "hosted")
+                    model = ModelRuntime(root, fault, native=native)
+                    model.cpus = 4 if location == "hosted" else 14
+                    environment = {"RPGMIGRATE_E2E_CAPACITY": "hosted-linux"} if location == "hosted" else {}
                     output = root / ({"default": "target/e2e/16-16.json", "root": "result.json", "nested": "nested/result.json", "cache": "target/e2e/result.json",
-                                      "native": "target/e2e/result.json"}[location])
+                                      "native": "target/e2e/result.json", "hosted": "target/e2e/result.json"}[location])
                     args = types.SimpleNamespace(pair="16-16", receipt=None if location == "default" else str(output), report_probe=None, profile=profile)
                     def execute(guard, command, **kwargs):
                         guard.checkpoint()
@@ -1002,7 +1037,10 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     with patch.object(harness, "ROOT", root), patch.object(harness, "DIAGNOSTIC_ROOT", root / "target/e2e/failures"), \
                             patch.object(harness.shutil, "which", return_value="/fake/podman"), patch.object(harness.shutil, "disk_usage", return_value=types.SimpleNamespace(free=57*1024**3)), \
                             patch.object(harness, "run", side_effect=model.call), patch.object(harness.subprocess, "run", side_effect=model.subprocess), \
-                            patch.object(harness.RuntimeGuard, "execute", execute), patch.object(copy_features, "validate_receipt"):
+                            patch.object(harness.RuntimeGuard, "execute", execute), patch.object(copy_features, "validate_receipt"), \
+                            patch.dict(harness.os.environ, environment, clear=False):
+                        if not environment:
+                            harness.os.environ.pop("RPGMIGRATE_E2E_CAPACITY", None)
                         if fault:
                             with self.assertRaises((RuntimeError, OSError)): harness.outer(args, receipt_validator=lambda *_: None)
                         else:
@@ -1024,15 +1062,21 @@ class RuntimeOwnershipTests(unittest.TestCase):
                         name = argv[argv.index("--name")+1]
                         if name.endswith(("-source", "-target")):
                             self.assertEqual("wal_level=logical" in argv, profile == "m8")
+                        role = "build" if "--network" in argv and argv[argv.index("--network")+1] == "pasta" else name.rsplit("-", 1)[1]
+                        self.assertEqual(argv[argv.index("--cpus")+1], str({"build": 2, "runner": 2}.get(role, 1 if location == "hosted" else 2)))
                     token = builds[0][builds[0].index("--label")+1].split("=", 1)[1]
                     ledger_path = output.parent / (output.name + "." + token + ".runtime.json")
                     self.assertEqual(model.build_ledger_path, ledger_path)
                     ledger = json.loads(ledger_path.read_text())
                     self.assertTrue(ledger["cleanup_complete"])
-                    self.assertEqual(ledger["runtime_api"]["machine"], location != "native")
-                    self.assertEqual(ledger["runtime_api"]["server"], "4.9.3" if location == "native" else "5.8.3")
-                    self.assertEqual(any(argv[1:2] == ["machine"] for argv in model.commands), location != "native")
-                    self.assertEqual(["getconf", "_NPROCESSORS_ONLN"] in model.commands, location == "native")
+                    self.assertEqual(ledger["runtime_api"]["machine"], not native)
+                    self.assertEqual(ledger["runtime_api"]["server"], "4.9.3" if native else "5.8.3")
+                    self.assertEqual(any(argv[1:2] == ["machine"] for argv in model.commands), not native)
+                    self.assertEqual((ledger["capacity"]["name"], ledger["capacity"]["selected_by"]),
+                                     ("hosted-linux", "RPGMIGRATE_E2E_CAPACITY") if location == "hosted" else ("local", "default"))
+                    if fault is None:
+                        self.assertEqual(json.loads(output.read_text())["capacity_profile"], ledger["capacity"]["name"])
+                    self.assertEqual(["getconf", "_NPROCESSORS_ONLN"] in model.commands, native)
                     self.assertEqual(ledger["private_removed"], fault != "foreign_private")
                     self.assertEqual(ledger["secret_file_absent"], fault != "foreign_private")
                     if fault == "foreign_private":
@@ -1053,7 +1097,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
                 model, path = ModelRuntime(Path(temporary), fault, native=native), Path(temporary) / "ledger.json"
                 with patch.object(harness, "run", side_effect=model.call), self.assertRaisesRegex(RuntimeError, "host locality"):
-                    harness.RuntimeGuard("podman", "fresh", path)
+                    harness.RuntimeGuard("podman", "fresh", path, harness.capacity_profile({}))
                 self.assertTrue(json.loads(path.read_text())["admission_failed"])
                 self.assertEqual([argv[1] for argv in model.commands], ["version", "info"])
 
@@ -1100,7 +1144,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
     def test_cgroup_limits_require_live_exact_owned_process_and_hard_cpu_memory_caps(self):
         self.assertTrue(hasattr(harness.RuntimeGuard, "observe_caps"), "missing effective cgroup admission")
-        entry = {"id": "a"*64, "name": "fresh-source", "role": "source", "image": "sha256:"+"b"*64, "memory": 1073741824, "mounts": []}
+        entry = {"id": "a"*64, "name": "fresh-source", "role": "source", "image": "sha256:"+"b"*64, "memory": 1073741824, "cpus": 2, "mounts": []}
         actual = {"Id": entry["id"], "Name": entry["name"], "Image": entry["image"], "State": {"Running": True}, "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
                   "Mounts": [], "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "bridge", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
         for limits in (b"200000 100000\n1073741824\n", b"max 100000\n1073741824\n", b"200000 100000\nmax\n", b"400000 100000\n1073741824\n", b"200000 100000\n4294967296\n", b""):
@@ -1206,7 +1250,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
 
     def test_actual_addressless_pasta_shape_is_build_only_and_closed(self):
-        entry = {"id": "a"*64, "image": "sha256:"+"b"*64, "name": "fresh-build", "role": "build", "memory": 4*1024**3, "mounts": []}
+        entry = {"id": "a"*64, "image": "sha256:"+"b"*64, "name": "fresh-build", "role": "build", "memory": 4*1024**3, "cpus": 2, "mounts": []}
         actual = {"Id": entry["id"], "Image": "b"*64, "Name": entry["name"], "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}}, "Mounts": [],
                   "HostConfig": {"Memory": entry["memory"], "NanoCpus": 2000000000, "CpuPeriod": 100000, "CpuQuota": 200000, "Privileged": False, "NetworkMode": "pasta", "PortBindings": {}},
                   "NetworkSettings": {"Ports": {}, "Networks": pasta_placeholder()}}

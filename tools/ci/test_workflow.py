@@ -32,7 +32,7 @@ def validate(source):
         "checks": ("run: task --silent --output=interleaved --color=false check lint test",),
         "dependencies": ("cargo install cargo-deny --version 0.20.2 --locked", "cargo deny --locked check licenses advisories"),
         "docs": ("DavidAnson/markdownlint-cli2-action@", '"git", "ls-files"', "*.md", "*.markdown"),
-        "engine-e2e": ("CONTAINER_RUNTIME: podman", "podman --version", "task test-e2e-clone-${{ matrix.pair }}",
+        "engine-e2e": ("CONTAINER_RUNTIME: podman", "RPGMIGRATE_E2E_CAPACITY: hosted-linux", "podman --version", "task test-e2e-clone-${{ matrix.pair }}",
                        'validate_receipt(report, clone.load_manifest())', 'test -s "target/e2e/${{ matrix.pair }}.json"'),
         "runner-image": ("CONTAINER_RUNTIME: podman", "podman --version", "task image:build", "task --silent image:smoke",
                          "test -s target/image/smoke.json"),

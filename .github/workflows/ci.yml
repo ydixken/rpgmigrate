@@ -126,6 +126,8 @@ jobs:
         pair: [16-16, 18-18, 16-18]
     env:
       CONTAINER_RUNTIME: podman
+      # The 4-CPU hosted runner cannot hold the local 2+2+2 caps; see docs/testing.md.
+      RPGMIGRATE_E2E_CAPACITY: hosted-linux
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

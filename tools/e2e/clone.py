@@ -626,6 +626,18 @@ def copy_restart(source, target, driver, root, bindir, manifest, receipt, case):
 
 LOGICAL_SERVER_ARGUMENTS = ("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s")
 GIB = 1024 ** 3
+# Per-role CPU caps; admission needs the host CPUs to cover source, target and runner together.
+# hosted-linux fits the 4-CPU GitHub ubuntu-24.04 runner; it is never selected from host facts.
+CAPACITY_PROFILES = {"local": {"build": 2, "source": 2, "target": 2, "runner": 2},
+                     "hosted-linux": {"build": 2, "source": 1, "target": 1, "runner": 2}}
+
+
+def capacity_profile(environ=os.environ):
+    name = environ.get("RPGMIGRATE_E2E_CAPACITY")
+    if name is not None and name not in CAPACITY_PROFILES:
+        raise RuntimeError("RPGMIGRATE_E2E_CAPACITY must be local or hosted-linux")
+    return {"name": name or "local", "selected_by": "default" if name is None else "RPGMIGRATE_E2E_CAPACITY",
+            "cpus": dict(CAPACITY_PROFILES[name or "local"])}
 
 
 def server_start_arguments(profile, arguments):
@@ -651,7 +663,8 @@ def image_identity(value):
 
 def validate_owned_container(actual, entry, token, baseline):
     host = actual.get("HostConfig", {})
-    cpu = host.get("NanoCpus") == 2000000000 or (host.get("CpuPeriod") == 100000 and host.get("CpuQuota") == 200000)
+    cpus = entry["cpus"]
+    cpu = type(cpus) is int and cpus > 0 and (host.get("NanoCpus") == cpus * 1000000000 or (host.get("CpuPeriod") == 100000 and host.get("CpuQuota") == cpus * 100000))
     mounts = actual.get("Mounts")
     observed = sorted((row.get("Source"), row.get("Destination"), row.get("RW")) for row in mounts) if isinstance(mounts, list) else None
     if (not re.fullmatch(r"[a-f0-9]{64}", entry.get("id", "")) or entry["id"] in baseline
@@ -696,11 +709,12 @@ def validate_owned_network(actual, expected, token, baseline, *, empty=False):
     return actual
 
 
-def validate_capacity(sample, baseline, *, initial=False):
+def validate_capacity(sample, baseline, capacity, *, initial=False):
     if any(type(sample.get(key)) is not int or sample[key] <= 0 for key in ("vm_free", "host_free", "vm_available", "vm_cpus")):
         raise RuntimeError("resource capacity sample is unavailable")
     disk, memory = (32 * GIB, 12 * GIB) if initial else (20 * GIB, 8 * GIB)
-    if (sample["vm_cpus"] < 6 or min(sample["vm_free"], sample["host_free"]) < disk or sample["vm_available"] < memory
+    cpus = capacity["cpus"]
+    if (sample["vm_cpus"] < cpus["source"] + cpus["target"] + cpus["runner"] or min(sample["vm_free"], sample["host_free"]) < disk or sample["vm_available"] < memory
             or any(baseline[key] - sample[key] > 12 * GIB for key in ("vm_free", "host_free"))):
         raise RuntimeError("resource capacity floor or growth budget crossed")
 
@@ -794,13 +808,13 @@ def validate_preservation(before, after, owned_images):
 
 
 class RuntimeGuard:
-    def __init__(self, runtime, token, path):
-        self.runtime, self.token, self.path = runtime, token, path
+    def __init__(self, runtime, token, path, capacity):
+        self.runtime, self.token, self.path, self.capacity = runtime, token, path, capacity
         self.deadline = time.monotonic() + 5400
         self.work_deadline = self.deadline - 300
         self.last_sample = 0
         self.ledger = {"version": 2, "scope": "runtime_resource_ownership", "run": token, "containers": [], "cleanup_complete": False,
-                       "deadline_unix": time.time() + 5400, "cleanup_reserve_seconds": 300, "samples": []}
+                       "deadline_unix": time.time() + 5400, "cleanup_reserve_seconds": 300, "samples": [], "capacity": capacity}
         self.persist()
         try:
             versions = json.loads(self.raw(["version", "--format", "json"]))
@@ -832,7 +846,7 @@ class RuntimeGuard:
                         raise RuntimeError("builtin network changed during independent baseline reads")
                     self.ledger["builtin_network_created_observations"].append({"id": identity, "before": before["created"], "after": after["created"]})
             self.initial_capacity = self.sample()
-            validate_capacity(self.initial_capacity, self.initial_capacity, initial=True)
+            validate_capacity(self.initial_capacity, self.initial_capacity, self.capacity, initial=True)
             self.persist()
         except Exception:
             self.ledger["admission_failed"] = True
@@ -908,7 +922,7 @@ class RuntimeGuard:
         try:
             quota, period = (int(value) for value in observed[0].split())
             memory = int(observed[1])
-            if len(observed) != 2 or period <= 0 or quota != period * 2 or memory != entry["memory"]:
+            if len(observed) != 2 or period <= 0 or quota != period * entry["cpus"] or memory != entry["memory"]:
                 raise ValueError
         except (ValueError, IndexError):
             raise RuntimeError("actual owned cgroup CPU or memory limit is absent or differs") from None
@@ -976,7 +990,7 @@ class RuntimeGuard:
         if pending.get("candidate") not in (None, cid) or cid in self.baseline["external"]:
             raise RuntimeError("pending container identity changed or predates creation")
         entry = {key: value for key, value in expected.items() if key != "kind"}
-        entry["id"] = cid
+        entry.update(id=cid, cpus=self.capacity["cpus"][expected["role"]])
         actual = validate_owned_container(self.inspect(cid), entry, self.token, self.baseline["containers"])
         state = actual.get("State", {})
         zero = (None, "", "0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000000Z")
@@ -1104,7 +1118,7 @@ class RuntimeGuard:
         if time.monotonic() >= self.work_deadline:
             raise RuntimeError("runtime work deadline expired; cleanup reserve started")
         if time.monotonic() - self.last_sample >= 5:
-            validate_capacity(self.sample(), self.initial_capacity)
+            validate_capacity(self.sample(), self.initial_capacity, self.capacity)
             self.persist()
         if time.monotonic() >= self.work_deadline:
             raise RuntimeError("runtime work deadline expired during resource observation")
@@ -1183,7 +1197,7 @@ class RuntimeGuard:
     def retain_container(self, cid, role, image, name, mounts, memory, network=None, *, actual=None):
         if not re.fullmatch(r"[a-f0-9]{64}", cid) or cid in self.baseline["containers"] or cid in self.baseline["external"]:
             raise RuntimeError("fresh owned creation returned no exact new container identity")
-        entry = {"id": cid, "role": role, "image": image, "name": name, "mounts": mounts, "memory": memory, "network": network, "cleanup_status": "pending"}
+        entry = {"id": cid, "role": role, "image": image, "name": name, "mounts": mounts, "memory": memory, "cpus": self.capacity["cpus"][role], "network": network, "cleanup_status": "pending"}
         actual = validate_owned_container(actual or self.inspect(cid), entry, self.token, self.baseline["containers"])
         entry["observed"] = container_snapshot(actual)
         entry["ownership_verified"] = True
@@ -1310,7 +1324,8 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     ledger_path = output.parent / (output.name + "." + token + ".runtime.json")
     if ledger_path.exists() or ledger_path.is_symlink():
         raise RuntimeError("fresh runtime ledger destination already exists")
-    guard = RuntimeGuard(runtime, token, ledger_path)
+    guard = RuntimeGuard(runtime, token, ledger_path, capacity_profile())
+    cpus = {role: str(value) for role, value in guard.capacity["cpus"].items()}
     private_parent = ROOT / "target/e2e"
     if any(path.is_symlink() for path in (private_parent, private_parent.parent)):
         raise RuntimeError("run-owned shared parent is replaced")
@@ -1421,7 +1436,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                 if entry["cleanup_status"] != "absent" and not failed:
                     raise RuntimeError("exact owned " + role + " cleanup could not be verified")
         build_mounts = [(str(source_context), "/workspace", False), (str(cache), "/build", True), (str(cargo_cache), "/cargo", True)]
-        fetch = ["--network", "pasta", "--memory", "4g", "--cpus", "2", "--label", label, "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--env", "CARGO_BUILD_JOBS=2",
+        fetch = ["--network", "pasta", "--memory", "4g", "--cpus", cpus["build"], "--label", label, "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--env", "CARGO_BUILD_JOBS=" + cpus["build"],
                  "--volume", str(source_context) + ":/workspace:ro", "--volume", str(cache) + ":/build", "--volume", str(cargo_cache) + ":/cargo", image_id, "cargo", "build", "--locked"]
         guard.ledger["stage"] = "cargo_build"
         guard.persist()
@@ -1440,7 +1455,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             server_images.append(identity)
             data_directory = "/var/lib/postgresql/data" if major == "16" else "/var/lib/postgresql/18/docker"
             entry = owned_container(["--network", token, "--network-alias", role, "--label", label, "--env-file", str(envfile),
-                                     "--env", "PGDATA=" + data_directory, "--memory", "1g", "--cpus", "2", identity, *server_arguments],
+                                     "--env", "PGDATA=" + data_directory, "--memory", "1g", "--cpus", cpus[role], identity, *server_arguments],
                                     role=role, image_id=identity, mounts=[], memory=GIB)
             cid = entry["id"]
             def ready():
@@ -1485,7 +1500,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             (receipt_dir / "m8-input.json").write_text(json.dumps(feature_binding))
             guard.ledger["binding"] = feature_binding
             guard.persist()
-        command = ["--network", token, "--label", label, "--memory", "4g", "--cpus", "2", "--env-file", str(envfile),
+        command = ["--network", token, "--label", label, "--memory", "4g", "--cpus", cpus["runner"], "--env-file", str(envfile),
                    "--env", "CARGO_TARGET_DIR=/build", "--env", "CARGO_HOME=/cargo", "--volume", str(source_context) + ":/workspace:ro",
                    "--volume", str(cache) + ":/build", "--volume", str(cargo_cache) + ":/cargo", "--volume", str(receipt_dir) + ":/receipt", "--volume", str(diagnostics) + ":/diagnostics"]
         mounts = [*build_mounts, (str(receipt_dir), "/receipt", True), (str(diagnostics), "/diagnostics", True)]
@@ -1562,6 +1577,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     if feature_mode and (guard.ledger.get("build_smoke_unavailable") or guard.ledger.get("build_smoke") != report.get("build_smoke") or not guard.ledger.get("build_smoke")):
         raise RuntimeError("source-bound pre-workflow debug smoke is missing or differs; inspect " + str(ledger_path))
     report["runtime_ledger"] = str(ledger_path)
+    report["capacity_profile"] = guard.capacity["name"]
     with output.open("x" if diagnostic_case or feature_mode else "w") as stream:
         stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(result.decode(), end="")
