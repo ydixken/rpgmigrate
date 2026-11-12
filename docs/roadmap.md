@@ -869,7 +869,7 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/engine-integration-20261112` at `3bc1f60` joins M8 with a local-Podman host path in the e2e runtime guard, the re-pinned ASAN lock graph after the `sha2` review, and the M6 lifecycle plans.
   Hosted run 43215645789 passed checks, dependencies, docs and both runner-image jobs.
   All three engine-e2e pairs stop at the capacity floor: the hosted runner reports four CPUs, and the guard requires six.
-  `feat/native-engine` is not fast-forwarded and no `dev-<sha>` runner image follows until that floor has a decision.
+  M8 does not reach `feat/native-engine`, and no M8 `dev-<sha>` runner image is published, until that floor has a decision.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.

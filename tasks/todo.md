@@ -1486,7 +1486,7 @@ User decisions, 2026-11-12:
   Pinned cargo-deny 0.20.2 passed licenses and advisories for the seven new `sha2` crates, all MIT OR Apache-2.0.
   Host gate: 559 Rust tests, 28 CLI tests, 532 Python tests, `test_clone.py` 49 and `test_ffi_asan.py` 22, all passing.
   Hosted run 43215645789 passed every job except engine-e2e 16-16, 18-18 and 16-18, which stop at `validate_capacity` because the runner has four CPUs and the floor is six.
-  Blocked on a leader decision about that floor; `feat/native-engine` stays at `b463abd` and no `dev-<sha>` image is published.
+  Blocked on a leader decision about that floor; M8 does not reach `feat/native-engine` and no M8 `dev-<sha>` image is published before it.
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-INTEGRATE-20261112/SHA256SUMS`, SHA-256 `c77d615cbcce1117a0b7be7e2e9a692d552b0500732ab4ef74f4ab3c6f778598`.
 - [x] M9-JOIN: `feat/m9-join-20261112` at `0f6fa60e93cab7a558d73a9abab5620dc6e036ad`, tree `81caec021b9c021be6bb9296ce4c222237756454`, based on `41db2ac`.
   It re-picks `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5`; H1 `0c507a7` was an empty pick because `59abca5` already carries its four files.
