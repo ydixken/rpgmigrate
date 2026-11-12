@@ -107,7 +107,8 @@ Unset selects `local`: 2 CPUs each for the build, source, target and runner cont
 `hosted-linux` keeps the build and runner at 2 CPUs and gives the source and target 1 CPU each.
 Admission refuses a host with fewer CPUs than the source, target and runner caps together: 6 for `local`, 4 for `hosted-linux`.
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
-We run CI with `hosted-linux` because the GitHub `ubuntu-24.04` runner has 4 CPUs.
+We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
+The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
 Both profiles keep the same memory caps and memory and disk floors, because that runner reports about 14 GiB free memory and about 86 GiB free on the Podman storage root.
 Failures retain redacted child stderr and safe stage/return-code/callsite metadata under `target/e2e/failures/`, using private 0700 directories and 0600 files.
 Public failure output contains no child argv, SQL, row values, or credentials.

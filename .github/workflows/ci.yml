@@ -118,7 +118,8 @@ jobs:
           globs: ${{ steps.markdown.outputs.files }}
 
   engine-e2e:
-    runs-on: ubuntu-24.04
+    # Podman 5 is the harness baseline; ubuntu-24.04 ships Podman 4.
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -143,6 +144,8 @@ jobs:
           podman info
           python3 --version
           task --version
+          podman_major=$(podman version --format '{{.Client.Version}}' | cut -d. -f1)
+          test "$podman_major" -ge 5
       - name: Provision the pinned public images
         run: |
           python3 - <<'PYPULL'

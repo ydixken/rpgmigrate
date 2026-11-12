@@ -32,7 +32,7 @@ def validate(source):
         "checks": ("run: task --silent --output=interleaved --color=false check lint test",),
         "dependencies": ("cargo install cargo-deny --version 0.20.2 --locked", "cargo deny --locked check licenses advisories"),
         "docs": ("DavidAnson/markdownlint-cli2-action@", '"git", "ls-files"', "*.md", "*.markdown"),
-        "engine-e2e": ("CONTAINER_RUNTIME: podman", "RPGMIGRATE_E2E_CAPACITY: hosted-linux", "podman --version", '["podman", "pull", "--quiet", reference]', "task test-e2e-clone-${{ matrix.pair }}",
+        "engine-e2e": ("CONTAINER_RUNTIME: podman", "RPGMIGRATE_E2E_CAPACITY: hosted-linux", "podman --version", 'test "$podman_major" -ge 5', '["podman", "pull", "--quiet", reference]', "task test-e2e-clone-${{ matrix.pair }}",
                        'validate_receipt(report, clone.load_manifest())', 'test -s "target/e2e/${{ matrix.pair }}.json"'),
         "runner-image": ("CONTAINER_RUNTIME: podman", "podman --version", "task image:build", "task --silent image:smoke",
                          "test -s target/image/smoke.json"),
@@ -41,6 +41,8 @@ def validate(source):
         for fragment in fragments:
             if fragment not in sections[name]:
                 raise ValueError(f"missing {name} command: {fragment}")
+    if "    runs-on: ubuntu-26.04\n" not in sections["engine-e2e"]:
+        raise ValueError("engine e2e must run on the Podman 5 runner")
     if re.findall(r"^        pair: \[(.*)\]$", sections["engine-e2e"], re.MULTILINE) != [", ".join(PAIRS)]:
         raise ValueError("clone matrix differs")
     entries = re.findall(r"^          - arch: ([a-z0-9]+)\n            runner: ([a-z0-9.-]+)$",
@@ -98,7 +100,7 @@ class WorkflowTests(unittest.TestCase):
         for command in ("task --silent --output=interleaved --color=false check lint test",
                         "cargo deny --locked check licenses advisories", "task test-e2e-clone-${{ matrix.pair }}",
                         "task image:build", "task --silent image:smoke", "validate_receipt(report, clone.load_manifest())",
-                        "test -s target/image/smoke.json"):
+                        "test -s target/image/smoke.json", 'test "$podman_major" -ge 5', "runs-on: ubuntu-26.04"):
             for replacement in ("", "true"):
                 with self.subTest(command=command, replacement=replacement), self.assertRaises(ValueError):
                     validate(self.source.replace(command, replacement, 1))
