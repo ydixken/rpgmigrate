@@ -109,11 +109,21 @@ Admission refuses a host with fewer CPUs than the source, target and runner caps
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
-That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode.
+That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode; we accept this only because the runner is discarded after the job.
 The development image builds with `--layers=false`, because cached intermediate images would be unowned resources that the preservation check refuses.
 Both profiles keep the same memory caps and memory and disk floors, because that runner reports about 14 GiB free memory and about 86 GiB free on the Podman storage root.
 Failures retain redacted child stderr and safe stage/return-code/callsite metadata under `target/e2e/failures/`, using private 0700 directories and 0600 files.
 Public failure output contains no child argv, SQL, row values, or credentials.
+On failure, the engine-e2e job prints a cleanup summary to the public log, and nothing else:
+
+- runtime ledger statuses, error kinds and verification flags;
+- the names of resources added, removed or changed between the baseline and after-run inventories;
+- each failure record (command kind, return code, diagnostic id and callsite);
+- for raw podman failures, the redacted stderr lines starting with `Error:` or `*`, cut to 300 characters;
+- the last 20 AppArmor `DENIED` or `ALLOWED` kernel lines;
+- the podman image list (ID, name, creation time and `io.rpgmigrate.e2e` label).
+
+It never prints a runtime ledger itself or any other stderr.
 
 1. Check the harness controls without containers.
 
