@@ -162,6 +162,23 @@ jobs:
           PYPULL
       - name: Qualify the development engine image
         run: task test-e2e-clone-${{ matrix.pair }}
+      - name: Summarize runtime cleanup on failure
+        if: failure()
+        run: |
+          python3 - <<'PYLEDGER'
+          import json
+          from pathlib import Path
+          # Statuses and exception kinds only; the ledger itself stays on the runner.
+          for path in sorted(Path("target/e2e").glob("*.runtime.json")):
+              ledger = json.loads(path.read_text())
+              print(json.dumps({"stage": ledger.get("stage"), "cleanup_complete": ledger.get("cleanup_complete"),
+                                "private_removed": ledger.get("private_removed"),
+                                **{key: value for key, value in ledger.items() if key.endswith(("_error_kind", "_verified"))},
+                                "containers": [[entry.get("role"), entry.get("cleanup_status"), entry.get("cleanup_error_kind")]
+                                               for entry in ledger.get("containers", [])],
+                                "network": [(ledger.get("network") or {}).get(key) for key in ("cleanup_status", "cleanup_error_kind")]},
+                               sort_keys=True))
+          PYLEDGER
       - name: Revalidate the exact sanitized clone receipt
         run: |
           test -s "target/e2e/${{ matrix.pair }}.json"
