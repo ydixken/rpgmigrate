@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "cases": [
+    "local_endpos_survives_active_fence_json_refusal",
+    "same_endpos_retry_after_completed_observation",
+    "endpos_sampled_before_certification_retains_exact_request",
+    "async_visible_row_cannot_emit_replication_json",
+    "loaded_cutover_durable_source",
+    "loaded_cutover_async_source",
+    "later_begin_coverage_preserves_pre_later_oracle",
+    "crossing_transaction_remains_whole_across_cutover_and_resume",
+    "cleanup_retains_foreign_resources_and_comparison_state",
+    "completed_resume_requires_checked_authority_close",
+    "m9_final_sequence_sync_failure",
+    "m9_final_large_object_sync_failure"
+  ]
+}

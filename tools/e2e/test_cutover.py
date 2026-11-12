@@ -497,6 +497,8 @@ class M9CutoverTests(unittest.TestCase):
                     path.write_text(json.dumps({"version": 1, "cases": cases}))
                     cutover.load_manifest(path, profile=profile)
             self.assertEqual(cutover.load_manifest()["cases"], list(cutover.CASES))
+            for durability in (None, "durable", "replay-safe"):
+                self.assertEqual(cutover.load_manifest(profile="m9", durability=durability)["cases"], required)
 
     def test_m9_completion_requires_both_actual_frames_and_equal_settings(self):
         for mode in ("durable", "replay-safe"):

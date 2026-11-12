@@ -1755,6 +1755,8 @@ class FollowHarnessTests(unittest.TestCase):
                 self.assertEqual(harness.load_manifest()["cases"], list(harness.CASES))
                 with self.assertRaises(RuntimeError):
                     harness.load_manifest(durability="durable")
+        for mode in (None, "durable", "replay-safe"):
+            self.assertEqual(harness.load_manifest(profile="m9", durability=mode)["cases"], expected[mode or "durable"])
 
     def test_m9_cutover_outer_dispatch_forwards_profile_and_durability_to_both_boundaries(self):
         import cutover
