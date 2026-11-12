@@ -929,7 +929,7 @@ These are source/component checkpoints; no broad Go suite, whole-M6 review, actu
 
 The root-approved completion-rejoin amendment requires separate partial-cleanup admission for flags `00`, `10`, and `01`, with actual target-row completion authority and completion-only credential-free version discovery.
 Ordinary active admission and the fully cleaned predicate remain unchanged; status and resource inventory cannot authorize completion.
-Private plan: `/tmp/rpgmigrate-m6-completion-rejoin-plan-20261110/2026-11-10-m6-completion-rejoin-amendment.md`, SHA-256 `1b4dfa9c7051a4037c92be38520d09bbcf4ce52f0e8a7e3f6d2fe5d9fd294dbf`.
+Plan: [completion-rejoin amendment](../docs/superpowers/plans/2026-11-10-m6-completion-rejoin-amendment.md), SHA-256 `1b4dfa9c7051a4037c92be38520d09bbcf4ce52f0e8a7e3f6d2fe5d9fd294dbf`, recovered byte-identical from the planning session log after the reboot wiped `/tmp`.
 The 46-path completion/rejoin/finalization/disposition join is signed in API checkpoint `3ef73545c9f074e1a50cd2c042132977ef170055`, native checkpoint `1d0d67b5001aae48774998f8f4bf5861e5fbceea`, and controller checkpoint `0346f9e8534174243f2d07470afcec5d8275e6de`, tree `1eb28adac4088756694e56006edf3240fbb6a8d0`.
 Its actual production/controller builds, four-package compilation, 807 named/154 top-level focused race checks, and scoped lint passed with zero failures, skips, or lint findings.
 Joined proof: `/tmp/m6-joined-integration-20261110/preceding-source-manifest.json`, SHA-256 `9c41fcd8591b4b5b04ec64a109ec9ec30990f19ae14c7c44fcc840b08ab5cb5b`.
