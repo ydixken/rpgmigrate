@@ -705,7 +705,7 @@ At the earlier joined-source checkpoint, compare/progress wiring had source test
 The earlier seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
-The isolated M8 code/docs handoff is signed as recorded above; no M8 source fast-forward to the engine primary or activation is authorized.
+The isolated M8 code/docs handoff is signed as recorded above; M8 source reaches the engine primary only through the integration branch once its hosted CI is green, and no activation is authorized.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
@@ -736,7 +736,7 @@ The checkpoint above records focused packet tests, the approved CLI omission cla
   Report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables.
   Compare fork default against native `replay-safe`.
   Label native `durable` as stronger than native `replay-safe`.
-- [ ] `docs/durability.md` crash matrix per mode: process kill, host power loss, target crash, target failover with and without a synchronous standby, source WAL retention.
+- [ ] `docs/durability.md` crash matrix per mode: process kill, host power loss (deferred 2026-11-12, documented as unqualified), target crash, target failover with and without a synchronous standby, source WAL retention.
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
 ### M10: Release readiness
@@ -849,12 +849,53 @@ A citation marked "(lost 2026-11-12)" names a file that no longer exists.
 Its recorded SHA-256 still identifies the bytes, and the claim it backs keeps its original scope without fresh verification.
 Where a byte-identical copy or a successor exists, the citation names it next to the lost path.
 
+On 2026-11-12 a Claude Code leader took over with the same roadmap, ledger and gates.
+Owners now work in standalone clones under `~/development/` instead of git worktrees, because the checked-in agent instructions forbid worktrees.
+The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds the evidence for each result below.
+
+### User decisions, 2026-11-12
+
+- Host power-loss crash rows are deferred; the durability documentation states them as unqualified instead of claiming a result.
+- Public development GHCR images remain approved for `ghcr.io/ydixken/rpgmigrate` and `ghcr.io/ydixken/pgcopydb-operator` only.
+- Feature-branch pushes to origin remain approved; main pushes, merges, tags and releases remain unauthorized.
+- Benchmark execution still needs separate approval.
+- The project license stays Apache-2.0.
+
+### Engine branches
+
+- `feat/m8-engine-20261112` at `41db2ac` carries M8 and passed the host gate, with 559 Rust tests and the ten-guide check.
+  Its hosted run 43210130162 failed on the stale ASAN lock pin and on `podman machine` calls in the e2e runtime guard; the integration branch below fixes both.
+  The regenerated M8 contract supersedes the lost `/tmp` contract.
+- `feat/engine-integration-20261112` at `3bc1f60` joins M8 with a local-Podman host path in the e2e runtime guard, the re-pinned ASAN lock graph after the `sha2` review, and the M6 lifecycle plans.
+  Hosted run 43215645789 passed checks, dependencies, docs and both runner-image jobs.
+  All three engine-e2e pairs stop at the capacity floor: the hosted runner reports four CPUs, and the guard requires six.
+  `feat/native-engine` is not fast-forwarded and no `dev-<sha>` runner image follows until that floor has a decision.
+- `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
+  It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
+  Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
+- `feat/m10-asan-20261112` at `cc82953`, also fast-forwarded onto `feat/m10-asan-preparation`, passes every hosted ASAN preparation stage on amd64 and arm64 except `graphs`.
+  Both unit graphs are `shape-unrecognized`, so ASAN stays unqualified.
+- `feat/m6-pkg-20261112` points at `254ab5ba`, whose hosted AMD64 runner image passed the smoke checks with the same build inputs as the ARM packet.
+- `docs/m6-lifecycle-20261112` at `f4346cf` restores the completion-rejoin and TERM amendment plans and specifies the native TERM runtime receipt.
+
+### Operator branches
+
+- M6-LINT needed no change: `5616d82` is already integrated in `3f1330e`, and `make lint` reports zero issues there.
+- `feat/m6-lifecycle-20261112` at `a5e802d` qualifies composed exact-UID disposal, cleanup on `complete=true` only, and plain-clone failure on a missing report, and adds the TERM receipt checker.
+- `feat/m7-harness-20261112` at `9353ac0` keeps the Go gate output, adds the macOS sleep guard, refuses `/tmp` run directories, and regenerates the kind image lock from public digests.
+- `feat/m7-suite-20261112` at `7a863ed` shapes suite Migrations for the native engine and labels the native matrix specs.
+- `feat/m7-faults-20261112` at `c290cba` adds six native fault specs, which have not run yet.
+- `feat/native-operator-integration-20261112` at `5f8e2f5` joins these with the M8 helper rebase, widens the kind label gate under the native engine, and captures TERM receipts in the suspend and delete specs.
+  Three M8 helper tests fail on a changed canonical helper hash, and moving that pin needs a decision.
+
+M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
+
 ## Execution model
 
 The leader decomposes, assigns one owner per file or subtree, and reviews; verification agents never review their own work.
 Effort per task: xhigh for WAL, apply, recovery, durability and safety reviews; high for bounded implementation and tests; medium for docs and CI; each brief states the reason.
 Each milestone gets a detailed implementation plan (superpowers:writing-plans) before work starts.
-Parallelize the build phase as far as file ownership allows: independent owners work at the same time, each in its own git worktree off `feat/native-engine` (user-approved 2026-11-08, overriding the earlier no-worktree rule), and the leader integrates.
+Parallelize the build phase as far as file ownership allows: independent owners work at the same time, each in its own standalone clone off `feat/native-engine`, and the leader integrates.
 Run the independent review (at the effort its risk calls for) and the Go test suites once per milestone, at its close, not after each task; workers run only the focused tests for their own change while building.
 Operator work goes on its own branch and PR, and existing operator edits (`tasks/todo.md`, `.agents/`) stay untouched.
 The verified VM allocation is fourteen CPUs, 32 GiB memory, and a 160-GiB disk; the [ledger](../tasks/todo.md) binds the latest resize/preservation proof.

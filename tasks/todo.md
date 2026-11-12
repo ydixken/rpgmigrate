@@ -1001,7 +1001,7 @@ Fast-forward proof: `/tmp/rpgmigrate-m6-sealed-capability-composition-20261110/c
 - [x] Compose the exact fixture, producer/help, and packaging-smoke packets on engine baseline `ef37214b55e7a082f6e2ee949768649e83163ea4`, with a separate fixture/consumer candidate on operator baseline `727e45da94a5b2d099e97380e086a36206e68451`.
 - [x] Verify packet manifests, every exported and baseline blob, intended modes, preserved peer files, and identical 133-file fixture trees.
 - [x] Update discovery/profile documentation without changing the three-field DTO, command-specific reports, historical empty parser fixture, or operator activation gates.
-- [ ] Qualify fresh ARM and AMD64 packaging artifacts from the exact new source and retain observed executable digests.
+- [x] Qualify fresh ARM and AMD64 packaging artifacts from the exact new source and retain observed executable digests.
 - [ ] Bind the new ARM executable/image to the scheduled M6 helper/preflight/controller and three-pair native acceptance packet.
 - [ ] Qualify exact-image AMD64 native database runtime in M10 before claiming multi-architecture runtime support.
 
@@ -1396,7 +1396,7 @@ Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, wit
 PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases were removed and original resources preserved.
 TOC proof: `/tmp/rpgmigrate-m8-catalog-toc-20261110/0942b349889341e7/final-proof.json` (lost 2026-11-12), SHA-256 `79a302da68f236c733b23f8061f3f065e2097576c614d056b58327f87946c9e2`.
 Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
-The isolated M8 code/docs handoff is signed as recorded above; no M8 source fast-forward to the engine primary or activation is authorized.
+The isolated M8 code/docs handoff is signed as recorded above; M8 source reaches the engine primary only through the integration branch once its hosted CI is green, and no activation is authorized.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
@@ -1428,7 +1428,7 @@ The checkpoint above records focused packet tests, the approved CLI omission cla
   Report target-committed rows and transactions per second, catch-up rate, commit-to-apply p50/p95/p99, and COPY MiB/s on narrow and wide tables.
   Compare fork default against native `replay-safe`.
   Label native `durable` as stronger than native `replay-safe`.
-- [ ] `docs/durability.md` crash matrix per mode: process kill, host power loss, target crash, target failover with and without a synchronous standby, source WAL retention.
+- [ ] `docs/durability.md` crash matrix per mode: process kill, host power loss (deferred 2026-11-12, documented as unqualified), target crash, target failover with and without a synchronous standby, source WAL retention.
 - [ ] Optional binary pgoutput, gated per stream on a built-in-type allowlist, only if measured.
 
 ## M10: Release readiness
@@ -1462,6 +1462,71 @@ The reboot cleared `/tmp` and `/private/tmp`, while `/private/var/tmp`, `~/.code
 A citation marked "(lost 2026-11-12)" names a file that no longer exists.
 Its recorded SHA-256 still identifies the bytes, and the claim it backs keeps its original scope without fresh verification.
 Where a byte-identical copy or a successor exists, the citation names it next to the lost path.
+
+On 2026-11-12 a Claude Code leader took over with the same roadmap, ledger and gates; owners work in standalone clones under `~/development/` because the checked-in agent instructions forbid worktrees.
+The [roadmap](../docs/roadmap.md#leader-takeover-and-wave-results-2026-11-12) records the same user decisions and branch summary.
+Evidence for each owner lives in `/private/var/tmp/rpgmigrate-<OWNER>-20261112/`, with a `SHA256SUMS` file where the owner wrote one.
+
+User decisions, 2026-11-12:
+
+- Host power-loss crash rows are deferred and documented as unqualified; [durability](../docs/durability.md) already states that power-loss durability is not proven.
+- Public development GHCR images remain approved for the two development packages only.
+- Feature-branch pushes remain approved; main, tags and releases remain unauthorized.
+- Benchmarks still need approval.
+- License: Apache-2.0.
+
+### Engine wave results, 2026-11-12
+
+- [x] M8-ENGINE: `feat/m8-engine-20261112` at `41db2ac0081b177874481f78434cf135471b39dc`, no new commits.
+  Host `task check lint test` passed 559 Rust tests (25 ignored) and 28 CLI tests; the ten-guide check passed on the debug binary.
+  The Python suite failed one ASAN test on the stale `lockfile_sha256` pin, and hosted run 43210130162 also failed all three engine-e2e pairs with exit 125 from `podman machine`.
+  Contract: `/private/var/tmp/rpgmigrate-M8-ENGINE-20261112/contract.md`, SHA-256 `8fd4a5d9a6afe2d40065b78031e7c9dfc385c1e79b630f195f8a437d77645c08`, replacing the lost `/tmp` contract in the M8 section.
+- [ ] ENGINE-INTEGRATE: `feat/engine-integration-20261112` at `3bc1f607bc1f28983cd8f4ce38ea757da27c31a8`, from `41db2ac`.
+  `e557168` probes a local Podman host without `podman machine` and refuses admission when locality is unknown; `f5520bb` re-pins the ASAN locked graph to `b5c9dd268bd51e92d1ac69fd2916eefee762fb8f9f0fc312178b77c2af479f82` with 37 verified registry archives; `3bc1f60` merges the M6 lifecycle plans.
+  Pinned cargo-deny 0.20.2 passed licenses and advisories for the seven new `sha2` crates, all MIT OR Apache-2.0.
+  Host gate: 559 Rust tests, 28 CLI tests, 532 Python tests, `test_clone.py` 49 and `test_ffi_asan.py` 22, all passing.
+  Hosted run 43215645789 passed every job except engine-e2e 16-16, 18-18 and 16-18, which stop at `validate_capacity` because the runner has four CPUs and the floor is six.
+  Blocked on a leader decision about that floor; `feat/native-engine` stays at `b463abd` and no `dev-<sha>` image is published.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-INTEGRATE-20261112/SHA256SUMS`, SHA-256 `c77d615cbcce1117a0b7be7e2e9a692d552b0500732ab4ef74f4ab3c6f778598`.
+- [x] M9-JOIN: `feat/m9-join-20261112` at `0f6fa60e93cab7a558d73a9abab5620dc6e036ad`, tree `81caec021b9c021be6bb9296ce4c222237756454`, based on `41db2ac`.
+  It re-picks `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5`; H1 `0c507a7` was an empty pick because `59abca5` already carries its four files.
+  `0f6fa60` adds `tests/fixtures/follow/m9-cases.json` (21 durable cases plus the replay-safe ACK oracle) and `tests/fixtures/follow/m9-cutover-cases.json` (12 cases), derived from the loaders' own contracts.
+  Focused suites passed, including clone 61, cutover 47, follow 75, witness 56 and 435 Rust library tests; live `--follow-authority` passed 21 of 21 and `--clone` 10 of 10 on PostgreSQL 16.15 and 18.6.
+  Evidence: `/private/var/tmp/rpgmigrate-M9-JOIN-20261112/SHA256SUMS`, SHA-256 `2ca867a006d1e28ee1b7b8a7a749a1dec6a8a213385cea99156c8926e108c60f`.
+  `tools/bench/test_m9.py` is not registered in CI, and `docs/testing.md` does not yet describe the M9 follow and cutover profiles.
+- [ ] M10-ASAN: `feat/m10-asan-20261112` at `cc829539b6c552a6f5ae8573d04fb11a908c2d2e`, also fast-forwarded onto `feat/m10-asan-preparation` so `asan-prepare.yml` runs.
+  Hosted run 43212199320 on `86800c0` passed admission, binfmt, toolchain, symbolizer, symbolized control, retention and bindings on amd64 and arm64.
+  Both `cli` and `libtest` unit graphs remain `shape-unrecognized`, so `graphs` is incomplete and the receipt keeps `qualification: not-assessed`.
+  The attempt schema is now version 4, and `86800c0` alone fails the STE style check that `cc82953` fixes.
+  Attempts: `/private/var/tmp/rpgmigrate-M10-ASAN-20261112/run-43212199320/`, amd64 `attempt.json` SHA-256 `e862aa0b690448672a4bb4224035ab889ade15d78d8d5096daa9fac5d6346cf8`, arm64 `attempt.json` SHA-256 `dc8a268fa6b17d244a3c6046d01ab7aa4c6450dc8dec5cd6cf9ff0559c8678e3`.
+- [x] M6-PKG: `feat/m6-pkg-20261112` points at `254ab5ba103bfe75a2e1dcd8acad0b9720e88ab8` with no new commits.
+  Hosted run 43210038392 passed `runner-image (amd64)` with image `sha256:c66bfe0279c1da2745ab78337c9c5303ea1ab3fdd465c4d3b8238b60a723ca1c`, binary SHA-256 `50ff53abbf3c5501189058387dff6770f14a17558441f4f732035b403246a048`, UID 65532 and all six smoke checks.
+  The hosted arm64 binary is byte-identical to the local ARM packet binary `4bded8d5`; the run's `checks` job failed only on three safety-comment placements that later source fixes.
+  Binding proof: `/private/var/tmp/rpgmigrate-M6-PKG-20261112/m6-pkg-binding-proof.json`, SHA-256 `6a3c8de90e3170a6397e77c50e00d222b30c14b8664ea4272cc694ae2970a786`.
+  The AMD64 image is a CI-runner image only, and whether the three-pair packet stays on `254ab5ba` or is rebuilt on the M6 closing source is a leader decision.
+- [x] M6-LIFECYCLE (engine docs): `docs/m6-lifecycle-20261112` at `f4346cf`, restoring both amendment plans byte-identical from session logs and adding the [TERM runtime receipt spec](../docs/superpowers/plans/2026-11-12-m6-native-term-runtime-receipt.md).
+  The parent final controller wiring plan `c2e61922` was not recoverable.
+  Provenance: `/private/var/tmp/rpgmigrate-M6-LIFECYCLE-20261112/plan-provenance.json`, SHA-256 `f37cd4f7af178aa5db74f3eec1ce63f9d05303da32323ebc3e2f5c3917079cf7`.
+
+### Operator wave results, 2026-11-12
+
+- [x] M6-LINT: no change; `5616d82` is already integrated in `3f1330e`, where `make lint` with `gocyclo` enabled reports zero issues.
+  Log: `/private/var/tmp/rpgmigrate-M6-LINT-20261112/make-lint.log`, SHA-256 `6c0183cc08b4d34629ca334e21042250143c9ad973727194451580d0b7ace1f3`.
+- [x] M6-LIFECYCLE: `feat/m6-lifecycle-20261112` at `a5e802d`, with three composed lifecycle tests and eight mutations that each turn them red.
+  The report parser accepts `complete:false` as partial progress, so the controller checks are the only cleanup guard.
+- [x] M7-HARNESS: `feat/m7-harness-20261112` at `9353ac0`; `hack/test_e2e_kind.py` passes 120 tests and the regenerated `3f1330e` lock passes the unmodified guard.
+  Lock verification: `/private/var/tmp/rpgmigrate-M7-HARNESS-20261112/lock-verification.json`, SHA-256 `99843d9f9c9e6323f8d419ed2c1074f1249653f42c212bf535e8be2912daac8a`.
+  The only surviving pin source is the `0cb3eb6b` lock, retained byte-identical under `/private/var/tmp/` as cited in the GHCR checkpoint.
+- [x] M7-SUITE: `feat/m7-suite-20261112` at `7a863ed`, 11 focused tests passing.
+  Tests: `/private/var/tmp/rpgmigrate-M7-SUITE-20261112/focused-tests.txt`, SHA-256 `1834e3adb13132e54451ca366c0b9f34c9c745e398dc73839afbd148427eea9e`.
+- [x] M7-FAULTS: `feat/m7-faults-20261112` at `c290cba`, six `native-fault` specs passing 22 offline unit tests and selecting 6 of 85 specs in a dry run; none has run on kind.
+  Dry run: `/private/var/tmp/rpgmigrate-M7-FAULTS-20261112/label-selection-dry-run.txt`, SHA-256 `e47d1702eef1b3f2d3accade6a3699426354f1bb37667694d84ced88196d1b96`.
+- [ ] OPERATOR-INTEGRATE: `feat/native-operator-integration-20261112` at `5f8e2f5603a09467612a7667cb0ea4c1b66da48c`, from `3f1330e`, merging the five operator branches above plus `feat/m8-helper-rebase-20261110`.
+  It adds `kindLabelFilterAllowed`, TERM receipt capture on pair 16:16, and the receipt checker in the offline kind controls; every first-parent commit is lint-clean.
+  `go test ./internal/native` fails three helper tests on a changed canonical helper hash from `09094f9`; moving the `e1bd440b` pin needs a leader decision because earlier M6 evidence binds it.
+  Evidence: `/private/var/tmp/rpgmigrate-OPERATOR-INTEGRATE-20261112/SHA256SUMS`, SHA-256 `18f1e4610c0d00267b123e900da7f59067e606465a1c333693ece64356fa5128`.
+
+M0–M5 remain closed and M6–M10 remain open.
 
 ## Capacity and parallel execution, user update 2026-11-08
 
