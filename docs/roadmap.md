@@ -149,8 +149,8 @@ The same run passed ARM64 publication at manifest digest `sha256:b3ccc7ec689bdd7
 Independent anonymous graph verification passed for both architectures, including all fourteen layers per image.
 The manager package API reports public visibility and repository linkage to `ydixken/pgcopydb-operator`.
 Hosted publication proves effective write access, while the manager Actions UI setting remains uninspected.
-Sealed eighteen-file manager evidence: `/tmp/rpgmigrate-m7-hosted-ci-public-20261110-ws3q891j/receipt-manifest.json`, SHA-256 `b21c161a38a24710ef2f6fc52ee10d55d11e8fdd9ee77dfa7017d15dd1581b05`.
-Lock-ready image input: `/tmp/rpgmigrate-m7-hosted-ci-public-20261110-ws3q891j/manager-lock-ready-images.json`, SHA-256 `d9b38e132048e54ac162933eaf1ff0dda4ac2a097f8b3270b7f7337be09a1366`.
+Sealed eighteen-file manager evidence: `/tmp/rpgmigrate-m7-hosted-ci-public-20261110-ws3q891j/receipt-manifest.json` (lost 2026-11-12), SHA-256 `b21c161a38a24710ef2f6fc52ee10d55d11e8fdd9ee77dfa7017d15dd1581b05`.
+Lock-ready image input: `/tmp/rpgmigrate-m7-hosted-ci-public-20261110-ws3q891j/manager-lock-ready-images.json` (lost 2026-11-12), SHA-256 `d9b38e132048e54ac162933eaf1ff0dda4ac2a097f8b3270b7f7337be09a1366`.
 Fresh source-bound runtime RUN qualification remains open.
 
 Historical engine source `a38e02d95e47adff912054d9ffc087219e2b82b7` passed all three plain-clone pairs and both architecture runner-image smokes in [CI run 42817666258](https://github.com/ydixken/rpgmigrate/actions/runs/42817666258).
@@ -159,17 +159,17 @@ The separate [development publication run](https://github.com/ydixken/rpgmigrate
 Keep those immutable tags untouched and retain the unknown outcomes.
 Successor source `abd1a36e50726a26a9f655c5f53bb34ed8d182c1` fixes those three comment placements and sanitizes push-failure diagnostics, with 451 portable checks passing.
 We pushed the signed successor to the feature branch.
-Push proof: `/tmp/rpgmigrate-native-safe-diagnostics-feature-push-proof-20261110.json`, SHA-256 `aee53d8539b35f329975c7d5a3d6685145c59233a61d4089710cb6c841659f8a`.
+Push proof: `/tmp/rpgmigrate-native-safe-diagnostics-feature-push-proof-20261110.json` (lost 2026-11-12), SHA-256 `aee53d8539b35f329975c7d5a3d6685145c59233a61d4089710cb6c841659f8a`.
 Fresh [checks run 42824505133](https://github.com/ydixken/rpgmigrate/actions/runs/42824505133) passed all eight jobs, including Linux Clippy, dependency/docs checks, all three plain-clone pairs, and both architecture runner-image smokes.
 The [development publication run 42824505294](https://github.com/ydixken/rpgmigrate/actions/runs/42824505294) passed both Ubuntu 26 native publication jobs.
 Typed public/source artifact verification and independent anonymous graph verification passed for both successor native images.
-Sealed native evidence: `/private/tmp/rpgmigrate-abd1-ci-verification-wp3sm6jz/manifest.json`, SHA-256 `bfbdd941990af3f37cd4880bf0faa25c13d422b7904edf715c624e6d94d06f66`.
-Lock-ready native input: `/private/tmp/rpgmigrate-abd1-ci-verification-wp3sm6jz/lock-ready-native-images.json`, SHA-256 `367652be5b567f2bf01d4c1e2b2eb8b1ccf3b326353aca6b0b1b01d3f8e30393`.
+Sealed native evidence: `/private/tmp/rpgmigrate-abd1-ci-verification-wp3sm6jz/manifest.json` (lost 2026-11-12), SHA-256 `bfbdd941990af3f37cd4880bf0faa25c13d422b7904edf715c624e6d94d06f66`.
+Lock-ready native input: `/private/tmp/rpgmigrate-abd1-ci-verification-wp3sm6jz/lock-ready-native-images.json` (lost 2026-11-12), SHA-256 `367652be5b567f2bf01d4c1e2b2eb8b1ccf3b326353aca6b0b1b01d3f8e30393`.
 These image checks do not qualify an operator migration.
 
 The strict twelve-role ARM64 lock binds public manager/native images and pinned upstream graphs.
 Fresh upstream verification hashed 72 layers totaling 1.234 GB, and the canonical operator `29ed` receipt-input checks passed.
-Private lock: `/private/tmp/rpgmigrate-m7-arm64-public-lock-20261110-build-a7f2/image-lock.json`, SHA-256 `0cb3eb6be70f56709274d8d5f55ac6f592663ea98407adad4caba36859752da1`.
+Private lock: `/private/var/tmp/rpgmigrate-m7-canonical29ed-clock-successor-20261110-1f92b6ad/image-lock.json`, SHA-256 `0cb3eb6be70f56709274d8d5f55ac6f592663ea98407adad4caba36859752da1`, a byte-identical copy of the cited `/private/tmp/rpgmigrate-m7-arm64-public-lock-20261110-build-a7f2/image-lock.json` (lost 2026-11-12).
 The canonical M6 private-envelope rebind manifest is `b293524d39398576cb3a02f13d709221edc3cbb2c909ed021debf29760a8b4c5`, with status `UNBOUND`.
 The sealed canonical supervisor packet retains status `UNBOUND`.
 Supervisor packet: `/private/var/tmp/rpgmigrate-m7-ghcr-registry-supervisors-canonical29ed-20261110/source-packet.json`, SHA-256 `ced1a9dea61f033729bbea7cc6df956d9eeaf2573471a4d9798d57ba0909410b`.
@@ -196,15 +196,15 @@ Bootstrap passed, while native E2E and migration execution remain open.
 No renewal or new parent lease follows from the first Ready receipt.
 
 The signed isolated M8 candidate `ea51e2375e51adc3d42115c588f5d3b23ea6d4a6`, tree `70198152465b405002ec4bf95d68775fa7342ed1`, composes Apache/GHCR changes without changing the M8 core and passed 398 portable tests.
-Composition proof: `/tmp/rpgmigrate-m8-primary-source-composition-20261110/signed-checkpoint.json`, SHA-256 `51f840b0fcc65eac496ddd93c1f2ab209f1571e7c0f68ecfb100076ee962a39a`.
+Composition proof: `/tmp/rpgmigrate-m8-primary-source-composition-20261110/signed-checkpoint.json` (lost 2026-11-12), SHA-256 `51f840b0fcc65eac496ddd93c1f2ab209f1571e7c0f68ecfb100076ee962a39a`.
 The earlier independent binary `2f0b077c` from source `611d1a4` passed one catalog and all ten Clone cases on each of PostgreSQL 16.15 and 18.6, with zero failures or ignored cases.
-Component summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json`, SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
+Component summary: `/private/tmp/rpgmigrate-m8-full-component-20261110/0dc035e4bcfa3ec9/summary.json` (lost 2026-11-12), SHA-256 `6babb268e5d86a6d612c785477a071dc882717023909197b7b192e98d4483833`.
 The first six-profile workflow attempt on 16-to-16 failed before Cargo or PostgreSQL started because the Podman pasta inspect shape differed from the harness assumption.
 It executed zero profiles and produced zero reports, so it does not qualify the three-pair workflow.
 Independent cleanup and preservation released the window.
 Failure/preservation proof: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-16-16-6d0f41c9/independent-failure-preservation-release-proof.json`, SHA-256 `3dc97cf996c6444327a1edf9c2688e2da0461d476360b35d1e7b824e7e8f5608`.
 The signed model-only inspect fix uses isolated source `5f287cdd8fa0a79008b8bc0e9b17863725014f0e`, tree `344cc30d8594c87cb550f19f83a10e4fe7c7d42b`, with all 426 portable checks passing.
-Signed checkpoint: `/tmp/rpgmigrate-m8-pasta-successor-integration-20261110/signed-checkpoint.json`, SHA-256 `36ed365b432435481d54a23f1c2bf2318f02f5718b7bf8de608d1c125519f033`.
+Signed checkpoint: `/tmp/rpgmigrate-m8-pasta-successor-integration-20261110/signed-checkpoint.json` (lost 2026-11-12), SHA-256 `36ed365b432435481d54a23f1c2bf2318f02f5718b7bf8de608d1c125519f033`.
 The fresh 334-entry source export passed verification.
 The earlier pasta failure remains RED under its original input identity.
 The `5f287` successor compiled, passed stock-libpq smoke, and started owned PostgreSQL 16, then failed with `actual COPY format observation is missing or invalid`.
@@ -217,7 +217,7 @@ Release proof: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-1
 The engine uses extended-query `PQsendQueryParams` framing, while the observer recognizes COPY only through simple-query `Q` messages.
 An in-memory reproduction accepts simple-query COPY and rejects the actual extended Parse/Bind/Describe/Execute/Sync framing.
 The two-file extended-COPY observer fix passed 31 in-memory wire checks, with four native extended-query cases failing against the original observer.
-Frozen patch: `/private/tmp/rpgmigrate-m8-extended-copy-wire-20261110-d418a2fe/extended-copy-wire.patch`, SHA-256 `5aacc3e9ba6ec280ed19105c3c3440c8f5a921d007d7550dc51cc72fa6f45646`.
+Frozen patch: `/private/tmp/rpgmigrate-m8-extended-copy-wire-20261110-d418a2fe/extended-copy-wire.patch` (lost 2026-11-12), SHA-256 `5aacc3e9ba6ec280ed19105c3c3440c8f5a921d007d7550dc51cc72fa6f45646`.
 Bounded COPY-feature failure capture remains source work.
 No live qualification or weaker COPY evidence requirement follows.
 The format 9 / metadata 7 candidate remains separate from the primary format 8 / metadata 6 baseline, without capability activation.
@@ -244,7 +244,7 @@ Explicit nondefault internally injected limits remain strict, and the direct str
 Test omission and compiled defaults through the real CLI path instead of passing stored limits directly to a helper.
 
 M10 source-tool preparation is committed at `81c5b8c035806e4934806caec4d41e7dcd85d660`: nine tooling files and three portable-suite registrations passed 439 tests across twenty suites with zero skips.
-Integration proof: `/private/tmp/rpgmigrate-m10-tool-integration-evidence-jckqtq98/integration-evidence.json`, SHA-256 `591d5168b9475370f918cbedbff1e79fc0abe219d908842fe82ffec62ccf1337`; commit/fast-forward proof SHA-256 `526aedfc157eb9257c28ea0063b268baac15c4ad29e9566f3ef0a462eafdcd14`.
+Integration proof: `/private/tmp/rpgmigrate-m10-tool-integration-evidence-jckqtq98/integration-evidence.json` (lost 2026-11-12), SHA-256 `591d5168b9475370f918cbedbff1e79fc0abe219d908842fe82ffec62ccf1337`; commit/fast-forward proof SHA-256 `526aedfc157eb9257c28ea0063b268baac15c4ad29e9566f3ef0a462eafdcd14`.
 We integrated signed ASAN commit `0b8ba467f2090375b970ac9fa419d2b1a1e326f5` and guide commit `75b8ff2cadf70833473f8188546487863c88adcc` on the engine feature branch.
 The actual same-source ten-guide checker passed with Task 3.54.0, 46 discovered tasks, and binary SHA-256 `0531da02f2155eb041df101e08fee3f2004b8032f1eecfdf390fa6625d53d8c2`.
 Signed checkpoint: `/Users/ydixken/.codex/tmp/rpgmigrate-m10-docs-asan-proof-fj1326j8/signed-checkpoint.json`, SHA-256 `d06947ab5c422aaae9713fa990e50484dd40868199c29687d92228807e858ecd`.
@@ -439,10 +439,10 @@ Production native admission still returns `UnsupportedEngine`; no actual native 
 The accepted operator source checkpoint is signed `93bd54c557d70ed2daa7be3120ea093b31cc93cf`, tree `a0739a53ca5edcc816e1904bdb87df3b6bb3a691`; its conditional fast-forward from `cf22e84` verified a clean authoritative checkout before and after integration.
 Five signed completion commits add helper receipts (`30686fa`), evidence retention (`50be291`), cleaned completion (`d937958`), follow/E/ACK dependency composition (`d87c920`), and plain-clone completion/verification (`6a27266`).
 Each prefix compiled and passed scoped lint with zero findings, with byte-identical qualified final-tree evidence reused where recorded.
-Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json`, SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
+Completion checkpoint proof: `/tmp/m6-completion-wave-checkpoint-20261110/manifest.json` (lost 2026-11-12), SHA-256 `860652704912ecd72cf14a6d912e8bbc86d74c41bc5fddbfab437755f966eb40`.
 Sampler publication and metrics then entered signed checkpoint `f8214a6` through an exact sealed seven-file relocation into an isolated worktree, preserving all 662 tracked peers.
 Its source-equivalent 73 named focused race checks passed without failures or skips; fresh compilation and scoped lint passed with zero findings.
-Sampler proof: `/tmp/m6-sampler-checkpoint-integration-20261110/checkpoint-manifest.json`, SHA-256 `a1835132bd9fd90de693cd2dcfdaca85ef587f338f121a7f70c213f158c7407e`.
+Sampler proof: `/tmp/m6-sampler-checkpoint-integration-20261110/checkpoint-manifest.json` (lost 2026-11-12), SHA-256 `a1835132bd9fd90de693cd2dcfdaca85ef587f338f121a7f70c213f158c7407e`.
 These are source/component checkpoints; no broad Go suite, whole-M6 review, actual SQL/Kubernetes/native operator workflow, or runtime qualification follows.
 
 The root-approved completion-rejoin amendment requires separate partial-cleanup admission for flags `00`, `10`, and `01`, with actual target-row completion authority and completion-only credential-free version discovery.
@@ -454,7 +454,7 @@ The [ledger](../tasks/todo.md#evidence-checkpoint-2026-11-10) binds the immutabl
 The five-path main dispatcher is integrated in `cf22e84`; its actual production/controller builds, 71 focused race checks, and scoped lint passed, with production admission still closed.
 The finalizer successor includes the production constant-build repair and stale-failed-condition repair; its actual production build, 39 affected race checks, and scoped lint passed with zero findings.
 Its older 335-race-check packet retains separate provenance and is not relabeled as qualification of the repaired successor.
-Finalizer proof: `/tmp/m6-clone-stale-failure-repair-export-20261110/manifest.json`, SHA-256 `3dfc5322c44bb678da6d966621a2b91a495bc86590099ce0646d2bbf75b1525c`.
+Finalizer proof: `/tmp/m6-clone-stale-failure-repair-export-20261110/manifest.json` (lost 2026-11-12), SHA-256 `3dfc5322c44bb678da6d966621a2b91a495bc86590099ce0646d2bbf75b1525c`.
 Dispatcher source integration does not qualify terminal replay after helper disposal; exact-UID disposal and terminal replay still require composed lifecycle qualification.
 The root-approved interface freeze retains atomic known-create `nativeJobUID`/`nativePVCUID` receipts, refusal to adopt absent receipts, invocation-bound Pod identity, worker TTL retention, and independently observed quiescence after TERM.
 Native evidence-bearing helper retention is checkpointed; exact-UID disposal and terminal replay still require composed lifecycle qualification.
@@ -474,14 +474,14 @@ The separate deadline candidate passed offline host/Go/scoped-lint checks and pr
 The [ledger](../tasks/todo.md#evidence-checkpoint-2026-11-10) binds these proofs; neither metadata nor authentication is qualified.
 
 The preceding `aaad6c7` lifecycle checkpoint added identity receipts/worker TTL, retained TERM primitives, and bounded clone capture/parsing, with 288 named focused race checks and nineteen final-proof-join race checks.
-Prior lifecycle proof: `/tmp/m6-lifecycle-components-integration-export-20261110/checkpoint-manifest.json`, SHA-256 `15fc47e882e9863980e3440b716afc8f13e5d3e4f1a3b6db64071f26baac75f7`.
+Prior lifecycle proof: `/tmp/m6-lifecycle-components-integration-export-20261110/checkpoint-manifest.json` (lost 2026-11-12), SHA-256 `15fc47e882e9863980e3440b716afc8f13e5d3e4f1a3b6db64071f26baac75f7`.
 The earlier follow/E/ACK/target-join export passed 81 focused race checks and zero scoped lint findings before its composition in `d87c920`; it ran no actual SQL, Kubernetes, or native engine process.
-Prior follow proof: `/tmp/m6-follow-flow-export-20261110/manifest.json`, SHA-256 `1f78346be36e277a54d3f9cfaa0935f35f51af9af723a562034e401ef9674040`.
+Prior follow proof: `/tmp/m6-follow-flow-export-20261110/manifest.json` (lost 2026-11-12), SHA-256 `1f78346be36e277a54d3f9cfaa0935f35f51af9af723a562034e401ef9674040`.
 
 The preceding operator checkpoint `9fd9061790f158ee8c65908113029ac667da68ba`, tree `53d2abe0385d28918d99d45cb71057dd24575739`, added worker locale pinning (`73c8a9b`), owned cleanup builders (`35f4ae3`), informational sampling (`f1ca944`), and identity status fields (`9fd9061`); each intermediate tree compiled and passed scoped lint with zero findings.
-Prior proof: `/tmp/rpgmigrate-m6-ready-exports-composed-20261110/integrated-manifest.json`, SHA-256 `4709a0d229a45d59d0f59de328fec702b39bf22bc8144032f604fc9f0a276b25`.
+Prior proof: `/tmp/rpgmigrate-m6-ready-exports-composed-20261110/integrated-manifest.json` (lost 2026-11-12), SHA-256 `4709a0d229a45d59d0f59de328fec702b39bf22bc8144032f604fc9f0a276b25`.
 The earlier retained-stop component export passed focused race tests and lint; its receipt retains component-only scope.
-Prior proof: `/tmp/m6-retained-stop-export-20261110/manifest.json`, SHA-256 `1819a0f3f832e56fd23c256736282363d3b0253b2f095cf8d0bac9adba99f906`.
+Prior proof: `/tmp/m6-retained-stop-export-20261110/manifest.json` (lost 2026-11-12), SHA-256 `1819a0f3f832e56fd23c256736282363d3b0253b2f095cf8d0bac9adba99f906`.
 The runner-profile qualification plan is `/Users/ydixken/.codex/tmp/2026-11-10-m6-runner-profile-qualification-tfhgdc6n.md`, SHA-256 `3b8e016d201b55197c8409c40a5922fff9d5ce3092924a8f11803a8d0a694e69`.
 Actual NSS, authentication/TLS, and three-pair acceptance remain open; image metadata is not runtime qualification.
 
@@ -840,6 +840,14 @@ Its SHA-256 is `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
 Existing third-party notices retain their original bytes and licenses.
 M6–M10 remain open, benchmark execution remains on HOLD, and tags and releases remain unauthorized.
 Development GHCR publication has separate dated approval.
+
+## Leader takeover and wave results, 2026-11-12
+
+The Codex leader stopped on a content-filter error at 2026-11-10T22:21Z, and the host rebooted afterwards.
+The reboot cleared `/tmp` and `/private/tmp`, while `/private/var/tmp`, `~/.codex/tmp` and `~/.cache` survived.
+A citation marked "(lost 2026-11-12)" names a file that no longer exists.
+Its recorded SHA-256 still identifies the bytes, and the claim it backs keeps its original scope without fresh verification.
+Where a byte-identical copy or a successor exists, the citation names it next to the lost path.
 
 ## Execution model
 
