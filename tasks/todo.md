@@ -1552,6 +1552,45 @@ Leader decisions, 2026-11-12:
   A read-only empty shadow mount over `/usr/share/rpgmigrate` is refused at admission, which `TestNativeImmutableAbsenceMountShadow` covers.
   The 0400 snapshot without an exec seal holds data only, so a missing exec seal is not a risk.
 
+### Wave 5 results, 2026-11-12
+
+- [x] ENGINE-RECORD: `feat/native-engine` at `4905072` adds the wave 4 ledger entries, the failure-summary rule in [testing](../docs/testing.md) and the pasta `shortcut:` comment; hosted ci.yml run 43236783512 passed 8 of 8 jobs.
+  Development runner image run 43236783511 on `4905072e343e13e4e9197934fbfdfb16a0887804` published `ghcr.io/ydixken/rpgmigrate:dev-4905072e343e13e4e9197934fbfdfb16a0887804-amd64` as `sha256:1899faafc09df70e6a09621f5d33102d38647c5c20a1f9a355662d4bd02e126b` and `-arm64` as `sha256:8f394b74ea93dc07187da6b7e4a4590ca2906ca7626b42a9a63a5f713083c936`; both tags resolve anonymously to those digests.
+  These images are not runtime-qualified, and the activation decision below names the `908ada6` digests.
+- [x] GUARD-FAST (operator): `feat/m6-guard-fast-20261112` at `ce55213` makes the e2e guard faster with every check and refusal kept.
+  Each node observation now runs its planned cgroup reads in one `podman machine ssh` call, and ownership checks, cap observations, pulls and image verifications run concurrently across the three nodes.
+  On the shared VM the pulled-phase check went from 441.85 s to 43.21 s and the pull of 8 roles on 3 nodes from about 1620 s to 134 s, which projects a qualification at about 4802 s of the 7200 s lease.
+  Old and new collectors returned identical results for 9 of 9 fact sets in both the ready and pulled phases.
+  `ce55213` pins the Podman client to 6.2.0 and refuses 6.1.4.
+  These timings come from a measurement harness, not a qualification receipt.
+  Evidence: `/private/var/tmp/rpgmigrate-GUARD-FAST-20261112/SHA256SUMS`, SHA-256 `6ba4d7aefd6df08067ab0d759763588ca80ac9003baa12d335fded18ab384477`.
+- [x] PASSFILE-PORT (operator): `feat/m6-passfile-port-20261112` at `5e49804` binds each passfile line to the exact host and port libpq uses, with a missing port resolving to `PGPORT` and then 5432.
+  IPv6 literals, several hosts, no host, an empty or non-numeric port, percent-encoding, and `host`, `port` or `service` in the URI query are refused by name.
+  `TestPassfile_SharedHostUserDistinctPorts` fails 4 of 4 on the pre-fix code, and admission refuses stdin and TTY on native containers.
+  Evidence: `/private/var/tmp/rpgmigrate-PASSFILE-PORT-20261112/SHA256SUMS`, SHA-256 `20a8cbb2c3d555e24567fb95d60c46191517f2c4e784e64afb9c6e52bfc3b03d`.
+- [x] INTEGRATE (operator): `feat/rpgmigrate-native-operator` fast-forwarded from `2e994e3` to `d87c65c25c00f66707c2cc501e29c2b336c233fb`, merging GUARD-FAST and PASSFILE-PORT.
+  Development manager image run 43252949087 published arm64 `ghcr.io/ydixken/pgcopydb-operator@sha256:f66459f179939bed01e71f7a081173252a9ea63d6f4dba542f13095024f0c59d` and amd64 `ghcr.io/ydixken/pgcopydb-operator@sha256:95b4726c3e02d9145ed4be39fc89d6af96f809ec5d77b6dd86a1c211b7a66b20`.
+  The arm64 kind image lock has SHA-256 `bb1ea81191eca8df401522a779600d49ea29a0f77e7c96addb1a7a287fd69e93`; we keep the lock outside Git, as `docs/operations/e2e-kind.md` on the operator line describes, and bind it here by hash.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE-20261112/SHA256SUMS`, SHA-256 `123bd79518440685a5c23e0ec6a0825c4e99856132013851248b9cbb1bac9df2`.
+- [ ] M6-RUNTIME2 (operator): run `09c27112ba224cfdb6682739b22f6442` on `d87c65c` with the `bb1ea811` lock and the `908ada6` arm64 runner produced no passing receipt; no stage deadline was exceeded.
+  The metadata phase refused 0 of 12 cases (receipt SHA-256 `9f1af7c4678586513e929fef24e3a7c50360e5366d6ba7853b9e69be04eefe1a`) and the delivery phase passed 3 of 9 (receipt SHA-256 `d1dac265877c79441ba58b04ba478d22f884b3f3167bcf0a8ffb68f3eac0712a`).
+  Production defect: kubelet's fsGroup makes `/tmp` setgid, so the private directory gets mode `0o2700` and the `S_IMODE == 0o700` checks in `evidence_program.py` and `evidence_request_writer.py` refuse it.
+  It fails closed: across the 9 delivery cases, composite authority and JobCompletedNative were never true, so no false completion occurred.
+  The PID check refused because no `podPidsLimit` bounds the pod, and the terminal proof failed because kubelet stops the sandbox after the Job container exits.
+  Harness fixes are on `feat/m6-runtime2-20261112` at `b878123`.
+  Evidence: `/private/var/tmp/rpgmigrate-M6-RUNTIME2-20261112/SHA256SUMS`, SHA-256 `b97f05bc05459cb21a0dd4a7ee77ad1ec0f54ab208bd8ed52271e3e31de6710f`, covering 259 files.
+- [ ] M6-ACTIVATE (operator): stopped without commits, because no plan named a qualified runner digest and the plans forbid an activation switch; the activation decision below resolves both.
+
+Leader decisions, wave 5:
+
+- The passfile's strict URI forms and IPv6 refusal are accepted.
+- Native Unix-socket connections are unsupported by design, because the runner is a separate pod, and need no qualification case.
+- The kind image lock stays outside Git, and this ledger carries its SHA-256.
+- The setgid refusal is fixed by setting the private directory to mode 0700 with `chmod` after `mkdir`, so the mode check stays exact; this changes the evidence program SHA.
+- The guard's kind config sets `podPidsLimit=4096`, and the profile check verifies the effective bound on the live pod instead of accepting systemd's default.
+- The terminal proof reads the sandbox state from CRI status and accepts a sandbox that kubelet stopped after the Job container exited.
+- Activation is authorized on the operator line with the `908ada6` runner digests and no activation switch.
+
 M0–M5 remain closed and M6–M10 remain open.
 
 ## Capacity and parallel execution, user update 2026-11-08

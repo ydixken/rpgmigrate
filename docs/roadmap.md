@@ -871,6 +871,9 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   The `hosted-linux` capacity profile resolved the four-CPU floor, and ENGINE-LAND2 landed the branch on `feat/native-engine` at `908ada6`.
 - `feat/native-engine` at `908ada6` carries M8; hosted ci.yml run 43229117047 passed 8 of 8 jobs, including all three engine-e2e pairs on `ubuntu-26.04` with Podman 5.
   Its `dev-908ada674b8bef69a9d4ca14fa1d053edc6bbaad` runner images are amd64 `sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b` and arm64 `sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b`.
+- `4905072` on `feat/native-engine` adds documentation and a CI comment only; hosted ci.yml run 43236783512 passed 8 of 8 jobs.
+  Development runner image run 43236783511 published its `dev-4905072e343e13e4e9197934fbfdfb16a0887804` runner images as amd64 `sha256:1899faafc09df70e6a09621f5d33102d38647c5c20a1f9a355662d4bd02e126b` and arm64 `sha256:8f394b74ea93dc07187da6b7e4a4590ca2906ca7626b42a9a63a5f713083c936`.
+  Activation names the `908ada6` digests, not these.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -889,8 +892,17 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-operator-integration-20261112` at `5f8e2f5` joins these with the M8 helper rebase, widens the kind label gate under the native engine, and captures TERM receipts in the suspend and delete specs.
   Three M8 helper tests fail on a changed canonical helper hash, and moving that pin needs a decision.
 - `feat/m6-explicit-20261112` at `a6b6af7` qualifies the native explicit-file binding on Linux arm64: 179 of 179 runtime cases, receipt SHA-256 `08d41a568311b95815711ab5e75972a3c20c991cd8d3d51ffc8bfe99352a437a`.
-- `feat/m6-runtime-20261112` at `67006bd` has no receipt: the guard check takes longer than the approved deadline contract's first stage allows.
-  We make the guard faster with every check kept, rather than change the deadline contract.
+- `feat/m6-runtime-20261112` at `67006bd` has no receipt: the guard check took longer than the approved deadline contract's first stage allows.
+  We made the guard faster with every check kept, rather than change the deadline contract.
+- `feat/m6-guard-fast-20261112` at `ce55213` batches each node's cgroup reads into one `podman machine ssh` call and runs per-node work concurrently, and pins the Podman client to 6.2.0.
+  The pulled-phase check went from 441.85 s to 43.21 s and the pull from about 1620 s to 134 s, which projects a qualification at about 4802 s of the 7200 s lease.
+- `feat/m6-passfile-port-20261112` at `5e49804` binds each passfile line to the exact host and port, and refuses IPv6 literals and URI forms libpq could resolve differently.
+- `feat/rpgmigrate-native-operator` at `d87c65c` merges both.
+  Its manager images are arm64 `sha256:f66459f179939bed01e71f7a081173252a9ea63d6f4dba542f13095024f0c59d` and amd64 `sha256:95b4726c3e02d9145ed4be39fc89d6af96f809ec5d77b6dd86a1c211b7a66b20`.
+  The arm64 kind image lock stays outside Git and is bound by SHA-256 `bb1ea81191eca8df401522a779600d49ea29a0f77e7c96addb1a7a287fd69e93`.
+- `feat/m6-runtime2-20261112` at `b878123` ran the runtime qualification on `d87c65c` with the `908ada6` arm64 runner and produced no passing receipt.
+  Kubelet's fsGroup makes `/tmp` setgid, so the evidence program refuses its own private directory; this fails closed, with no false completion in the 9 delivery cases.
+  The pod PID bound and the terminal proof on a stopped sandbox also refused; the decisions below address all three.
 
 ### Leader decisions, 2026-11-12
 
@@ -898,6 +910,13 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - The development image keeps `--layers=false`, so the preservation check needs no trust logic for cached ancestor images.
 - The engine-e2e failure-summary step stays, and [testing](testing.md) names exactly what it prints.
 - A read-only empty shadow mount over `/usr/share/rpgmigrate` is refused at admission (`TestNativeImmutableAbsenceMountShadow`), and the 0400 memfd snapshot holds data only, so neither M6-EXPLICIT item blocks M6.
+- The passfile's strict URI forms and IPv6 refusal are accepted.
+- Native Unix-socket connections are unsupported by design, because the runner is a separate pod, and need no qualification case.
+- The kind image lock stays outside Git, and the [ledger](../tasks/todo.md#wave-5-results-2026-11-12) carries its SHA-256.
+- The evidence program sets its private directory to 0700 with `chmod` after `mkdir`, so the exact mode check stays and the setgid bit no longer trips it.
+- The guard's kind config sets `podPidsLimit=4096`, and the profile check verifies the effective bound on the live pod.
+- The terminal proof reads the sandbox state from CRI status and accepts a sandbox that kubelet stopped after the Job container exited.
+- Activation is authorized on the operator line with the `908ada6` runner digests and no activation switch.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 
