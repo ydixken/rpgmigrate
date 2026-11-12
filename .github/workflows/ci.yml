@@ -188,6 +188,8 @@ jobs:
               if json.loads(path.read_text())["callsite"]["function"] == "raw":
                   print([line[:300] for line in path.with_suffix(".stderr").read_text(errors="replace").splitlines() if line.lstrip().startswith(("Error:", "* "))])
           PYLEDGER
+          sudo dmesg | grep -iE 'apparmor|denied' | tail -n 20
+          pgrep -a -f 'pasta|aardvark' | cut -c1-160 || true
       - name: Revalidate the exact sanitized clone receipt
         run: |
           test -s "target/e2e/${{ matrix.pair }}.json"
