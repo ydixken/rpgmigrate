@@ -149,10 +149,8 @@ jobs:
       - name: Let rootless Podman stop its pasta network helper
         run: |
           # Ubuntu's passt AppArmor profile denies podman's signal to pasta (Launchpad #2154379).
-          ls -d /etc/apparmor.d/*pass* /etc/apparmor.d/*podman*
-          grep -n 'include' /etc/apparmor.d/usr.bin.passt
-          echo 'signal (receive),' | sudo tee -a /etc/apparmor.d/local/usr.bin.passt
-          sudo apparmor_parser --replace /etc/apparmor.d/usr.bin.passt
+          # The profile has no local include, so the ephemeral runner logs instead of enforcing it.
+          sudo apparmor_parser --replace --complain /etc/apparmor.d/usr.bin.passt
       - name: Provision the pinned public images
         run: |
           python3 - <<'PYPULL'
