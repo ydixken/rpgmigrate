@@ -874,6 +874,8 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `4905072` on `feat/native-engine` adds documentation and a CI comment only; hosted ci.yml run 43236783512 passed 8 of 8 jobs.
   Development runner image run 43236783511 published its `dev-4905072e343e13e4e9197934fbfdfb16a0887804` runner images as amd64 `sha256:1899faafc09df70e6a09621f5d33102d38647c5c20a1f9a355662d4bd02e126b` and arm64 `sha256:8f394b74ea93dc07187da6b7e4a4590ca2906ca7626b42a9a63a5f713083c936`.
   Activation names the `908ada6` digests, not these.
+- `05631c2` on `feat/native-engine` records wave 5; hosted ci.yml run 43265842631 passed 8 of 8 jobs on its second attempt.
+  Its `dev-05631c2` runner images are not runtime-qualified either.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -904,6 +906,17 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   Kubelet's fsGroup makes `/tmp` setgid, so the evidence program refuses its own private directory; this fails closed, with no false completion in the 9 delivery cases.
   The pod PID bound and the terminal proof on a stopped sandbox also refused; the decisions below address all three.
 
+- `feat/m6-setgid-fix-20261112` at `0967ff2` sets the evidence input directory to 0700 with `fchmod` before the exact mode check.
+- `feat/m6-kind-profile-20261112` at `4d85c6c` sets kubelet `podPidsLimit: 4096` in the kind config, checks the effective PID bound along the cgroup chain, and reads the terminal proof from CRI status.
+- `feat/m6-activate2-20261112` at `98212e8` admits native Migrations only on the `908ada6` runner digests and qualifies the resolver policy against that runtime.
+- `fix/test-hygiene-20261112` at `20a6089` repins `setup-go` to v7 and fixes three test-harness causes, none in product code.
+- `feat/rpgmigrate-native-operator` at `c2a9ef6` merges those four and repins the evidence program.
+  Its manager images are arm64 `sha256:520c3b660b0cd91457a08ed79442c7ef0d994bcb759d234a807f26e39b82d1d0` and amd64 `sha256:80cfa4964c3cbd6500d7e0e574953672088000d36622afba1ebd9df1f2b23cbb`.
+  The arm64 kind image lock stays outside Git and is bound by SHA-256 `0d952db1236bcd0045b1d2745872f1c633cdc380633dce7e248d9a002469ef71`.
+- `feat/m6-runtime3-20261112` at `524da30` holds the harness fixes for run `4664fadc67804dc0976056f65ba3bbe2` on `c2a9ef6`, which passed metadata 12 of 12, password_tls_probe 12 of 12, delivery 9 of 9 with no false completion, and controller 5 of 5.
+  The TERM receipt is deferred to the M7 native suspend and delete specs.
+- The M7 smoke run on `c2a9ef6` reached native preflight for a 16:16 Migration and stopped there on a `ROLLBACK` transaction-state defect in the evidence program; the decisions below fix it.
+
 ### Leader decisions, 2026-11-12
 
 - The pasta AppArmor profile stays in complain mode on throwaway CI runners only, until the runner image ships the Launchpad #2154379 fix.
@@ -917,6 +930,14 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - The guard's kind config sets `podPidsLimit=4096`, and the profile check verifies the effective bound on the live pod.
 - The terminal proof reads the sandbox state from CRI status and accepts a sandbox that kubelet stopped after the Job container exited.
 - Activation is authorized on the operator line with the `908ada6` runner digests and no activation switch.
+- The resolver residual risk is accepted for this release, and the glibc fix is tracked for M10.
+- `actions/upload-artifact` stays at v6.
+- The in-process reconciler phase counts as the M6 controller receipt, and M7 covers the in-cluster manager.
+- The evidence program fixes its `ROLLBACK` precondition, and a failed native preflight reports its error class as one bounded line in the condition message and the controller log.
+- The relay waits within its injection window until the input directory mode is exactly 0700.
+- Admission pins the runner digest into the Migration status.
+- On a CSI volume with `fsGroup`, the volume root may carry the kubelet group and setgid bits, and every directory the evidence program creates below it must be exactly 0700.
+- The native route is lifted for pairs 16:16, 18:18 and 16:18, and the M7 native suite connects with `sslmode=verify-full`.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 

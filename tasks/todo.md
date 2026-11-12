@@ -1593,6 +1593,60 @@ Leader decisions, wave 5:
 
 M0–M5 remain closed and M6–M10 remain open.
 
+### Wave 6 results, 2026-11-12
+
+- [x] ENGINE-RECORD2: `feat/native-engine` at `05631c2` records wave 5; hosted ci.yml run 43265842631 passed 8 of 8 jobs on its second attempt, after engine-e2e 16-16 and 18-18 failed with code 56 from `_create` at `clone.py:955` during the image build.
+  Development runner image run 43265842434 published `dev-05631c2` images as amd64 `sha256:32ec432f47520dacf9b81167c8fdbba1eb8b026b762358c8065e3084bb311a71` and arm64 `sha256:15f0d6f34e384457f63d3d6316b93a88c5588343d7754d1bb3ec6bbfd06affce`; activation names the `908ada6` digests, not these.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-RECORD2-20261112/SHA256SUMS`, SHA-256 `73d18175445fad6d1b6c21659bc5518faf83ef22748ecb9df75be1f9fa23377a`.
+- [x] SETGID-FIX (operator): `feat/m6-setgid-fix-20261112` at `0967ff2` sets the evidence input directory to 0700 with `fchmod` before the unchanged exact `private_type` check.
+  `test_PrivateInputSetgidParent` passes under a kubelet-style setgid `/tmp` and refuses when `fchmod` is a no-op.
+  Evidence: `/private/var/tmp/rpgmigrate-SETGID-FIX-20261112/SHA256SUMS`, SHA-256 `a0ac8d02a11e974fe25cb6239e6913e0c4261480fe1e4702b814777e4029160e`.
+- [x] KIND-PROFILE (operator): `feat/m6-kind-profile-20261112` at `4d85c6c` sets kubelet `podPidsLimit: 4096` in the kind config, checks `pids.max` along the whole cgroup chain, and reads the terminal proof from CRI status on a stopped sandbox.
+  Its live run was diagnostic, not a receipt, because the limit was applied by hand to each node.
+  Evidence: `/private/var/tmp/rpgmigrate-KIND-PROFILE-20261112/SHA256SUMS`, SHA-256 `374bc61731e1628dacb62e6e821a6ab3e3beb2c51052460847e176d04c7fbf61`.
+- [x] M6-ACTIVATE2 (operator): `feat/m6-activate2-20261112` at `98212e8` admits a native Migration only on one of the two compiled-in `908ada6` runner digests, and qualifies the resolver policy against that runtime's `libc.so.6`, `nsswitch.conf`, libpq runtime JSON and a bounded `/etc/resolv.conf`.
+  Every other image gets the existing `UnsupportedEngine` refusal before any resource exists, and 16 of 16 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-M6-ACTIVATE2-20261112/SHA256SUMS`, SHA-256 `0006da1c989e2f9d7fffa10886e5fe5f17640af89b9c59310a3a271cbb7836df`.
+- [x] TEST-HYGIENE (operator): `fix/test-hygiene-20261112` at `20a6089` repins `setup-go` to v7, maps approved action commit pins to their tags, isolates the lint fixture from the parent `make`, and makes `TestProgressSQLBounds` refuse psql before 15 by name.
+  The full non-e2e suite passed 5560 tests with 0 failures against PostgreSQL 16.15 and 18.6.
+  Evidence: `/private/var/tmp/rpgmigrate-TEST-HYGIENE-20261112/SHA256SUMS`, SHA-256 `22665139aa7ff002f7d62b6801915bc0fee1803b4b5b0952058914cec54a3433`.
+- [x] INTEGRATE2 (operator): `feat/rpgmigrate-native-operator` fast-forwarded from `d87c65c` to `c2a9ef6d32870f22ea85872f22346e45ea9ed229`, merging the four branches above and repinning the evidence program to SHA-256 `02b5ae9394b526d81451a9004adda7ed05cd9171e61c39245521db731645d678` (120633 bytes).
+  Development manager image run 43276631714 published arm64 `ghcr.io/ydixken/pgcopydb-operator@sha256:520c3b660b0cd91457a08ed79442c7ef0d994bcb759d234a807f26e39b82d1d0` and amd64 `ghcr.io/ydixken/pgcopydb-operator@sha256:80cfa4964c3cbd6500d7e0e574953672088000d36622afba1ebd9df1f2b23cbb`.
+  The arm64 kind image lock binds operator `c2a9ef6` and engine `908ada6` and has SHA-256 `0d952db1236bcd0045b1d2745872f1c633cdc380633dce7e248d9a002469ef71`; it stays outside Git.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE2-20261112/SHA256SUMS`, SHA-256 `f339036c6a7e6f6c41c5fdb2efa754e2b8a3c8a8f353367316e344af0c7efce3`.
+- [x] M6-RUNTIME3 (operator): run `4664fadc67804dc0976056f65ba3bbe2` from `feat/m6-runtime3-20261112` at `524da30`, on the `0d952db1` lock and the `908ada6` arm64 runner, closed every phase with verified cleanup.
+  All fixes were in the qualification harness; no guard, cap or deadline contract changed.
+  - metadata passed 12 of 12, receipt SHA-256 `7a0926bdd812e7e6404c4cfa32ceb0afb65db13b759c89421f582875d79ac0dd`, on a cluster whose pod-slice `pids.max` the guard requires to be exactly 4096.
+  - password_tls_probe passed 12 of 12, receipt SHA-256 `4c01cfff32a971dde00ac759be3a234680950afd63f800717dd8f6bee8424078`.
+  - delivery passed 9 of 9, receipt SHA-256 `60c0d70a23cff89fc4268ea15ad5b8adcde0fc23a65266556f70e33c00753101`; composite authority was false in every refused case, so no false completion occurred.
+  - controller passed 5 of 5, receipt SHA-256 `6d9e4b81d1a219d828dc53a5149344cc638624cfc9d18403a80fdd3f995cc04c`; the in-process `MigrationReconciler` created the version and preflight Jobs for a native 16:18 Migration, and the preflight passed live.
+
+  Evidence: `/private/var/tmp/rpgmigrate-M6-RUNTIME3-20261112/SHA256SUMS`, SHA-256 `0e20d94280cbdac53043a55ddda7701f9d7b4bc5d3edaa27b533140c2685e5ad`, covering 378 files.
+- [ ] TERM receipt: deferred to the M7 native suspend and delete specs, which need a running native follow worker behind the native route refusals.
+- [ ] M7-SMOKE (operator): run `f4afac973c204384a785b569a9ab354b` drove a native 16:16 Migration on `c2a9ef6` to native preflight, which failed with `NativePreflightFailed` before any worker, PVC or copy; no receipt was produced and nothing was pushed.
+  Production defect: `evidence_program.py:725` passes `before=state` for the `ROLLBACK` query at `:1426`, so a session inside a transaction refuses with class `transaction_state`.
+  With only that precondition changed, the preflight passed all 17 checks on the same CNPG pair, including `pg_dump_major 16` from the `908ada6` runner.
+  Getting there needed local bypasses of the native route refusals, which were never pushed.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-SMOKE-20261112/SHA256SUMS`, SHA-256 `9ae7962d67d171270a2f8fb5ee0f5ba910c9a5f669dd36575515f8779e3cbeeb`.
+
+Standing leader decisions, carried into wave 7:
+
+- The resolver residual risk is accepted for this release, and the glibc fix is tracked for M10.
+- `actions/upload-artifact` stays at v6.
+- The in-process reconciler phase counts as the M6 controller receipt, and M7 covers the in-cluster manager.
+- Native Unix-socket connections stay unsupported.
+- The kind image lock stays outside Git.
+
+Leader decisions, wave 6:
+
+- The `ROLLBACK` precondition is fixed in the evidence program, and a failed native preflight emits its error class from the closed set as one bounded line in the condition message and the controller log.
+- The relay waits within its 5 s injection window until the input directory mode is exactly 0700, instead of refusing the brief `mkdir`-to-`fchmod` window; this changes the writer SHA.
+- Admission pins the runner digest into the Migration status, so a later operator reconfiguration cannot change the image of an admitted native Migration.
+- On a CSI volume with `fsGroup`, the volume root may carry the kubelet group and setgid bits, and every directory the evidence program creates below it must be exactly 0700.
+- The native route is lifted for pairs 16:16, 18:18 and 16:18, and the M7 native suite connects with `sslmode=verify-full`.
+
+M0–M5 remain closed and M6–M10 remain open.
+
 ## Capacity and parallel execution, user update 2026-11-08
 
 The verified VM allocation is fourteen CPUs, 32768 MiB memory, and a 160-GiB disk; the M7 section binds the latest resize/preservation proof.
