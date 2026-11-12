@@ -45,6 +45,7 @@ LDCONFIG_EXEC = b'exec /sbin/ldconfig.real "$@"'
 NATIVE_TOOL_REASONS = ("unreadable", "not-regular", "not-native-elf", "interpreter-mismatch", "wrapper-target-mismatch")
 NATIVE_TOOL_DETAILS = tuple(tool + "-" + reason for tool in (*NATIVE_ELF_TOOLS, *NATIVE_SCRIPTS) for reason in NATIVE_TOOL_REASONS)
 BINFMT_ROOT = Path("/proc/sys/fs/binfmt_misc")
+RUNNER_IMAGE_OS = {"amd64": "ubuntu24", "arm64": "ubuntu24-arm64"}
 BINFMT_HANDLER_LIMIT = 64
 BINFMT_RECORD_LIMIT = 4096
 BINFMT_TOTAL_LIMIT = 256 * 1024
@@ -392,14 +393,22 @@ def prepare_toolchain(supervisor, pin, target, report=None, notices=None):
     require(sha256(std_lock) == STD_LOCK, "toolchain")
     tools = prefix / "lib/rustlib" / target / "bin"
     require(tools.is_dir(), "toolchain")
-    tool_inventory = []
-    for path in sorted(tools.iterdir()):
-        require(path.is_file() and not path.is_symlink() and re.fullmatch(r"[a-z0-9._-]+", path.name), "toolchain")
-        tool_inventory.append({"name": path.name, "sha256": sha256(path)})
+    tool_inventory = llvm_tool_inventory(tools)
     report.update({
             "rustc_version": pin["rustc_version"], "compiler_commit": pin["compiler_commit"], "llvm_version": "23.1.5",
             "cargo_version": cargo_version, "stdlib_lock_sha256": STD_LOCK, "llvm_tools": tool_inventory, **binaries})
     return report
+
+
+def llvm_tool_inventory(tools):
+    inventory = []
+    for path in sorted(tools.rglob("*")):
+        name = path.relative_to(tools).as_posix()
+        if name == "gcc-ld" and path.is_dir() and not path.is_symlink():
+            continue
+        require(path.is_file() and not path.is_symlink() and re.fullmatch(r"(?:gcc-ld/)?[a-z0-9._-]+", name), "toolchain")
+        inventory.append({"name": name, "sha256": sha256(path)})
+    return inventory
 
 
 def graph_shape(graph):
@@ -606,7 +615,7 @@ def release_checksums(path):
             require(not active and not checksums, "package-authentication")
             active = True
         elif active and line.startswith(" "):
-            match = re.fullmatch(r" ([0-9a-f]{64}) +([1-9][0-9]*) (\S+)", line)
+            match = re.fullmatch(r" ([0-9a-f]{64}) +(0|[1-9][0-9]*) (\S+)", line)
             require(match and match[3] not in checksums, "package-authentication")
             checksums[match[3]] = (match[1], int(match[2]))
         elif active:
@@ -640,6 +649,13 @@ def package_index_records(path, expected_sha256, expected_size, supervisor):
         records.append(fields)
     require(records and size == expected_size and digest.hexdigest() == expected_sha256, "package-authentication")
     return records
+
+
+def merge_package_record(records, record):
+    # Component moves (universe to main) republish identical bytes under a new pool path; keep the first.
+    identity = (record["Package"], record["Version"], record["Architecture"])
+    previous = records.setdefault(identity, record)
+    require(previous["SHA256"] == record["SHA256"] and previous["Size"] == record["Size"], "package-authentication")
 
 
 class UbuntuPackages:
@@ -708,9 +724,7 @@ APT::Update::Error-Mode "any";
                 actual = package_index_records(index, *checksums[meta], supervisor)
                 self.public.add("package-index", index, self.base + "dists/" + suite + "/" + meta + ".xz", index_hash)
                 for record in actual:
-                    identity = (record["Package"], record["Version"], record["Architecture"])
-                    require(identity not in self.records or self.records[identity] == record, "package-authentication")
-                    self.records[identity] = record
+                    merge_package_record(self.records, record)
 
     def installed(self, path):
         result = self.supervisor.run(["/usr/bin/dpkg-query", "-S", str(path)]).stdout.strip()
@@ -1019,6 +1033,13 @@ def check_native_tools(target):
                     data.count(b"exec ") == 1, "ldconfig-wrapper-target-mismatch")
 
 
+def runner_image(parent, architecture):
+    image = {key: parent.get(key, "") for key in ("ImageOS", "ImageVersion")}
+    require(image["ImageOS"] == RUNNER_IMAGE_OS[architecture] and
+            re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", image["ImageVersion"]), "admission")
+    return image
+
+
 def admit(supervisor, target, parent, pin, attempt):
     attempt["admission_detail"] = None
     attempt["admission_substage"] = "uid"
@@ -1047,8 +1068,7 @@ def admit(supervisor, target, parent, pin, attempt):
     attempt["admission_substage"] = "public-pin"
     require(pin["external_symbolizer"]["status"] == "qualification-required", "admission")
     attempt["admission_substage"] = "runner-image"
-    image = {key: parent.get(key, "") for key in ("ImageOS", "ImageVersion")}
-    require(image["ImageOS"] == "ubuntu24" and re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", image["ImageVersion"]), "admission")
+    image = runner_image(parent, architecture)
     attempt["admission_substage"] = "scratch-disk"
     free = shutil.disk_usage(supervisor.run_dir).free
     require(free >= 12 * GIB, "admission")

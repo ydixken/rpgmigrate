@@ -878,13 +878,75 @@ class PreparationTests(unittest.TestCase):
                         patch.object(self.prep.shutil, "disk_usage", return_value=SimpleNamespace(free=13 * self.prep.GIB)), \
                         patch.object(self.prep.resource, "getrlimit", return_value=(0, 0)):
                     try:
-                        value = self.prep.admit(supervisor, target, {"ImageOS": "ubuntu24", "ImageVersion": "20261101.360.1"}, pin, attempt)
+                        value = self.prep.admit(supervisor, target, {"ImageOS": self.prep.RUNNER_IMAGE_OS[architecture],
+                                                                     "ImageVersion": "20261101.360.1"}, pin, attempt)
                     except RuntimeError:
                         value = None
                 self.assertIsNotNone(value, "a strict offset-zero pyc-like magic cannot match either native ELF")
                 self.assertEqual(value["binfmt"], {"inspection": "complete-snapshot", "handlers_examined": 1,
                     "elf_disjoint_magic_handlers": 1, "enabled_handlers": 1, "disabled_handlers": 0, "registry_state": "enabled"})
                 self.assertNotIn(CANARY, json.dumps(value))
+
+    def test_release_checksums_accept_signed_empty_index_entries(self):
+        empty = hashlib.sha256(b"").hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary) / "InRelease"
+            release.write_text("Suite: noble\nSHA256:\n " + empty + "                0 main/debian-installer/binary-arm64/Packages\n "
+                               + "a" * 64 + "  12 main/binary-arm64/Packages.xz\n-----BEGIN PGP SIGNATURE-----\n")
+            self.assertEqual(self.prep.release_checksums(release), {"main/debian-installer/binary-arm64/Packages": (empty, 0),
+                                                                    "main/binary-arm64/Packages.xz": ("a" * 64, 12)})
+            release.write_text("SHA256:\n " + empty + " 01 main/Packages\n")
+            with self.assertRaisesRegex(RuntimeError, "package-authentication"):
+                self.prep.release_checksums(release)
+
+    def test_package_records_merge_component_moves_only_with_identical_bytes(self):
+        record = {"Package": "ocl-icd-dev", "Version": "2.3.2-1build1", "Architecture": "arm64",
+                  "Filename": "pool/universe/o/ocl-icd/ocl-icd-dev_2.3.2-1build1_arm64.deb", "SHA256": "a" * 64, "Size": "10"}
+        moved = {**record, "Filename": record["Filename"].replace("universe", "main")}
+        records = {}
+        self.prep.merge_package_record(records, record)
+        self.prep.merge_package_record(records, moved)
+        self.assertEqual(records, {("ocl-icd-dev", "2.3.2-1build1", "arm64"): record})
+        for change in ({"SHA256": "b" * 64}, {"Size": "11"}):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "package-authentication"):
+                self.prep.merge_package_record(records, {**moved, **change})
+
+    def test_runner_image_os_is_exact_per_native_architecture(self):
+        # Observed hosted runners: ubuntu-24.04 20261101.360.1 and ubuntu-24.04-arm 20261111.182.1.
+        self.assertEqual(self.prep.RUNNER_IMAGE_OS, {"amd64": "ubuntu24", "arm64": "ubuntu24-arm64"})
+        self.prep.runner_image({"ImageOS": "ubuntu24-arm64", "ImageVersion": "20261111.182.1"}, "arm64")
+        self.prep.runner_image({"ImageOS": "ubuntu24", "ImageVersion": "20261101.360.1"}, "amd64")
+        for parent, architecture in (({"ImageOS": "ubuntu24", "ImageVersion": "20261111.182.1"}, "arm64"),
+                                     ({"ImageOS": "ubuntu24-arm64", "ImageVersion": "20261101.360.1"}, "amd64"),
+                                     ({"ImageOS": "ubuntu24", "ImageVersion": CANARY}, "amd64"), ({}, "amd64")):
+            with self.subTest(parent=parent), self.assertRaisesRegex(RuntimeError, "^admission$"):
+                self.prep.runner_image(parent, architecture)
+
+    def test_llvm_tool_inventory_accepts_only_regular_files_and_the_gcc_ld_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tools = Path(temporary) / "bin"
+            (tools / "gcc-ld").mkdir(parents=True)
+            for name in ("rust-lld", "llvm-ar", "gcc-ld/ld.lld", "gcc-ld/wasm-ld"):
+                (tools / name).write_bytes(name.encode())
+            inventory = self.prep.llvm_tool_inventory(tools)
+            self.assertEqual([entry["name"] for entry in inventory], ["gcc-ld/ld.lld", "gcc-ld/wasm-ld", "llvm-ar", "rust-lld"])
+            self.assertEqual(inventory[-1]["sha256"], hashlib.sha256(b"rust-lld").hexdigest())
+            for change in ("other-dir", "link", "nested"):
+                with self.subTest(change=change):
+                    if change == "other-dir":
+                        (tools / "other").mkdir()
+                    elif change == "link":
+                        (tools / "link").symlink_to("rust-lld")
+                    else:
+                        (tools / "gcc-ld" / "nested").mkdir()
+                    with self.assertRaisesRegex(RuntimeError, "^toolchain$"):
+                        self.prep.llvm_tool_inventory(tools)
+                    for name in ("other", "link", "gcc-ld/nested"):
+                        path = tools / name
+                        if path.is_symlink():
+                            path.unlink()
+                        elif path.exists():
+                            path.rmdir()
 
     def test_binfmt_parser_requires_first_four_byte_masked_elf_disjointness(self):
         for record in (self.binfmt_record(), self.binfmt_record(mask="ffffffff"),
