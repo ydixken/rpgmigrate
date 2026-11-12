@@ -327,6 +327,7 @@ class ModelRuntime:
         if args[0] == "inspect": return json.dumps([self.containers[args[1]]]).encode()
         if args[:2] == ["build", "--help"]: return b"--cpu-period uint --cpu-quota int --memory string\n"
         if args[0] == "build":
+            assert "--layers=false" in args, "a cached build leaves unowned intermediate images"
             tag = args[args.index("--tag")+1]; label = args[args.index("--label")+1].split("=", 1)[1]
             paths = list(self.root.rglob("*." + label + ".runtime.json"))
             assert len(paths) == 1, "build requires one exact run-bound ledger"
@@ -1355,7 +1356,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     copied = root / ("copied.json." + token + ".runtime.json")
                     copied.write_text(json.dumps(record)); copied.chmod(0o600)
                 model = ModelRuntime(root)
-                command = ["podman", "build", "--tag", "localhost/fresh:dev", "--label", "io.rpgmigrate.e2e=" + token,
+                command = ["podman", "build", "--layers=false", "--tag", "localhost/fresh:dev", "--label", "io.rpgmigrate.e2e=" + token,
                            "--file", str(private / "source/tools/e2e/Containerfile")]
                 if fault:
                     with self.assertRaises(AssertionError): model.call(command)

@@ -176,7 +176,7 @@ jobs:
           python3 - <<'PYLEDGER'
           import json
           from pathlib import Path
-          # Statuses, exception kinds and failure callsites only; ledgers and stderr stay on the runner.
+          # Statuses, resource deltas, callsites and podman error lines only; ledgers and other stderr stay on the runner.
           for path in sorted(Path("target/e2e").glob("*.runtime.json")):
               ledger = json.loads(path.read_text())
               print(json.dumps({"stage": ledger.get("stage"), "cleanup_complete": ledger.get("cleanup_complete"),
@@ -202,8 +202,7 @@ jobs:
                   print([line[:300] for line in path.with_suffix(".stderr").read_text(errors="replace").splitlines() if line.lstrip().startswith(("Error:", "* "))])
           PYLEDGER
           podman image ls --all --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}} {{.CreatedAt}} {{index .Labels "io.rpgmigrate.e2e"}}'
-          sudo dmesg | grep -iE 'apparmor|denied' | tail -n 20
-          pgrep -a -f 'pasta|aardvark' | cut -c1-160 || true
+          sudo dmesg | grep -E 'apparmor="(DENIED|ALLOWED)"' | tail -n 20 || true
       - name: Revalidate the exact sanitized clone receipt
         run: |
           test -s "target/e2e/${{ matrix.pair }}.json"

@@ -1406,7 +1406,8 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                                                "effective_cgroup_status": "not_proven_for_ephemeral_image_build"}
         guard.ledger["stage"] = "development_image"
         guard.persist()
-        built = guard._create([runtime, "build", "--jobs", "2", "--memory", "4g", *cpu_arguments, "--label", label,
+        # Layer caching commits untagged intermediate images that preservation would see as unowned.
+        built = guard._create([runtime, "build", "--layers=false", "--jobs", "2", "--memory", "4g", *cpu_arguments, "--label", label,
                               "--network", "private", "--tag", image, "--file", str(source_context / "tools/e2e/Containerfile"), str(source_context / "tools/e2e")],
                              {"kind": "image", "tag": image}, timeout=1200)
         image_id = built["id"]
