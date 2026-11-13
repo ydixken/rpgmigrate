@@ -1647,6 +1647,72 @@ Leader decisions, wave 6:
 
 M0–M5 remain closed and M6–M10 remain open.
 
+### Wave 7 results, 2026-11-12
+
+- [x] ENGINE-RECORD3: `feat/native-engine` at `7d91552` records wave 6; hosted ci.yml run 43304825898 passed 8 of 8 jobs.
+  Development runner image run 43304825755 succeeded, and its `dev-7d91552` digests were not recorded because activation names the `908ada6` digests.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-RECORD3-20261112/SHA256SUMS`, SHA-256 `f5e7c25f6385409cc487bc57654bbbf20ac17fe033a3f4cd66d9e92df6cdf68d`.
+- [x] PREFLIGHT-FIX (operator): `fix/native-preflight-20261112` at `b235e25` fixes the `ROLLBACK` precondition, writes one closed-set `native_preflight_failure` line that becomes the preflight termination message, and lets the relay wait for the 0700 input directory mode.
+  The native follow preflight passed 17 of 17 checks against a PostgreSQL 16 pair with the `908ada6` runner, and 16 of 16 mutations failed the tests.
+  The writer SHA-256 is `772f9e080fab37a30feeb76c2c604363272ede1106a83bfa32177a1c2f038c8f`, which puts the owned-inventory relay at 16369 of its 16384 bytes.
+  Evidence: `/private/var/tmp/rpgmigrate-PREFLIGHT-FIX-20261112/SHA256SUMS`, SHA-256 `5dd4c21b5f92831e89028d0a8bfef1e2d1b7e42f8cc0b6feb36f0534258e11ce`.
+- [x] RUNNER-PIN (operator): `fix/native-runner-pin-20261112` at `4b94c1c` records the admitted runner image in `status.nativeRunnerImage`, which two CEL rules make immutable once set.
+  Every native Job, deletion cleanup included, uses the recorded image, and a native Migration past admission without one is refused without a status write; 8 of 8 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-RUNNER-PIN-20261112/SHA256SUMS`, SHA-256 `7f761479f4aebee755b616646357733d07f104b8dde0fdf17409e4152230f34f`.
+- [x] WORKDIR-FSGROUP (operator): `fix/native-workdir-fsgroup-20261112` at `0242d4b` admits a kubelet fsGroup `/work` root in the native helpers and keeps the strict check on everything below it.
+  Its container proof matched 168 of 168 expected verdicts, and it located the two engine refusals at `src/state.rs:873-875` and `:272` that ENGINE-FSGROUP fixes.
+  Evidence: `/private/var/tmp/rpgmigrate-WORKDIR-FSGROUP-20261112/SHA256SUMS`, SHA-256 `93005adc5054f7e8c1736a490c3fbcbda14e49f2d41dbd6c171c42201635c248`.
+- [x] M7-ROUTE (operator): `feat/m7-native-route-20261112` at `193980e` lifts the native kind route for 16:16, 18:18 and 16:18, one named spec per run from a fixed list of 10, and writes receipt `schema_version` 2.
+  58 of 59 mutations failed the tests, and the survivor is equivalent.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-ROUTE-20261112/SHA256SUMS`, SHA-256 `0e25a988766cc9785f754e7c806a342aaee7f64cc005ca3c597d2083caeb3204`.
+- [x] INTEGRATE3 (operator): `feat/rpgmigrate-native-operator` fast-forwarded from `c2a9ef6` to `13074776e47af2c35cfd8ca89a25bd99b239c24b`, merging the four branches above and repinning the evidence program to SHA-256 `c6bca34e7a0801419f887dc291d8cc4fa2c72afa54abd8994ebd7839f9a480be` (121639 bytes).
+  Development manager image run 43319910510 published arm64 `sha256:28ecaa4fe166d6624a5fb9b152bbdc44f0e8734617089bf722e8b07aa180c9b4` and amd64 `sha256:d63ef391d3626f066c7018e0cb70060dc9aa9431ed309c46b2df191df3d78521`.
+  The arm64 kind image lock binds operator `1307477` and engine `908ada6` and has SHA-256 `786bf7c3939745b24982d8a27f4f16bcbb5ee2b13243b79a851068cd6eebbd92`; it stays outside Git.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE3-20261112/SHA256SUMS`, SHA-256 `1b21e9529263336d382829dc31056d3d9b81845341e109a42cc52a26d7bad717`.
+- [ ] M7-RUN1 (operator): no native spec passed and no receipt validated.
+  `feat/m7-run1-20261112` adds a runner-owned 0700 hostPath work volume (`759ee6e`) bound when its worker schedules (`aff4075`), and the line was fast-forwarded to `aff4075`.
+  Manager image run 43330769326 published arm64 `sha256:31ec6165aa7886f242c013b4cacb0a5c1de0b335f0f9b0e4b5728ee343c3842a` and amd64 `sha256:9dcdb2c956af87443db8a42eadcff564fc201b8da8f56549e6aefc069d270c12`.
+  The arm64 lock for `aff4075` has SHA-256 `a535704c9b2f2ce2c686199f9467abf5bdaab1fda5eea74f6a81f36d5d8881e2` and stays outside Git; the `759ee6e` lock `55b6a7b302a27902fd71e3c991202543808ca332b434a6a8810d259308b79945` is superseded.
+  Native preflight passed live on all three pairs through the in-cluster manager.
+  - Run `7a181214b21045d98ade4675c93160cb` (16:16) wedged on P1: the worker-start check at `internal/controller/native_worker.go:65` refuses a claim that the volume controller binds during worker start.
+  - Runs `e02a8bbab9fe4a5aab5339e10b606562` (18:18) and `f763c7d2895a480a8b6436a0eb190329` (16:18) stopped on P2, clone refusing the fixture's citext and composite columns, and then on P3, a Failed native follow Migration that can never be deleted.
+  - The six 16:16 fault specs did not run, so the TERM receipt stays open.
+
+  Evidence: `/private/var/tmp/rpgmigrate-M7-RUN1-20261112/SHA256SUMS`, SHA-256 `a26fa98a027bc6458d1e012cef5eed95c6336d83bee75df10827bb540d3fc9c4`.
+
+### Wave 8 results, 2026-11-13
+
+- [x] ENGINE-FSGROUP: `fix/state-fsgroup-20261113` at `1aec190` admits a state parent owned by root or the process uid whose group write is either sticky or granted to a group the process holds, and creates the state directory at exactly 0700.
+  Other-writable, foreign-group and foreign-owner roots stay refused; hosted ci.yml run 43342634549 passed 8 of 8 jobs, and a capped podman proof gave 12 of 12 expected verdicts on simulated kubelet roots.
+  The `fchmod` on a newly created control directory at `src/state/control.rs:570` is defensive and no mutation can reach it.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-FSGROUP-20261113/SHA256SUMS`, SHA-256 `3adcfb0d839bfb8165dc30d5e67cb350b8b5299fb5e4a3a30deaa71f5ab27e42`.
+- [x] ENGINE-TYPES: `feat/clone-extension-types-20261113` at `8e284de` admits extension-owned base types and standalone composite types in text COPY, through domains and arrays, and refuses at planning when the owning extension is missing on the target.
+  Hosted ci.yml run 43348686367 passed 8 of 8 jobs on its second attempt, after a `crun` race in the cargo build; follow passed only on throwaway probe branches, because the follow harness still expects state format 8 and metadata 6.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-TYPES-20261113/SHA256SUMS`, SHA-256 `96641820f13bd0763aeb43dac622000e08134e65ae8323302c91e5dcd10d1b62`.
+- [x] ENGINE-LAND3: `feat/native-engine` fast-forwarded from `7d91552` to `42866da43fc43a9af88bab01b5c203b7f1d7d5aa`, merging both branches above.
+  Hosted ci.yml run 43350510136 on the integration branch passed 8 of 8 jobs on its second attempt, after engine-e2e 16-16 failed with `container state improper` at `clone.py:874`; run 43351266784 on `feat/native-engine` passed 8 of 8 on its first attempt.
+  Development runner image run 43351267111 published `dev-42866da43fc43a9af88bab01b5c203b7f1d7d5aa` as arm64 `sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f` (executable SHA-256 `c244a35d4d1656a23a141a0b24cba8f8c0d2eb59b8bdbf025b13f710dfc2de6f`) and amd64 `sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2` (executable SHA-256 `013a11bfbd23de7231c8e33596053f93c0d69d1cd03638f745e443418379758c`), both pulled anonymously.
+  Against `908ada6`, `libc.so.6` and `/etc/nsswitch.conf` are unchanged on both architectures.
+  The libpq runtime JSON and `libpq.so.5.18` changed on both, because the unversioned `libpq5=18.*` install now resolves PGDG `18.7-1.pgdg13+2` instead of `18.6-1.pgdg13+2`.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND3-20261113/SHA256SUMS`.
+- [ ] Operator qualification of the `42866da` runner: the operator resolver policy and the M6 driver pin the `908ada6` libpq runtime JSON and library, so the new runner needs new pins before it can be admitted.
+- [ ] The native operator fixture still fails the engine: clone refuses the materialized view `event_daily_counts`, and follow refuses a generated column, a domain CHECK, a citext `UNIQUE` index and `e2e_seed_pkey` through the default-collation `collversion` comparison at `src/catalog/follow.rs:193`.
+
+Leader decisions, wave 8:
+
+- The resolver residual risk stays accepted, and the glibc fix stays tracked for M10.
+- `actions/upload-artifact` stays at v6, native Unix-socket connections stay unsupported, and the kind image lock stays outside Git.
+- Receipt `schema_version` 2 is correct.
+- The preflight container keeps `FallbackToLogsOnError`, because the controller reads only the exact closed-set line from the termination message.
+- The runner-pin guard stays on every reconcile, so an operator upgrade must keep admitted runner digests qualified until in-flight Migrations finish, and the upgrade notes say so.
+- Native was never activated before the runner record, so no pre-change in-flight native Migrations exist.
+- The relay cap stays 16384 bytes, and the next writer change must trim the writer first.
+- Workers may fast-forward the operator line when a run needs a manager image from the exact tree, after its gates pass.
+- M7 qualifies on the runner-owned hostPath work volume, and the CSI fsGroup path is proven in podman with simulated kubelet roots.
+- ENGINE-FSGROUP and ENGINE-TYPES land on `feat/native-engine` together, after hosted ci.yml passed on the merged tree.
+
+M0–M5 remain closed and M6–M10 remain open.
+
 ## Capacity and parallel execution, user update 2026-11-08
 
 The verified VM allocation is fourteen CPUs, 32768 MiB memory, and a 160-GiB disk; the M7 section binds the latest resize/preservation proof.

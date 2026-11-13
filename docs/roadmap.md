@@ -876,6 +876,12 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   Activation names the `908ada6` digests, not these.
 - `05631c2` on `feat/native-engine` records wave 5; hosted ci.yml run 43265842631 passed 8 of 8 jobs on its second attempt.
   Its `dev-05631c2` runner images are not runtime-qualified either.
+- `7d91552` on `feat/native-engine` records wave 6; hosted ci.yml run 43304825898 passed 8 of 8 jobs.
+- `fix/state-fsgroup-20261113` at `1aec190` admits kubelet fsGroup state parents (group write granted to a group the process holds, or sticky) and creates the state directory at exactly 0700.
+- `feat/clone-extension-types-20261113` at `8e284de` admits extension-owned base types and standalone composite types in text COPY, through domains and arrays.
+- `feat/native-engine` at `42866da` merges both; hosted ci.yml run 43351266784 passed 8 of 8 jobs.
+  Its `dev-42866da43fc43a9af88bab01b5c203b7f1d7d5aa` runner images are arm64 `sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f` and amd64 `sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2`.
+  They keep the `908ada6` `libc.so.6` and `nsswitch.conf`, but carry libpq 18.7 and a new libpq runtime JSON, so the operator must repin before it admits them.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -917,6 +923,16 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   The TERM receipt is deferred to the M7 native suspend and delete specs.
 - The M7 smoke run on `c2a9ef6` reached native preflight for a 16:16 Migration and stopped there on a `ROLLBACK` transaction-state defect in the evidence program; the decisions below fix it.
 
+- `fix/native-preflight-20261112` at `b235e25` fixes that precondition, names the refusal class in one closed-set line, and lets the relay wait for the 0700 input directory mode.
+- `fix/native-runner-pin-20261112` at `4b94c1c` records the admitted runner image in an immutable `status.nativeRunnerImage`, which every later native Job uses.
+- `fix/native-workdir-fsgroup-20261112` at `0242d4b` admits a kubelet fsGroup `/work` root in the native helpers and keeps the strict check below it.
+- `feat/m7-native-route-20261112` at `193980e` lifts the native kind route for 16:16, 18:18 and 16:18, one named spec per run.
+- `feat/rpgmigrate-native-operator` at `1307477` merges those four.
+  Its manager images are arm64 `sha256:28ecaa4fe166d6624a5fb9b152bbdc44f0e8734617089bf722e8b07aa180c9b4` and amd64 `sha256:d63ef391d3626f066c7018e0cb70060dc9aa9431ed309c46b2df191df3d78521`, and its arm64 lock has SHA-256 `786bf7c3939745b24982d8a27f4f16bcbb5ee2b13243b79a851068cd6eebbd92`.
+- `feat/m7-run1-20261112` gives native kind Migrations a runner-owned 0700 hostPath work volume, and the line moved to `aff4075` for it.
+  Its manager images are arm64 `sha256:31ec6165aa7886f242c013b4cacb0a5c1de0b335f0f9b0e4b5728ee343c3842a` and amd64 `sha256:9dcdb2c956af87443db8a42eadcff564fc201b8da8f56549e6aefc069d270c12`, and its arm64 lock has SHA-256 `a535704c9b2f2ce2c686199f9467abf5bdaab1fda5eea74f6a81f36d5d8881e2`.
+  No native spec passed on it: a worker-start claim check, clone refusing citext and composite columns, and an undeletable Failed follow Migration stopped every run.
+
 ### Leader decisions, 2026-11-12
 
 - The pasta AppArmor profile stays in complain mode on throwaway CI runners only, until the runner image ships the Launchpad #2154379 fix.
@@ -938,6 +954,14 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - Admission pins the runner digest into the Migration status.
 - On a CSI volume with `fsGroup`, the volume root may carry the kubelet group and setgid bits, and every directory the evidence program creates below it must be exactly 0700.
 - The native route is lifted for pairs 16:16, 18:18 and 16:18, and the M7 native suite connects with `sslmode=verify-full`.
+- Receipt `schema_version` 2 is correct.
+- The preflight container keeps `FallbackToLogsOnError`, because the controller reads only the exact closed-set line from the termination message.
+- The runner-pin guard stays on every reconcile, so an operator upgrade must keep admitted runner digests qualified until in-flight Migrations finish, and the upgrade notes say so.
+- Native was never activated before the runner record, so no pre-change in-flight native Migrations exist.
+- The relay cap stays 16384 bytes, and the next writer change must trim the writer first.
+- Workers may fast-forward the operator line when a run needs a manager image from the exact tree, after its gates pass.
+- M7 qualifies on the runner-owned hostPath work volume, and the CSI fsGroup path is proven in podman with simulated kubelet roots.
+- The engine state parent rule and extension-owned column types land on `feat/native-engine` together, after hosted ci.yml passed on the merged tree.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 
