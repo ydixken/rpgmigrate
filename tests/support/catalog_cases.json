@@ -12,5 +12,6 @@
   "catalog::tests::live_clone_admission_selects_each_heap_once_and_omits_generated_input",
   "catalog::tests::live_clone_admission_refuses_unsupported_relations_and_trigger_states",
   "catalog::tests::live_clone_admission_requires_column_type_extensions_on_the_target",
+  "catalog::tests::live_cdc_follow_index_collations_use_recorded_database_versions",
   "catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales"
 ]

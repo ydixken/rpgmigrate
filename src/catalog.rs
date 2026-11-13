@@ -2810,6 +2810,78 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires owned PostgreSQL with the private US locale and ICU"]
+    fn live_cdc_follow_index_collations_use_recorded_database_versions() {
+        let io = cdc_control();
+        let base = std::env::var("RPGMIGRATE_TEST_CATALOG_ADMIN").expect("owned admin required");
+        let mut admin = cdc_source(true, &io);
+        let mut cases = vec![
+            ("libc", "LOCALE_PROVIDER libc LOCALE 'en_US.UTF-8'", true),
+            ("c", "LOCALE_PROVIDER libc LOCALE 'C'", false),
+            (
+                "icu",
+                "LOCALE_PROVIDER icu ICU_LOCALE 'und' LOCALE 'C'",
+                true,
+            ),
+        ];
+        if admin.server_version().unwrap() >= 170_000 {
+            cases.push((
+                "builtin",
+                "LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' LOCALE 'C'",
+                true,
+            ));
+        }
+        for (label, options, versioned) in cases {
+            let name = format!("e1_collation_{label}_{}", std::process::id());
+            admin
+                .query(
+                    &format!("CREATE DATABASE {name} TEMPLATE template0 ENCODING 'UTF8' {options}"),
+                    &io,
+                )
+                .unwrap();
+            let info = Conninfo::new(format!("{base} dbname={name}").into()).unwrap();
+            let mut db = PgConnection::connect(&info, &io).unwrap();
+            command(&mut db, "BEGIN", "BEGIN", &io).unwrap();
+            for sql in [
+                "CREATE COLLATION und_icu (provider=icu, locale='und')",
+                "CREATE TABLE item (id text PRIMARY KEY, code text COLLATE \"C\" UNIQUE, tag text COLLATE und_icu UNIQUE)",
+            ] {
+                db.query(sql, &io).unwrap();
+            }
+            let oid = db
+                .query("SELECT 'item'::pg_catalog.regclass::pg_catalog.oid", &io)
+                .unwrap();
+            let oid = text(&oid, 0, 0).unwrap().parse().unwrap();
+            let versions = db.query("SELECT datcollversion, pg_catalog.pg_database_collation_actual_version(oid) FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()", &io).unwrap();
+            assert_eq!(versions.cell(0, 0).unwrap(), versions.cell(0, 1).unwrap());
+            assert_eq!(versions.cell(0, 0).unwrap().is_some(), versioned, "{label}");
+            follow::require_follow_execution(&mut db, oid, &io).unwrap();
+            let mut drifts = vec![
+                "UPDATE pg_catalog.pg_database SET datcollversion='drifted' WHERE datname=pg_catalog.current_database()",
+                "UPDATE pg_catalog.pg_collation SET collversion='drifted' WHERE collname='und_icu'",
+            ];
+            if versioned {
+                drifts.push("UPDATE pg_catalog.pg_database SET datcollversion=NULL WHERE datname=pg_catalog.current_database()");
+            }
+            for drift in drifts {
+                command(&mut db, "SAVEPOINT drift", "SAVEPOINT", &io).unwrap();
+                db.query(drift, &io).unwrap();
+                let error = follow::require_follow_execution(&mut db, oid, &io).unwrap_err();
+                assert!(
+                    error.message.contains("deterministic current collations"),
+                    "{label} {drift}: {error:?}"
+                );
+                command(&mut db, "ROLLBACK TO SAVEPOINT drift", "ROLLBACK", &io).unwrap();
+            }
+            command(&mut db, "ROLLBACK", "ROLLBACK", &io).unwrap();
+            drop(db);
+            admin
+                .query(&format!("DROP DATABASE {name} WITH (FORCE)"), &io)
+                .unwrap();
+        }
+    }
+
+    #[test]
     #[ignore = "requires owned PostgreSQL with private German and US monetary locales"]
     fn live_money_clone_preserves_values_and_defaults_across_role_locales() {
         use crate::contracts::{

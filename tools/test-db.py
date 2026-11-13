@@ -145,7 +145,7 @@ def main():
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")
     modes.add_argument("--authority", action="store_true", help="require the exact target authority live-test inventory")
     modes.add_argument("--replication", action="store_true", help="require the exact raw CopyBoth live-test inventory")
-    modes.add_argument("--catalog", action="store_true", help="require fourteen exact CDC, clone, and money catalog live tests")
+    modes.add_argument("--catalog", action="store_true", help="require fifteen exact CDC, follow collation, clone, and money catalog live tests")
     modes.add_argument("--source-catalog", action="store_true", help="require the exact three source identity live tests")
     modes.add_argument("--engine", action="store_true", help="require all transport, prepared, authority, replication, and catalog/COPY live tests")
     parser.add_argument("command", nargs=argparse.REMAINDER)
