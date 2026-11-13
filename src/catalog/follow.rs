@@ -184,10 +184,7 @@ fn require_follow_execution(connection: &mut PgConnection, oid: u32, io: &IoCont
     // Pinned builtins can lack pg_depend rows, so expression absence is the safe admission proof.
     let result=connection.query(&format!(r#"WITH RECURSIVE ancestors(oid) AS (
  SELECT {oid}::pg_catalog.oid UNION SELECT i.inhparent FROM pg_catalog.pg_inherits i JOIN ancestors a ON a.oid=i.inhrelid
-), types(oid,depth) AS (
- SELECT DISTINCT a.atttypid,0 FROM pg_catalog.pg_attribute a WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped
- UNION ALL SELECT CASE WHEN t.typtype='d' THEN t.typbasetype ELSE t.typelem END,x.depth+1 FROM types x JOIN pg_catalog.pg_type t ON t.oid=x.oid WHERE x.depth<32 AND (t.typtype='d' OR (t.typelem<>0 AND t.typlen=-1))
-)
+), {}
 SELECT
  NOT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.contype IN ('c','x') AND (c.conrelid IN (SELECT oid FROM ancestors) OR c.contypid IN (SELECT oid FROM types))),
  NOT EXISTS(SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=idx.relam WHERE i.indrelid IN (SELECT oid FROM ancestors) AND (
@@ -199,7 +196,7 @@ SELECT
  p.partexprs IS NOT NULL OR 0=ANY(p.partattrs::pg_catalog.int2[]) OR
  EXISTS(SELECT 1 FROM pg_catalog.unnest(p.partclass::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_opclass op ON op.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=op.opcnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid=op.opcmethod WHERE op.oid IS NULL OR op.oid>=16384 OR ns.nspname<>'pg_catalog' OR am.oid>=16384 OR am.amname NOT IN ('btree','hash')) OR
  EXISTS(SELECT 1 FROM pg_catalog.unnest(p.partcollation::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_collation co ON co.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=co.collnamespace WHERE key.oid<>0 AND (co.oid IS NULL OR ns.nspname<>'pg_catalog' OR co.collname NOT IN ('C','POSIX') OR NOT co.collisdeterministic OR co.collversion IS DISTINCT FROM pg_catalog.pg_collation_actual_version(co.oid)))
- ))"#),io)?;
+ ))"#, super::clone::column_types(&oid.to_string())),io)?;
     if result.rows() != 1 || result.columns()? != 3 {
         return Err(refusal(
             "follow-execution: catalog safety evidence is missing",

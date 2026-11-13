@@ -815,7 +815,14 @@ class FollowHarnessTests(unittest.TestCase):
         cases["backpressure"].update(seconds=65, wal_sender_timeout_seconds=60, feedback_held=True,
                                       queue={"messages": 1024, "owned_bytes": 8192, "limit_messages": 1024, "limit_bytes": 8 * 1024 * 1024})
         harness.validate_receipt(report, manifest)
-        harness.validate_receipt({**report, "receipt_scope": "smoke", "cases": {"initial_copy_dml": report["cases"]["initial_copy_dml"]}}, manifest)
+        compared = [{"status": "match"} for _ in manifest["tables"]]
+        smoke = {**report, "receipt_scope": "smoke", "cases": {"initial_copy_dml": {**report["cases"]["initial_copy_dml"], "comparison_tables": compared}}}
+        harness.validate_receipt(smoke, manifest)
+        for tables in (None, [], compared[1:], [*compared[1:], {"status": "different"}], [*compared[1:], "match"]):
+            bad = copy.deepcopy(smoke)
+            bad["cases"]["initial_copy_dml"]["comparison_tables"] = tables
+            with self.subTest(tables=tables), self.assertRaisesRegex(RuntimeError, "engine data comparison"):
+                harness.validate_receipt(bad, manifest)
         for bad in ({**report, "report_validation": {}}, {**report, "cases": {}}, {**report, "successful_follow_exit": True}, {**report, "power_loss_tested": True},
                     {**report, "cases": {**report["cases"], "initial_copy_dml": {"observed": True}}},
                     {**report, "cases": {**report["cases"], "backpressure": {"observed": True, "seconds": 60, "wal_sender_timeout_seconds": 60}}}):
@@ -1077,6 +1084,9 @@ class FollowHarnessTests(unittest.TestCase):
                         self.reports.append(report["report_validation"]["reports"][0])
                     def stop(self, _process, *, crash=False):
                         events.append("crash" if crash else "stop")
+                    def inspect(self, path, _source, _target, _state, *, json_output=False):
+                        events.append(("compare",) + path if json_output else "unexpected inspection")
+                        return [{"status": "match"} for _ in harness.load_manifest()["tables"]]
                 wires = []
                 class Wire:
                     def __init__(self, *_args):
@@ -1138,6 +1148,7 @@ class FollowHarnessTests(unittest.TestCase):
                 else:
                     self.assertIn("workload_preflight", events)
                     self.assertNotIn("crash", events)
+                    self.assertEqual(events[-2:], ["stop", ("compare", "compare", "data")])
 
     def test_failure_capture_bounds_source_and_target_proxy_classes_without_replacing_cause(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(harness.clone, "DIAGNOSTIC_ROOT", Path(temporary) / "diagnostics"):

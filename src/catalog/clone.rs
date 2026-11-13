@@ -525,24 +525,78 @@ fn source_obligations(connection: &mut PgConnection, io: &IoControl) -> Result<(
     require_source_obligations(result.cell(0, 0)?)
 }
 
+/// Pre-data can only recreate an extension type when the target can create its extension.
+pub(super) fn require_target_extensions(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    tables: &[CloneTable],
+    io: &IoControl,
+) -> Result<()> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let oids = tables
+        .iter()
+        .map(|table| table.source_oid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let result = source.query(&format!("WITH RECURSIVE {} SELECT DISTINCT e.extname::pg_catalog.text FROM types x JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_type'::pg_catalog.regclass AND d.objid=x.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid ORDER BY 1 LIMIT 1025", column_types(&oids)), io)?;
+    if result.rows() > 1024 || result.columns()? != 1 {
+        return Err(refusal(
+            "clone column type extension inventory exceeds its bound",
+        ));
+    }
+    for row in 0..result.rows() {
+        let name = target.quote_literal(text(&result, row, 0)?)?;
+        let available = target.query(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name={name})"
+            ),
+            io,
+        )?;
+        if available.rows() != 1 || available.columns()? != 1 || available.cell(0, 0)? != Some(b"t")
+        {
+            return Err(refusal(
+                "clone column type extension is unavailable on the target",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Recursive `roots` and `types` CTEs: every type a column's text form reaches through domains,
+/// arrays and standalone composite members. UNION keeps composite fan-out polynomial.
+pub(super) fn column_types(relations: &str) -> String {
+    format!(
+        r#"roots AS (
+ SELECT a.attrelid,a.attnum,a.attname,a.attgenerated,a.atttypid FROM pg_catalog.pg_attribute a WHERE a.attrelid IN ({relations}) AND a.attnum>0 AND NOT a.attisdropped
+), types AS (
+ SELECT attrelid,attnum,atttypid AS oid,0 AS depth FROM roots
+ UNION
+ SELECT x.attrelid,x.attnum,m.oid,x.depth+1 FROM types x JOIN pg_catalog.pg_type t ON t.oid=x.oid
+ CROSS JOIN LATERAL (SELECT t.typbasetype WHERE t.typtype='d'
+  UNION ALL SELECT t.typelem WHERE t.typtype<>'d' AND t.typelem<>0 AND t.typlen=-1
+  UNION ALL SELECT a.atttypid FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
+  WHERE t.typtype='c' AND c.oid=t.typrelid AND c.relkind='c' AND a.attnum>0 AND NOT a.attisdropped) m(oid)
+ WHERE x.depth<32
+)"#
+    )
+}
+
 fn clone_columns(
     connection: &mut PgConnection,
     oid: u32,
     io: &IoControl,
 ) -> Result<(Vec<String>, Vec<String>)> {
-    let result=connection.query(&format!(r#"WITH RECURSIVE roots AS (
- SELECT a.attnum,a.attname,a.attgenerated,a.atttypid FROM pg_catalog.pg_attribute a WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped
-), types AS (
- SELECT attnum,atttypid AS oid,0 AS depth FROM roots
- UNION ALL
- SELECT x.attnum,CASE WHEN t.typtype='d' THEN t.typbasetype WHEN t.typelem<>0 AND t.typlen=-1 THEN t.typelem ELSE 0 END,x.depth+1
- FROM types x JOIN pg_catalog.pg_type t ON t.oid=x.oid WHERE x.depth<32 AND (t.typtype='d' OR (t.typelem<>0 AND t.typlen=-1))
-)
+    // Extension base types and standalone composites have text I/O that pre-data recreates; binary COPY still refuses them.
+    let result=connection.query(&format!(r#"WITH RECURSIVE {}
 SELECT r.attname,r.attgenerated,COALESCE(pg_catalog.bool_and(
  x.depth<32 AND (t.typtype IN ('d','e') OR (t.typelem<>0 AND t.typlen=-1) OR
- (n.nspname='pg_catalog' AND t.typtype IN ('b','r','m') AND t.oid<16384 AND t.typname NOT IN ('regclass','regcollation','regconfig','regdictionary','regnamespace','regoper','regoperator','regproc','regprocedure','regrole','regtype','aclitem','pg_node_tree')))),false)
-FROM roots r JOIN types x USING(attnum) LEFT JOIN pg_catalog.pg_type t ON t.oid=x.oid LEFT JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
-GROUP BY r.attnum,r.attname,r.attgenerated ORDER BY r.attnum LIMIT 1601"#),io)?;
+ (n.nspname='pg_catalog' AND t.typtype IN ('b','r','m') AND t.oid<16384 AND t.typname NOT IN ('regclass','regcollation','regconfig','regdictionary','regnamespace','regoper','regoperator','regproc','regprocedure','regrole','regtype','aclitem','pg_node_tree')) OR
+ (t.typtype='c' AND EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid=t.typrelid AND c.relkind='c')) OR
+ (t.typtype='b' AND t.typisdefined AND t.oid>=16384 AND EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::pg_catalog.regclass AND d.objid=t.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e')))),false)
+FROM roots r JOIN types x USING(attrelid,attnum) LEFT JOIN pg_catalog.pg_type t ON t.oid=x.oid LEFT JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
+GROUP BY r.attnum,r.attname,r.attgenerated ORDER BY r.attnum LIMIT 1601"#, column_types(&oid.to_string())),io)?;
     if result.rows() > 1600 || result.columns()? != 3 {
         return Err(refusal("clone requires a bounded supported column layout"));
     }
@@ -796,6 +850,7 @@ pub(crate) fn plan_clone(
     }
     let tables = inspect_clone_tables(source, &[], io)?;
     require_identity_compatibility(source_id.major, target_id.major, &tables)?;
+    require_target_extensions(source, target, &tables, io)?;
     source_obligations(target, io)?;
     let objects = clone_object_inventory(target, io)?;
     verify_exact_exclusions(&objects, exact_metadata)?;

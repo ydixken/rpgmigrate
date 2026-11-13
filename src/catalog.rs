@@ -2720,6 +2720,13 @@ mod tests {
             format!(
                 "CREATE TRIGGER normal_trigger BEFORE INSERT ON {q}.parent FOR EACH ROW EXECUTE FUNCTION {q}.trigger_fn()"
             ),
+            format!("CREATE EXTENSION citext SCHEMA {q}"),
+            format!("CREATE DOMAIN {q}.email AS {q}.citext"),
+            format!("CREATE TYPE {q}.size AS (width numeric, label {q}.citext, moods {q}.mood[])"),
+            format!("CREATE TYPE {q}.nested AS (inner_size {q}.size, sizes {q}.size[])"),
+            format!(
+                "CREATE TABLE {q}.typed (email {q}.citext, emails {q}.citext[], address {q}.email, size {q}.size, sizes {q}.size[], nested {q}.nested)"
+            ),
         ] {
             connection.query(&sql, &io).unwrap();
         }
@@ -2733,13 +2740,73 @@ mod tests {
                 .iter()
                 .map(|t| t.name.table.as_str())
                 .collect::<Vec<_>>(),
-            ["child", "leaf", "parent"]
+            ["child", "leaf", "parent", "typed"]
         );
-        for table in tables.iter().filter(|t| t.name.table != "leaf") {
+        for table in tables
+            .iter()
+            .filter(|t| ["child", "parent"].contains(&t.name.table.as_str()))
+        {
             assert_eq!(table.writable_columns, ["id", "number", "moods"]);
             assert_eq!(table.all_columns, ["id", "number", "moods", "computed"]);
         }
+        let typed = ["email", "emails", "address", "size", "sizes", "nested"];
+        assert_eq!(tables[3].writable_columns, typed);
+        assert_eq!(tables[3].all_columns, typed);
         command(&mut connection, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the owned catalog PostgreSQL harness"]
+    fn live_clone_admission_requires_column_type_extensions_on_the_target() {
+        let io = cdc_control();
+        let mut source = cdc_source(true, &io);
+        let mut target = cdc_target_connection(true, &io);
+        command(&mut source, "BEGIN", "BEGIN", &io).unwrap();
+        let schema = format!("clone_extension_{}", std::process::id());
+        let q = source.quote_identifier(&schema).unwrap();
+        for sql in [
+            format!("CREATE SCHEMA {q}"),
+            format!("CREATE EXTENSION citext SCHEMA {q}"),
+            format!("CREATE TYPE {q}.labelled AS (label {q}.citext)"),
+            format!("CREATE TABLE {q}.plain (id integer)"),
+            format!("CREATE TABLE {q}.item (id integer, value {q}.labelled[])"),
+        ] {
+            source.query(&sql, &io).unwrap();
+        }
+        let table = |source: &mut PgConnection, name: &str| {
+            let literal = source.quote_literal(&format!("{q}.{name}")).unwrap();
+            let oid = source
+                .query(
+                    &format!("SELECT {literal}::pg_catalog.regclass::pg_catalog.oid"),
+                    &io,
+                )
+                .unwrap();
+            crate::contracts::CloneTable {
+                source_oid: text(&oid, 0, 0).unwrap().parse().unwrap(),
+                name: QualifiedTable {
+                    schema: schema.clone(),
+                    table: name.into(),
+                },
+                writable_columns: Vec::new(),
+                all_columns: Vec::new(),
+                identity_modes: Vec::new(),
+                partition_identity_modes: None,
+            }
+        };
+        let plain = [table(&mut source, "plain")];
+        let typed = [table(&mut source, "plain"), table(&mut source, "item")];
+        clone::require_target_extensions(&mut source, &mut target, &typed, &io).unwrap();
+        source
+            .query(
+                "UPDATE pg_catalog.pg_extension SET extname='rpgmigrate_absent_extension' WHERE extname='citext'",
+                &io,
+            )
+            .unwrap();
+        clone::require_target_extensions(&mut source, &mut target, &plain, &io).unwrap();
+        let error =
+            clone::require_target_extensions(&mut source, &mut target, &typed, &io).unwrap_err();
+        assert!(error.message.contains("unavailable on the target"));
+        command(&mut source, "ROLLBACK", "ROLLBACK", &io).unwrap();
     }
 
     #[test]
@@ -2966,6 +3033,34 @@ mod tests {
             (
                 &["CREATE TABLE {s}.item(computed integer GENERATED ALWAYS AS (1) STORED)"],
                 "at least one writable column",
+            ),
+            (
+                &["CREATE TABLE {s}.item(id integer, value regclass)"],
+                "unsupported textual representation",
+            ),
+            (
+                &[
+                    "CREATE TYPE {s}.member AS (value regclass)",
+                    "CREATE TABLE {s}.item(id integer, value {s}.member[])",
+                ],
+                "unsupported textual representation",
+            ),
+            (
+                &[
+                    "CREATE TABLE {s}.row_source(id integer)",
+                    "CREATE TABLE {s}.item(id integer, value {s}.row_source)",
+                ],
+                "unsupported textual representation",
+            ),
+            (
+                &[
+                    "CREATE TYPE {s}.local",
+                    "CREATE FUNCTION {s}.local_in(cstring) RETURNS {s}.local LANGUAGE internal IMMUTABLE STRICT AS 'int4in'",
+                    "CREATE FUNCTION {s}.local_out({s}.local) RETURNS cstring LANGUAGE internal IMMUTABLE STRICT AS 'int4out'",
+                    "CREATE TYPE {s}.local (INPUT = {s}.local_in, OUTPUT = {s}.local_out, LIKE = integer)",
+                    "CREATE TABLE {s}.item(id integer, value {s}.local)",
+                ],
+                "unsupported textual representation",
             ),
         ];
         for (index, (definitions, expected)) in cases.iter().enumerate() {
