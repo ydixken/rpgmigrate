@@ -376,6 +376,8 @@ Use the maintained task ledger for actual passed receipts.
 These commands define checks, not a support claim.
 
 The follow harness reuses the clone harness's immutable server images, private internal network, exact container cleanup, redacted failure metadata, and matching-target-major tools.
+The harness takes the native format and target metadata it expects from `NATIVE_FORMAT` and `TARGET_METADATA` in `tools/e2e/follow.py`, and the cutover and M8 checks import them.
+A portable test pins both to the constants in `src/state.rs`, so a format bump fails `task test` until someone reviews the harness.
 It starts logical decoding only inside its disposable source container and checks the executable's actual linked libpq version.
 Follow refuses a domain CHECK that any column reaches through domains, arrays, or composite members.
 The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
