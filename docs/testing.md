@@ -41,6 +41,8 @@ Plain CI runs this local gate with stock PGDG libpq 18 development files, prints
 
 The retained `tools/test-db.py` harness owns disposable PostgreSQL clusters and checks test receipts and independent SQL fingerprints.
 Its catalog profile includes a non-superuser money clone check across German and US monetary defaults.
+It also creates libc `en_US.UTF-8`, libc `C` and ICU databases, plus a builtin `C.UTF-8` one on PostgreSQL 17 and later, and checks that follow compares an index's default collation against the version recorded in `pg_database`.
+The server must be built with ICU.
 That profile requires already installed GNU `localedef`, `/usr/share/i18n/locales/de_DE`, `/usr/share/i18n/locales/en_US`, and `/usr/share/i18n/charmaps/UTF-8.gz`.
 It compiles only private locale files, establishes `LOCPATH` before starting the owned server, and passes that environment to the client utilities.
 Missing tools, source data, or compiled `LC_MONETARY` output fail the check.

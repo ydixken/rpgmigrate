@@ -180,8 +180,13 @@ fn inspect_source_tables(
     Ok(())
 }
 
-fn require_follow_execution(connection: &mut PgConnection, oid: u32, io: &IoControl) -> Result<()> {
+pub(super) fn require_follow_execution(
+    connection: &mut PgConnection,
+    oid: u32,
+    io: &IoControl,
+) -> Result<()> {
     // Pinned builtins can lack pg_depend rows, so expression absence is the safe admission proof.
+    // The default collation (oid 100) records its version in pg_database, never in pg_collation.
     let result=connection.query(&format!(r#"WITH RECURSIVE ancestors(oid) AS (
  SELECT {oid}::pg_catalog.oid UNION SELECT i.inhparent FROM pg_catalog.pg_inherits i JOIN ancestors a ON a.oid=i.inhrelid
 ), {}
@@ -190,7 +195,7 @@ SELECT
  NOT EXISTS(SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=idx.relam WHERE i.indrelid IN (SELECT oid FROM ancestors) AND (
  i.indexprs IS NOT NULL OR i.indpred IS NOT NULL OR NOT i.indisvalid OR NOT i.indisready OR NOT i.indislive OR am.oid>=16384 OR am.amname NOT IN ('btree','hash','gist','gin','spgist','brin') OR
  EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_opclass op ON op.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=op.opcnamespace WHERE op.oid IS NULL OR op.oid>=16384 OR ns.nspname<>'pg_catalog' OR op.opcmethod<>am.oid) OR
- EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_collation co ON co.oid=key.oid WHERE key.oid<>0 AND (co.oid IS NULL OR NOT co.collisdeterministic OR co.collversion IS DISTINCT FROM pg_catalog.pg_collation_actual_version(co.oid)))
+ EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_collation co ON co.oid=key.oid WHERE key.oid<>0 AND (co.oid IS NULL OR NOT co.collisdeterministic OR (CASE WHEN co.oid=100 THEN (SELECT d.datcollversion IS DISTINCT FROM pg_catalog.pg_database_collation_actual_version(d.oid) FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()) ELSE co.collversion IS DISTINCT FROM pg_catalog.pg_collation_actual_version(co.oid) END) IS NOT FALSE))
  )),
  NOT EXISTS(SELECT 1 FROM pg_catalog.pg_partitioned_table p WHERE p.partrelid IN (SELECT oid FROM ancestors) AND (
  p.partexprs IS NOT NULL OR 0=ANY(p.partattrs::pg_catalog.int2[]) OR
