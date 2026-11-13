@@ -128,6 +128,12 @@ No entrypoint prevents callers from running shell commands.
 > Mount writable `/work` and `/tmp` directories owned by `65532:65532`.
 > The Dockerfile declares no volumes and cannot enforce runtime read-only flags.
 
+A Kubernetes `fsGroup` volume root such as `root:65532` mode `2775` also works as the parent of the state directory.
+Every parent of the state directory must be owned by root or the runner uid.
+A group-writable parent must belong to the runner's effective gid or one of its supplementary groups, unless it has the sticky bit.
+An other-writable parent needs the sticky bit.
+The engine creates the state directory at exactly mode `0700` and clears the setgid bit it inherits from such a root.
+
 The smoke uses temporary filesystems for both writable paths, disables networking, drops all capabilities, and enables `no-new-privileges`.
 We disable Podman's automatic read-only-container temporary mounts and use `--mount` with `U=true` to assign both explicit mounts to the configured user, following the [Podman runtime documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html).
 It checks the configured and effective uid, actual machine architecture, exact discovery document, and executable hash.

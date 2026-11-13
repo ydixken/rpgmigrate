@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -277,8 +277,10 @@ fn open_native(
             parent
                 .sync_all()
                 .map_err(|_| bad_state("state-sync: cannot synchronize state parent"))?;
-            open_at(&parent, &name, DIRECTORY_FLAGS, 0)
-                .map_err(|_| bad_state("state-replaced: new state directory is unavailable"))?
+            let handle = open_at(&parent, &name, DIRECTORY_FLAGS, 0)
+                .map_err(|_| bad_state("state-replaced: new state directory is unavailable"))?;
+            make_private(&handle)?;
+            handle
         }
         Err(_) => {
             return Err(bad_state(
@@ -859,6 +861,7 @@ fn open_at(parent: &File, name: &CStr, flags: libc::c_int, mode: libc::c_uint) -
 }
 
 fn open_parent(path: &Path) -> Result<File> {
+    let groups = process_groups()?;
     let mut directory =
         File::open("/").map_err(|_| bad_state("state-parent: cannot open state parent"))?;
     for component in path.components() {
@@ -870,14 +873,44 @@ fn open_parent(path: &Path) -> Result<File> {
         }
         let meta = metadata(&directory)?;
         // SAFETY: geteuid has no arguments or memory preconditions.
-        let trusted_owner = meta.uid() == 0 || meta.uid() == unsafe { libc::geteuid() };
-        if !trusted_owner || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0) {
+        let euid = unsafe { libc::geteuid() };
+        if !safe_parent(meta.uid(), meta.gid(), meta.mode(), euid, &groups) {
             return Err(bad_state(
                 "state-parent: state parent permits unsafe directory replacement",
             ));
         }
     }
     Ok(directory)
+}
+
+/// A kubelet fsGroup root is group-writable; only a group this process belongs to may share it.
+fn safe_parent(uid: u32, gid: u32, mode: u32, euid: u32, groups: &[libc::gid_t]) -> bool {
+    let sticky = mode & 0o1000 != 0;
+    (uid == 0 || uid == euid)
+        && (sticky || mode & 0o002 == 0)
+        && (sticky || mode & 0o020 == 0 || groups.contains(&gid))
+}
+
+/// The effective gid followed by the supplementary groups.
+fn process_groups() -> Result<Vec<libc::gid_t>> {
+    let failed = || bad_state("state-parent: cannot read process groups");
+    // SAFETY: a zero size only queries the count and writes nothing.
+    let count = usize::try_from(unsafe { libc::getgroups(0, std::ptr::null_mut()) })
+        .map_err(|_| failed())?;
+    // SAFETY: getegid has no arguments or memory preconditions.
+    let mut groups = vec![unsafe { libc::getegid() }; count + 1];
+    let size = libc::c_int::try_from(count).map_err(|_| failed())?;
+    // SAFETY: groups[1..] holds exactly `size` writable entries.
+    let written = unsafe { libc::getgroups(size, groups[1..].as_mut_ptr()) };
+    groups.truncate(1 + usize::try_from(written).map_err(|_| failed())?);
+    Ok(groups)
+}
+
+/// mkdir inherits S_ISGID from an fsGroup parent; clear it so check_private stays exact.
+fn make_private(directory: &File) -> Result<()> {
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .map_err(|_| bad_state("state-permissions: cannot make new state directory private"))
 }
 
 struct RootEntries {
@@ -1411,6 +1444,68 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::BadState);
         assert!(!tmp.path().exists());
         assert!(error.message.starts_with("state-parent:"), "{error:?}");
+    }
+
+    #[test]
+    fn parent_rule_admits_group_write_only_from_trusted_owner_and_group() {
+        let (me, group) = (1000, 65532);
+        let groups = [1000, group];
+        for (uid, gid, mode, safe) in [
+            (me, 1000, 0o700, true),
+            (0, group, 0o2775, true),
+            (me, group, 0o42775, true),
+            (me, group, 0o3775, true),
+            (0, group, 0o2770, true),
+            (0, 0, 0o1777, true),
+            (0, 2000, 0o1775, true),
+            (0, group, 0o2777, false),
+            (me, me, 0o777, false),
+            (0, 2000, 0o2775, false),
+            (me, 2000, 0o770, false),
+            (2000, group, 0o2775, false),
+            (2000, group, 0o700, false),
+            (2000, 0, 0o1777, false),
+        ] {
+            assert_eq!(
+                safe_parent(uid, gid, mode, me, &groups),
+                safe,
+                "{uid}:{gid} {mode:o}"
+            );
+        }
+        assert!(!safe_parent(0, group, 0o2775, me, &[1000]));
+    }
+
+    #[test]
+    fn process_groups_start_with_the_effective_gid() {
+        let groups = process_groups().unwrap();
+        // SAFETY: getegid has no arguments or memory preconditions.
+        assert_eq!(groups[0], unsafe { libc::getegid() });
+        // SAFETY: a zero size only queries the count and writes nothing.
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        assert_eq!(groups.len(), 1 + usize::try_from(count).unwrap());
+    }
+
+    #[test]
+    fn fsgroup_parent_creates_exactly_private_state() {
+        for mode in [0o775, 0o2775, 0o2770, 0o3775] {
+            let tmp = TempDir::new();
+            // SAFETY: getegid has no arguments or memory preconditions.
+            std::os::unix::fs::chown(&tmp.0, None, Some(unsafe { libc::getegid() })).unwrap();
+            fs::set_permissions(&tmp.0, Permissions::from_mode(mode)).unwrap();
+            assert_eq!(fs::metadata(&tmp.0).unwrap().mode() & 0o7777, mode);
+            drop(tmp.create());
+            let state = fs::metadata(tmp.path()).unwrap();
+            assert_eq!(state.mode() & 0o7777, 0o700, "{mode:o}");
+        }
+    }
+
+    #[test]
+    fn other_writable_parent_without_sticky_is_refused() {
+        let tmp = TempDir::new();
+        fs::set_permissions(&tmp.0, Permissions::from_mode(0o2777)).unwrap();
+        let error = open(&request(tmp.path(), StateAction::Create)).unwrap_err();
+        assert!(error.message.starts_with("state-parent:"), "{error:?}");
+        assert!(!tmp.path().exists());
     }
 
     #[test]
