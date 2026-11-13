@@ -567,14 +567,16 @@ pub(super) fn validate_directory(root: &File) -> Result<()> {
 fn namespace(root: &Directory) -> Result<(File, File)> {
     root.check()?;
     // SAFETY: root is live, CONTROL is a fixed single-component name, and mode is private.
-    if unsafe { libc::mkdirat(root.handle.as_raw_fd(), CONTROL.as_ptr(), 0o700) } != 0
-        && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
-    {
+    let created = unsafe { libc::mkdirat(root.handle.as_raw_fd(), CONTROL.as_ptr(), 0o700) } == 0;
+    if !created && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
         return Err(bad_state("state-control: cannot create control directory"));
     }
-    validate_directory(&root.handle)?;
     let control = open_at(&root.handle, CONTROL, DIRECTORY_FLAGS, 0)
         .map_err(|_| bad_state("state-control: control directory is unavailable"))?;
+    if created {
+        make_private(&control)?;
+    }
+    validate_directory(&root.handle)?;
     #[cfg(test)]
     tests::namespace_step(tests::NamespaceStep::Parent)?;
     root.handle
