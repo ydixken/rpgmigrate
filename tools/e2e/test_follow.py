@@ -212,7 +212,7 @@ class FollowHarnessTests(unittest.TestCase):
 
     @staticmethod
     def checkpoint_row(**changes):
-        return {"version": 6, "source_system": 1, "source_database": 2, "generation": 1,
+        return {"version": harness.TARGET_METADATA, "source_system": 1, "source_database": 2, "generation": 1,
                 "target_system": 3, "target_database": 4, "owner_oid": 5, "schema_oid": 6, "table_oid": 7,
                 "applied_order": 1, "last_xid": 3, "begin_ordinal": 16,
                 "source_commit_lsn": "0/10", "source_end_lsn": "0/18", "certified_lsn": None,
@@ -232,6 +232,15 @@ class FollowHarnessTests(unittest.TestCase):
                         {"source_commit_lsn": None}, {"begin_ordinal": 15}, {"certified_lsn": "0/0"}):
             with self.subTest(changes=changes), self.assertRaises(RuntimeError):
                 harness.checkpoint_observation(self.checkpoint_row(**changes))
+        for version in (harness.TARGET_METADATA - 1, harness.TARGET_METADATA + 1):
+            with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "metadata version"):
+                harness.checkpoint_observation(self.checkpoint_row(version=version))
+
+    def test_expected_native_formats_match_the_engine_constants(self):
+        source = (harness.clone.ROOT / "src/state.rs").read_text()
+        self.assertEqual(re.findall(r"^const FORMAT_VERSION: u32 = (\d+);$", source, re.MULTILINE), [str(harness.NATIVE_FORMAT)])
+        self.assertEqual(re.findall(r"^pub\(crate\) const TARGET_METADATA_VERSION: u32 = (\d+);$", source, re.MULTILINE),
+                         [str(harness.TARGET_METADATA)])
 
     def test_failure_observation_reads_are_bounded_and_unavailable_does_not_leak(self):
         database = object.__new__(harness.Database)
@@ -581,12 +590,12 @@ class FollowHarnessTests(unittest.TestCase):
         work = {"migration_uid": "12345678-1234-1234-1234-123456789abc", "run_id": bytes(stream["run"]).hex(),
                 "workdir_id": "owned-oracle", "checkpoint_generation": maximum}
         expected = {"stream": stream, "target_system_identifier": maximum, "target_database_oid": 16385,
-                    "schema_name": "owned", "table_name": "control", "owner_oid": 10}
+                    "schema_name": "owned", "table_name": "control", "owner_oid": 10, "metadata_version": harness.TARGET_METADATA}
         record = {"intent": {"binding": expected, "nonce": list(range(33, 49))}, "schema_oid": 16386, "table_oid": 16387,
-                  "marker_table_oid": 16388, "marker_index_oid": 16389}
-        native = {"format_version": 8, "clone_state": {"plan": {"tables": [{"source_oid": 1, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id"], "all_columns": ["id"], "identity_modes": [97], "partition_identity_modes": None}]}, "owned_tables": []}, "target_provenance": [{"phase": "confirmed", "record": record}], "follow_state": {"binding": binding, "cleanup": None}}
+                  "marker_table_oid": 16388, "marker_index_oid": 16389, "large_object_table_oid": 16391, "large_object_index_oid": 16392}
+        native = {"format_version": harness.NATIVE_FORMAT, "clone_state": {"plan": {"tables": [{"source_oid": 1, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id"], "all_columns": ["id"], "identity_modes": [97], "partition_identity_modes": None}]}, "owned_tables": []}, "target_provenance": [{"phase": "confirmed", "record": record}], "follow_state": {"binding": binding, "cleanup": None}}
         catalog = {"oid": "16387", "relnamespace": "16386", "relowner": "10", "relpersistence": "p", "relkind": "r"}
-        row = {"magic": "rpgmigrate", "version": 6, "run_id": "\\x" + work["run_id"], "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(),
+        row = {"magic": "rpgmigrate", "version": harness.TARGET_METADATA, "run_id": "\\x" + work["run_id"], "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(),
                "source_system": maximum, "source_database": "16384", "generation": maximum, "target_system": maximum,
                "target_database": "16385", "owner_oid": "10", "schema_oid": "16386", "table_oid": "16387", "applied_order": maximum,
                "last_xid": "4294967295", "begin_ordinal": maximum, "source_commit_lsn": "FFFFFFFF/FFFFFFFF", "source_end_lsn": "FFFFFFFF/FFFFFFFF",
@@ -597,7 +606,7 @@ class FollowHarnessTests(unittest.TestCase):
                                             "workdir_id": work["workdir_id"], "checkpoint_generation": maximum}, "origin_name": None})}
         self.assertEqual(set(row), {name for name, _kind in columns})
         actual = [maximum, "16385", "10", True, "on", "on"]
-        objects = ["16387|16386|10|p|r", "16388|16386|10|p|r", "16389|16386|10|p|i"]
+        objects = ["16387|16386|10|p|r", "16388|16386|10|p|r", "16389|16386|10|p|i", "16391|16386|10|p|r", "16392|16386|10|p|i"]
         def sql(name, query):
             self.assertEqual(name, "owned_target")
             if query.startswith("SELECT row_to_json(c)"):
@@ -631,7 +640,7 @@ class FollowHarnessTests(unittest.TestCase):
             observed = database.authority("owned_target", state, work)
             self.assertEqual(harness.authority_frontier(observed), maximum)
             self.assertTrue(harness.require_feedback({"statuses": [(maximum, maximum, maximum)]}, observed, maximum))
-            for version in (6, 7, 9, True):
+            for version in (8, 10, True, None):
                 (state / "manifest.json").write_text(json.dumps({**native, "format_version": version}))
                 with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "identity/version"):
                     database.authority("owned_target", state, work)
@@ -668,18 +677,24 @@ class FollowHarnessTests(unittest.TestCase):
                 harness.authority_frontier(database.authority("owned_target", state, work))
 
             row["last_xid"] = None
-            row["version"] = 7
-            native["format_version"] = 9
-            expected["metadata_version"] = 7
-            record.update(large_object_table_oid=16391, large_object_index_oid=16392)
-            objects.extend(["16391|16386|10|p|r", "16392|16386|10|p|i"])
+            self.assertEqual(database.authority("owned_target", state, work)["version"], harness.TARGET_METADATA)
+            for bad in (harness.TARGET_METADATA - 1, None):
+                with self.subTest(row_version=bad), self.assertRaisesRegex(RuntimeError, "full stream/object binding"):
+                    row["version"] = bad
+                    database.authority("owned_target", state, work)
+            row["version"] = harness.TARGET_METADATA
+            for bad in (harness.TARGET_METADATA - 1, None):
+                with self.subTest(binding_version=bad), self.assertRaisesRegex(RuntimeError, "binding metadata version"):
+                    expected["metadata_version"] = bad
+                    (state / "manifest.json").write_text(json.dumps(native))
+                    database.authority("owned_target", state, work)
+            expected["metadata_version"] = harness.TARGET_METADATA
             (state / "manifest.json").write_text(json.dumps(native))
-            self.assertEqual(database.authority("owned_target", state, work, candidate=True)["version"], 7)
-            objects.pop()
+            removed = objects.pop()
             with self.assertRaisesRegex(RuntimeError, "owned checkpoint/marker"):
-                database.authority("owned_target", state, work, candidate=True)
-            with self.assertRaisesRegex(RuntimeError, "identity/version"):
                 database.authority("owned_target", state, work)
+            objects.append(removed)
+            self.assertEqual(database.authority("owned_target", state, work)["version"], harness.TARGET_METADATA)
 
     def test_feedback_predicate_needs_positive_applied_or_certified_target_and_status(self):
         row = {"applied_order": 1, "last_xid": 3, "begin_ordinal": 16, "source_commit_lsn": "0/10", "source_end_lsn": "0/18", "certified_lsn": None}

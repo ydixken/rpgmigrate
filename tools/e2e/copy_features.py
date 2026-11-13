@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 
 import clone
+from follow import NATIVE_FORMAT, TARGET_METADATA
 from follow_wire import WireGate
 
 FIXTURES = clone.FIXTURES
@@ -230,7 +231,7 @@ def validate_physical_inventory(rows, record):
         try:
             binding = record["intent"]["binding"]
             identities = [record[key] for key in ("table_oid", "marker_table_oid", "marker_index_oid", "large_object_table_oid", "large_object_index_oid")]
-            if binding["metadata_version"] != 7 or any(not valid_oid(value) for value in identities) or len(set(identities)) != 5:
+            if binding["metadata_version"] != TARGET_METADATA or any(not valid_oid(value) for value in identities) or len(set(identities)) != 5:
                 raise ValueError
             primary = [row for row in rows if row.get("index_parent") == record["table_oid"] and row.get("primary") is True]
             if len(primary) != 1 or primary[0]["oid"] in identities:
@@ -250,7 +251,7 @@ def validate_physical_inventory(rows, record):
                 if kind == "r":
                     excluded.add(oid)
         except (KeyError, TypeError, ValueError):
-            raise RuntimeError("exact owned metadata7 heap/index identities differ") from None
+            raise RuntimeError("exact owned metadata heap/index identities differ") from None
     return [row for row in rows if row.get("kind") in ("r", "p", "f", "m") and row["oid"] not in excluded]
 
 
@@ -259,8 +260,8 @@ def physical_inventory(database, name, *, state=None):
     if state is not None:
         native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
         provenance = native.get("target_provenance", [])
-        if native.get("format_version") != 9 or len(provenance) != 1 or provenance[0].get("phase") != "confirmed":
-            raise RuntimeError("candidate inventory requires one confirmed native9 provenance")
+        if native.get("format_version") != NATIVE_FORMAT or len(provenance) != 1 or provenance[0].get("phase") != "confirmed":
+            raise RuntimeError("candidate inventory requires one confirmed native provenance")
         record = provenance[0]["record"]
     query = "SELECT COALESCE(json_agg(r ORDER BY r.oid),'[]'::json) FROM (SELECT c.oid::bigint AS oid,c.relnamespace::bigint AS schema_oid,c.relowner::bigint AS owner_oid,c.relpersistence AS persistence,c.relkind AS kind,n.nspname AS schema,c.relname AS name,i.indrelid::bigint AS index_parent,i.indisprimary AS primary FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_catalog.pg_index i ON i.indexrelid=c.oid WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND c.relkind IN ('r','p','f','m','i') ORDER BY c.oid LIMIT 257) r;"
     return validate_physical_inventory(json.loads(database.sql(name, query), object_pairs_hook=clone.unique_object), record)
@@ -279,7 +280,7 @@ def validate_native_comparison(output, inventories, *, lo_verified, native=True)
 
 
 def validate_manifest(manifest):
-    expected = {"version": 1, "native_format": 9, "metadata_version": 7, "cases": list(CASES), "max_objects": MAX_OBJECTS,
+    expected = {"version": 1, "native_format": NATIVE_FORMAT, "metadata_version": TARGET_METADATA, "cases": list(CASES), "max_objects": MAX_OBJECTS,
                 "max_logical_bytes": MAX_LOGICAL_BYTES, "split_threshold": DEFAULT_THRESHOLD, "max_heap_bytes": MAX_HEAP_BYTES,
                 "split_rows": 286720, "max_rows": 400000, "max_bytes": 33554432}
     fixtures = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(FIXTURES.glob("m8-*.sql"))}
@@ -586,7 +587,7 @@ def run_profiles(source, target, driver, root, manifest, *, progress=None):
                         cutover.require_fence_refusal(result)
                     cutover.persisted_endpos(driver, state, end)
                     cutover.finish_completed(driver, worker)
-                    completed_row = target.authority(dstname, state, driver.work[state], candidate=True)
+                    completed_row = target.authority(dstname, state, driver.work[state])
                     if completed_row is None or completed_row["follow_completed"] is not True or completed_row["drain_end_lsn"] != end:
                         raise RuntimeError("candidate target did not durably complete the exact final LO boundary")
                 stage = "final_oracles"

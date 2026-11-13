@@ -124,9 +124,9 @@ def producer_receipt():
                          (clone.ROOT / "src/apply/metadata.rs").read_text().split("];", 1)[0])
     for index in (1, 2, *range(4, 9)):
         value = cases[cutover.CASES[index]]
-        full = {**dict.fromkeys(columns), **value["target_row"], "version": 6}
+        full = {**dict.fromkeys(columns), **value["target_row"], "version": cutover.TARGET_METADATA}
         value["producer_authority"] = {"receipt_scope": "engine_producer", "independent_go_evidence": "pending_qualified_m6_reader",
-            "native_format": 8, "metadata_version": 6, "work": WORK, "checkpoint_row": full,
+            "native_format": cutover.NATIVE_FORMAT, "metadata_version": cutover.TARGET_METADATA, "work": WORK, "checkpoint_row": full,
             "target_provenance": {"table_oid": 7, "marker_table_oid": 8, "marker_index_oid": 9}, "follow_state": {"binding": {}},
             "catalog": {"columns": [{"attname": name} for name in columns], "objects": [{"oid": oid} for oid in (7, 8, 9)],
                         "constraints": [{"contype": "p"}], "indexes": [{"indisprimary": True}]}}
@@ -571,7 +571,7 @@ class CutoverHarnessTests(unittest.TestCase):
                 root = Path(temporary)
                 state = root / "state"
                 (state / "control").mkdir(parents=True)
-                (state / "manifest.json").write_text(json.dumps({"format_version": 8,
+                (state / "manifest.json").write_text(json.dumps({"format_version": cutover.NATIVE_FORMAT,
                     "follow_state": {"origin_name": "preserved_origin", "cleanup": {"slot_removed": True, "publication_removed": True}}}))
                 (state / "control/endpos.json").write_text('{"end_lsn":32}')
                 driver = clone.Driver(Path("unused"), {}, root, mode="operator")
@@ -1076,7 +1076,7 @@ class CutoverHarnessTests(unittest.TestCase):
 
     def test_diagnostic_authority_keeps_numeric_checkpoint_and_catalog_hashes_only(self):
         row = producer_receipt()["cases"][cutover.CASES[1]]["target_row"]
-        row.update(version=6, source_system=1, source_database=2, target_system=3, target_database=4,
+        row.update(version=cutover.TARGET_METADATA, source_system=1, source_database=2, target_system=3, target_database=4,
                    owner_oid=5, schema_oid=6, table_oid=7, clone_state="fixture-sensitive-row-private")
         catalog = {"objects": [{"unsafe": "fixture-sensitive-row-private"}], "columns": [None] * 29,
                    "constraints": [None], "indexes": [None]}
