@@ -11,7 +11,7 @@ import time
 import zlib
 
 import clone
-from follow import lsn
+from follow import NATIVE_FORMAT, TARGET_METADATA, lsn
 from authority_selfcheck import line_from
 
 
@@ -747,15 +747,15 @@ def validate_cases(cases):
         full_row = handoff["checkpoint_row"]
         provenance = handoff["target_provenance"]
         if (handoff.get("receipt_scope") != "engine_producer" or handoff.get("independent_go_evidence") != "pending_qualified_m6_reader"
-                or type(handoff.get("native_format")) is not int or handoff["native_format"] != 8
-                or type(handoff.get("metadata_version")) is not int or handoff["metadata_version"] != 6
+                or type(handoff.get("native_format")) is not int or handoff["native_format"] != NATIVE_FORMAT
+                or type(handoff.get("metadata_version")) is not int or handoff["metadata_version"] != TARGET_METADATA
                 or handoff.get("work") != value["caller_goal"]["work"] or type(full_row.get("version")) is not int
-                or full_row["version"] != 6 or len(full_row) != 29
+                or full_row["version"] != TARGET_METADATA or len(full_row) != 29
                 or any(full_row.get(key) != item for key, item in value["target_row"].items())
                 or {item["attname"] for item in catalog["columns"]} != set(full_row) or len(catalog["columns"]) != 29
                 or {item["oid"] for item in catalog["objects"]} != {provenance[key] for key in ("table_oid", "marker_table_oid", "marker_index_oid")}
                 or not catalog["constraints"] or not catalog["indexes"] or not isinstance(handoff["follow_state"]["binding"], dict)):
-            raise RuntimeError("cutover producer omitted its actual native8 catalog/provenance handoff")
+            raise RuntimeError("cutover producer omitted its actual native catalog/provenance handoff")
         oracles(value)
         return report
 
@@ -981,8 +981,8 @@ def idle_certification(driver, source, target, srcname, dstname, state, worker):
 def producer_authority(target, name, state, work, row):
     native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
     record = native["target_provenance"][0]["record"]
-    if native["format_version"] != 8 or len(row) != 29 or row["version"] != 6:
-        raise RuntimeError("M6 producer handoff requires the exact native8 metadata6 layout")
+    if native["format_version"] != NATIVE_FORMAT or len(row) != 29 or row["version"] != TARGET_METADATA:
+        raise RuntimeError("producer handoff requires the exact native format and metadata layout")
     oid = record["table_oid"]
     catalog = json.loads(target.sql(name, f"""SELECT json_build_object(
 'objects',(SELECT json_agg(c ORDER BY c.oid) FROM (SELECT oid::bigint,relnamespace::bigint,relowner::bigint,relname,relkind,relpersistence,relrowsecurity,relforcerowsecurity,relreplident,relam::bigint FROM pg_class WHERE oid IN ({oid},{record['marker_table_oid']},{record['marker_index_oid']})) c),
@@ -993,7 +993,7 @@ def producer_authority(target, name, state, work, row):
             or len(catalog.get("columns", [])) != 29 or not catalog.get("indexes") or not catalog.get("constraints")):
         raise RuntimeError("actual M6 producer catalog/provenance output is incomplete")
     return {"receipt_scope": "engine_producer", "probe_checked": False, "independent_go_evidence": "pending_qualified_m6_reader",
-            "native_format": 8, "metadata_version": 6, "work": work, "target_provenance": record,
+            "native_format": NATIVE_FORMAT, "metadata_version": TARGET_METADATA, "work": work, "target_provenance": record,
             "follow_state": native["follow_state"], "checkpoint_row": row, "catalog": catalog}
 
 
@@ -1017,9 +1017,9 @@ def completed_resume_close(driver, source, target, srcname, dstname, state, laun
     from follow import WireGate
     work, end = driver.work[state], clean["end_lsn"]
     native = json.loads((state / "manifest.json").read_bytes(), object_pairs_hook=clone.unique_object)
-    if (native.get("format_version") != 8
+    if (native.get("format_version") != NATIVE_FORMAT
             or native["follow_state"].get("cleanup") != {"slot_removed": True, "publication_removed": True}):
-        raise RuntimeError("completed close fault requires exact source cleanup and native8 state")
+        raise RuntimeError("completed close fault requires exact source cleanup and native state")
     origin = native["follow_state"]["origin_name"]
     extra = ("--origin", origin) if origin is not None else ()
     suffix = work["run_id"][:16]

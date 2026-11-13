@@ -109,7 +109,10 @@ Unset selects `local`: 2 CPUs each for the build, source, target and runner cont
 `hosted-linux` keeps the build and runner at 2 CPUs and gives the source and target 1 CPU each.
 Admission refuses a host with fewer CPUs than the source, target and runner caps together: 6 for `local`, 4 for `hosted-linux`.
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
+The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
+For each pair, the engine-e2e job runs the clone qualification, the follow smoke and the cutover producer in that order, then revalidates and retains each sanitized receipt.
+We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.
 The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
 That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode; we accept this only because the runner is discarded after the job.
 The development image builds with `--layers=false`, because cached intermediate images would be unowned resources that the preservation check refuses.
@@ -118,7 +121,7 @@ Failures retain redacted child stderr and safe stage/return-code/callsite metada
 Public failure output contains no child argv, SQL, row values, or credentials.
 On failure, the engine-e2e job prints a cleanup summary to the public log, and nothing else:
 
-- runtime ledger statuses, error kinds and verification flags;
+- runtime ledger statuses, error kinds and verification flags, including each owned container's cgroup observation;
 - the names of resources added, removed or changed between the baseline and after-run inventories;
 - each failure record (command kind, return code, diagnostic id and callsite);
 - for raw podman failures, the redacted stderr lines starting with `Error:` or `*`, cut to 300 characters;
@@ -378,6 +381,8 @@ Use the maintained task ledger for actual passed receipts.
 These commands define checks, not a support claim.
 
 The follow harness reuses the clone harness's immutable server images, private internal network, exact container cleanup, redacted failure metadata, and matching-target-major tools.
+The harness takes the native format and target metadata it expects from `NATIVE_FORMAT` and `TARGET_METADATA` in `tools/e2e/follow.py`, and the cutover and M8 checks import them.
+A portable test pins both to the constants in `src/state.rs`, so a format bump fails `task test` until someone reviews the harness.
 It starts logical decoding only inside its disposable source container and checks the executable's actual linked libpq version.
 Follow refuses a domain CHECK that any column reaches through domains, arrays, or composite members.
 The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.

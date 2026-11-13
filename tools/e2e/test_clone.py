@@ -1158,6 +1158,26 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 else:
                     with self.assertRaises(RuntimeError): guard.observe_caps(entry)
 
+    def test_container_shorter_than_the_sample_interval_still_has_its_caps_observed(self):
+        entry = {"id": "a"*64, "name": "fresh-runner", "role": "runner", "image": "sha256:"+"b"*64, "memory": 1073741824, "cpus": 2, "mounts": [], "cleanup_status": "pending"}
+        for runs in (True, False):
+            entry.pop("cgroup_verified", None)
+            states = iter([False, runs])
+            def inspect(_):
+                running = next(states, runs)
+                return {"Id": entry["id"], "Name": entry["name"], "Image": entry["image"], "State": {"Running": running}, "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
+                        "Mounts": [], "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "bridge", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.token, guard.baseline = "fresh", {"containers": {}}
+            guard.last_sample = harness.time.monotonic()
+            guard.work_deadline = guard.last_sample + 30
+            guard.deadline = guard.work_deadline + 30
+            guard.ledger = {"processes": [], "containers": [entry]}
+            with self.subTest(runs=runs), patch.object(guard, "persist"), patch.object(guard, "inspect", side_effect=inspect), \
+                    patch.object(guard, "raw", return_value=b"200000 100000\n1073741824\n"):
+                guard.execute([sys.executable, "-c", "import time;time.sleep(1)"], timeout=10)
+                self.assertIs(entry.get("cgroup_verified"), True if runs else None)
+
 
     def test_network_cleanup_refuses_foreign_attachment_wrong_identity_and_unavailable_absence(self):
         for fault in ("id", "label", "inspect", "foreign_map", "foreign_filter", "remove", "absence", "ok"):

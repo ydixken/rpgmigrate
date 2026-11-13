@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 import zlib
 
@@ -124,9 +124,9 @@ def producer_receipt():
                          (clone.ROOT / "src/apply/metadata.rs").read_text().split("];", 1)[0])
     for index in (1, 2, *range(4, 9)):
         value = cases[cutover.CASES[index]]
-        full = {**dict.fromkeys(columns), **value["target_row"], "version": 6}
+        full = {**dict.fromkeys(columns), **value["target_row"], "version": cutover.TARGET_METADATA}
         value["producer_authority"] = {"receipt_scope": "engine_producer", "independent_go_evidence": "pending_qualified_m6_reader",
-            "native_format": 8, "metadata_version": 6, "work": WORK, "checkpoint_row": full,
+            "native_format": cutover.NATIVE_FORMAT, "metadata_version": cutover.TARGET_METADATA, "work": WORK, "checkpoint_row": full,
             "target_provenance": {"table_oid": 7, "marker_table_oid": 8, "marker_index_oid": 9}, "follow_state": {"binding": {}},
             "catalog": {"columns": [{"attname": name} for name in columns], "objects": [{"oid": oid} for oid in (7, 8, 9)],
                         "constraints": [{"contype": "p"}], "indexes": [{"indisprimary": True}]}}
@@ -480,6 +480,13 @@ class CutoverHarnessTests(unittest.TestCase):
             bad["cases"][name][key] = change
             with self.subTest(case=name, key=key), self.assertRaises((RuntimeError, KeyError, ValueError)):
                 cutover.validate_receipt(bad, manifest)
+        for name, change in (("native_format", lambda h: h.update(native_format=cutover.NATIVE_FORMAT - 1)),
+                             ("metadata_version", lambda h: h.update(metadata_version=cutover.TARGET_METADATA - 1)),
+                             ("checkpoint_version", lambda h: h["checkpoint_row"].update(version=cutover.TARGET_METADATA - 1))):
+            bad = copy.deepcopy(value)
+            change(bad["cases"][cutover.CASES[1]]["producer_authority"])
+            with self.subTest(handoff=name), self.assertRaisesRegex(RuntimeError, "native catalog/provenance handoff"):
+                cutover.validate_receipt(bad, manifest)
         for fields in ({"receipt_scope": "full"}, {"independent_go_evidence": "BarrierConfirmed"}, {"source_tree": {}},
                        {"report_validation": {}}, {"successful_follow_exit": False}):
             with self.subTest(fields=fields), self.assertRaises(RuntimeError):
@@ -571,7 +578,7 @@ class CutoverHarnessTests(unittest.TestCase):
                 root = Path(temporary)
                 state = root / "state"
                 (state / "control").mkdir(parents=True)
-                (state / "manifest.json").write_text(json.dumps({"format_version": 8,
+                (state / "manifest.json").write_text(json.dumps({"format_version": cutover.NATIVE_FORMAT,
                     "follow_state": {"origin_name": "preserved_origin", "cleanup": {"slot_removed": True, "publication_removed": True}}}))
                 (state / "control/endpos.json").write_text('{"end_lsn":32}')
                 driver = clone.Driver(Path("unused"), {}, root, mode="operator")
@@ -1074,9 +1081,21 @@ class CutoverHarnessTests(unittest.TestCase):
                 self.assertEqual(value["startup"], {"status": "unavailable"})
                 self.assertIs(value["native_identity"]["reusable_m6_identity"], False)
 
+    def test_producer_authority_requires_the_engine_format_and_metadata_before_catalog_reads(self):
+        record = {"table_oid": 7, "marker_table_oid": 8, "marker_index_oid": 9}
+        target = SimpleNamespace(sql=Mock(side_effect=AssertionError("catalog read")))
+        for native, version, admitted in ((cutover.NATIVE_FORMAT, cutover.TARGET_METADATA, True), (cutover.NATIVE_FORMAT - 1, cutover.TARGET_METADATA, False),
+                                          (cutover.NATIVE_FORMAT, cutover.TARGET_METADATA - 1, False)):
+            row = {**{"column_" + str(index): None for index in range(28)}, "version": version}
+            with self.subTest(native=native, version=version), tempfile.TemporaryDirectory() as temporary:
+                state = Path(temporary)
+                (state / "manifest.json").write_text(json.dumps({"format_version": native, "target_provenance": [{"record": record}]}))
+                with self.assertRaisesRegex(AssertionError if admitted else RuntimeError, "catalog read" if admitted else "native format and metadata"):
+                    cutover.producer_authority(target, "owned", state, WORK, row)
+
     def test_diagnostic_authority_keeps_numeric_checkpoint_and_catalog_hashes_only(self):
         row = producer_receipt()["cases"][cutover.CASES[1]]["target_row"]
-        row.update(version=6, source_system=1, source_database=2, target_system=3, target_database=4,
+        row.update(version=cutover.TARGET_METADATA, source_system=1, source_database=2, target_system=3, target_database=4,
                    owner_oid=5, schema_oid=6, table_oid=7, clone_state="fixture-sensitive-row-private")
         catalog = {"objects": [{"unsafe": "fixture-sensitive-row-private"}], "columns": [None] * 29,
                    "constraints": [None], "indexes": [None]}

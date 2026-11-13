@@ -24,6 +24,8 @@ from follow_wire import WireGate
 sys.path.insert(0, str(clone.ROOT / "tests/support"))
 from follow_snapshot_fixture import validate_identity_modes
 
+# Native state format and target metadata the engine writes; test_follow pins both to src/state.rs.
+NATIVE_FORMAT, TARGET_METADATA = 9, 7
 FIXTURES = clone.ROOT / "tests/fixtures/follow"
 CASES = ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_oids", "oracle_mutation",
          "before_commit_rollback", "after_commit_before_feedback", "partial_receive_transaction", "repeated_restart",
@@ -131,7 +133,7 @@ def checkpoint_observation(row):
         if type(value) is not int or not minimum <= value < bound:
             raise RuntimeError("checkpoint observation numeric identity or counter is invalid")
         result[key] = value
-    if result["version"] != 6:
+    if result["version"] != TARGET_METADATA:
         raise RuntimeError("checkpoint observation metadata version differs")
     for key in ("source_commit_lsn", "source_end_lsn", "certified_lsn", "copy_consistent_point", "drain_end_lsn", "drain_witness_lsn"):
         result[key] = lsn(row[key]) if row.get(key) is not None else None
@@ -711,7 +713,7 @@ class Database(clone.Database):
             raise RuntimeError("exact owned follow slot binding or WAL differs")
         return row
 
-    def authority(self, name, state, work, *, candidate=False):
+    def authority(self, name, state, work):
         path = state / "manifest.json"
         if not path.is_file():
             return None
@@ -720,7 +722,7 @@ class Database(clone.Database):
         binding = native.get("follow_state", {}).get("binding")
         if not records or not binding or records[0].get("phase") != "confirmed":
             return None
-        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != (9 if candidate else 8):
+        if len(records) != 1 or type(native.get("format_version")) is not int or native["format_version"] != NATIVE_FORMAT:
             raise RuntimeError("independent follow native identity/version differs")
         try:
             validate_identity_modes(native["clone_state"]["plan"])
@@ -755,7 +757,7 @@ class Database(clone.Database):
                                     or any(type(value) is not bool for value in cleanup.values())):
             raise RuntimeError("independent native follow cleanup receipt differs")
         stream = expected["stream"]
-        same = {"magic": "rpgmigrate", "version": 7 if candidate else 6, "run_id": "\\x" + bytes(stream["run"]).hex(),
+        same = {"magic": "rpgmigrate", "version": TARGET_METADATA, "run_id": "\\x" + bytes(stream["run"]).hex(),
                 "nonce": "\\x" + bytes(record["intent"]["nonce"]).hex(), "source_system": stream["source"]["system_identifier"],
                 "source_database": stream["source"]["database_oid"], "generation": stream["generation"],
                 "target_system": expected["target_system_identifier"], "target_database": expected["target_database_oid"],
@@ -770,13 +772,11 @@ class Database(clone.Database):
                 or type(row.get("barrier_counter")) is not int or not 0 < row["barrier_counter"] < 2**64
                 or type(row.get("barrier_epoch")) is not int or not 0 <= row["barrier_epoch"] < 2**64):
             raise RuntimeError("independent target primary identity/durability policy is absent")
-        owned_oids = [record["table_oid"], record["marker_table_oid"], record["marker_index_oid"]]
-        kinds = ["r", "r", "i"]
-        if candidate:
-            if expected.get("metadata_version") != 7:
-                raise RuntimeError("candidate metadata version differs")
-            owned_oids += [record["large_object_table_oid"], record["large_object_index_oid"]]
-            kinds += ["r", "i"]
+        if expected.get("metadata_version") != TARGET_METADATA:
+            raise RuntimeError("independent follow binding metadata version differs")
+        owned_oids = [record["table_oid"], record["marker_table_oid"], record["marker_index_oid"],
+                      record["large_object_table_oid"], record["large_object_index_oid"]]
+        kinds = ["r", "r", "i", "r", "i"]
         objects = self.sql(name, f"SELECT oid,relnamespace,relowner,relpersistence,relkind FROM pg_class WHERE oid IN ({','.join(map(str, owned_oids))}) ORDER BY oid;").decode().splitlines()
         expected_objects = sorted(f"{oid}|{record['schema_oid']}|{expected['owner_oid']}|p|{kind}" for oid, kind in zip(owned_oids, kinds))
         if sorted(objects) != expected_objects:
