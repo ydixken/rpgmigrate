@@ -929,6 +929,19 @@ class RuntimeGuard:
         entry["cgroup_verified"] = True
         entry["cgroup_limits"] = {"cpu_quota": quota, "cpu_period": period, "memory_bytes": memory}
 
+    def observe_started_caps(self):
+        # The 5 s sample misses a container that exits sooner, such as a quick follow smoke runner.
+        waiting = False
+        for entry in self.ledger.get("containers", []):
+            if entry.get("cgroup_verified") or entry.get("cleanup_status") != "pending":
+                continue
+            actual = validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
+            if actual.get("State", {}).get("Running") is True:
+                self.observe_caps(entry, actual)
+            else:
+                waiting = True
+        return waiting
+
     def _create(self, command, expected, *, timeout=300):
         if getattr(self, "_pending_creation", None) is not None or self._creation_unresolved():
             raise RuntimeError("another resource creation remains pending")
@@ -1141,14 +1154,17 @@ class RuntimeGuard:
         try:
             self.ledger.setdefault("processes", []).append(record)
             self.persist()
+            starting = any(not entry.get("cgroup_verified") and entry.get("cleanup_status") == "pending" for entry in self.ledger.get("containers", []))
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError("owned subprocess deadline expired")
                 try:
-                    output, error = process.communicate(timeout=min(5, remaining))
+                    output, error = process.communicate(timeout=min(.2 if starting else 5, remaining))
                     break
                 except subprocess.TimeoutExpired:
+                    if starting:
+                        starting = self.observe_started_caps()
                     self.checkpoint()
             if process.returncode:
                 raise SubprocessFailure(private_failure("owned-runtime-subprocess", process.returncode, error, None, caller))

@@ -107,6 +107,7 @@ Unset selects `local`: 2 CPUs each for the build, source, target and runner cont
 `hosted-linux` keeps the build and runner at 2 CPUs and gives the source and target 1 CPU each.
 Admission refuses a host with fewer CPUs than the source, target and runner caps together: 6 for `local`, 4 for `hosted-linux`.
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
+The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
 That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode; we accept this only because the runner is discarded after the job.
