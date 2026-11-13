@@ -31,17 +31,18 @@ CASES = [
     "catalog::tests::live_cdc_target_requires_owned_transaction_settings",
     "catalog::tests::live_clone_admission_selects_each_heap_once_and_omits_generated_input",
     "catalog::tests::live_clone_admission_refuses_unsupported_relations_and_trigger_states",
+    "catalog::tests::live_clone_admission_requires_column_type_extensions_on_the_target",
     "catalog::tests::live_money_clone_preserves_values_and_defaults_across_role_locales",
 ]
 COMMAND = ["cargo", "test", "--locked", "--lib", "catalog::tests::live_",
            "--", "--ignored", "--test-threads=1", "--skip", "catalog::tests::live_source_identity_",
            "--skip", "catalog::tests::live_preflight_"]
 OUTPUT = ("".join(f"test {name} ... ok\n" for name in CASES)
-          + "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s\n")
+          + "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s\n")
 
 
 class CatalogHarnessTests(unittest.TestCase):
-    def test_catalog_profile_requires_the_thirteen_independent_names(self):
+    def test_catalog_profile_requires_the_fourteen_independent_names(self):
         expected = module_cases(load_manifest(), "Catalog")
         self.assertEqual(expected, CASES)
         self.assertEqual(json.loads((SUPPORT / "catalog_cases.json").read_text()), CASES)
@@ -55,7 +56,7 @@ class CatalogHarnessTests(unittest.TestCase):
         self.assertEqual(len(module_cases(manifest, "Authority")), 19)
         self.assertEqual(len(module_cases(manifest, "Replication")), 9)
 
-    def test_catalog_receipt_accepts_exact_thirteen_without_other_fixture_receipts(self):
+    def test_catalog_receipt_accepts_exact_fourteen_without_other_fixture_receipts(self):
         validate = runpy.run_path(str(WRAPPER))["validate_module_receipt"]
         validate("Catalog", module_cases(load_manifest(), "Catalog"), OUTPUT, {})
 
@@ -88,8 +89,8 @@ class CatalogHarnessTests(unittest.TestCase):
         expected = module_cases(load_manifest(), "Catalog")
         records, _, summary = OUTPUT.rpartition("test result:")
         for output in (records, OUTPUT + "test result:" + summary,
-                       OUTPUT.replace("13 passed", "0 passed"),
-                       OUTPUT.replace("13 passed", "6 passed"),
+                       OUTPUT.replace("14 passed", "0 passed"),
+                       OUTPUT.replace("14 passed", "6 passed"),
                        OUTPUT.replace("0 failed", "1 failed"),
                        OUTPUT.replace("0 ignored", "1 ignored"),
                        OUTPUT.replace("0 measured", "1 measured"),
@@ -174,7 +175,7 @@ class CatalogHarnessTests(unittest.TestCase):
             self.assertEqual(environment[key], f"host='/owned/socket' port='24567' dbname='{database}' "
                              f"user='{role}' connect_timeout='3' sslmode='disable' "
                              "application_name='rpgmigrate_e1_fixture' passfile='/owned/catalog/empty.pgpass'")
-        self.assertIn("Catalog verified 13 exact cases; full E1 suite not selected", output)
+        self.assertIn("Catalog verified 14 exact cases; full E1 suite not selected", output)
 
     def test_money_locales_disabled_preserves_environment_without_compilation(self):
         with patch.dict(os.environ, {"LOCPATH": "inherited"}), patch.object(locales.shutil, "which", side_effect=AssertionError("unexpected compiler")):

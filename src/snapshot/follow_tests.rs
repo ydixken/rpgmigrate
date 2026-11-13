@@ -957,6 +957,7 @@ fn live_follow_executed_expressions_refuse_before_resource_creation() {
     for ddl in [
         "CREATE TABLE public.items(id integer PRIMARY KEY CHECK(id>0))",
         "CREATE DOMAIN public.positive AS integer CHECK(VALUE>0); CREATE TABLE public.items(id integer PRIMARY KEY,value public.positive)",
+        "CREATE DOMAIN public.positive AS integer CHECK(VALUE>0); CREATE TYPE public.pair AS(value public.positive); CREATE TABLE public.items(id integer PRIMARY KEY,value public.pair[])",
         "CREATE TABLE public.items(id integer PRIMARY KEY,value text); CREATE INDEX expression_idx ON public.items((lower(value)))",
         "CREATE TABLE public.items(id integer PRIMARY KEY,value text); CREATE INDEX partial_idx ON public.items(value) WHERE id>0",
         "CREATE TABLE public.root(id integer) PARTITION BY RANGE((id+1)); CREATE TABLE public.leaf PARTITION OF public.root FOR VALUES FROM(0) TO(100); ALTER TABLE public.leaf REPLICA IDENTITY FULL",

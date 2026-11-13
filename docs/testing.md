@@ -270,6 +270,11 @@ A mismatch refuses and rolls back.
 The 16 MiB row cap applies to the complete qualification row, including generated output.
 The historical M2 profile refuses foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables during preflight.
 Its binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip-policy cases remain historical refusal checks.
+Text COPY admits built-in types, enums, domains, arrays, standalone composite types, and extension base types, checking every domain base, array element, and composite member.
+It refuses `reg*` types, `aclitem` and `pg_node_tree`, whose text is not portable, as well as table row types and base types that no extension owns.
+An extension that owns a column type must be available on the target, or planning refuses before mutation.
+Planning does not compare extension versions, because pre-data installs the target's default version.
+Binary COPY keeps its built-in scalar predicate, so a table with any of these columns falls back to text.
 The M8 component and direct CLI profiles above cover the candidate implementation.
 The separate follow profile below controls `clone --follow` qualification.
 Table and post-data jobs default to four.
@@ -370,6 +375,7 @@ These commands define checks, not a support claim.
 
 The follow harness reuses the clone harness's immutable server images, private internal network, exact container cleanup, redacted failure metadata, and matching-target-major tools.
 It starts logical decoding only inside its disposable source container and checks the executable's actual linked libpq version.
+Follow refuses a domain CHECK that any column reaches through domains, arrays, or composite members.
 The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
 Its DEFAULT, INDEX, and keyless FULL identities cover changed keys, duplicate rows, NULLs, unchanged TOAST, TRUNCATE, explicit identity values, and differing source/target custom type OIDs.
 The independent row and schema fingerprints retain the clone oracle's row/byte bounds and multiplicity checks.
