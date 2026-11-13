@@ -14,6 +14,9 @@ const CATALOG: &str = "rpgmigrate_metadata_catalog";
 const READ: &str = "rpgmigrate_metadata_read";
 const UPDATE: &str = "rpgmigrate_metadata_update";
 const NUMERIC_U64: i32 = (20 << 16) + 4;
+// PGDG 16.16 and 18.7 stamp each new column with a server-owned pg_attver that SET and RESET leave unchanged.
+// Any other column option, or a second entry, is still foreign.
+const ATTOPTIONS: &str = "(a.attoptions IS NULL OR (pg_catalog.cardinality(a.attoptions) = 1 AND a.attoptions[1] OPERATOR(pg_catalog.~) '^pg_attver=[0-9]+$'))";
 const COLUMNS: [(&str, &str, u32, i32, bool); 29] = [
     ("magic", "text", 25, -1, true),
     ("version", "int4", 23, -1, true),
@@ -1168,7 +1171,7 @@ fn catalog_sql(version: u64) -> Result<String> {
             WHERE NOT COALESCE(a.attname = expected.name AND a.atttypid = expected.type_oid::pg_catalog.oid
                 AND a.atttypmod = expected.modifier AND a.attnotnull = expected.required
                 AND NOT a.attisdropped AND NOT a.atthasdef AND a.attislocal AND a.attinhcount = 0
-                AND a.attndims = 0 AND a.attacl IS NULL AND a.attoptions IS NULL AND a.attfdwoptions IS NULL
+                AND a.attndims = 0 AND a.attacl IS NULL AND {ATTOPTIONS} AND a.attfdwoptions IS NULL
                 AND a.attcollation = CASE WHEN a.atttypid = 25
                     THEN 'pg_catalog."C"'::pg_catalog.regcollation::pg_catalog.oid ELSE 0 END
                 {identity} {generated}, false))
@@ -1422,7 +1425,7 @@ fn validate_receipt_catalog(
         AND c.reloftype=0 AND c.relnatts={width} AND c.relchecks=0
         AND pg_catalog.has_table_privilege(c.oid,'SELECT') AND pg_catalog.has_table_privilege(c.oid,'INSERT') AND pg_catalog.has_table_privilege(c.oid,'DELETE')
         AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) a WHERE a.grantor<>c.relowner OR (a.grantee<>c.relowner AND (a.grantee<>(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=CURRENT_USER) OR a.privilege_type NOT IN('SELECT','INSERT','DELETE') OR a.is_grantable)))
-        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT EXISTS(SELECT 1 FROM (VALUES {attributes}) e(num,name,ty,modifier,required) WHERE a.attnum=e.num AND a.attname=e.name AND a.atttypid=e.ty::oid AND a.atttypmod=e.modifier AND a.attnotnull=e.required AND NOT a.attisdropped AND NOT a.atthasdef AND a.attislocal AND a.attinhcount=0 AND a.attndims=0 AND a.attacl IS NULL AND a.attoptions IS NULL AND a.attfdwoptions IS NULL AND a.attidentity='' AND a.attgenerated='' AND a.attcollation=CASE WHEN a.atttypid=25 THEN 'pg_catalog."C"'::pg_catalog.regcollation::oid ELSE 0 END))
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT EXISTS(SELECT 1 FROM (VALUES {attributes}) e(num,name,ty,modifier,required) WHERE a.attnum=e.num AND a.attname=e.name AND a.atttypid=e.ty::oid AND a.atttypmod=e.modifier AND a.attnotnull=e.required AND NOT a.attisdropped AND NOT a.atthasdef AND a.attislocal AND a.attinhcount=0 AND a.attndims=0 AND a.attacl IS NULL AND {ATTOPTIONS} AND a.attfdwoptions IS NULL AND a.attidentity='' AND a.attgenerated='' AND a.attcollation=CASE WHEN a.atttypid=25 THEN 'pg_catalog."C"'::pg_catalog.regcollation::oid ELSE 0 END))
         AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attrdef a WHERE a.adrelid=c.oid)
         AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid)
         AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
