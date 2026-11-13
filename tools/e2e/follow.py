@@ -38,7 +38,13 @@ DELETE FROM "M2 space".rows WHERE id=1;
 INSERT INTO "M2 space".empty VALUES(10,'primary key');
 UPDATE "M2 space".empty SET id=11,value='changed primary key' WHERE id=10;
 UPDATE "M2 space".indexed SET id=2,value='changed key' WHERE id=1;
-UPDATE "M2 space".wide SET changed=1 WHERE id=1;'''
+UPDATE "M2 space".wide SET changed=1 WHERE id=1;
+INSERT INTO "M2 space".rows(id,value,email,emails,address,size,sizes) OVERRIDING SYSTEM VALUE VALUES(2002,'typed','Typed@Example.COM','{A,a,NULL}','Mixed@Case','(1.50,,"label, ""quoted"" (x)",busy)','{"(2,3,B,calm)",NULL}');
+UPDATE "M2 space".rows SET email='typed@example.com',size=ROW(9.25,NULL,'',NULL),sizes=NULL WHERE id=2002;
+UPDATE "M2 space".rows SET size=NULL,emails='{}',address='BOX 2' WHERE id=2;
+DELETE FROM "M2 space".rows WHERE id=3;
+INSERT INTO "M2 space".full_rows VALUES(2,'case','Alpha'),(2,'case','ALPHA');
+UPDATE "M2 space".full_rows SET value='upper' WHERE id=2 AND label::text='ALPHA';'''
 
 
 def check_workload(source, name, manifest):
@@ -449,6 +455,11 @@ def validate_receipt(report, manifest, *, diagnostic_case=None):
     for name, boundary in (("before_commit_rollback", "before_commit"), ("after_commit_before_feedback", "after_commit")):
         if name in report["cases"]:
             validate_data_fault(report["cases"][name].get("data_fault", {}), boundary, runs)
+    if scope == "smoke":
+        tables = report["cases"]["initial_copy_dml"].get("comparison_tables")
+        if (not isinstance(tables, list) or len(tables) != len(manifest["tables"])
+                or any(not isinstance(table, dict) or table.get("status") != "match" for table in tables)):
+            raise RuntimeError("follow smoke lacks a matching engine data comparison for every planned table")
     for name, value in report["cases"].items():
         if name in ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_oids", "repeated_restart") or name == diagnostic_case:
             if type(value.get("frontier")) is not int or value["frontier"] <= 0 or value.get("feedback_observed") is not True:
@@ -1085,6 +1096,8 @@ def inner(args):
             receipt["cases"]["initial_copy_dml"] = {**converge(srcname, dstname, state, wire, process), "workload_preflight": "rolled_back"}
             if args.smoke:
                 driver.stop(process)
+                comparisons = driver.inspect(("compare", "data"), source.connection(srcname), target.connection(dstname), state, json_output=True)
+                receipt["cases"]["initial_copy_dml"]["comparison_tables"] = comparisons
                 finish_receipt()
                 print(json.dumps({"follow_e2e": "smoke_passed", "pair": args.pair, "cases": 1}, sort_keys=True))
                 return

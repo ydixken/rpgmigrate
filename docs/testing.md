@@ -163,6 +163,7 @@ Unvalidated not-null constraints refuse qualification.
 FK, CHECK, primary-key, index, and trigger evidence remains exact.
 The fixture includes eight physical heaps, an empty table, wide rows, inheritance, and partition leaves, with per-table bounds.
 Those bounds are 100,000 rows and 64 MiB of oracle output.
+The fixture's `rows` heap also carries `citext`, a domain over it, a standalone composite type, and arrays of both, so pre-data must create the extension and text COPY must carry those values.
 After creation, independent `ONLY` row counts must match the reviewed baseline, including 2048 wide rows, two duplicate parent rows, and one separately counted child row.
 A target-byte mutation must fail the independent oracle and runtime comparison.
 Snapshot tests compare the target with the source fingerprint captured before concurrent writes, then require a current-source comparison difference.
@@ -273,7 +274,7 @@ Its binary COPY, splitting, filters, all-database/roles variants, destructive re
 Text COPY admits built-in types, enums, domains, arrays, standalone composite types, and extension base types, checking every domain base, array element, and composite member.
 It refuses `reg*` types, `aclitem` and `pg_node_tree`, whose text is not portable, as well as table row types and base types that no extension owns.
 An extension that owns a column type must be available on the target, or planning refuses before mutation.
-Planning does not compare extension versions, because pre-data installs the target's default version.
+Planning does not compare extension versions, because pre-data installs the target's default version; the 16 to 18 container pair runs `citext` across such a version change.
 Binary COPY keeps its built-in scalar predicate, so a table with any of these columns falls back to text.
 The M8 component and direct CLI profiles above cover the candidate implementation.
 The separate follow profile below controls `clone --follow` qualification.
@@ -366,6 +367,7 @@ Engine excludes the native receiver and apply cases, snapshot profiles, source c
    ```
 
 The smoke profile requires exactly one observed `initial_copy_dml` case and writes `target/e2e/follow-smoke-16-16.json` with `receipt_scope=smoke`.
+After a controlled stop, that case runs the engine's data comparison and requires a match for every planned table.
 Matching `test-e2e-follow-smoke-18-18` and `test-e2e-follow-smoke-16-18` tasks check the other declared pairs.
 A smoke receipt does not establish the full fault inventory.
 The full profile requires every declared case for each of 16 to 16, 18 to 18, and 16 to 18, and writes `target/e2e/follow-<pair>.json`.
@@ -378,6 +380,8 @@ It starts logical decoding only inside its disposable source container and check
 Follow refuses a domain CHECK that any column reaches through domains, arrays, or composite members.
 The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
 Its DEFAULT, INDEX, and keyless FULL identities cover changed keys, duplicate rows, NULLs, unchanged TOAST, TRUNCATE, explicit identity values, and differing source/target custom type OIDs.
+The smoke DML inserts, updates, and deletes `citext`, domain, composite, and array values, including case-only changes.
+A FULL-identity update picks one of two rows that differ only by `citext` case, so a case-insensitive match would change the wrong row.
 The independent row and schema fingerprints retain the clone oracle's row/byte bounds and multiplicity checks.
 The fixture's physical `ONLY` row counts must match its reviewed baseline before start.
 
