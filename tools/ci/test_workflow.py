@@ -33,7 +33,11 @@ def validate(source):
         "dependencies": ("cargo install cargo-deny --version 0.20.2 --locked", "cargo deny --locked check licenses advisories"),
         "docs": ("DavidAnson/markdownlint-cli2-action@", '"git", "ls-files"', "*.md", "*.markdown"),
         "engine-e2e": ("CONTAINER_RUNTIME: podman", "RPGMIGRATE_E2E_CAPACITY: hosted-linux", "podman --version", 'test "$podman_major" -ge 5', '["podman", "pull", "--quiet", reference]', "task test-e2e-clone-${{ matrix.pair }}",
-                       'validate_receipt(report, clone.load_manifest())', 'test -s "target/e2e/${{ matrix.pair }}.json"'),
+                       'validate_receipt(report, clone.load_manifest())', 'test -s "target/e2e/${{ matrix.pair }}.json"',
+                       "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
+                       "follow.validate_receipt(smoke, follow.load_manifest())",
+                       "cutover.validate_receipt(producer, cutover.load_manifest(), require_images=True)",
+                       'test -s "target/e2e/follow-smoke-${{ matrix.pair }}.json"', 'test -s "target/e2e/follow-cutover-${{ matrix.pair }}.json"'),
         "runner-image": ("CONTAINER_RUNTIME: podman", "podman --version", "task image:build", "task --silent image:smoke",
                          "test -s target/image/smoke.json"),
     }
@@ -73,6 +77,11 @@ def validate(source):
             raise ValueError(f"missing {name} required receipt artifact")
     if "path: target/e2e/${{ matrix.pair }}.json" not in sections["engine-e2e"]:
         raise ValueError("clone artifacts must contain only the sanitized receipt")
+    if "            target/e2e/follow-smoke-${{ matrix.pair }}.json\n            target/e2e/follow-cutover-${{ matrix.pair }}.json\n" not in sections["engine-e2e"]:
+        raise ValueError("follow artifacts must contain only the sanitized smoke and cutover receipts")
+    steps = re.findall(r"^      - name: [^\n]+\n        run: (task test-e2e-[a-z-]+-\$\{\{ matrix\.pair \}\})\n(?=      - )", sections["engine-e2e"], re.MULTILINE)
+    if steps != ["task test-e2e-clone-${{ matrix.pair }}", "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}"]:
+        raise ValueError("every pair must run clone, follow smoke and cutover once, unconditionally, in that order")
     if "path: target/image/smoke.json" not in sections["runner-image"]:
         raise ValueError("image artifact must bind the smoke receipt")
 
@@ -100,7 +109,9 @@ class WorkflowTests(unittest.TestCase):
         for command in ("task --silent --output=interleaved --color=false check lint test",
                         "cargo deny --locked check licenses advisories", "task test-e2e-clone-${{ matrix.pair }}",
                         "task image:build", "task --silent image:smoke", "validate_receipt(report, clone.load_manifest())",
-                        "test -s target/image/smoke.json", 'test "$podman_major" -ge 5', "runs-on: ubuntu-26.04"):
+                        "test -s target/image/smoke.json", 'test "$podman_major" -ge 5', "runs-on: ubuntu-26.04",
+                        "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
+                        "follow.validate_receipt(smoke, follow.load_manifest())"):
             for replacement in ("", "true"):
                 with self.subTest(command=command, replacement=replacement), self.assertRaises(ValueError):
                     validate(self.source.replace(command, replacement, 1))

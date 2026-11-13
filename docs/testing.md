@@ -109,6 +109,8 @@ Admission refuses a host with fewer CPUs than the source, target and runner caps
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
 The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
+For each pair, the engine-e2e job runs the clone qualification, the follow smoke and the cutover producer in that order, then revalidates and retains each sanitized receipt.
+We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.
 The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
 That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode; we accept this only because the runner is discarded after the job.
 The development image builds with `--layers=false`, because cached intermediate images would be unowned resources that the preservation check refuses.
@@ -117,7 +119,7 @@ Failures retain redacted child stderr and safe stage/return-code/callsite metada
 Public failure output contains no child argv, SQL, row values, or credentials.
 On failure, the engine-e2e job prints a cleanup summary to the public log, and nothing else:
 
-- runtime ledger statuses, error kinds and verification flags;
+- runtime ledger statuses, error kinds and verification flags, including each owned container's cgroup observation;
 - the names of resources added, removed or changed between the baseline and after-run inventories;
 - each failure record (command kind, return code, diagnostic id and callsite);
 - for raw podman failures, the redacted stderr lines starting with `Error:` or `*`, cut to 300 characters;
