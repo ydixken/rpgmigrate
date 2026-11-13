@@ -381,7 +381,7 @@ Follow refuses a domain CHECK that any column reaches through domains, arrays, o
 The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
 Its DEFAULT, INDEX, and keyless FULL identities cover changed keys, duplicate rows, NULLs, unchanged TOAST, TRUNCATE, explicit identity values, and differing source/target custom type OIDs.
 The smoke DML inserts, updates, and deletes `citext`, domain, composite, and array values, including case-only changes.
-A FULL-identity update picks one of two rows that differ only by `citext` case, so a case-insensitive match would change the wrong row.
+A FULL-identity update picks one of two rows whose composite values differ only in numeric scale and `citext` case, which record equality treats as equal, so only an exact text match changes the right row.
 The independent row and schema fingerprints retain the clone oracle's row/byte bounds and multiplicity checks.
 The fixture's physical `ONLY` row counts must match its reviewed baseline before start.
 

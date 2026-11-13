@@ -34,7 +34,7 @@ CREATE TABLE "M2 space".indexed (id integer NOT NULL, value text);
 CREATE UNIQUE INDEX indexed_identity ON "M2 space".indexed(id);
 ALTER TABLE "M2 space".indexed REPLICA IDENTITY USING INDEX indexed_identity;
 INSERT INTO "M2 space".indexed VALUES (1, 'index');
-CREATE TABLE "M2 space".full_rows (id integer, value text, label citext);
+CREATE TABLE "M2 space".full_rows (id integer, value text, label citext, size "M2 space".size);
 ALTER TABLE "M2 space".full_rows REPLICA IDENTITY FULL;
 INSERT INTO "M2 space".full_rows VALUES (1, NULL), (1, NULL), (NULL, 'nullable');
 CREATE TABLE "M2 space".truncated (id integer PRIMARY KEY, value text);

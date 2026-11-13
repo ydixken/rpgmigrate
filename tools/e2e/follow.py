@@ -43,8 +43,8 @@ INSERT INTO "M2 space".rows(id,value,email,emails,address,size,sizes) OVERRIDING
 UPDATE "M2 space".rows SET email='typed@example.com',size=ROW(9.25,NULL,'',NULL),sizes=NULL WHERE id=2002;
 UPDATE "M2 space".rows SET size=NULL,emails='{}',address='BOX 2' WHERE id=2;
 DELETE FROM "M2 space".rows WHERE id=3;
-INSERT INTO "M2 space".full_rows VALUES(2,'case','Alpha'),(2,'case','ALPHA');
-UPDATE "M2 space".full_rows SET value='upper' WHERE id=2 AND label::text='ALPHA';'''
+INSERT INTO "M2 space".full_rows VALUES(2,'case','Alpha','(1.0,,Alpha,calm)'),(2,'case','Alpha','(1.00,,ALPHA,calm)');
+UPDATE "M2 space".full_rows SET value='upper' WHERE id=2 AND size::text='(1.00,,ALPHA,calm)';'''
 
 
 def check_workload(source, name, manifest):
