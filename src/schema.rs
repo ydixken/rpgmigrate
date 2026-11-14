@@ -865,7 +865,7 @@ mod tests {
             &format!("{{\"passfile\":{}}}", target.as_raw_fd()),
         );
         let files = bound.source.files().unwrap().clone();
-        let lifetime = Arc::downgrade(&files);
+        let lifetime = std::sync::Arc::downgrade(&files);
         let mut values: Vec<(OsString, OsString)> = files
             .options()
             .map(|(key, value)| {
