@@ -87,6 +87,11 @@ Database checks do not establish power-loss durability, target failover safety, 
 If `CARGO_TARGET_DIR` selects a separate build directory, set `RPGMIGRATE_BIN` to its emitted executable for CLI checks.
 Use `task help` for retained focused profiles, including prepared execution, replication, and target authority.
 
+Required CI pins its PostgreSQL images, so a new upstream minor never reaches it unannounced.
+The advisory `live-minors.yml` workflow runs every profile above, plus the E1 copy suite, against the latest PGDG 16 and 18 server packages.
+It runs daily and on manual dispatch, never on push, and keeps one log per profile as the `live-minors-pg16` and `live-minors-pg18` artifacts.
+A failure there means a current minor changed something the engine checks; reproduce it locally with the same profile on that minor.
+
 ## Container clone checks
 
 The [roadmap](roadmap.md) and [task ledger](../tasks/todo.md) record qualified clone runs and their exact input provenance.

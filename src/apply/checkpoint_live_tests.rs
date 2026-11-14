@@ -1407,6 +1407,7 @@ fn missing_privileges() {
         .unwrap();
     let table = qualified(&mut admin, &provenance);
     let marker = format!("{schema}.copy_done");
+    let large_objects = format!("{schema}.large_object_done");
     admin
         .query(
             &format!("GRANT USAGE ON SCHEMA {schema} TO e3_restricted"),
@@ -1419,15 +1420,18 @@ fn missing_privileges() {
             &io,
         )
         .unwrap();
-    admin
-        .query(
-            &format!("GRANT SELECT, INSERT, DELETE ON {marker} TO e3_restricted"),
-            &io,
-        )
-        .unwrap();
+    for receipt in [&marker, &large_objects] {
+        admin
+            .query(
+                &format!("GRANT SELECT, INSERT, DELETE ON {receipt} TO e3_restricted"),
+                &io,
+            )
+            .unwrap();
+    }
     for (relation, privileges) in [
         (&table, ["SELECT", "INSERT", "UPDATE"]),
         (&marker, ["SELECT", "INSERT", "DELETE"]),
+        (&large_objects, ["SELECT", "INSERT", "DELETE"]),
     ] {
         for privilege in privileges {
             admin
@@ -1525,7 +1529,10 @@ fn missing_privileges() {
             .query(&format!("GRANT SELECT, INSERT, UPDATE ON {table} TO {role}"), &io)
             .unwrap();
         admin
-            .query(&format!("GRANT SELECT, INSERT, DELETE ON {marker} TO {role}"), &io)
+            .query(
+                &format!("GRANT SELECT, INSERT, DELETE ON {marker}, {schema}.large_object_done TO {role}"),
+                &io,
+            )
             .unwrap();
         let base = std::env::var("RPGMIGRATE_TEST_AUTHORITY_RESTRICTED").unwrap();
         let escaped = writer.replace('\\', "\\\\").replace('\'', "\\'");

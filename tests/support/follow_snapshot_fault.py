@@ -14,7 +14,7 @@ import threading
 import time
 
 from db_harness import psql, quote
-from follow_snapshot_fixture import validate_identity_modes
+from follow_snapshot_fixture import expiry_state, validate_identity_modes
 from protocol_fault import error_sqlstate, packet
 
 
@@ -252,7 +252,7 @@ class Relay:
         if (self.case == "expired_export_refused" and self.details["exporter_expired"]
                 and not session["replication"] and command.startswith("SET TRANSACTION SNAPSHOT") and kind == b"E"):
             state = error_sqlstate(payload)
-            assert state == {160015: "22023", 180006: "42704"}[self.context["server_version_num"]], f"expiry SQLSTATE {state} from {'replication' if session['replication'] else 'SQL'} session"
+            assert state == expiry_state(self.context["server_version_num"]), f"expiry SQLSTATE {state} from {'replication' if session['replication'] else 'SQL'} session"
             self.details["sqlstate"] = state
             self.hit()
         if (self.case == "source_finish_unknown" and session["imported"] and command == "COMMIT" and kind == b"C"):

@@ -87,7 +87,7 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
                         "command_tag": "CREATE_REPLICATION_SLOT" if create_loss else "COMMIT" if case == "source_finish_unknown" else None,
                         "ready_before": "I" if create_loss else None, "ready_after": changed,
                         "client_closed_after_ready": changed is not None, "exporter_expired": case == "expired_export_refused",
-                        "sqlstate": fixture.EXPIRY_STATES[self.context["server_version_num"]] if case == "expired_export_refused" else None},
+                        "sqlstate": fixture.expiry_state(self.context["server_version_num"]) if case == "expired_export_refused" else None},
         }
         return value
 
@@ -266,7 +266,7 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
                 fixture.validate_phase({**value, "details": details}, self.context, value["case"], value["phase"])
 
     def test_slot_export_expiry_requires_actual_major_specific_sqlstate(self):
-        for number, expected in ((160015, "22023"), (180006, "42704")):
+        for number, expected in ((160015, "22023"), (160016, "22023"), (180006, "42704"), (180007, "42704")):
             self.context["server_version_num"] = number
             value = self.phase("expired_export_refused")
             self.assertEqual(value["details"]["sqlstate"], expected)
@@ -274,6 +274,9 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             for state in (None, "XX000", "22023" if expected == "42704" else "42704"):
                 with self.subTest(number=number, state=state), self.assertRaises(AssertionError):
                     fixture.validate_phase({**value, "details": {**value["details"], "sqlstate": state}}, self.context, value["case"], value["phase"])
+        for number in (170004, 150000, 190000, "160016", None):
+            with self.subTest(number=number), self.assertRaises(AssertionError):
+                fixture.expiry_state(number)
 
     def test_finish_unknown_requires_real_import_then_commit_fault(self):
         value = self.phase("source_finish_unknown")
