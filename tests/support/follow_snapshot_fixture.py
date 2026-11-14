@@ -7,7 +7,8 @@ import re
 FAULT_CASES = ("create_reply_lost", "create_tail_lost", "expired_export_refused",
                "imported_identity_mismatch", "source_finish_unknown")
 TAIL_PHASES = ("tail_lost", "ready_transaction", "ready_failed")
-EXPIRY_STATES = {160015: "22023", 180006: "42704"}
+# The expired-export SQLSTATE differs by major; minors must not change it, so a new minor stays checked.
+EXPIRY_STATES = {16: "22023", 18: "42704"}
 PHASE_FIELDS = {
     "owner", "profile", "case", "phase", "status", "server_version_num", "native_path", "stream",
     "publication", "slot", "source_slot_phase", "slot_nonce", "publication_before_slot",
@@ -84,8 +85,13 @@ def lsn(value):
     return (high << 32) | low
 
 
+def expiry_state(number):
+    assert type(number) is int and number // 10000 in EXPIRY_STATES, "unqualified follow snapshot server version"
+    return EXPIRY_STATES[number // 10000]
+
+
 def version(value, context):
-    assert type(value) is int and value in EXPIRY_STATES, "unqualified follow snapshot server version"
+    expiry_state(value)
     assert value == context["server_version_num"], "follow snapshot receipt server differs from its owned cluster"
 
 
@@ -185,7 +191,7 @@ def validate_phase(value, context, case, phase):
         assert details["row_seen"] is False and details["row_delivered"] is False and details["completion_seen"] is False, "unrelated CREATE-only row evidence"
         assert details["command_tag"] == ("COMMIT" if case == "source_finish_unknown" else None), "wrong imported source completion fault"
     assert details["exporter_expired"] is (case == "expired_export_refused"), "wrong owned exporter expiry observation"
-    assert details["sqlstate"] == (EXPIRY_STATES[value["server_version_num"]] if case == "expired_export_refused" else None), "wrong actual source expiry SQLSTATE"
+    assert details["sqlstate"] == (expiry_state(value["server_version_num"]) if case == "expired_export_refused" else None), "wrong actual source expiry SQLSTATE"
     if case == "imported_identity_mismatch":
         assert details["identity_before"] == value["sql_pid"] and positive(details["identity_after"], 0x7fffffff) and details["identity_after"] != details["identity_before"], "intended post-import SQL PID mutation is missing"
     else:
