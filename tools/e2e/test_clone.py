@@ -178,6 +178,15 @@ class CloneHarnessTests(unittest.TestCase):
             self.assertEqual(metadata["callsite"]["file"], Path(__file__).name)
             self.assertEqual(metadata["callsite"]["function"], self._testMethodName)
             self.assertGreater(metadata["callsite"]["line"], 0)
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.deadline = sys.executable, harness.time.monotonic() + 30
+            with patch.object(harness, "DIAGNOSTIC_ROOT", root), self.assertRaises(RuntimeError) as wrapped:
+                guard.raw(["-c", "import sys; sys.exit(3)"])
+            self.assertEqual(wrapped.exception.metadata["callsite"]["function"], "raw")
+            self.assertEqual(wrapped.exception.metadata["callers"][0], {"file": Path(__file__).name, "function": self._testMethodName, "line": wrapped.exception.metadata["callers"][0]["line"]})
+            self.assertTrue(1 <= len(wrapped.exception.metadata["callers"]) <= 4)
+            for path in root.glob(wrapped.exception.metadata["diagnostic_id"] + ".*"):
+                path.unlink()
             self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
             self.assertEqual(len(list(root.iterdir())), 2)
             for path in root.iterdir():
@@ -410,6 +419,9 @@ class ModelRuntime:
             return b""
         if args[0] == "exec":
             actual = self.containers[args[1]]
+            if args[2] == "cat" and (self.fault, actual["model_role"]) in (("runner_exit_race", "runner"), ("source_exit_race", "source")):
+                actual["State"].update(Running=False, Status="exited")
+                raise harness.SubprocessFailure(harness.private_failure("container-exec", 255, b"Error: can only create exec sessions on running containers: container state improper", None, sys._getframe()))
             if args[2] == "cat": return str(actual["HostConfig"]["NanoCpus"] // 10000).encode() + b" 100000\n" + str(actual["HostConfig"]["Memory"]).encode() + b"\n"
             if args[2] == "stat": return b"700|postgres\n"
             if "pg_ls_waldir" in args[-1]: return b"1000|1000\n"
@@ -1016,7 +1028,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         import copy_features
         try:
             for profile, fault, location in (("disabled", None, "default"), ("disabled", None, "root"), ("disabled", None, "nested"),
-                                             ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache"),
+                                             ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache"), ("disabled", "runner_exit_race", "hosted"), ("disabled", "source_exit_race", "hosted"),
                                              ("disabled", None, "native"), ("disabled", None, "hosted")):
                 with self.subTest(profile=profile, fault=fault, location=location), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
@@ -1048,7 +1060,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
                             harness.outer(args, receipt_validator=lambda *_: None)
                     self.assertFalse(model.containers)
                     self.assertFalse(model.networks)
-                    self.assertEqual(len(model.removed), 2 if fault == "data_directory" else 4)
+                    self.assertEqual(len(model.removed), 2 if fault in ("data_directory", "source_exit_race") else 4)
                     builds = [argv for argv in model.commands if len(argv)>1 and argv[1] == "build" and "--tag" in argv]
                     self.assertEqual(len(builds), 1)
                     self.assertNotIn("localhost/rpgmigrate-m2-dev:stock", builds[0])
@@ -1089,6 +1101,12 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     self.assertNotIn("must-not-persist", json.dumps(ledger))
                     self.assertNotIn("private-never-persist", json.dumps(ledger))
                     self.assertEqual(output.exists(), fault is None)
+                    if fault == "runner_exit_race":
+                        runner = next(entry for entry in ledger["containers"] if entry["role"] == "runner")
+                        self.assertEqual((ledger["failure"]["stage"], len(runner["cgroup_exec_after_exit"]), runner.get("cgroup_verified")), ("receipt_validation", 1, None))
+                    if fault == "source_exit_race":
+                        source = next(entry for entry in ledger["containers"] if entry["role"] == "source")
+                        self.assertEqual((ledger["failure"], len(source["cgroup_exec_after_exit"]), source.get("ready")), ({"kind": "RuntimeError", "stage": "source_start"}, 1, None))
         finally:
             sys.path.pop(0)
 
@@ -1177,6 +1195,67 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     patch.object(guard, "raw", return_value=b"200000 100000\n1073741824\n"):
                 guard.execute([sys.executable, "-c", "import time;time.sleep(1)"], timeout=10)
                 self.assertIs(entry.get("cgroup_verified"), True if runs else None)
+
+    def test_container_exit_between_inspect_and_cap_exec_is_unobserved_never_a_pass(self):
+        # A fake podman whose exec fails as podman does for a container that exited after the guard's inspect.
+        def guard_for(entry, script):
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.token, guard.baseline, guard.storage = sys.executable, "fresh", {"containers": {}, "external": []}, "/storage"
+            guard.last_sample = harness.time.monotonic()
+            guard.work_deadline = guard.last_sample + 30
+            guard.deadline = guard.work_deadline + 30
+            guard.ledger = {"processes": [], "containers": [entry], "samples": []}
+            def inspect(_):
+                running = script["states"].pop(0) if script["states"] else script["final"]
+                if running == "gone":
+                    raise RuntimeError("exact container inspection is unavailable")
+                return {"Id": entry["id"], "Name": entry["name"], "Image": entry["image"], "State": {"Running": running}, "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
+                        "Mounts": [], "HostConfig": {"Memory": 1073741824, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "bridge", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
+            def raw(arguments, timeout=5, **_):
+                self.assertEqual(arguments[:2], ["exec", entry["id"]])
+                outcome = script["execs"].pop(0)
+                if outcome == "ok":
+                    return b"200000 100000\n1073741824\n"
+                return harness.run([sys.executable, "-c", "import sys; sys.stderr.write(%r); sys.exit(255)" % outcome])
+            return guard, inspect, raw
+        exited = "Error: can only create exec sessions on running containers: container state improper"
+        def entry_for(role, **extra):
+            return {"id": "a"*64, "name": "fresh-" + role, "role": role, "image": "sha256:"+"b"*64, "memory": 1073741824, "cpus": 2, "mounts": [], "cleanup_status": "pending", **extra}
+        cases = (
+            # (method, role, ready, inspect states, final state, exec outcomes, expected: "unobserved" | "verified" | error)
+            ("poll", "runner", False, [True, False], False, [exited], "unobserved"),
+            ("poll", "runner", False, [True, False, True], True, [exited, "ok"], "verified"),
+            ("poll", "runner", False, [True, True], True, [exited], harness.SubprocessFailure),
+            ("poll", "runner", False, [True, True], True, ["Error: OCI runtime error"], harness.SubprocessFailure),
+            ("sample", "runner", False, [True, False], False, [exited], "unobserved"),
+            ("sample", "source", True, [True, False], False, [exited], RuntimeError),
+            ("sample", "runner", False, [True, True], True, [exited], harness.SubprocessFailure),
+            ("poll", "runner", False, [True], "gone", [exited], RuntimeError),
+            ("poll", "runner", False, [True], None, [exited], harness.SubprocessFailure),
+        )
+        for method, role, ready, states, final, execs, expected in cases:
+            entry = entry_for(role, **({"ready": True} if ready else {}))
+            script = {"states": list(states), "final": final, "execs": list(execs)}
+            guard, inspect, raw = guard_for(entry, script)
+            with self.subTest(method=method, role=role, states=states, execs=execs), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), patch.object(guard, "persist"), \
+                    patch.object(guard, "inspect", side_effect=inspect), patch.object(guard, "raw", side_effect=raw), \
+                    patch.object(guard, "host", side_effect=lambda arguments, **_: {"cat": b"MemAvailable: 1 kB\n", "df": b"h\nd 1 2 3 4\n", "getconf": b"4\n"}[arguments[0]]):
+                def act():
+                    if method == "poll":
+                        while guard.observe_started_caps() and script["states"]:
+                            pass
+                    else:
+                        guard.raw = lambda arguments, timeout=5, **_: b"" if arguments[0] == "ps" else raw(arguments)
+                        guard.sample()
+                if isinstance(expected, type):
+                    with self.assertRaises(expected): act()
+                    self.assertIsNone(entry.get("cgroup_verified"))
+                else:
+                    act()
+                    self.assertIs(entry.get("cgroup_verified"), True if expected == "verified" else None)
+                    self.assertEqual(len(entry.get("cgroup_exec_after_exit", [])), 1)
+                self.assertEqual(script["execs"], [])
 
 
     def test_network_cleanup_refuses_foreign_attachment_wrong_identity_and_unavailable_absence(self):
