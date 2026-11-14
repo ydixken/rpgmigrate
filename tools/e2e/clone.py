@@ -95,6 +95,8 @@ def validate_runtime(report):
 def validate_receipt(report, manifest, *, require_reports=True):
     validate_runtime(report)
     if require_reports:
+        if report.get("cases", {}).get("plain", {}).get("operator_uri_query") != OPERATOR_URI_QUERY:
+            raise RuntimeError("plain clone did not use the operator's connection query strings")
         validation = report.get("report_validation", {})
         records = validation.get("reports", [])
         mode = validation.get("mode")
@@ -228,6 +230,11 @@ def quote(value):
     return '"' + value.replace('"', '""') + '"'
 
 
+# The query strings the operator appends to native URIs (internal/conn/conn.go keepaliveParams, sourceTimeout).
+OPERATOR_URI_QUERY = {"source": "keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=6&tcp_user_timeout=60000",
+                      "target": "keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=6"}
+
+
 class Database:
     def __init__(self, host, bindir, environment):
         self.host, self.bindir, self.environment = host, bindir, environment
@@ -235,6 +242,10 @@ class Database:
 
     def connection(self, name):
         return f"host={self.host} dbname={name} user=postgres sslmode=disable connect_timeout=3 application_name={self.application}"
+
+    def operator_uri(self, name, side):
+        return (f"postgresql://postgres@{self.host}/{name}?sslmode=disable&connect_timeout=3"
+                f"&application_name={self.application}&{OPERATOR_URI_QUERY[side]}")
 
     def sql(self, name, sql):
         return run([str(self.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--dbname", self.connection(name)],
@@ -498,6 +509,8 @@ def inner(args):
             srcname, dstname = "src_" + name, "dst_" + name
             return srcname, dstname, source.create(srcname, True), target.create(dstname), root / name
         srcname, dstname, src, dst, state = case("plain")
+        # pg_dump and pg_restore must land in these databases with the operator's liveness options.
+        src, dst = source.operator_uri(srcname, "source"), target.operator_uri(dstname, "target")
         expected = source.fingerprint(srcname, manifest)
         driver.finish(driver.start(src, dst, state))
         require_equal(expected, target.fingerprint(dstname, manifest))
@@ -510,7 +523,8 @@ def inner(args):
             measured = progress.get("copy", {}).get(counter, {})
             if measured.get("total") is None or measured.get("total") != measured.get("done"):
                 raise RuntimeError("completed progress lacks measured counters")
-        receipt["cases"]["plain"] = {"observed": True, "fingerprints": expected, "target_receipt": target.completion(dstname, state, manifest)}
+        receipt["cases"]["plain"] = {"observed": True, "fingerprints": expected, "target_receipt": target.completion(dstname, state, manifest),
+                                     "operator_uri_query": OPERATOR_URI_QUERY}
         completed = target.completion(dstname, state, manifest)
         driver.finish(driver.start(src, dst, state, "--resume", "--not-consistent"))
         require_equal(expected, target.fingerprint(dstname, manifest))
