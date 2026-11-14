@@ -876,6 +876,8 @@ fn metadata_shape_acl() {
     for alteration in [
         "ALTER TABLE @ ADD CONSTRAINT foreign_check CHECK (true)",
         "ALTER TABLE @ ALTER COLUMN magic SET DEFAULT 'foreign'",
+        "ALTER TABLE @ ALTER COLUMN magic SET (n_distinct = 5)",
+        "ALTER TABLE $.copy_done ALTER COLUMN magic SET (n_distinct = 5)",
         "CREATE INDEX foreign_index ON @ ((length(magic)))",
         "CREATE RULE foreign_rule AS ON UPDATE TO @ DO INSTEAD NOTHING",
         "CREATE TRIGGER foreign_trigger BEFORE UPDATE ON @ FOR EACH ROW EXECUTE PROCEDURE public.authority_metadata_trigger()",
