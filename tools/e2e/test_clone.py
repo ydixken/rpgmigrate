@@ -178,6 +178,15 @@ class CloneHarnessTests(unittest.TestCase):
             self.assertEqual(metadata["callsite"]["file"], Path(__file__).name)
             self.assertEqual(metadata["callsite"]["function"], self._testMethodName)
             self.assertGreater(metadata["callsite"]["line"], 0)
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.deadline = sys.executable, harness.time.monotonic() + 30
+            with patch.object(harness, "DIAGNOSTIC_ROOT", root), self.assertRaises(RuntimeError) as wrapped:
+                guard.raw(["-c", "import sys; sys.exit(3)"])
+            self.assertEqual(wrapped.exception.metadata["callsite"]["function"], "raw")
+            self.assertEqual(wrapped.exception.metadata["callers"][0], {"file": Path(__file__).name, "function": self._testMethodName, "line": wrapped.exception.metadata["callers"][0]["line"]})
+            self.assertTrue(1 <= len(wrapped.exception.metadata["callers"]) <= 4)
+            for path in root.glob(wrapped.exception.metadata["diagnostic_id"] + ".*"):
+                path.unlink()
             self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
             self.assertEqual(len(list(root.iterdir())), 2)
             for path in root.iterdir():

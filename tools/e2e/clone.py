@@ -159,7 +159,12 @@ def private_failure(kind, returncode, stderr, environment, frame, line=None):
     identifier = uuid.uuid4().hex
     metadata = {"command_kind": kind, "returncode": returncode, "diagnostic_id": identifier,
                 "callsite": {"file": Path(frame.f_code.co_filename).name,
-                             "function": frame.f_code.co_name, "line": line or frame.f_lineno}, "retained": False}
+                             "function": frame.f_code.co_name, "line": line or frame.f_lineno}, "callers": [], "retained": False}
+    # The callsite of a shared wrapper such as RuntimeGuard.raw cannot tell which caller failed.
+    outer = frame.f_back
+    while outer is not None and len(metadata["callers"]) < 4:
+        metadata["callers"].append({"file": Path(outer.f_code.co_filename).name, "function": outer.f_code.co_name, "line": outer.f_lineno})
+        outer = outer.f_back
     values = environment if environment is not None else os.environ
     secrets = set(FIXTURE_SECRETS)
     secrets.update(value for key, value in values.items() if value and ("PASSWORD" in key or key.endswith("_PGURI")))
