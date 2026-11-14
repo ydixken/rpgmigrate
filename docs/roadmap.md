@@ -898,6 +898,11 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-engine` at `6f9263d` merges those four; hosted ci.yml run 43597389267 passed 8 of 8 jobs.
   Its `dev-6f9263d43e3ba7ac7e81f3b34757f79d581dc389` runner images are arm64 `sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60` and amd64 `sha256:ad648befc155a95df25df7f7a9f91c65bfe9b08a3ff95d8b6970fa697f0c2404`.
   Against `42866da` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
+- `fix/live-profiles-current-minors-20261114` at `3a3fe82` grants the restricted writer its `large_object_done` privileges in `missing_privileges`, keys the follow-snapshot expiry SQLSTATE by major, and adds the advisory live-minors workflow.
+- `fix/utility-liveness-options-20261114` at `bedb782` forwards the five client liveness keys to pg_dump and pg_restore through `--dbname`, and refuses every other option without an environment variable as `BadConfig`.
+- `feat/native-engine` at `2b9b11d` merges both; hosted ci.yml run 43621185148 passed 8 of 8 jobs.
+  Its `dev-2b9b11da305b74172e89e6dcb877372c24f04ccd` runner images are arm64 `sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978` and amd64 `sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f`.
+  Against `6f9263d` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -959,6 +964,11 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   - `fix/native-m7-fixture-20261113` at `719f2af` seeds the objects native refuses for the pgcopydb engine only, and adds the `native-refusal` spec.
 - `feat/native-operator-integration9-20261113` at `70b9fb4` merges those five and documents `get` on `pods/exec` for a manager role the cluster admin supplies with `rbac.create=false`.
 - `fix/native-e2e-cleanup-evidence-20261113` at `156607a` makes the native cleanup check require a succeeded cleanup Job and a census of this run's resources, and makes the slot and origin counts follow the engine.
+- `fix/native-pod-status-drift-20261113` at `af4332e` compares native pod reads by UID, phase and the named container's state, so kubelet `status.resources` drift no longer refuses.
+- `fix/native-e2e-verify-evidence-20261114` at `1ba56d5` makes the native comparison helper accept the engine's camelCase progress keys, records the final compare sample, and makes the native e2e checks require the drain proof and the native data result.
+- `feat/rpgmigrate-native-operator` at `b22985d` merges both and admits only the `6f9263d` runner.
+  Its manager images are arm64 `sha256:068b01b35390125a58d48e8f1bb6534567e7a2b69d8dbcc8626a54cdce35520e` and amd64 `sha256:027e99708c16ae1a7a2ba5a14b2efb5f0d9bf9d8f69e9b7187165dff4802e299`, and its arm64 lock has SHA-256 `a19d6d5abbf6cfb3991da3650cf2871ef17820d289ad580260ed59db6edd4b83`.
+  M7-RUN3 passed `native-refusal` on 16:16 on it and failed automatic-cutover on all three pairs: the engine refused the operator's client keepalive settings (P-UTIL), and the retry-gate helper lacked `PGAPPNAME`, so the retry looped without end (P-RETRY).
 
 ### Leader decisions, 2026-11-12
 
@@ -1015,6 +1025,17 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - After native cleanup the target keeps `_rpgmigrate_<run>`, as the engine contract says, and the source has none.
 - The automatic-cutover spec relies on the target schema check and the census name test, with no pre-cleanup count.
 - In the harness cap poll, an exec that fails because the container already stopped leaves its caps unverified and polling continues; the final never-observed check still fails.
+
+### Decisions, wave 10, 2026-11-14
+
+- The operator keeps appending client keepalives and the source `tcp_user_timeout`, because they give the engine's own connections dead-peer detection in about 70 s.
+  The engine forwards exactly `keepalives`, `keepalives_idle`, `keepalives_interval`, `keepalives_count` and `tcp_user_timeout` with ASCII-digit values to pg_dump and pg_restore through `--dbname`.
+  Secret-bearing or security keys never go into argv, and every other option without an environment variable refuses as `BadConfig` before any mutation, so the operator fails terminal with `NativeBadConfig`.
+- The retry-gate helper env gains `PGAPPNAME=pgm-retry-gate`, and one table-driven test ties every native helper role's env to the evidence program's check.
+  A gate read with no known observation requeues after `retryGateInterval`; once `verdictOverdue` has passed, the Migration fails terminally with a reason naming the retry-gate helper, and status stops reporting a running clone after the worker Job failed.
+- automatic-cutover calls `expectDrainProgress` under native, and the M6 driver gets a test that a different rpgmigrate binary hash is refused.
+- Native compare shows only the final progress sample, a documented limitation to revisit in M10; the private helper result extension is confirmed and both redundant checks stay.
+- ENGINE-LIVE-MINORS lands as is, including the per-major follow-snapshot SQLSTATE keying.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 

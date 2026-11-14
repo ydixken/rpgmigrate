@@ -1778,8 +1778,8 @@ Leader decisions, wave 8:
   The slot and origin counts follow the engine and test each filter against a name the engine creates, so a filter that cannot see the engine's resources fails instead of reading 0; `native-refusal` is admitted on pair 16:16 only.
   The cluster-free e2e suite passed 826 and 827 tests with `-race` on PostgreSQL 16.15 and 18.6, and 16 of 16 mutations failed the tests; it is proven offline only.
   Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-CLEANUP-EVIDENCE-20261113/SHA256SUMS`, SHA-256 `d97b8b9108af2852edfa551c17183ad0d4d1f6c1c3fafd3a171d059999cddea2`.
-- [ ] Under native, live-writer still reads the `<name>-verify` Job log and `status.verificationProgress`, which native does not produce, so it needs native verification evidence.
-- [ ] The whole-pod-status comparisons at `native_preflight.go:363`, `native_version.go:96` and `native_failure.go:35` drift the same way the transport did; one owner should fix them together.
+- [x] Under native, live-writer read the `<name>-verify` Job log and `status.verificationProgress`, which native did not produce; OP-NATIVE-VERIFY-EVIDENCE in wave 9c gives it native verification evidence, not yet proven live.
+- [x] The whole-pod-status comparisons at `native_preflight.go:363`, `native_version.go:96` and `native_failure.go:35` drifted the same way the transport did; OP-POD-STATUS-DRIFT in wave 9c replaced them.
 
 OP-POD-STATUS-DRIFT, INTEGRATE5 and M7-RUN3 stopped on an authentication outage in wave 9b and produced no report.
 
@@ -1813,10 +1813,35 @@ Leader decisions, wave 9:
   Development runner image run 43597389316 published `dev-6f9263d43e3ba7ac7e81f3b34757f79d581dc389` as arm64 `sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60` (executable SHA-256 `608c34dfbb3b159df7e9fe1af3399e2237a9b4e2d7ec8bf97f69cbbbf490c99c`) and amd64 `sha256:ad648befc155a95df25df7f7a9f91c65bfe9b08a3ff95d8b6970fa697f0c2404` (executable SHA-256 `6cdb7e989870611258ac6ac89d26f550e9696258c365eef8d50e85654bcd4ec2`), both pulled anonymously with every layer verified.
   Against `42866da` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures.
   The six approved `ci/follow-smoke-*-20261113` branches were deleted after the fast-forward, and no open pull request used them.
-  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND5-20261114/SHA256SUMS`.
-- [ ] Operator qualification of the `6f9263d` runner: the controller admits only the `42866da` digests, so integration adds the new digests and the executable SHA-256 the M6 driver pins; the libpq pins stay.
-- [ ] `apply::checkpoint::live_tests::missing_privileges` fails on PostgreSQL 16.15, 16.16 and 18.7, because the test never grants the restricted role its privileges on `large_object_done`.
-- [ ] The live cargo profiles do not run in hosted CI, so a new PostgreSQL minor can break the engine without a red job.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND5-20261114/SHA256SUMS`, SHA-256 `55d34127e42c2ab37f30f4281db0712ac5c7317a15ef5ad5574198df3fe4e77e`.
+- [x] ENGINE-LIVE-MINORS: `fix/live-profiles-current-minors-20261114` at `3a3fe82` makes `missing_privileges` grant the restricted and quoted writers SELECT, INSERT and DELETE on `large_object_done`, and revokes each in turn to prove the engine still refuses.
+  The follow-snapshot expiry SQLSTATE is keyed by major (16 to `22023`, 18 to `42704`) instead of by exact minor, the exact state is still asserted and other majors still refuse.
+  `.github/workflows/live-minors.yml` runs every live profile daily and on dispatch against the latest PGDG 16 and 18 minors, with read-only permissions and pinned actions, and does not block required CI.
+  All 16 profiles passed on PostgreSQL 16.15, 16.16, 18.6 and 18.7 locally, and live-minors run 43596851660 passed them on 16.16 and 18.7 with libpq 18.7; 3 mutation groups failed their checks.
+  ci.yml run 43596810538 passed 8 of 8 after one rerun of engine-e2e 16-18, which hit the cap-poll race ENGINE-CAPPOLL fixed.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LIVE-MINORS-20261114/SHA256SUMS`, SHA-256 `a4f9ca5fa0abc326e56def99b60c99395f1f1a6b34234ab8e9374039d72a81bf`.
+- [x] OP-POD-STATUS-DRIFT (operator): `fix/native-pod-status-drift-20261113` at `af4332e` compares native pod reads by UID, phase and the named container's full state through `podexec.SamePodState`, so the captured kubelet `status.resources` drift no longer refuses.
+  All 18 call sites in the controller, the transport, the version and failure reads and the owned and retry admissions use it; a changed terminated `finishedAt` still refuses.
+  `make lint` reported 0 issues, the non-e2e Go suite passed 5946 tests with 315 of 315 envtest specs, and 45 of 45 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-POD-STATUS-DRIFT-20261114/SHA256SUMS`, SHA-256 `5b5cbc2fa0e71a196ee2f2b15a6ff237f6307e37361ea9d2f62ed60ab226f0ac`.
+- [x] OP-NATIVE-VERIFY-EVIDENCE (operator): `fix/native-e2e-verify-evidence-20261114` at `1ba56d5` makes the native comparison helper accept the engine's camelCase compare progress keys; it refused them, so every real native data compare failed.
+  The helper's sealed result carries the final progress sample, which the controller records as one `final` `data` progress item.
+  Native `expectDrainProgress` requires `NativeDrainConfirmed` and exactly one completed checkpoint row whose `drain_end_lsn` equals the endpos, and native `expectFinalProgress` requires the finished native data result.
+  The non-e2e Go suite passed 5730 tests with 316 of 316 envtest specs on PostgreSQL 16 and 18, the cluster-free e2e suite passed 829 and 830 tests with `-race`, and 24 of 24 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-VERIFY-EVIDENCE-20261114/SHA256SUMS`, SHA-256 `b835195d76ad18991d42ac9a64028bf9f7cade016f91254648a525209059edba`.
+- [x] INTEGRATE5 (operator): `feat/rpgmigrate-native-operator` fast-forwarded to `b22985d928b27f164b0e5bffbf71dc8ad8f23608`, which merges both branches above and admits only the `6f9263d` runner digests; the M6 driver pins its arm64 executable SHA-256 `608c34dfbb3b159df7e9fe1af3399e2237a9b4e2d7ec8bf97f69cbbbf490c99c`.
+  Its `dev-b22985d` manager images are arm64 `sha256:068b01b35390125a58d48e8f1bb6534567e7a2b69d8dbcc8626a54cdce35520e` and amd64 `sha256:027e99708c16ae1a7a2ba5a14b2efb5f0d9bf9d8f69e9b7187165dff4802e299`, and the arm64 lock outside Git has SHA-256 `a19d6d5abbf6cfb3991da3650cf2871ef17820d289ad580260ed59db6edd4b83`.
+  The non-e2e Go suite passed 5957 tests with 316 of 316 envtest specs on PostgreSQL 16.15 and 18.6, 5 of 5 mutations failed the tests, and hosted manager image run 43603751330 and offline contracts run 43603751350 passed.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE5-20261114/SHA256SUMS`, SHA-256 `bf9c4843e5c81bbc92ad2a5aa0f4d3065923cb488ef6d0d3431f33736784fa5c`.
+- [x] M7-RUN3 (operator): on `b22985d` with lock `a19d6d5a`, native-refusal passed on 16:16 in run `a814c6de70494e7c9af898bcedbeb8ca`.
+  The Migration failed `NativeBadConfig` at attempt 1, neither database changed, and deletion cleared the finalizer without a cleanup Job; this is the first live proof of native exec as the manager service account.
+  automatic-cutover failed on 16:16, 18:18 and 16:18 in runs `6009474e6a954f2a8ab14ab8c558ed07`, `35cd27e349d142a7918d259b728abb27` and `e096aa49cb0542ec8603fc4ccf785acc` at the 1800 s budget, each on P-UTIL and then P-RETRY, so no other spec ran.
+  P-UTIL: the operator appends client keepalives, and `tcp_user_timeout=60000` on the source, to every native URI, and the `6f9263d` engine refuses a set libpq option without an environment variable before pg_dump, with exit 4 at `ffi.rs:66`.
+  P-RETRY: the retry-gate helper environment lacks `PGAPPNAME=pgm-retry-gate`, so the evidence program exits 1 at once; the controller started 333 to 338 helper pods per run while the Migration stayed at Cloning and its status still reported the clone as running.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-RUN3-20261114/SHA256SUMS`, SHA-256 `5ce09b518f300a58e581579c932d9f48bac0a17b5a9dfef18f1f6d461718d14c`.
+- [x] Operator qualification of the `6f9263d` runner landed in INTEGRATE5.
+- [x] `apply::checkpoint::live_tests::missing_privileges` failed on PostgreSQL 16.15, 16.16 and 18.7 because the test never granted the restricted role its privileges on `large_object_done`; ENGINE-LIVE-MINORS adds the grant.
+- [x] The live cargo profiles did not run in hosted CI; ENGINE-LIVE-MINORS adds the advisory live-minors workflow.
 
 Leader decisions, wave 9c:
 
@@ -1826,6 +1851,44 @@ Leader decisions, wave 9c:
 - After native cleanup the target keeps `_rpgmigrate_<run>`, as the engine contract says, and the source has none.
 - automatic-cutover relies on the target schema check and the census name test, with no pre-cleanup count.
 - In the harness cap poll, an exec that fails because the container already stopped leaves its caps unverified and polling continues; the final never-observed check still fails.
+
+M0–M5 remain closed and M6–M10 remain open.
+
+### Wave 10 results, 2026-11-14
+
+- [x] ENGINE-UTIL-LIVENESS: `fix/utility-liveness-options-20261114` at `bedb782` forwards exactly `keepalives`, `keepalives_idle`, `keepalives_interval`, `keepalives_count` and `tcp_user_timeout`, each with a non-empty ASCII-digit value, to pg_dump and pg_restore as one `--dbname` connection string after `--no-password`.
+  With none of the five set, argv is unchanged; the password and every other key stay out of argv.
+  Every other set option without an environment variable, and any non-digit value, still refuses before any mutation, now as `BadConfig` (exit 2, `native:BadConfig:`), which the operator maps to `NativeBadConfig`.
+  The e2e plain clone case connects with the operator's exact URI query strings, and its receipt records them.
+  Local gates passed on macOS and in the Linux dev image, the schema live profile passed 3 of 3 on PostgreSQL 16.16 and 18.7, and 5 of 5 mutations failed the tests.
+  Hosted ci.yml run 43619086787 passed 8 of 8 on its second attempt; the first failed engine-e2e 16-18 on curl exit 56 in the image build.
+  `789c65d` and `02d530c` do not build the Linux lib tests on their own, and `bedb782` restores the import they dropped.
+  The M7-RUN3 reproduction refuses with the `6f9263d` runner and copies 100 of 100 rows with a binary built from this branch, with and without the operator's settings.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-UTIL-LIVENESS-20261114/SHA256SUMS`, SHA-256 `62cf1dbc131eb0977b09cd356ce3a2afdabf1a1ce6389029ec536eebcbe78dc9`.
+- [x] ENGINE-LAND6: `integrate/engine-land6-20261114` at `2b9b11da305b74172e89e6dcb877372c24f04ccd` merges `3a3fe82` and `bedb782` onto `ba8ba1f` without conflicts, and `task check lint test` passed with 566 Rust unit, 28 CLI and 541 portable tests.
+  Hosted ci.yml run 43620339280 passed 8 of 8 on its second attempt; the first failed the arm64 runner image on curl exit 56 fetching the PGDG key, and engine-e2e 18-18 with returncode 56 in the follow smoke's development image build.
+  `feat/native-engine` fast-forwarded from `ba8ba1f` to `2b9b11d`, where ci.yml run 43621185148 passed 8 of 8 on its second attempt after engine-e2e 16-16 hit the same returncode 56 in the development image build.
+  Development runner image run 43621185153 published `dev-2b9b11da305b74172e89e6dcb877372c24f04ccd` as arm64 `sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978` (executable SHA-256 `9324aa272daa804acd2d84f45d2eac02bdacd6dd7eedb05797e681a49b71bd29`) and amd64 `sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f` (executable SHA-256 `d8727fc059917857be437a2099be04537ea56f0b31c45d3b5f1dac221198e6e3`), both pulled anonymously with every layer verified.
+  Against `6f9263d` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures, and a re-extraction of `6f9263d` reproduced the ENGINE-LAND5 values.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND6-20261114/SHA256SUMS`.
+- [ ] Both PGDG key fetches (`Dockerfile:4`, `tools/e2e/Containerfile:5`) run curl without retries, and curl exit 56 failed hosted jobs in ENGINE-LAND5, ENGINE-UTIL-LIVENESS and ENGINE-LAND6.
+- [ ] Operator side of decision (h): `PGAPPNAME=pgm-retry-gate` in the retry-gate helper env, one table-driven test tying every native helper role's env to the evidence program's own check, a gate read with no known observation requeuing after `retryGateInterval`, terminal failure naming the retry-gate helper once `verdictOverdue` has passed, and no running clone in status after the worker Job failed.
+- [ ] Operator side of decision (i): automatic-cutover calls `expectDrainProgress` under native, and the M6 driver test refuses a different rpgmigrate binary hash.
+- [ ] Operator qualification of the `2b9b11d` runner: integration adds its digests and the executable SHA-256 the M6 driver pins, then a new manager image, a new lock and M7-RUN4.
+- [ ] Not yet proven live: the camelCase compare fix, native data verification, the drain proof, cleanup evidence on a completed Migration, and the pod-status drift fix beyond preflight.
+- [ ] Job, Migration and PVC status comparisons are still whole-status; none has been seen to drift live.
+- [ ] The live-minors schedule fires only from the default branch, so until it reaches main it runs by manual dispatch only.
+- [ ] `tests/support/follow_receive_live.py:18` still pins its image digests to 160015 and 180006.
+- [ ] The probe branches `ci/follow-harness-probe-20261113`, `ci/follow-harness-probe2-20261113` and `ci/live-minors-probe-20261114` stay until the human approves deleting them.
+
+Leader decisions, wave 10:
+
+- (g) The operator keeps appending client keepalives and, on the source, `tcp_user_timeout=60000`, because they give the engine's own connections dead-peer detection in about 70 s.
+  The engine forwards exactly those five keys with ASCII-digit values to pg_dump and pg_restore through `--dbname`; secret-bearing or security keys never go into argv, and every other option without an environment variable still refuses, as `BadConfig` before any mutation.
+- (h) The retry-gate helper env gains `PGAPPNAME=pgm-retry-gate`, and a gate that yields no known observation requeues after `retryGateInterval` until `verdictOverdue`, then fails the Migration terminally with a reason naming the retry-gate helper.
+- (i) automatic-cutover calls `expectDrainProgress` under native, and the M6 driver gets a test that a different rpgmigrate binary hash is refused.
+- (j) Native compare shows only the final progress sample, a documented limitation to revisit in M10; the private helper result extension in `29f0c59` is confirmed, and both redundant checks stay.
+- (k) ENGINE-LIVE-MINORS lands as is, including the per-major follow-snapshot SQLSTATE keying.
 
 M0–M5 remain closed and M6–M10 remain open.
 
