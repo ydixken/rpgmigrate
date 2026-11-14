@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: '23 5 * * *'
   workflow_dispatch:
+  # probe only: never merged; GitHub dispatches only workflows on the default branch.
+  push:
+    branches: [ci/live-minors-probe-20261114]
 
 permissions:
   contents: read
