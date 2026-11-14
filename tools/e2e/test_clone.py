@@ -75,6 +75,7 @@ class CloneHarnessTests(unittest.TestCase):
         manifest = harness.load_manifest()
         report = {"pair": "16-18", "server_versions": ["16.15", "18.6"], "client_versions": {"pg_dump": "18.6", "pg_restore": "18.6", "psql": "18.6"}, "linked_libpq": 180006,
                   "cases": {name: {"observed": True} for name in manifest["cases"]}}
+        report["cases"]["plain"]["operator_uri_query"] = harness.OPERATOR_URI_QUERY
         work = {"migration_uid": "12345678-9abc-def0-1234-56789abcdef0", "run_id": "123456789abcdef0123456789abcdef0", "workdir_id": "fixture", "checkpoint_generation": 1}
         records = []
         for command in ("clone",) * 4 + ("list progress",) * 2:
@@ -88,10 +89,22 @@ class CloneHarnessTests(unittest.TestCase):
         variants = [{**report, "report_validation": {}}, {**report, "report_validation": {"mode": "operator_go_parse_report", "reports": records}}, {**report, "cases": {}}, {**report, "linked_libpq": None},
                     {**report, "server_versions": ["16.15", "16.15"]},
                     {**report, "client_versions": {"pg_dump": "16.15"}},
-                    {**report, "cases": {**report["cases"], manifest["cases"][0]: {"observed": False}}}]
+                    {**report, "cases": {**report["cases"], manifest["cases"][0]: {"observed": False}}},
+                    {**report, "cases": {**report["cases"], "plain": {"observed": True}}},
+                    {**report, "cases": {**report["cases"], "plain": {"observed": True, "operator_uri_query": {"source": "", "target": ""}}}}]
         for bad in variants:
             with self.subTest(bad=bad), self.assertRaises(RuntimeError):
                 harness.validate_receipt(bad, manifest)
+
+    def test_plain_clone_uses_the_operator_uri_query_strings(self):
+        database = harness.Database("source", Path("/bin"), {})
+        self.assertEqual(database.operator_uri("src_plain", "source"),
+                         "postgresql://postgres@source/src_plain?sslmode=disable&connect_timeout=3"
+                         f"&application_name={database.application}&keepalives=1&keepalives_idle=10"
+                         "&keepalives_interval=10&keepalives_count=6&tcp_user_timeout=60000")
+        self.assertTrue(database.operator_uri("dst_plain", "target").endswith("&keepalives_count=6"))
+        with self.assertRaises(KeyError):
+            database.operator_uri("x", "other")
 
     def test_missing_fault_and_wrong_failure_reason_fail(self):
         harness.require_failure(3, "uncertain pre-data ownership", "pre-data", True)
