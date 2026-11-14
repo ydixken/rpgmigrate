@@ -427,7 +427,7 @@ Tags and releases remain unauthorized.
 The dated M7 amendment permits only development GHCR publication, and these checks do not close M10.
 
 - [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
-- [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, and both native image builds.
+- [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone, follow smoke and cutover producer jobs on hosted runners, and both native image builds.
 - [ ] Release GHCR publication on version tags only, pending separate release authorization.
 Development publication follows the dated M7 amendment.
 
@@ -717,6 +717,14 @@ The [ledger](../tasks/todo.md#m8-feature-widening-each-item-enables-its-capabili
 - [ ] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
+We widen follow and clone for the objects the native M7 fixture leaves to pgcopydb, in this order:
+
+1. [ ] Expression and partial indexes over immutable built-in functions.
+1. [ ] Generated columns.
+1. [ ] Materialized views, refreshed in post-data.
+1. [ ] Domain CHECK in follow.
+1. [ ] Indexes with extension operator classes.
+
 ### M9: Durability modes and measured performance
 
 M9 checkpoint `59abca5308b827d29dfe12cbbed0b7928ca50ff1` uses native format 10 / metadata 7 and retains `REPLAY_SAFE_BARRIER_INTERVAL_MS=None`, H1/H4 ACK source work, and M10 fuzz provenance.
@@ -882,6 +890,14 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-engine` at `42866da` merges both; hosted ci.yml run 43351266784 passed 8 of 8 jobs.
   Its `dev-42866da43fc43a9af88bab01b5c203b7f1d7d5aa` runner images are arm64 `sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f` and amd64 `sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2`.
   They keep the `908ada6` `libc.so.6` and `nsswitch.conf`, but carry libpq 18.7 and a new libpq runtime JSON, so the operator must repin before it admits them.
+- `fix/follow-default-collation-20261113` at `1a171e3` makes follow compare the default collation with the version `pg_database` records, and keeps refusing a real version mismatch.
+- `fix/follow-harness-format9-20261113` at `e2df395` makes the follow and cutover harness expect native format 9 and metadata 7, and runs the follow smoke and the cutover producer in ci.yml for every pair.
+- `integrate/engine-land4-20261113` at `3d8f826` merges both, and hosted ci.yml run 43392346553 failed engine-e2e 18-18 twice with `container state improper` at `clone.py:874`.
+  `630a872` on `fix/follow-harness-format9-20261113` fixes that race: a cap exec that fails because the owned container already stopped leaves its caps unobserved, and polling continues.
+- `fix/live-money-clone-20261113` at `56d1277` admits the server-owned `pg_attver=<digits>` column option that PGDG PostgreSQL 16.16 and 18.7 write on every new column, and refuses any other option.
+- `feat/native-engine` at `6f9263d` merges those four; hosted ci.yml run 43597389267 passed 8 of 8 jobs.
+  Its `dev-6f9263d43e3ba7ac7e81f3b34757f79d581dc389` runner images are arm64 `sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60` and amd64 `sha256:ad648befc155a95df25df7f7a9f91c65bfe9b08a3ff95d8b6970fa697f0c2404`.
+  Against `42866da` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -932,6 +948,17 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/m7-run1-20261112` gives native kind Migrations a runner-owned 0700 hostPath work volume, and the line moved to `aff4075` for it.
   Its manager images are arm64 `sha256:31ec6165aa7886f242c013b4cacb0a5c1de0b335f0f9b0e4b5728ee343c3842a` and amd64 `sha256:9dcdb2c956af87443db8a42eadcff564fc201b8da8f56549e6aefc069d270c12`, and its arm64 lock has SHA-256 `a535704c9b2f2ce2c686199f9467abf5bdaab1fda5eea74f6a81f36d5d8881e2`.
   No native spec passed on it: a worker-start claim check, clone refusing citext and composite columns, and an undeletable Failed follow Migration stopped every run.
+- `feat/rpgmigrate-native-operator` at `5f22807` merges the wave 8 operator fixes and admits only the `42866da` runner, with its libpq 18.7 pins.
+  Its manager images are arm64 `sha256:e78c32cc7689ac702f34b4bffee45aedec4dd71ce4b12503b9ef55433c7a89d6` and amd64 `sha256:06abb3bbb754e42397ce235e6e9d288ad9f563ec1017c0fcd379c42506f043cc`, and its arm64 lock has SHA-256 `05089bfc6c4652b5a8481155178ba64819b99c630879e05a7cf8bb280bfd4ad2`.
+  M7-RUN2 passed no native spec on it: clone refused the fixture's materialized view, and native exec lacked `get` on `pods/exec`.
+- Wave 9 branches from `5f22807`:
+  - `fix/native-exec-rbac-get-20261113` at `a56cf56` grants `get` as well as `create` on `pods/exec`.
+  - `fix/native-helper-job-tracking-finalizer-20261113` at `dad677c` admits the Job controller removing `job-tracking` from an ended helper pod between reads.
+  - `fix/native-transport-races-20261113` at `b669fb1` compares only the terminal container state around the native log read and fixes the relay's FIFO arrival and teardown races.
+  - `fix/native-cutover-guard-20261113` at `c819c48` emits `CutoverStarted` once the native endpos is saved and ports the early Manual cutover spec to native.
+  - `fix/native-m7-fixture-20261113` at `719f2af` seeds the objects native refuses for the pgcopydb engine only, and adds the `native-refusal` spec.
+- `feat/native-operator-integration9-20261113` at `70b9fb4` merges those five and documents `get` on `pods/exec` for a manager role the cluster admin supplies with `rbac.create=false`.
+- `fix/native-e2e-cleanup-evidence-20261113` at `156607a` makes the native cleanup check require a succeeded cleanup Job and a census of this run's resources, and makes the slot and origin counts follow the engine.
 
 ### Leader decisions, 2026-11-12
 
@@ -962,6 +989,32 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - Workers may fast-forward the operator line when a run needs a manager image from the exact tree, after its gates pass.
 - M7 qualifies on the runner-owned hostPath work volume, and the CSI fsGroup path is proven in podman with simulated kubelet roots.
 - The engine state parent rule and extension-owned column types land on `feat/native-engine` together, after hosted ci.yml passed on the merged tree.
+
+### Decisions, 2026-11-13
+
+The user approved `get` on `pods/exec`, kept `fsGroupChangePolicy: OnRootMismatch` on native work-volume pods, and approved deleting the six `ci/follow-smoke-*-20261113` engine branches and no others.
+
+- M7 qualifies on the native fixture of `fix/native-m7-fixture-20261113`, whose three expression or partial indexes also move to the pgcopydb-only seed.
+- The `IS NOT FALSE` guard in the follow collation check stays, so a missing `pg_database` row refuses.
+- Servers that record no collation version (musl, macOS) are admitted, as PostgreSQL itself admits them.
+- The follow harness keeps its own format constants with a test pinning them to `src/state.rs`, because a format bump needs a deliberate harness review.
+- Evidence and retry admissions are not widened to compare helper-pod metadata.
+- The `CutoverStarted` wording stays as legacy.
+- Native M7 runs with large objects, binary COPY and split off, so native specs expect no large objects on the target.
+- The runner keeps `libpq5=18.*` until the M10 reproducible runner build, and each new runner is repinned at integration.
+- The M7-RUN1 and M7-RUN2 Migrations are discarded.
+- The relay cap and the helper cap stay 16384 bytes, and the next change to either program trims it first.
+
+### Decisions, 2026-11-14
+
+The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/native-engine` reached `6f9263d`.
+
+- Admitting exactly one server-owned `pg_attver=<digits>` attoptions entry matches PostgreSQL 16.16 and 18.7 and does not weaken the metadata guard.
+- The engine keeps requiring uniform privileges on every owned table, so the `missing_privileges` live test grants the restricted role its privileges on `large_object_done`.
+- A scheduled and manually dispatched, non-blocking hosted workflow runs the live cargo profiles on the latest PGDG 16 and 18 minors; required CI stays on pinned images.
+- After native cleanup the target keeps `_rpgmigrate_<run>`, as the engine contract says, and the source has none.
+- The automatic-cutover spec relies on the target schema check and the census name test, with no pre-cleanup count.
+- In the harness cap poll, an exec that fails because the container already stopped leaves its caps unverified and polling continues; the final never-observed check still fails.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 

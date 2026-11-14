@@ -909,7 +909,7 @@ Tags and releases remain unauthorized.
 The dated M7 amendment permits only development GHCR publication, and these checks do not close M10.
 
 - [x] Runner image: rpgmigrate, sh, psql 18, PGDG client tools 16 and 18 under `/usr/lib/postgresql/<major>/bin`, GNU coreutils and sed, uid 65532, read-only rootfs, multi-arch, smoke test.
-- [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone jobs on hosted runners, and both native image builds.
+- [x] GitHub Actions: lint, test, cargo-deny (licenses, advisories), docs lint, development-image clone, follow smoke and cutover producer jobs on hosted runners, and both native image builds.
 - [ ] Release GHCR publication on version tags only, pending separate release authorization.
 Development publication follows the dated M7 amendment.
 
@@ -1410,6 +1410,14 @@ The regenerated file quotes the code and is not byte-identical to the lost file.
 - [ ] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
+We widen follow and clone for the objects the native M7 fixture leaves to pgcopydb, in this order:
+
+1. [ ] Expression and partial indexes over immutable built-in functions.
+1. [ ] Generated columns.
+1. [ ] Materialized views, refreshed in post-data.
+1. [ ] Domain CHECK in follow.
+1. [ ] Indexes with extension operator classes.
+
 ## M9: Durability modes and measured performance
 
 M9 checkpoint `59abca5308b827d29dfe12cbbed0b7928ca50ff1` uses native format 10 / metadata 7 and retains `REPLAY_SAFE_BARRIER_INTERVAL_MS=None`, H1/H4 ACK source work, and M10 fuzz provenance.
@@ -1694,9 +1702,24 @@ M0–M5 remain closed and M6–M10 remain open.
   Development runner image run 43351267111 published `dev-42866da43fc43a9af88bab01b5c203b7f1d7d5aa` as arm64 `sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f` (executable SHA-256 `c244a35d4d1656a23a141a0b24cba8f8c0d2eb59b8bdbf025b13f710dfc2de6f`) and amd64 `sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2` (executable SHA-256 `013a11bfbd23de7231c8e33596053f93c0d69d1cd03638f745e443418379758c`), both pulled anonymously.
   Against `908ada6`, `libc.so.6` and `/etc/nsswitch.conf` are unchanged on both architectures.
   The libpq runtime JSON and `libpq.so.5.18` changed on both, because the unversioned `libpq5=18.*` install now resolves PGDG `18.7-1.pgdg13+2` instead of `18.6-1.pgdg13+2`.
-  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND3-20261113/SHA256SUMS`.
-- [ ] Operator qualification of the `42866da` runner: the operator resolver policy and the M6 driver pin the `908ada6` libpq runtime JSON and library, so the new runner needs new pins before it can be admitted.
-- [ ] The native operator fixture still fails the engine: clone refuses the materialized view `event_daily_counts`, and follow refuses a generated column, a domain CHECK, a citext `UNIQUE` index and `e2e_seed_pkey` through the default-collation `collversion` comparison at `src/catalog/follow.rs:193`.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND3-20261113/SHA256SUMS`, SHA-256 `7ae0da77113dda221ec186d2bcbc5f3b734c5463a8d44518b4273fbdb7d5026f`.
+- [x] INTEGRATE4 (operator): `feat/rpgmigrate-native-operator` fast-forwarded from `aff4075` to `5f228074cba59e900ff58daac0df2dc339192435`, merging the OP-PVC-BIND `087a5d4`, OP-EMPTY-DISPOSITION `ad6b956`, OP-FSGROUP-POLICY `55ebdce` and HARNESS-HYGIENE `38d5a87` branches.
+  The controller admits only the `42866da` runner digests, and the M6 driver and the native evidence program pin its libpq 18.7 runtime JSON, `libpq.so.5.18` and package `18.7-1.pgdg13+2`; the program SHA-256 becomes `5d054ec20143aa13240d91f44f56d5d4ecef7b78b678360774cd3ad621ad41bb` (121639 bytes).
+  The non-e2e Go suite passed 5662 tests with 314 of 314 envtest specs on PostgreSQL 16.15 and 18.6, and 8 of 8 mutations failed the tests.
+  Development manager image run 43356806966 published arm64 `sha256:e78c32cc7689ac702f34b4bffee45aedec4dd71ce4b12503b9ef55433c7a89d6` and amd64 `sha256:06abb3bbb754e42397ce235e6e9d288ad9f563ec1017c0fcd379c42506f043cc`.
+  The arm64 kind image lock binds operator `5f22807` and engine `42866da` and has SHA-256 `05089bfc6c4652b5a8481155178ba64819b99c630879e05a7cf8bb280bfd4ad2`; it stays outside Git.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE4-20261113/SHA256SUMS`, SHA-256 `436ed7170af67192927ce73ab20d4b917d9f635647d8102a6a35a6d3ee8382f1`.
+- [ ] M7-RUN2 (operator): no native spec passed on `5f22807` with lock `05089bfc`.
+  - automatic-cutover runs `e091dfe819284548b99dc087d402f10d` (16:16), `81a2c1a377604b808d3d7d3f27fa8690` (18:18) and `087a220c65b14e198168680c28874efe` (16:18) stopped on clone refusing the materialized view `event_daily_counts`, and their deletion then stalled.
+  - early-manual run `a782664f4ee5431cb1b43a1b1d444a8f` (16:16) stopped on the same refusal, and its guard timed out at 1800 s.
+  - The deletion stall came from the manager role granting only `create` on `pods/exec`, while the native transport's WebSocket exec needs `get`.
+  - The runs also found the helper `job-tracking` finalizer refusal, the `JobCompletedNative` whole-status race, the default-collation `collversion` refusal and three early-manual suite defects, which wave 9 addresses.
+  - The six 16:16 fault specs did not run, so the TERM receipt stays open.
+
+  Evidence: `/private/var/tmp/rpgmigrate-M7-RUN2-20261113/SHA256SUMS`, SHA-256 `5ab3f3745e899888caf971b9c73f9d434571b08cacb2b95c879e5e3ab0040bfc`.
+- [ ] The native operator fixture failed the engine: clone refused the materialized view `event_daily_counts`, and follow refused a generated column, a domain CHECK, a citext `UNIQUE` index and `e2e_seed_pkey` through the default-collation `collversion` comparison at `src/catalog/follow.rs:193`.
+  In wave 9, OP-NATIVE-FIXTURE moves the first four objects and three expression or partial indexes to a pgcopydb-only seed, and ENGINE-COLLATION fixes the default-collation comparison.
+  ENGINE-COLLATION reached `feat/native-engine` at `6f9263d`, and this closes when OP-NATIVE-FIXTURE reaches the operator line.
 
 Leader decisions, wave 8:
 
@@ -1710,6 +1733,99 @@ Leader decisions, wave 8:
 - Workers may fast-forward the operator line when a run needs a manager image from the exact tree, after its gates pass.
 - M7 qualifies on the runner-owned hostPath work volume, and the CSI fsGroup path is proven in podman with simulated kubelet roots.
 - ENGINE-FSGROUP and ENGINE-TYPES land on `feat/native-engine` together, after hosted ci.yml passed on the merged tree.
+
+### Wave 9a and 9b results, 2026-11-13
+
+- [x] ENGINE-COLLATION: `fix/follow-default-collation-20261113` at `1a171e3` makes follow compare the default collation (oid 100) with `pg_database.datcollversion` against `pg_database_collation_actual_version`, and keeps the `collversion` comparison for other collations.
+  A recorded version that differs from the actual one, NULL against a real version included, still refuses; `1a171e3` drops the unreachable control directory `fchmod`.
+  Hosted ci.yml run 43373876846 passed 8 of 8 jobs, and the live catalog profile passed 14 of 15 on PostgreSQL 16 and 18, with `live_money_clone_preserves_values_and_defaults_across_role_locales` failing as it does on `d438e7a`; 5 of 5 mutations failed the new case on both majors.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-COLLATION-20261113/SHA256SUMS`, SHA-256 `60c619e14e2c43c787340e3946f170e18e4667e0dd3820ddc97987a5ce5c0aeb`.
+- [x] ENGINE-FOLLOW-HARNESS: `fix/follow-harness-format9-20261113` at `e2df395` makes the follow and cutover harness expect native format 9 and metadata 7 from `NATIVE_FORMAT` and `TARGET_METADATA` in `tools/e2e/follow.py`, pinned to `src/state.rs` by a portable test.
+  The harness reads each owned container's cgroup caps as soon as it runs, and ci.yml runs the follow smoke and the cutover producer after the clone qualification for every pair.
+  Hosted ci.yml run 43375009175 passed 8 of 8 jobs with clone 8 of 8, follow smoke 1 of 1 and cutover producer 10 of 10 cases per pair; 25 of 25 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-FOLLOW-HARNESS-20261113/SHA256SUMS`, SHA-256 `3b2d32ce60632993acf6da18b5b91ed37f517b60ff455824f5385e2878e1d899`.
+- [x] ENGINE-LAND4: `integrate/engine-land4-20261113` at `3d8f82662dd05ac819129bd40989a715cda6f802` merges both branches above, and `task check lint test` passed with 563 Rust unit, 28 CLI and 537 portable tests.
+  Hosted ci.yml run 43392346553 failed engine-e2e 18-18 on both attempts with `container state improper` at `clone.py:874`, first in the cutover producer and then in the clone qualification, so it did not land; ENGINE-CAPPOLL fixed the cause and ENGINE-LAND5 landed it.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND4-20261113/SHA256SUMS`, SHA-256 `743826aa1122ad7c44585f48f19e531edfc37cbdb2adf9190c1661611b4953b2`.
+- [x] OP-EXEC-RBAC (operator): `fix/native-exec-rbac-get-20261113` at `a56cf56` grants `get` as well as `create` on `pods/exec`, which the native transport's WebSocket handshake needs.
+  `TestManagerRolesGrantPodsExecGetAndCreate` requires exactly `create,get` in the role and the chart, and 11 of 11 mutations failed it.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-EXEC-RBAC-20261113/SHA256SUMS`, SHA-256 `1e654bd5af17d514ab5f6b34c5b0874c5eee60c12f145c1b85039a555ce66b51`.
+- [x] OP-INV-FINALIZER (operator): `fix/native-helper-job-tracking-finalizer-20261113` at `dad677c` lets owned helper admission accept the Job controller removing `batch.kubernetes.io/job-tracking` from an ended pod the paired Job controls, and nothing else.
+  The non-e2e Go suite passed 5700 tests with 314 of 314 envtest specs, and 8 of 8 mutations failed the tests; 16 real M7-RUN2 before and after pairs are admitted.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-INV-FINALIZER-20261113/SHA256SUMS`, SHA-256 `17efbc4e47342e2d716ef10eb21fa138b7bcd24e7621712c9e00a5a5ce501101`.
+- [x] OP-TRANSPORT (operator): `fix/native-transport-races-20261113` at `b669fb1` compares only the terminal container state around the native log read, and lets the relay see the program's own FIFO arrival and teardown.
+  The writer SHA-256 becomes `feecccd8`, at 15249 of the relay's 16384 bytes after a one-space indent; 13 of 13 mutations failed the tests, and the fixed writer passed 17000 of 17000 and 16000 of 16000 stress round trips.
+  Live kind run `9ebb722d0a4d4226889b371a057c8444` replayed 377 exec streams without a transport refusal.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-TRANSPORT-20261113/SHA256SUMS`, SHA-256 `960522baa5ea14c9b6f3422fdffb773a0516ab479b0b003f0ae6f655ce43f819`.
+- [x] OP-NATIVE-CUTOVER-GUARD (operator): `fix/native-cutover-guard-20261113` at `c819c48` emits `CutoverStarted` once, after the native endpos is saved in status, and ports the early Manual cutover spec to native slot names with a fail-fast on Failed and waits capped by the suite deadline.
+  The non-e2e Go suite passed 5668 tests with 315 of 315 envtest specs, and 17 of 17 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-CUTOVER-GUARD-20261113/SHA256SUMS`, SHA-256 `692731b87a1cb20aefc465c45fb77e525ac9d360c04dafa55694d9387f25ea7c`.
+- [x] OP-NATIVE-FIXTURE (operator): `fix/native-m7-fixture-20261113` at `719f2af` seeds the objects native refuses only for the pgcopydb engine, from `test/e2e/fixtures/legacy.sql`, and adds the `native-refusal` kind spec.
+  The offline proof passed 34 of 34 checks, including clone and follow with a matching `compare data` on 16-16, 18-18 and 16-18, and 12 of 12 mutations failed a test.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-FIXTURE-20261113/SHA256SUMS`, SHA-256 `417070ffef2fca05a65a284272371d4317a6a92bc8c7c52070ba210fd0d7ee5b`.
+- [x] ENGINE-MONEY: `live_money_clone_preserves_values_and_defaults_across_role_locales` failed because PGDG PostgreSQL 16.16 and 18.7 write `attoptions={pg_attver=<n>}` on every new column, and the target metadata checks in `src/apply/metadata.rs` required `attoptions IS NULL`.
+  That refused every native clone and authority acquire against those minors, not only money tables.
+  `fix/live-money-clone-20261113` at `56d1277` admits NULL or exactly one `pg_attver=<digits>` entry and refuses any other option, and `metadata_shape_acl` gains two `n_distinct` tamper cases.
+  With the fix the catalog profile passed 14 of 14 on 16.15, 16.16 and 18.7 and the authority profile 18 of 19, failing only `missing_privileges` as the base does; 4 of 4 mutations failed the tests on both new minors, and hosted ci.yml run 43393688088 passed 8 of 8 jobs.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-MONEY-20261113/SHA256SUMS`, SHA-256 `d4b9c616c45e8d1f376a9f88fb41afb86a4fae42e05d05ed3c9404923ed189de`.
+- [x] OP-MERGE5 (operator): `feat/native-operator-integration9-20261113` at `70b9fb40759dba5a89c5eaf2f52596e85ccf1c85` merges the five operator branches above on `5f22807` without conflicts.
+  `70b9fb4` documents `get` and `create` on `pods/exec` for a manager role the cluster admin supplies with `rbac.create=false`.
+  The non-e2e Go suite passed 5722 tests with 315 of 315 envtest specs on PostgreSQL 16.15 and 18.6, and the cluster-free e2e suite passed 822 and 823 tests with `-race`.
+  It needs a kind image lock of its own, because lock `05089bfc` binds `5f22807`.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-MERGE5-20261113/SHA256SUMS`, SHA-256 `25cf80d9ba2f1fa6be120fa9843131a9674a65a85a48785568647ce75403ccfd`.
+- [x] OP-NATIVE-CLEANUP-EVIDENCE (operator): `fix/native-e2e-cleanup-evidence-20261113` at `156607a`, on `70b9fb4`, makes `expectCleanupSucceeded` require positive evidence for a native Migration.
+  It needs a `rpgmigrate-cleanup-<32 hex>` Job seen to succeed, `nativeFinalizedJobUID` equal to `nativeJobUID`, and a census of this run's slots, publications and schemas reading `0/0/0` on the source and `0/0/1` on the target.
+  The slot and origin counts follow the engine and test each filter against a name the engine creates, so a filter that cannot see the engine's resources fails instead of reading 0; `native-refusal` is admitted on pair 16:16 only.
+  The cluster-free e2e suite passed 826 and 827 tests with `-race` on PostgreSQL 16.15 and 18.6, and 16 of 16 mutations failed the tests; it is proven offline only.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-CLEANUP-EVIDENCE-20261113/SHA256SUMS`, SHA-256 `d97b8b9108af2852edfa551c17183ad0d4d1f6c1c3fafd3a171d059999cddea2`.
+- [ ] Under native, live-writer still reads the `<name>-verify` Job log and `status.verificationProgress`, which native does not produce, so it needs native verification evidence.
+- [ ] The whole-pod-status comparisons at `native_preflight.go:363`, `native_version.go:96` and `native_failure.go:35` drift the same way the transport did; one owner should fix them together.
+
+OP-POD-STATUS-DRIFT, INTEGRATE5 and M7-RUN3 stopped on an authentication outage in wave 9b and produced no report.
+
+Human approvals, 2026-11-13:
+
+- Add `get` to `pods/exec` on `fix/native-exec-rbac-get-20261113`.
+- `fsGroupChangePolicy: OnRootMismatch` on native work-volume pods stays.
+- Delete the six engine branches `ci/follow-smoke-probe-20261113`, `ci/follow-smoke-base-20261113`, `ci/follow-smoke-mutation-20261113`, `ci/follow-smoke-mutation2-20261113`, `ci/follow-smoke-mutation3-20261113` and `ci/follow-smoke-mutation4-20261113`, and nothing else; the `ci/follow-harness-probe*-20261113` branches stay.
+
+Leader decisions, wave 9:
+
+- M7 qualifies on the native fixture of `fix/native-m7-fixture-20261113`, including its moves of `app_users_name_lower_idx`, `documents_title_lower_idx` and `readings_recent_partial_idx`.
+- The `IS NOT FALSE` guard in the collation check stays, so a missing `pg_database` row refuses.
+- Servers that record no collation version (musl, macOS) are admitted, as PostgreSQL itself admits them.
+- The harness keeps its own format constants and the test that pins them to `src/state.rs`, because a format bump needs a deliberate harness review.
+- Evidence and retry admissions are not widened to compare helper-pod metadata.
+- The `CutoverStarted` wording stays as legacy.
+- Native M7 runs with large objects, binary COPY and split off, so native specs expect no large objects on the target.
+- The runner keeps `libpq5=18.*` until the M10 reproducible runner build, and each new runner is repinned at integration.
+- The M7-RUN1 and M7-RUN2 Migrations are discarded.
+- The relay cap and the helper cap stay 16384 bytes, and the next change to either program trims it first.
+
+### Wave 9c results, 2026-11-14
+
+- [x] ENGINE-CAPPOLL: `fix/follow-harness-format9-20261113` at `630a872` leaves a container's cgroup caps unobserved, and keeps polling, when the cap exec fails and a fresh inspect shows the owned container has stopped.
+  Any other exec failure, a failed inspect or a running container still fails the run, a ready source or target that stops during sampling still fails, and the final never-observed check is unchanged; `8eb9ac0` records up to four caller frames of a failed harness subprocess.
+  7 of 7 mutations failed the tests, and hosted ci.yml runs 43596044852 (push) and 43596425789 (dispatch) passed 8 of 8 jobs; the fix is proven with fake-podman tests, not a reproduced race.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-CAPPOLL-20261114/SHA256SUMS`, SHA-256 `203bbffb8d663765001fd602c6269cfcf5856d70f41bcb86be2691a16c8f0e47`.
+- [x] ENGINE-LAND5: `integrate/engine-land4-20261113` at `6f9263d43e3ba7ac7e81f3b34757f79d581dc389` merges `630a872` and `56d1277` onto `3d8f826`, and `task check lint test` passed with 563 Rust unit, 28 CLI and 538 portable tests.
+  Hosted ci.yml run 43597041038 passed 8 of 8 jobs on its first attempt, and `feat/native-engine` fast-forwarded from `d438e7a` to `6f9263d`, where run 43597389267 passed 8 of 8.
+  Development runner image run 43597389316 published `dev-6f9263d43e3ba7ac7e81f3b34757f79d581dc389` as arm64 `sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60` (executable SHA-256 `608c34dfbb3b159df7e9fe1af3399e2237a9b4e2d7ec8bf97f69cbbbf490c99c`) and amd64 `sha256:ad648befc155a95df25df7f7a9f91c65bfe9b08a3ff95d8b6970fa697f0c2404` (executable SHA-256 `6cdb7e989870611258ac6ac89d26f550e9696258c365eef8d50e85654bcd4ec2`), both pulled anonymously with every layer verified.
+  Against `42866da` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures.
+  The six approved `ci/follow-smoke-*-20261113` branches were deleted after the fast-forward, and no open pull request used them.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND5-20261114/SHA256SUMS`.
+- [ ] Operator qualification of the `6f9263d` runner: the controller admits only the `42866da` digests, so integration adds the new digests and the executable SHA-256 the M6 driver pins; the libpq pins stay.
+- [ ] `apply::checkpoint::live_tests::missing_privileges` fails on PostgreSQL 16.15, 16.16 and 18.7, because the test never grants the restricted role its privileges on `large_object_done`.
+- [ ] The live cargo profiles do not run in hosted CI, so a new PostgreSQL minor can break the engine without a red job.
+
+Leader decisions, wave 9c:
+
+- Admitting exactly one server-owned `pg_attver=<digits>` attoptions entry matches PostgreSQL 16.16 and 18.7 and does not weaken the metadata guard.
+- The engine keeps requiring uniform privileges on every owned table, so `missing_privileges` grants the restricted role its privileges on `large_object_done`.
+- A scheduled and manually dispatched, non-blocking hosted workflow runs the live cargo profiles on the latest PGDG 16 and 18 minors, so upstream minor changes surface; required CI stays on pinned images.
+- After native cleanup the target keeps `_rpgmigrate_<run>`, as the engine contract says, and the source has none.
+- automatic-cutover relies on the target schema check and the census name test, with no pre-cleanup count.
+- In the harness cap poll, an exec that fails because the container already stopped leaves its caps unverified and polling continues; the final never-observed check still fails.
 
 M0–M5 remain closed and M6–M10 remain open.
 
