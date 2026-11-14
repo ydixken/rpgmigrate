@@ -147,6 +147,20 @@ Both internal map variables are removed from utility descendants and tool-discov
 Revalidate retained files before connection or utility spawn.
 Credentials, TLS/database behavior, real `pg_dump`, packaged images, and resolver/PVC qualification remain separate runtime gates.
 
+## Utility connection settings
+
+Schema `pg_dump` and `pg_restore` children get the effective connection settings through libpq environment variables, never argv.
+They connect to the peer the engine already validated: `PGHOST`, `PGHOSTADDR`, `PGPORT`, `PGDATABASE` and `PGUSER` are pinned from the live connection.
+libpq has no environment variable for the client liveness settings `keepalives`, `keepalives_idle`, `keepalives_interval`, `keepalives_count` and `tcp_user_timeout`.
+We forward exactly these five through the utility's `--dbname` connection string, for example `--dbname=keepalives=1 keepalives_idle=10`, because the operator appends them to every native URI for dead-peer detection.
+libpq expands that string and still takes the database, host, port, user and password from the environment.
+Each value MUST be ASCII digits only; any other value refuses.
+Without these settings, `pg_dump` gets no `--dbname` and `pg_restore` gets an empty `--dbname=` as before.
+
+> [!important]
+> Every other set option without a libpq environment variable, such as `sslpassword`, `oauth_client_secret`, `scram_client_key`, `replication` or `fallback_application_name`, refuses with exit 2 (`native:BadConfig`) before any mutation.
+> Secret-bearing and security settings never reach utility argv.
+
 ## Work identity and ownership
 
 Operator runs supply all four environment variables together:

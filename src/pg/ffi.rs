@@ -4,7 +4,7 @@ use super::{
     StandbyStatus, error, io,
 };
 use crate::contracts::connection_files::ConnectionFiles;
-use crate::contracts::{Conninfo, Error, IoControl, Result};
+use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};
 use pq_sys as pq;
 use std::cell::Cell;
 use std::ffi::{CStr, CString, OsString, c_void};
@@ -44,6 +44,34 @@ pub(crate) struct UtilityEnvironment {
     pub(crate) remove: Vec<OsString>,
     pub(crate) values: Vec<(OsString, OsString)>,
     pub(crate) files: Option<Arc<ConnectionFiles>>,
+    /// `key=digits` pairs the utility's --dbname connection string must carry.
+    pub(crate) liveness: Vec<String>,
+}
+
+/// Client dead-peer settings libpq has no environment variable for.
+/// Only these, with ASCII-digit values, may reach utility argv; they carry no secret.
+pub(crate) const UTILITY_LIVENESS_KEYS: [&str; 5] = [
+    "keepalives",
+    "keepalives_idle",
+    "keepalives_interval",
+    "keepalives_count",
+    "tcp_user_timeout",
+];
+
+fn liveness_setting(keyword: &[u8], value: &[u8]) -> Result<String> {
+    let key = UTILITY_LIVENESS_KEYS
+        .into_iter()
+        .find(|key| key.as_bytes() == keyword);
+    match key {
+        Some(key) if !value.is_empty() && value.iter().all(u8::is_ascii_digit) => {
+            // Digit-only bytes are valid UTF-8.
+            Ok(format!("{key}={}", String::from_utf8_lossy(value)))
+        }
+        _ => Err(Error::new(
+            ErrorKind::BadConfig,
+            "PostgreSQL utility connection settings cannot be represented safely",
+        )),
+    }
 }
 
 /// # Safety
@@ -55,6 +83,7 @@ unsafe fn copy_utility_options(
         remove: Vec::new(),
         values: Vec::new(),
         files: None,
+        liveness: Vec::new(),
     };
     let mut current = options.as_ptr();
     // SAFETY: the caller retains the complete keyword-terminated option array.
@@ -63,9 +92,14 @@ unsafe fn copy_utility_options(
         let option = unsafe { &*current };
         if option.envvar.is_null() {
             if !option.val.is_null() {
-                return Err(error(
-                    "PostgreSQL utility connection settings cannot be represented safely",
-                ));
+                // SAFETY: a visited entry's keyword and this non-null value are terminated strings.
+                let (keyword, value) = unsafe {
+                    (
+                        CStr::from_ptr(option.keyword).to_bytes(),
+                        CStr::from_ptr(option.val).to_bytes(),
+                    )
+                };
+                environment.liveness.push(liveness_setting(keyword, value)?);
             }
         } else {
             // SAFETY: each non-null field is a terminated string owned by the option array.
@@ -86,6 +120,25 @@ unsafe fn copy_utility_options(
         current = unsafe { current.add(1) };
     }
     Ok(environment)
+}
+
+/// Parses synthetic settings the way a live connection's effective options are copied.
+#[cfg(test)]
+pub(crate) fn parsed_utility_environment(bytes: &[u8]) -> Result<UtilityEnvironment> {
+    let input = CString::new(bytes).unwrap();
+    let mut diagnostic = ptr::null_mut();
+    // SAFETY: input and diagnostic are live; both returned allocations are freed below.
+    let options = unsafe { pq::PQconninfoParse(input.as_ptr(), &mut diagnostic) };
+    if !diagnostic.is_null() {
+        // SAFETY: this optional allocation was returned by libpq exactly once.
+        unsafe { pq::PQfreemem(diagnostic.cast()) };
+    }
+    let options = NonNull::new(options).expect("synthetic settings must parse");
+    // SAFETY: libpq returned a complete live option array.
+    let result = unsafe { copy_utility_options(options) };
+    // SAFETY: release the array once, including expected refusal cases.
+    unsafe { pq::PQconninfoFree(options.as_ptr()) };
+    result
 }
 
 pub(crate) struct PgConnection {
@@ -1846,33 +1899,16 @@ mod tests {
 
     #[test]
     fn utility_environment_does_not_replay_a_service_reference() {
-        let settings = parsed_utility_options(b"service=private-fixture").unwrap();
+        let settings = parsed_utility_environment(b"service=private-fixture").unwrap();
         assert!(
             !settings.values.iter().any(|(name, _)| name == "PGSERVICE"),
             "utility must not resolve a service again"
         );
     }
 
-    fn parsed_utility_options(bytes: &[u8]) -> Result<UtilityEnvironment> {
-        let input = CString::new(bytes).unwrap();
-        let mut diagnostic = ptr::null_mut();
-        // SAFETY: input and diagnostic are live; both returned allocations are freed below.
-        let options = unsafe { pq::PQconninfoParse(input.as_ptr(), &mut diagnostic) };
-        if !diagnostic.is_null() {
-            // SAFETY: this optional allocation was returned by libpq exactly once.
-            unsafe { pq::PQfreemem(diagnostic.cast()) };
-        }
-        let options = NonNull::new(options).expect("synthetic settings must parse");
-        // SAFETY: libpq returned a complete live option array.
-        let result = unsafe { copy_utility_options(options) };
-        // SAFETY: release the array once, including expected refusal cases.
-        unsafe { pq::PQconninfoFree(options.as_ptr()) };
-        result
-    }
-
     #[test]
     fn utility_environment_copies_native_bytes_and_removes_null_defaults() {
-        let environment = parsed_utility_options(b"password='private-\xff' sslmode=disable options='-c search_path=' sslrootcert='private-\xfe'").unwrap();
+        let environment = parsed_utility_environment(b"password='private-\xff' sslmode=disable options='-c search_path=' sslrootcert='private-\xfe'").unwrap();
         for (key, value) in [
             ("PGPASSWORD", b"private-\xff".as_slice()),
             ("PGSSLMODE", b"disable"),
@@ -1899,15 +1935,68 @@ mod tests {
                 "null mapped default was not removed"
             );
         }
+        assert!(environment.liveness.is_empty());
         for input in [
             b"replication=database".as_slice(),
             b"sslpassword='private-secret'",
+            b"oauth_client_secret='private-secret'",
             b"fallback_application_name='private-value'",
-            b"keepalives=0",
+            b"keepalives=1 sslpassword='private-secret'",
         ] {
-            let failure = parsed_utility_options(input)
+            let failure = parsed_utility_environment(input)
                 .err()
                 .expect("unmapped settings must be refused");
+            assert_eq!(
+                failure.message,
+                "PostgreSQL utility connection settings cannot be represented safely"
+            );
+            assert_eq!(failure.kind, ErrorKind::BadConfig);
+        }
+    }
+
+    #[test]
+    fn utility_environment_forwards_only_digit_liveness_settings() {
+        let environment = parsed_utility_environment(
+            b"tcp_user_timeout=60000 keepalives=1 keepalives_idle=10 keepalives_interval=10 keepalives_count=6 password=private",
+        )
+        .unwrap();
+        assert_eq!(
+            environment.liveness,
+            [
+                "keepalives=1",
+                "keepalives_idle=10",
+                "keepalives_interval=10",
+                "keepalives_count=6",
+                "tcp_user_timeout=60000",
+            ],
+            "libpq option order and exact values must be kept"
+        );
+        assert!(
+            environment
+                .values
+                .iter()
+                .any(|(name, value)| name == "PGPASSWORD" && value == "private"),
+            "the credential stays in the environment"
+        );
+        assert_eq!(
+            parsed_utility_environment(b"keepalives=0")
+                .unwrap()
+                .liveness,
+            ["keepalives=0"]
+        );
+        for input in [
+            b"keepalives_idle=10s".as_slice(),
+            b"keepalives_idle=' 10'",
+            b"keepalives_count=-1",
+            b"tcp_user_timeout=6e4",
+            b"keepalives_interval=1.5",
+            b"keepalives=''",
+            b"keepalives='1 dbname=decoy'",
+        ] {
+            let failure = parsed_utility_environment(input)
+                .err()
+                .expect("non-digit liveness values must be refused");
+            assert_eq!(failure.kind, ErrorKind::BadConfig);
             assert_eq!(
                 failure.message,
                 "PostgreSQL utility connection settings cannot be represented safely"

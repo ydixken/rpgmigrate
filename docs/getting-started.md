@@ -81,6 +81,7 @@ For separately admitted database work, use explicit source and target settings.
 `--target` overrides `PGCOPYDB_TARGET_PGURI`.
 The executable checks the effective connections after those overrides.
 Stock libpq resolves service files, `PGPASSFILE`, and TLS settings.
+Only the five client liveness options may be set without a libpq environment variable; see [utility connection settings](native-protocol.md#utility-connection-settings).
 Use private service and passfile files and the intended server certificate validation policy.
 Keep credentials out of shell history, argv, logs, reports, and version control.
 Do not paste real connection strings into retained evidence.

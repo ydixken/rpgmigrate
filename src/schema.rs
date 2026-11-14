@@ -1,12 +1,11 @@
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -16,7 +15,7 @@ use crate::contracts::{
     CloneOptions, ClonePlan, CloneTarget, Error, ErrorKind, IoControl, OwnedObject, RestorePolicy,
     Result, SnapshotTicket,
 };
-use crate::pg::PgConnection;
+use crate::pg::{PgConnection, UtilityEnvironment};
 use crate::state::{ClonePhase, NativeState};
 
 struct PrivateFiles {
@@ -241,22 +240,22 @@ fn tools_in(major: u32, io: &IoControl, stock_root: &Path, internal_files: bool)
     ))
 }
 
-fn utility(program: &Path, connection: &PgConnection) -> Result<Command> {
-    let environment = connection.utility_environment()?;
-    utility_command(
-        program,
-        environment.remove,
-        environment.values,
-        environment.files,
-    )
+/// `restore` selects pg_restore's connection mode with an explicit, possibly empty --dbname.
+fn utility(program: &Path, connection: &PgConnection, restore: bool) -> Result<Command> {
+    utility_command(program, connection.utility_environment()?, restore)
 }
 
 fn utility_command(
     program: &Path,
-    remove: Vec<OsString>,
-    values: Vec<(OsString, OsString)>,
-    files: Option<Arc<ConnectionFiles>>,
+    environment: UtilityEnvironment,
+    restore: bool,
 ) -> Result<Command> {
+    let UtilityEnvironment {
+        remove,
+        values,
+        files,
+        liveness,
+    } = environment;
     let mut options = values
         .iter()
         .find(|(name, _)| name == "PGOPTIONS")
@@ -285,6 +284,10 @@ fn utility_command(
         .env("PGAPPNAME", "rpgmigrate-schema")
         .arg("--no-password")
         .stdout(Stdio::null());
+    // libpq expands this string and still takes dbname, host, port, user and password from env.
+    if restore || !liveness.is_empty() {
+        command.arg(format!("--dbname={}", liveness.join(" ")));
+    }
     Ok(command)
 }
 
@@ -350,7 +353,7 @@ pub(crate) fn dump(
     let tools = tools(target_identity.major, io)?;
     let mut files = PrivateFiles::new()?;
     let (path, file) = files.file("schema.dump")?;
-    let mut command = utility(&tools.dump, &source)?;
+    let mut command = utility(&tools.dump, &source, false)?;
     command
         .args([
             "--format=custom",
@@ -460,12 +463,10 @@ pub(crate) fn restore_pre(
     }
     catalog::configure_durability(&mut target, io)?;
     let before = catalog::clone_object_inventory(&mut target, io)?;
-    let mut command = utility(&archive.tools.restore, &target)?;
+    let mut command = utility(&archive.tools.restore, &target, true)?;
     state.begin_pre_data()?;
-    // An empty explicit dbname selects restore connection mode; libpq reads PGDATABASE.
     command
         .args([
-            "--dbname=",
             "--section=pre-data",
             "--single-transaction",
             "--exit-on-error",
@@ -498,10 +499,9 @@ pub(crate) fn restore_post(
         ));
     }
     catalog::configure_durability(&mut target, io)?;
-    let mut command = utility(&archive.tools.restore, &target)?;
+    let mut command = utility(&archive.tools.restore, &target, true)?;
     command
         .args([
-            "--dbname=",
             "--section=post-data",
             "--exit-on-error",
             "--no-publications",
@@ -537,7 +537,7 @@ fn comparison_dump(
     selection: ComparisonDump<'_>,
     io: &IoControl,
 ) -> Result<()> {
-    let mut command = utility(&tools.dump, connection)?;
+    let mut command = utility(&tools.dump, connection, false)?;
     command
         .args([
             "--format=plain",
@@ -754,6 +754,55 @@ fn failure(message: &str) -> Error {
 mod tests {
     use super::*;
     use crate::contracts::Conninfo;
+    use crate::pg::{UTILITY_LIVENESS_KEYS, parsed_utility_environment};
+
+    fn utility_args(settings: &[u8], restore: bool) -> Vec<String> {
+        let environment = parsed_utility_environment(settings).unwrap();
+        utility_command(Path::new("/nonexistent/pg_dump"), environment, restore)
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn utility_argv_without_liveness_settings_is_unchanged() {
+        let settings = b"host=db port=5432 dbname=app user=app password=private-secret";
+        assert_eq!(utility_args(settings, false), ["--no-password"]);
+        assert_eq!(utility_args(settings, true), ["--no-password", "--dbname="]);
+    }
+
+    #[test]
+    fn utility_argv_carries_only_the_forwarded_liveness_settings() {
+        // The operator's exact source query string, plus secrets that must stay in env.
+        let settings = b"host=db port=5432 dbname=app user=app password=private-secret \
+            sslmode=disable keepalives=1 keepalives_idle=10 keepalives_interval=10 \
+            keepalives_count=6 tcp_user_timeout=60000";
+        let expected = "--dbname=keepalives=1 keepalives_idle=10 keepalives_interval=10 keepalives_count=6 tcp_user_timeout=60000";
+        for restore in [false, true] {
+            let args = utility_args(settings, restore);
+            assert_eq!(args, ["--no-password", expected]);
+            for arg in &args {
+                assert!(!arg.contains("private-secret") && !arg.contains("password="));
+                let Some(connection) = arg.strip_prefix("--dbname=") else {
+                    continue;
+                };
+                for item in connection.split(' ') {
+                    let (key, value) = item.split_once('=').unwrap();
+                    assert!(UTILITY_LIVENESS_KEYS.contains(&key), "{key} reached argv");
+                    assert!(!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
+                }
+            }
+        }
+        let target = b"host=db dbname=app keepalives=1 keepalives_idle=10 keepalives_interval=10 keepalives_count=6";
+        assert_eq!(
+            utility_args(target, true),
+            [
+                "--no-password",
+                "--dbname=keepalives=1 keepalives_idle=10 keepalives_interval=10 keepalives_count=6"
+            ]
+        );
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
@@ -863,7 +912,13 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         drop(script);
-        let mut command = utility_command(&program, vec![], values, Some(files)).unwrap();
+        let environment = UtilityEnvironment {
+            remove: vec![],
+            values,
+            files: Some(files),
+            liveness: vec![],
+        };
+        let mut command = utility_command(&program, environment, false).unwrap();
         command
             .env(MODE, "probe")
             .env(PROBE, serde_json::to_string(&probe).unwrap());
@@ -1023,6 +1078,7 @@ mod tests {
         let mut command = utility(
             &Path::new(context["bindir"].as_str().unwrap()).join("psql"),
             connection,
+            false,
         )
         .unwrap();
         assert!(
@@ -1285,6 +1341,7 @@ mod tests {
                     let failure = match utility(
                         &Path::new(context["bindir"].as_str().unwrap()).join("psql"),
                         &connection,
+                        false,
                     ) {
                         Err(error) => error,
                         Ok(_) => panic!("unmapped effective option must be refused before spawn"),
@@ -1292,6 +1349,7 @@ mod tests {
                     assert!(
                         failure.message
                             == "PostgreSQL utility connection settings cannot be represented safely"
+                            && failure.kind == ErrorKind::BadConfig
                     );
                 } else {
                     let environment = connection.utility_environment().unwrap();
@@ -1660,6 +1718,7 @@ mod tests {
             assert!(
                 failure.message
                     == "PostgreSQL utility connection settings cannot be represented safely"
+                    && failure.kind == ErrorKind::BadConfig
             );
             assert!(restore_pre(&options, &plan, &archive, &mut state, &io).is_err());
             assert!(
@@ -1703,7 +1762,7 @@ mod tests {
                 "post-data restore omitted its index"
             );
             let mut captured_dump =
-                utility(&archive.tools.dump, snapshot.connection().unwrap()).unwrap();
+                utility(&archive.tools.dump, snapshot.connection().unwrap(), false).unwrap();
             captured_dump
                 .args([
                     "--format=custom",
@@ -2258,7 +2317,7 @@ mod tests {
         )
         .unwrap();
         let (archive, _) = files.file("initial.dump").unwrap();
-        let mut command = utility(&tools.dump, &source).unwrap();
+        let mut command = utility(&tools.dump, &source, false).unwrap();
         command
             .args([
                 "--format=custom",
@@ -2270,10 +2329,9 @@ mod tests {
             .arg("--file")
             .arg(&archive);
         assert!(run(&mut command, &io, None).unwrap().success());
-        let mut command = utility(&tools.restore, &target).unwrap();
+        let mut command = utility(&tools.restore, &target, true).unwrap();
         command
             .args([
-                "--dbname=",
                 "--section=pre-data",
                 "--single-transaction",
                 "--exit-on-error",
