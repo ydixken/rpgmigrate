@@ -1,0 +1,100 @@
+name: Live profiles on current PostgreSQL minors
+
+# Advisory: required CI stays on pinned images; this surfaces new upstream minors early.
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-minors-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  live-profiles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        major: [16, 18]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the latest PGDG server, libpq 18 and locale sources
+        run: |
+          pgdg_key=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          pgdg_repository=https://apt.postgresql.org/pub/repos/apt
+          sudo install -d /usr/share/postgresql-common/pgdg /etc/postgresql-common
+          sudo curl --fail --location --proto '=https' --tlsv1.2 \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o "$pgdg_key"
+          . /etc/os-release
+          printf '%s\n' "deb [signed-by=$pgdg_key] $pgdg_repository ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          # The harness owns private clusters; a packaged main cluster would only hold port 5432.
+          echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.conf
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "postgresql-${{ matrix.major }}" \
+            'libpq-dev=18.*' 'libpq5=18.*' pkg-config locales
+          server=$(dpkg-query -W -f '${Version}' "postgresql-${{ matrix.major }}")
+          candidate=$(apt-cache policy "postgresql-${{ matrix.major }}" | awk '/Candidate:/ { print $2 }')
+          test "$server" = "$candidate"
+          case "$server" in *pgdg*) ;; *) echo "not a PGDG server package: $server" >&2; exit 1 ;; esac
+          dpkg-query -W libpq5 "postgresql-${{ matrix.major }}"
+      - name: Select the manifest's Rust toolchain
+        run: |
+          toolchain=$(python3 -c \
+            'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup override set "$toolchain"
+          rustc --version
+          cargo --version
+      - name: Install and verify Task from the shared checksum pin
+        run: |
+          task_bin=$(python3 tools/bootstrap-task.py)
+          dirname "$task_bin" >> "$GITHUB_PATH"
+      - name: Run every live profile against the installed minor
+        run: |
+          bindir=/usr/lib/postgresql/${{ matrix.major }}/bin
+          version=$("$bindir/postgres" --version | sed -E 's/.* ([0-9]+\.[0-9]+).*/\1/')
+          numeric=$(( ${{ matrix.major }} * 10000 + ${version#*.} ))
+          export PATH="$bindir:$PATH"
+          set -- PG_BINDIR="$bindir" RPGMIGRATE_TEST_EXPECTED_PG_VERSION="$version" \
+            RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM="$numeric"
+          logs=target/live-minors/$version
+          mkdir -p "$logs"
+          failed=
+          # Each profile runs even after an earlier one fails, so one run reports every break.
+          for target in test-db-self-check test-engine test-catalog test-source-catalog test-clone test-schema \
+            test-follow-source test-follow-snapshot test-follow-authority test-follow-receive test-follow-apply \
+            test-transport test-prepared test-replication test-authority; do
+            if task --output=interleaved --color=false "$target" "$@" > "$logs/$target.log" 2>&1; then
+              echo "$target passed"
+            else
+              echo "::error::$target failed on PostgreSQL $version"
+              failed="$failed $target"
+            fi
+          done
+          if env "$@" python3 tools/test-db.py -- cargo test --locked --test copy_integration -- --test-threads=1 \
+            > "$logs/e1.log" 2>&1; then
+            echo "e1 passed"
+          else
+            echo "::error::e1 failed on PostgreSQL $version"
+            failed="$failed e1"
+          fi
+          test -z "$failed" || { echo "failed on PostgreSQL $version:$failed" >&2; exit 1; }
+      - name: Retain live profile logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: live-minors-pg${{ matrix.major }}
+          path: target/live-minors/
+          if-no-files-found: error

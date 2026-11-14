@@ -15,6 +15,13 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 JOBS = {"checks", "dependencies", "docs", "engine-e2e", "runner-image"}
 PAIRS = ("16-16", "18-18", "16-18")
 ARCHES = {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}
+LIVE_WORKFLOW = ROOT / ".github/workflows/live-minors.yml"
+LIVE_REQUIRED = (
+    "\n    timeout-minutes: ", "persist-credentials: false", "python3 tools/bootstrap-task.py",
+    "        major: [16, 18]\n", "fail-fast: false", 'test "$server" = "$candidate"', "*pgdg*) ;;",
+    "'libpq5=18.*'", "--test copy_integration", 'test -z "$failed" || {', "        if: always()\n",
+    "actions/upload-artifact@", "path: target/live-minors/", "if-no-files-found: error",
+)
 
 
 def jobs(source):
@@ -75,6 +82,34 @@ def validate(source):
         raise ValueError("clone artifacts must contain only the sanitized receipt")
     if "path: target/image/smoke.json" not in sections["runner-image"]:
         raise ValueError("image artifact must bind the smoke receipt")
+
+
+def live_targets():
+    """Every tools/test-db.py mode as the Taskfile target that runs it."""
+    modes = re.findall(r'modes\.add_argument\("--([a-z-]+)"', (ROOT / "tools/test-db.py").read_text())
+    if not modes:
+        raise ValueError("no tools/test-db.py profiles found")
+    return {"test-db-self-check" if mode == "self-check" else "test-" + mode for mode in modes}
+
+
+def validate_live(source):
+    triggers = source.split("\non:\n", 1)[1].split("\n\n", 1)[0] if "\non:\n" in source else ""
+    if re.findall(r"^  ([a-z_]+):", triggers, re.MULTILINE) != ["schedule", "workflow_dispatch"]:
+        raise ValueError("live minors must run only on schedule and manual dispatch")
+    if "permissions:\n  contents: read\n" not in source or re.search(r"(?:write|read)-all|:\s*write\b|secrets\.", source):
+        raise ValueError("live minors permissions must remain read-only")
+    if re.search(r"continue-on-error|packages:|docker push|podman push", source):
+        raise ValueError("publication or ignored failures are forbidden")
+    actions = re.findall(r"^\s+(?:- )?uses: (\S+)", source, re.MULTILINE)
+    if not actions or any(not re.fullmatch(r"[\w.-]+/[\w.-]+@[a-f0-9]{40}", action) for action in actions):
+        raise ValueError("every action needs an immutable commit")
+    for fragment in LIVE_REQUIRED:
+        if fragment not in source:
+            raise ValueError(f"missing live minors control: {fragment.strip()}")
+    loop = re.search(r"for target in (.*?); do", source, re.DOTALL)
+    targets = set(loop[1].replace("\\\n", " ").split()) if loop else set()
+    if targets != live_targets():
+        raise ValueError("live minors must run exactly every tools/test-db.py profile")
 
 
 class WorkflowTests(unittest.TestCase):
@@ -149,6 +184,23 @@ class WorkflowTests(unittest.TestCase):
         for source in mutations:
             with self.subTest(source=source[-100:]), self.assertRaises(ValueError):
                 validate(source)
+
+    def test_live_minors_contract(self):
+        validate_live(LIVE_WORKFLOW.read_text())
+
+    def test_live_minors_refuses_push_missing_profile_or_ignored_failure(self):
+        source = LIVE_WORKFLOW.read_text()
+        mutations = [source.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n", 1),
+                     source.replace("  schedule:\n    - cron: '23 5 * * *'\n", "", 1),
+                     source.replace("contents: read", "contents: write", 1),
+                     re.sub(r"actions/checkout@[a-f0-9]{40}", "actions/checkout@main", source, count=1),
+                     source.replace("    steps:\n", "    continue-on-error: true\n    steps:\n", 1),
+                     *(source.replace(fragment, "", 1) for fragment in LIVE_REQUIRED),
+                     *(re.sub(rf"(?<=[ ]){re.escape(target)}(?=[ ;\n])", "", source, count=1) for target in live_targets()),
+                     source.replace("test-authority;", "test-authority test-unknown;", 1)]
+        for mutated in mutations:
+            with self.subTest(source=mutated), self.assertRaises(ValueError):
+                validate_live(mutated)
 
 
 if __name__ == "__main__":
