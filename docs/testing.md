@@ -108,6 +108,7 @@ Unset selects `local`: 2 CPUs each for the build, source, target and runner cont
 Admission refuses a host with fewer CPUs than the source, target and runner caps together: 6 for `local`, 4 for `hosted-linux`.
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
 The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
+A container can exit between the inspect and the `exec` that reads its limits; when a fresh inspect then shows it stopped, the read counts as not observed and polling continues, while any other `exec` failure fails the run.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 For each pair, the engine-e2e job runs the clone qualification, the follow smoke and the cutover producer in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.

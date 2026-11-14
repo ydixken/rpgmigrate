@@ -923,7 +923,14 @@ class RuntimeGuard:
         actual = validate_owned_container(actual or self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
         if actual.get("State", {}).get("Running") is not True:
             raise RuntimeError("effective limits require a live exact owned container")
-        observed = self.raw(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]).splitlines()
+        try:
+            observed = self.raw(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]).splitlines()
+        except SubprocessFailure as failure:
+            # An exit between the inspect and the exec leaves the caps unobserved; the final check still requires them.
+            if validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"]).get("State", {}).get("Running") is not False:
+                raise
+            entry.setdefault("cgroup_exec_after_exit", []).append(failure.metadata["diagnostic_id"])
+            return False
         try:
             quota, period = (int(value) for value in observed[0].split())
             memory = int(observed[1])
@@ -933,6 +940,7 @@ class RuntimeGuard:
             raise RuntimeError("actual owned cgroup CPU or memory limit is absent or differs") from None
         entry["cgroup_verified"] = True
         entry["cgroup_limits"] = {"cpu_quota": quota, "cpu_period": period, "memory_bytes": memory}
+        return True
 
     def observe_started_caps(self):
         # The 5 s sample misses a container that exits sooner, such as a quick follow smoke runner.
@@ -941,9 +949,7 @@ class RuntimeGuard:
             if entry.get("cgroup_verified") or entry.get("cleanup_status") != "pending":
                 continue
             actual = validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
-            if actual.get("State", {}).get("Running") is True:
-                self.observe_caps(entry, actual)
-            else:
+            if actual.get("State", {}).get("Running") is not True or not self.observe_caps(entry, actual):
                 waiting = True
         return waiting
 
@@ -1099,9 +1105,7 @@ class RuntimeGuard:
             if entry.get("cleanup_status") == "absent":
                 continue
             actual = validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
-            if actual.get("State", {}).get("Running") is True:
-                self.observe_caps(entry, actual)
-            elif entry.get("ready"):
+            if (actual.get("State", {}).get("Running") is not True or not self.observe_caps(entry, actual)) and entry.get("ready"):
                 raise RuntimeError("owned database stopped during resource sampling")
             if entry["role"] in ("source", "target") and entry.get("ready"):
                 raw = self.raw(["exec", entry["id"], "psql", "-X", "-qAt", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
@@ -1500,7 +1504,8 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                         or feature_mode and (details.get("version") != {"16": "16.15", "18": "18.6"}[major] or details.get("wal_level") != "logical")
                         or role not in network.get("Aliases", []) or network.get("NetworkID") != network_id):
                     raise RuntimeError("actual fresh server identity, startup settings, alias or PGDATA differ")
-                guard.observe_caps(entry, actual)
+                if not guard.observe_caps(entry, actual):
+                    raise RuntimeError("owned server stopped before its effective cgroup caps were observed")
                 entry.update(ready=True, server=details)
                 server_identities.append({**details, "id": cid, "image": identity, "role": role, "started_at": actual["State"]["StartedAt"], "pgdata_permissions": "700|postgres"})
                 guard.persist()
