@@ -903,7 +903,12 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-engine` at `2b9b11d` merges both; hosted ci.yml run 43621185148 passed 8 of 8 jobs.
   Its `dev-2b9b11da305b74172e89e6dcb877372c24f04ccd` runner images are arm64 `sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978` and amd64 `sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f`.
   Against `6f9263d` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
-- `fix/pgdg-fetch-retry-20261115` makes both PGDG key fetches retry transient network errors, because curl exit 56 failed hosted image builds three times in wave 10.
+- `fix/pgdg-fetch-retry-20261115` at `e078818` makes both PGDG key fetches retry transient network errors, because curl exit 56 failed hosted image builds three times in wave 10.
+- `feat/native-engine` at `09eecff` carries it; hosted ci.yml run 43659428587 passed 8 of 8 jobs, and its runner is not qualified.
+- `fix/schema-compare-chunks-20261115` at `f2f38e5` compares the schema dump bodies byte for byte, independent of read chunk boundaries and of header lines of different lengths (P-SCHEMA-CHUNKS).
+- `feat/native-engine` at `abb3c53` merges it; hosted ci.yml run 43676012182 passed 8 of 8 jobs.
+  Its `dev-abb3c53077448b04fe73ea068721852991d4aa85` runner images are arm64 `sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299` and amd64 `sha256:a73a393e9b62cf760705f6d455c868db068591f865e0fbac748f0d7fca6e71c3`.
+  Against `2b9b11d` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -976,6 +981,15 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   Its manager images are arm64 `sha256:7e58b1bbe00a91fab55c617b826ef0151a6082ec2557fc551cb3bbb78e0e48d6` and amd64 `sha256:4a7d9102b1ca05491645486c07ebcb68ac00094b95f39d7a75bfe8dfd43c0d74`, and its arm64 lock has SHA-256 `488b4ff76b6bb7c35aaa1098bd83262aeb3990f51002413e69fe03ae96cfb2ee`.
   M7-RUN4 passed fresh-clone and `native-refusal` on 16:16 on it, and proved the forwarded client keepalives live.
   automatic-cutover failed on all three pairs and fault-copy on 16:16, on four production defects (P-LAG, P-INVENTORY-OID, P-CATALOG-PG18-SLOT, P-RETRY-RELAY) and two suite defects (S-FAULT-COPY, S-LIVE-WRITER-LSN).
+- Wave 11 branches from `8fab794`:
+  - `fix/native-evidence-sql-20261115` at `a345472` fills the engine's `{pg18}` catalog placeholder per major and compares owned inventory publication oids as integers.
+  - `fix/native-source-exec-env-20261115` at `7cdac8e` gives the source observation exec `PGCONNECT_TIMEOUT=10` in its own argv and ties every native exec to its program's env check.
+  - `fix/native-retry-relay-20261115` at `584441b` relays the retry request through its own writer, ends the hold when the budget is spent, and paces gate reads with `RetryGateStatus.lastReadAt`.
+  - `fix/native-replication-lsn-20261115` at `e24a62d` reports native `writeLSN` and `replayLSN` from the lag sample.
+  - `fix/native-e2e-fault-copy-20261115` at `feb181c` kills fault-copy only while a sized bulk table is mid-COPY on the target.
+  - `test/native-seams-20261115` at `7c2e279` adds the cluster-free native seam harness, which found P-CLEANED-SOURCE-REUSE, P-SCHEMA-ACL and P-SCHEMA-CHUNKS.
+- `feat/native-operator-integration11-20261115` at `53231a0` merges those six and passed the seam harness on 24 of 27 steps on each pair, so it stopped at the gate and the line stays at `8fab794`.
+  The three failed steps are follow verification, cleaned evidence and finish, on P-SCHEMA-ACL and P-CLEANED-SOURCE-REUSE; M7-RUN5 did not start.
 
 ### Leader decisions, 2026-11-12
 
@@ -1055,6 +1069,18 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - The retry gate reads at most once per `retryGateInterval` across reconciles and restarts, through one optional durable timestamp in `RetryGateStatus`, and the budget-exhausted path ends the hold.
 - Both PGDG key fetches retry transient network errors, and the operator keeps the `2b9b11d` runner this wave.
 - The probe branches `ci/follow-harness-probe-20261113`, `ci/follow-harness-probe2-20261113` and `ci/live-minors-probe-20261114` are deleted with human approval.
+
+### Decisions, wave 12, 2026-11-15
+
+- The cleaned and cleanup-rejoin completion programs take one connection input per session they open, and the evidence program's one-use capability check stays.
+- Native is not granted `EXECUTE` on `pg_catalog.pg_replication_origin_*`, because the engine creates no replication origin.
+  The prerequisites docs become engine-specific, the e2e suite and the seam harness grant it only for legacy, and the native docs say that a grant left over from a legacy setup shows up as a schema difference and must be revoked.
+  The engine compare keeps comparing catalog ACLs, and whether it should scope them out is recorded for the M10 review.
+- The engine compares the dump bodies byte for byte, independent of read chunk boundaries and of differing header line lengths, and the operator qualifies the `abb3c53` runner this wave.
+- The operator's v7 receipt catalogs and fixtures are re-synced to the qualified engine source, admitting the single server-owned `pg_attver` attoption as engine `56d1277` does, and a test fails when their recorded engine commit differs from the qualified runner's source commit.
+- Native sets the write, replay and source LSN gauges from the same sample as `status.replication`.
+- Operator CI runs PostgreSQL with `wal_level=logical` and fails when the logical-slot live cases skip.
+- The seam harness gates integration on all three pairs twice: on the locked images, and on the newest CloudNativePG 16 and 18 minor images, with their digests recorded.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 
