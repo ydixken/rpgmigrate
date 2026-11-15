@@ -297,6 +297,7 @@ Before post-data starts, restart or resume with `--not-consistent` obtains a new
 It invalidates old completion markers and truncates only positively recorded owned data without CASCADE.
 A lost positive pre-data ownership handoff refuses recovery and preserves the uncertain objects for manual review or a fresh migration.
 Before advancing a restart generation, pre-data schema comparison under the new exported source snapshot refuses same-OID schema drift without target mutation.
+Schema comparison checks and skips each dump's provenance header, then compares the remaining bodies byte for byte, independent of header line lengths and read buffer boundaries.
 An uncertain post-data boundary refuses recopy.
 A completed clone accepts `--resume --not-consistent` only after positive durable target proof, preserving its generation and committed marker rows, and refuses unsafe restart.
 No path adopts or repairs pgcopydb state or foreign target objects.
