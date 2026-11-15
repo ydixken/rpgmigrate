@@ -1870,16 +1870,39 @@ M0–M5 remain closed and M6–M10 remain open.
   `feat/native-engine` fast-forwarded from `ba8ba1f` to `2b9b11d`, where ci.yml run 43621185148 passed 8 of 8 on its second attempt after engine-e2e 16-16 hit the same returncode 56 in the development image build.
   Development runner image run 43621185153 published `dev-2b9b11da305b74172e89e6dcb877372c24f04ccd` as arm64 `sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978` (executable SHA-256 `9324aa272daa804acd2d84f45d2eac02bdacd6dd7eedb05797e681a49b71bd29`) and amd64 `sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f` (executable SHA-256 `d8727fc059917857be437a2099be04537ea56f0b31c45d3b5f1dac221198e6e3`), both pulled anonymously with every layer verified.
   Against `6f9263d` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures, and a re-extraction of `6f9263d` reproduced the ENGINE-LAND5 values.
-  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND6-20261114/SHA256SUMS`.
-- [ ] Both PGDG key fetches (`Dockerfile:4`, `tools/e2e/Containerfile:5`) run curl without retries, and curl exit 56 failed hosted jobs in ENGINE-LAND5, ENGINE-UTIL-LIVENESS and ENGINE-LAND6.
-- [ ] Operator side of decision (h): `PGAPPNAME=pgm-retry-gate` in the retry-gate helper env, one table-driven test tying every native helper role's env to the evidence program's own check, a gate read with no known observation requeuing after `retryGateInterval`, terminal failure naming the retry-gate helper once `verdictOverdue` has passed, and no running clone in status after the worker Job failed.
-- [ ] Operator side of decision (i): automatic-cutover calls `expectDrainProgress` under native, and the M6 driver test refuses a different rpgmigrate binary hash.
-- [ ] Operator qualification of the `2b9b11d` runner: integration adds its digests and the executable SHA-256 the M6 driver pins, then a new manager image, a new lock and M7-RUN4.
-- [ ] Not yet proven live: the camelCase compare fix, native data verification, the drain proof, cleanup evidence on a completed Migration, and the pod-status drift fix beyond preflight.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND6-20261114/SHA256SUMS`, SHA-256 `761ca0025e6ae7e1077fcc0f18f73700644a83262182b2f2f05378bbbd12c2a0`.
+- [x] Both PGDG key fetches (`Dockerfile:4`, `tools/e2e/Containerfile:5`) ran curl without retries, and curl exit 56 failed hosted jobs in ENGINE-LAND5, ENGINE-UTIL-LIVENESS and ENGINE-LAND6; ENGINE-CI-RETRY in wave 11 adds the retries (decision q).
+- [x] OP-RETRY-GATE (operator): `fix/native-retry-gate-env-20261114` at `31b4eaa` implements decision (h).
+  The retry-gate helper env gains `PGAPPNAME=pgm-retry-gate`, and `native_helper_env_contract_test.go` builds every native helper Job through the controller's builders and runs each program's own env check under that env; at `b22985d` only the retry-gate row failed.
+  A gate read with no known observation holds with `RetryHeld=ProbeFailed` and requeues after `retryGateInterval`; once `FailedAt` plus the 15 min verdict deadline has passed, the Migration fails as `Failed/NativeRetryGateUnobserved` and `RetryHeld` becomes `False/MigrationFailed`.
+  `CloneCompleted` reads `AttemptFailed` while the gate decides and `CloneFailed` on a terminal failure, instead of `CloneRunning`.
+  The non-e2e Go suite passed 5977 tests with 318 of 318 envtest specs on PostgreSQL 16.15 and 18.6, and 25 of 27 mutations failed the tests; one survivor was equivalent and one is owned by the env contract test.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-RETRY-GATE-20261114/SHA256SUMS`, SHA-256 `5c068def4dce3006b97c4311baf1eee600417b97e3ecfa1189facae5ac35b446`.
+- [x] OP-SUITE-DRAIN (operator): `fix/native-e2e-auto-drain-20261114` at `c84e97e` implements decision (i).
+  The automatic-cutover spec calls `expectDrainProgress` under native, a source test fails if it stops doing so, and the M6 driver test refuses a different or missing rpgmigrate binary hash; with the old test file a `None` pin passed.
+  The cluster-free e2e suite passed 830 and 831 tests with `-race` on PostgreSQL 16.15 and 18.6, and 2 of 2 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SUITE-DRAIN-20261114/SHA256SUMS`, SHA-256 `5638b9767de681af1c888587f1f12ce27b06cee5594b21aaedc0fad3c3e7bda2`.
+- [x] INTEGRATE6 (operator): `feat/rpgmigrate-native-operator` fast-forwarded from `b22985d` to `8fab79477e01fd93bb4c8d85a55ab0120ba67020`, which merges `31b4eaa` and `c84e97e` and admits only the `2b9b11d` runner digests; the M6 driver pins its arm64 executable SHA-256 `9324aa272daa804acd2d84f45d2eac02bdacd6dd7eedb05797e681a49b71bd29`.
+  Its `dev-8fab79477e01fd93bb4c8d85a55ab0120ba67020` manager images are arm64 `sha256:7e58b1bbe00a91fab55c617b826ef0151a6082ec2557fc551cb3bbb78e0e48d6` and amd64 `sha256:4a7d9102b1ca05491645486c07ebcb68ac00094b95f39d7a75bfe8dfd43c0d74`, and the arm64 lock outside Git has SHA-256 `488b4ff76b6bb7c35aaa1098bd83262aeb3990f51002413e69fe03ae96cfb2ee`.
+  The non-e2e Go suite passed 5980 tests with 318 of 318 envtest specs on PostgreSQL 16 and 18, the cluster-free e2e suite passed 830 and 831 tests, 6 of 6 mutations failed the tests, and hosted manager image run 43627890336 and offline contracts run 43627890356 passed.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE6-20261114/SHA256SUMS`, SHA-256 `47cecccbbe29ad2ae908e65392395847dd7c9e24d1e97982ea87e312647222b4`.
+- [x] M7-RUN4 (operator): on `8fab794` with lock `488b4ff7`, fresh-clone (run `61b44a9e8605452892c155d1e7b5a60b`) and native-refusal (run `15f61616125647e1b5b0804af9e824fc`) passed on 16:16.
+  automatic-cutover failed on 16:16, 18:18 and 16:18 (runs `2a17f0b20e87416383bb40adef643a86`, `76562ab92d7344d5be0391c267f095a3`, `673db83b8e9d4a52b205161b721d9013`) and fault-copy failed on 16:16 (run `55b2925853d2431784381ebab3754bdc`); the seven specs that wait for lag or `CaughtUp` did not run.
+  The worker URIs carried the client keepalives, and pg_dump and pg_restore copied all 17 tables and 40 indexes with them on all three pairs, which is the first live proof of decision (g).
+  P-LAG: the source exec argv at `internal/native/source_program.go:58` sets no `PGCONNECT_TIMEOUT`, which `evidence_program.py:1639` requires and the worker env leaves out, so lag and source head are never sampled.
+  P-INVENTORY-OID: `owned_inventory_program.py:133` builds the oid into JSON as a string, so it never equals the integer list, and deleting any provisioned follow Migration hangs.
+  P-CATALOG-PG18-SLOT: `evidence_program.py:1065` carries the engine's `{pg18}` catalog placeholder unsubstituted, so the deletion inventory and the completed-evidence read fail with SQLSTATE 42601 on both majors, and the test fixtures carry it too.
+  P-RETRY-RELAY: `retry_readiness.go:66-79` sends the retry request through the completed-evidence writer, which refuses it, so the retry gate can never observe.
+  S-FAULT-COPY: at the guard's scale of 0.01 the base copy ends in about a second, so fault-copy never sees a COPY.
+  S-LIVE-WRITER-LSN: live-writer requires `writeLSN` and `replayLSN`, which native does not report.
+  Each defect has a reproduction run in both directions; five diagnostic 16:16 clusters with an instrumented manager confirmed the fixes but yield no receipt.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-RUN4-20261114/SHA256SUMS`, SHA-256 `9716de0215ebf964d571b74faea11596ce26f2933cf43684bd9dae18ce459c13`.
+- [x] Operator sides of decisions (h) and (i) landed in INTEGRATE6, and operator qualification of the `2b9b11d` runner with them.
+- [ ] Not yet proven live: the camelCase compare fix, native data verification, the drain proof, the retry gate, cleanup evidence on a completed Migration, and the pod-status drift fix beyond preflight; M7-RUN4 reached none of them.
 - [ ] Job, Migration and PVC status comparisons are still whole-status; none has been seen to drift live.
 - [ ] The live-minors schedule fires only from the default branch, so until it reaches main it runs by manual dispatch only.
 - [ ] `tests/support/follow_receive_live.py:18` still pins its image digests to 160015 and 180006.
-- [ ] The probe branches `ci/follow-harness-probe-20261113`, `ci/follow-harness-probe2-20261113` and `ci/live-minors-probe-20261114` stay until the human approves deleting them.
+- [x] The probe branches `ci/follow-harness-probe-20261113`, `ci/follow-harness-probe2-20261113` and `ci/live-minors-probe-20261114` were deleted under decision (r) after confirming no open pull request used them.
 
 Leader decisions, wave 10:
 
@@ -1889,6 +1912,34 @@ Leader decisions, wave 10:
 - (i) automatic-cutover calls `expectDrainProgress` under native, and the M6 driver gets a test that a different rpgmigrate binary hash is refused.
 - (j) Native compare shows only the final progress sample, a documented limitation to revisit in M10; the private helper result extension in `29f0c59` is confirmed, and both redundant checks stay.
 - (k) ENGINE-LIVE-MINORS lands as is, including the per-major follow-snapshot SQLSTATE keying.
+
+M0–M5 remain closed and M6–M10 remain open.
+
+### Wave 11, 2026-11-15
+
+- [x] ENGINE-CI-RETRY: `fix/pgdg-fetch-retry-20261115` makes both PGDG key fetches pass `--retry 5 --retry-delay 2 --retry-all-errors` and keep `--fail`, because plain `--retry` does not retry curl exit 56; `tools/ci/test_workflow.py` refuses either fetch without them.
+  It deletes exactly the three probe branches of decision (r); `git ls-remote --heads origin` listed 27 heads before and 24 after.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-CI-RETRY-20261115/`.
+- [ ] Operator production fixes P-LAG, P-INVENTORY-OID, P-CATALOG-PG18-SLOT and P-RETRY-RELAY (decision l), then a new manager image and lock.
+- [ ] The cluster-free native seam harness (decision m) gates integration before M7-RUN5.
+- [ ] S-FAULT-COPY (decision n), S-LIVE-WRITER-LSN (decision o) and retry-gate pacing (decision p).
+- [ ] The runner built from the ENGINE-CI-RETRY head is not qualified; the operator keeps the `2b9b11d` runner this wave.
+
+Leader decisions, wave 11:
+
+- (l) The four M7-RUN4 production fixes are approved as proposed.
+  P-LAG: `PGCONNECT_TIMEOUT=10` goes into the source exec's `/usr/bin/env` argv (`internal/native/source_program.go:58`), never into the worker env.
+  P-INVENTORY-OID: `owned_inventory_program.py:133` compares oids as integers.
+  P-CATALOG-PG18-SLOT: the operator substitutes the engine's `{pg18}` catalog placeholder per major exactly as `src/apply/metadata.rs` does, and no embedded SQL or test fixture may carry an unsubstituted template placeholder.
+  P-RETRY-RELAY: the retry request goes through its own writer adapter shaped like the inventory one, and the completed-evidence writer keeps refusing every other request kind.
+- (m) Every M7 run found production defects at the same three seams (Go env and argv into a program, Go request into a writer, program SQL against engine-written state) that unit tests with fakes and hand-made fixtures missed.
+  A cluster-free native seam harness that runs every native program through the operator's own Go builders against state the qualified engine wrote gates integration before any further M7 run.
+- (n) fault-copy creates a spec-local bulk table sized for a copy window of tens of seconds at the guard's fixed scale, and kills the runner when `pg_stat_progress_copy` on the target shows that table mid-copy (bytes processed above zero and below the total); never observing mid-copy fails the spec.
+- (o) Native reports `status.replication` `writeLSN` and `replayLSN` from the same sample that yields `lagBytes`, with `lagBytes` equal to `writeLSN` minus `replayLSN`, and the docs say what `replayLSN` means under native.
+- (p) `RetryGateStatus` gains one optional durable timestamp of the last gate read, and the gate reads at most once per `retryGateInterval` across reconciles and restarts.
+  The budget-exhausted path ends the hold (`RetryHeld=False/MigrationFailed`) as `NativeRetryGateUnobserved` does.
+- (q) Both PGDG key fetches retry transient network errors, and the operator keeps qualifying the `2b9b11d` runner this wave.
+- (r) Human approval 2026-11-15: delete exactly `ci/follow-harness-probe-20261113`, `ci/follow-harness-probe2-20261113` and `ci/live-minors-probe-20261114`, after confirming each exists and no open pull request uses it.
 
 M0–M5 remain closed and M6–M10 remain open.
 

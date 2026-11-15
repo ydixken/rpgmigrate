@@ -903,6 +903,7 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-engine` at `2b9b11d` merges both; hosted ci.yml run 43621185148 passed 8 of 8 jobs.
   Its `dev-2b9b11da305b74172e89e6dcb877372c24f04ccd` runner images are arm64 `sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978` and amd64 `sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f`.
   Against `6f9263d` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
+- `fix/pgdg-fetch-retry-20261115` makes both PGDG key fetches retry transient network errors, because curl exit 56 failed hosted image builds three times in wave 10.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -969,6 +970,12 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/rpgmigrate-native-operator` at `b22985d` merges both and admits only the `6f9263d` runner.
   Its manager images are arm64 `sha256:068b01b35390125a58d48e8f1bb6534567e7a2b69d8dbcc8626a54cdce35520e` and amd64 `sha256:027e99708c16ae1a7a2ba5a14b2efb5f0d9bf9d8f69e9b7187165dff4802e299`, and its arm64 lock has SHA-256 `a19d6d5abbf6cfb3991da3650cf2871ef17820d289ad580260ed59db6edd4b83`.
   M7-RUN3 passed `native-refusal` on 16:16 on it and failed automatic-cutover on all three pairs: the engine refused the operator's client keepalive settings (P-UTIL), and the retry-gate helper lacked `PGAPPNAME`, so the retry looped without end (P-RETRY).
+- `fix/native-retry-gate-env-20261114` at `31b4eaa` names the retry-gate session, ties every native helper role's env to the evidence program's check, bounds a gate that yields no observation, and stops reporting a failed worker as a running clone.
+- `fix/native-e2e-auto-drain-20261114` at `c84e97e` makes automatic-cutover require the native drain proof and makes the M6 driver test refuse a different rpgmigrate binary.
+- `feat/rpgmigrate-native-operator` at `8fab794` merges both and admits only the `2b9b11d` runner.
+  Its manager images are arm64 `sha256:7e58b1bbe00a91fab55c617b826ef0151a6082ec2557fc551cb3bbb78e0e48d6` and amd64 `sha256:4a7d9102b1ca05491645486c07ebcb68ac00094b95f39d7a75bfe8dfd43c0d74`, and its arm64 lock has SHA-256 `488b4ff76b6bb7c35aaa1098bd83262aeb3990f51002413e69fe03ae96cfb2ee`.
+  M7-RUN4 passed fresh-clone and `native-refusal` on 16:16 on it, and proved the forwarded client keepalives live.
+  automatic-cutover failed on all three pairs and fault-copy on 16:16, on four production defects (P-LAG, P-INVENTORY-OID, P-CATALOG-PG18-SLOT, P-RETRY-RELAY) and two suite defects (S-FAULT-COPY, S-LIVE-WRITER-LSN).
 
 ### Leader decisions, 2026-11-12
 
@@ -1036,6 +1043,18 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - automatic-cutover calls `expectDrainProgress` under native, and the M6 driver gets a test that a different rpgmigrate binary hash is refused.
 - Native compare shows only the final progress sample, a documented limitation to revisit in M10; the private helper result extension is confirmed and both redundant checks stay.
 - ENGINE-LIVE-MINORS lands as is, including the per-major follow-snapshot SQLSTATE keying.
+
+### Decisions, wave 11, 2026-11-15
+
+- The four M7-RUN4 production fixes are approved as proposed.
+  The source exec's `/usr/bin/env` argv carries `PGCONNECT_TIMEOUT=10` and the worker env does not; the owned inventory compares oids as integers; the operator substitutes the engine's `{pg18}` catalog placeholder per major exactly as the engine does, and no embedded SQL or fixture keeps a template placeholder; the retry request gets its own writer adapter and the completed-evidence writer keeps refusing every other request kind.
+- Every M7 run found production defects at the seams between Go env or argv and a program, a Go request and a writer, and program SQL and engine-written state, which fakes and hand-made fixtures missed.
+  A cluster-free native seam harness that runs every native program through the operator's own Go builders against state the qualified engine wrote gates integration before any further M7 run.
+- fault-copy uses a spec-local bulk table sized for a copy window of tens of seconds and kills the runner only when `pg_stat_progress_copy` shows that table mid-copy; never observing mid-copy fails the spec.
+- Native reports `writeLSN` and `replayLSN` from the same sample as `lagBytes`, with `lagBytes` equal to their difference.
+- The retry gate reads at most once per `retryGateInterval` across reconciles and restarts, through one optional durable timestamp in `RetryGateStatus`, and the budget-exhausted path ends the hold.
+- Both PGDG key fetches retry transient network errors, and the operator keeps the `2b9b11d` runner this wave.
+- The probe branches `ci/follow-harness-probe-20261113`, `ci/follow-harness-probe2-20261113` and `ci/live-minors-probe-20261114` are deleted with human approval.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 
