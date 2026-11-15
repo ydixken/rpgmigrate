@@ -93,6 +93,19 @@ def validate(source):
         raise ValueError("image artifact must bind the smoke receipt")
 
 
+KEY_BUILDS = (ROOT / "Dockerfile", ROOT / "tools/e2e/Containerfile")
+
+
+def validate_key_fetch(source):
+    # Hosted image builds lost jobs to curl exit 56 on this fetch; plain --retry skips that error.
+    fetches = [line for line in source.splitlines() if "ACCC4CF8.asc" in line and "curl " in line]
+    if len(fetches) != 1:
+        raise ValueError("expected exactly one PGDG key fetch")
+    flags = fetches[0].split()
+    if "--fail" not in flags or "--retry-all-errors" not in flags or not re.search(r"--retry [1-9]", fetches[0]):
+        raise ValueError("PGDG key fetch must fail on HTTP errors and retry transient network errors")
+
+
 def live_targets():
     """Every tools/test-db.py mode as the Taskfile target that runs it."""
     modes = re.findall(r'modes\.add_argument\("--([a-z-]+)"', (ROOT / "tools/test-db.py").read_text())
@@ -195,6 +208,15 @@ class WorkflowTests(unittest.TestCase):
         for source in mutations:
             with self.subTest(source=source[-100:]), self.assertRaises(ValueError):
                 validate(source)
+
+    def test_pgdg_key_fetch_retries_transient_errors(self):
+        for path in KEY_BUILDS:
+            source = path.read_text()
+            validate_key_fetch(source)
+            for mutated in (source.replace(" --retry-all-errors", "", 1), re.sub(r" --retry [0-9]+", "", source, count=1),
+                            source.replace("curl --fail ", "curl ", 1), source.replace("ACCC4CF8.asc", "missing.asc")):
+                with self.subTest(path=path.name, source=mutated[:400]), self.assertRaises(ValueError):
+                    validate_key_fetch(mutated)
 
     def test_live_minors_contract(self):
         validate_live(LIVE_WORKFLOW.read_text())
