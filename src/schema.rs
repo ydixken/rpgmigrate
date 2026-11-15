@@ -281,7 +281,6 @@ fn utility_command(
     command
         .envs(values)
         .env("PGOPTIONS", options)
-        .env("PGAPPNAME", "rpgmigrate-schema")
         .arg("--no-password")
         .stdout(Stdio::null());
     // libpq expands this string and still takes dbname, host, port, user and password from env.
@@ -337,13 +336,13 @@ pub(crate) fn dump(
     if clone.ticket != *ticket || clone.plan.policy != options.policy {
         return Err(failure("schema archive snapshot or policy binding differs"));
     }
-    let mut source = PgConnection::connect(&options.source, io)?;
+    let mut source = PgConnection::connect(&options.source, crate::pg::Role::Copy, io)?;
     if catalog::read_clone_source(&mut source, io)? != ticket.source {
         return Err(failure(
             "schema dump source identity differs from the snapshot",
         ));
     }
-    let mut target = PgConnection::connect(&options.target, io)?;
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
     let target_identity = catalog::read_clone_target(&mut target, io)?;
     if target_identity != clone.plan.target || ticket.source.major > target_identity.major {
         return Err(failure(
@@ -457,7 +456,7 @@ pub(crate) fn restore_pre(
     {
         return Err(failure("pre-data restore archive binding differs"));
     }
-    let mut target = PgConnection::connect(&options.target, io)?;
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
     if catalog::read_clone_target(&mut target, io)? != plan.target {
         return Err(failure("pre-data restore target identity differs"));
     }
@@ -492,7 +491,7 @@ pub(crate) fn restore_post(
     if options.policy != archive.policy || options.post_data_jobs == 0 {
         return Err(failure("post-data restore policy or concurrency differs"));
     }
-    let mut target = PgConnection::connect(&options.target, io)?;
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
     if catalog::read_clone_target(&mut target, io)? != archive.target {
         return Err(failure(
             "post-data target identity differs from the schema archive",
@@ -643,8 +642,8 @@ fn compare_schemas(
     ticket: Option<&SnapshotTicket>,
     io: &IoControl,
 ) -> Result<bool> {
-    let mut source = PgConnection::connect(&options.source, io)?;
-    let mut target = PgConnection::connect(&options.target, io)?;
+    let mut source = PgConnection::connect(&options.source, crate::pg::Role::Compare, io)?;
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Compare, io)?;
     catalog::configure_session(&mut source, io)?;
     catalog::configure_session(&mut target, io)?;
     let source_identity = catalog::read_clone_source(&mut source, io)?;
@@ -991,6 +990,7 @@ mod tests {
                     .expect("schema admin is required"),
             )
             .unwrap(),
+            crate::pg::Role::Copy,
             io,
         )
         .unwrap();
@@ -1266,7 +1266,9 @@ mod tests {
         ] {
             info = utility_keyword(&info, name, OsStr::new(&value));
         }
-        let connection = PgConnection::connect(&Conninfo::new(info).unwrap(), io).unwrap();
+        let connection =
+            PgConnection::connect(&Conninfo::new(info).unwrap(), crate::pg::Role::Copy, io)
+                .unwrap();
         let database = connection_value(&connection, "PGDATABASE");
         let mut captured = utility_probe(&connection, context, database.to_str().unwrap());
         for (name, expected) in [
@@ -1302,7 +1304,9 @@ mod tests {
         ] {
             direct = utility_keyword(&direct, name, OsStr::new(&value));
         }
-        let direct = PgConnection::connect(&Conninfo::new(direct).unwrap(), io).unwrap();
+        let direct =
+            PgConnection::connect(&Conninfo::new(direct).unwrap(), crate::pg::Role::Copy, io)
+                .unwrap();
         assert!(
             run(
                 &mut utility_probe(&direct, context, database.to_str().unwrap()),
@@ -1328,7 +1332,7 @@ mod tests {
             let root = PathBuf::from(std::env::var_os("RPGMIGRATE_TEST_UTILITY_ROOT").unwrap());
             let info =
                 Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTH_BASE").unwrap()).unwrap();
-            let connection = PgConnection::connect(&info, &io);
+            let connection = PgConnection::connect(&info, crate::pg::Role::Copy, &io);
             if ["insecure", "nonregular", "wrong-password"]
                 .iter()
                 .any(|name| case == *name)
@@ -1338,7 +1342,7 @@ mod tests {
                     "unsafe or incorrect service passfile authenticated"
                 );
             } else {
-                let connection = connection.unwrap();
+                let mut connection = connection.unwrap();
                 let before = catalog::clone_object_inventory(&mut admin, &io).unwrap();
                 if case == "unsupported-secret" || case == "unsupported-fallback" {
                     let failure = match utility(
@@ -1381,6 +1385,9 @@ mod tests {
                             "effective service passfile changed"
                         );
                     }
+                    let parent_name = connection.query("SHOW application_name", &io).unwrap();
+                    let parent_name =
+                        OsString::from_vec(parent_name.cell(0, 0).unwrap().unwrap().to_vec());
                     let mut command = utility_probe(
                         &connection,
                         &context,
@@ -1412,7 +1419,7 @@ mod tests {
                                 .into_os_string(),
                         ),
                         ("PGSSLMODE", "disable".into()),
-                        ("PGAPPNAME", "rpgmigrate-schema".into()),
+                        ("PGAPPNAME", parent_name.clone()),
                     ] {
                         assert!(
                             command
@@ -1477,6 +1484,7 @@ mod tests {
             .expect("isolated SCRAM fixture is required");
         let authenticated = PgConnection::connect(
             &Conninfo::new(utility_keyword(&base, "password", &password)).unwrap(),
+            crate::pg::Role::Copy,
             &io,
         )
         .unwrap();
@@ -1626,8 +1634,10 @@ mod tests {
             let target_info =
                 Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_SCHEMA_TARGET_ADMIN").unwrap())
                     .unwrap();
-            let mut source = PgConnection::connect(&source_info, &io).unwrap();
-            let mut target = PgConnection::connect(&target_info, &io).unwrap();
+            let mut source =
+                PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+            let mut target =
+                PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
             for (connection, expected) in [
                 (&source, config["source"].as_str().unwrap()),
                 (&target, config["target"].as_str().unwrap()),
@@ -1651,7 +1661,7 @@ mod tests {
                 );
             }
             let beta_info = Conninfo::new(config["beta_uri"].as_str().unwrap().into()).unwrap();
-            let mut beta = PgConnection::connect(&beta_info, &io).unwrap();
+            let mut beta = PgConnection::connect(&beta_info, crate::pg::Role::Copy, &io).unwrap();
             let before_beta = catalog::clone_object_inventory(&mut beta, &io).unwrap();
             source.query("CREATE SCHEMA utility_route", &io).unwrap();
             source
@@ -1713,7 +1723,8 @@ mod tests {
             let mut unsupported = original_service.clone();
             unsupported.extend_from_slice(b"sslpassword=private-fixture-secret\n");
             fs::write(&service, unsupported).unwrap();
-            let bad_target = PgConnection::connect(&options.target, &io).unwrap();
+            let bad_target =
+                PgConnection::connect(&options.target, crate::pg::Role::Copy, &io).unwrap();
             let failure = match preflight(snapshot.connection().unwrap(), &bad_target, &plan, &io) {
                 Err(error) => error,
                 Ok(_) => panic!("unmapped service secret must be refused"),
@@ -2431,8 +2442,10 @@ mod tests {
             policy: RestorePolicy::default(),
             not_consistent: false,
         };
-        let mut source = PgConnection::connect(&options.source, &io).unwrap();
-        let mut target = PgConnection::connect(&options.target, &io).unwrap();
+        let mut source =
+            PgConnection::connect(&options.source, crate::pg::Role::Copy, &io).unwrap();
+        let mut target =
+            PgConnection::connect(&options.target, crate::pg::Role::Copy, &io).unwrap();
         for sql in [
             "CREATE SCHEMA guard",
             "CREATE FUNCTION guard.constant() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
@@ -2481,7 +2494,8 @@ mod tests {
             )
             .unwrap();
         let verify = || {
-            let mut exporter = PgConnection::connect(&options.source, &io).unwrap();
+            let mut exporter =
+                PgConnection::connect(&options.source, crate::pg::Role::Copy, &io).unwrap();
             exporter
                 .query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", &io)
                 .unwrap();

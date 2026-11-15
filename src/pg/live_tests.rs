@@ -24,7 +24,7 @@ fn fixture() -> Conninfo {
 #[ignore = "requires isolated harness connection"]
 fn query_drains_errors_rejects_multiple_statements_and_remains_usable() {
     let io = control();
-    let mut connection = PgConnection::connect(&fixture(), &io).unwrap();
+    let mut connection = PgConnection::connect(&fixture(), crate::pg::Role::Copy, &io).unwrap();
     for sql in [
         "SELECT 1/0; SELECT 1",
         "SELECT 'private-row'; SELECT 1",
@@ -74,8 +74,8 @@ fn query_drains_errors_rejects_multiple_statements_and_remains_usable() {
 #[ignore = "requires isolated harness connection"]
 fn raw_copy_handles_empty_null_escaped_bytes_and_one_oversize_frame() {
     let io = control();
-    let mut source = PgConnection::connect(&fixture(), &io).unwrap();
-    let mut target = PgConnection::connect(&fixture(), &io).unwrap();
+    let mut source = PgConnection::connect(&fixture(), crate::pg::Role::Copy, &io).unwrap();
+    let mut target = PgConnection::connect(&fixture(), crate::pg::Role::Copy, &io).unwrap();
     for connection in [&mut source, &mut target] {
         connection
             .query(
@@ -142,7 +142,7 @@ fn raw_copy_handles_empty_null_escaped_bytes_and_one_oversize_frame() {
 #[ignore = "requires isolated harness connection"]
 fn late_copy_error_and_copy_abort_leave_transactions_rollbackable() {
     let io = control();
-    let mut source = PgConnection::connect(&fixture(), &io).unwrap();
+    let mut source = PgConnection::connect(&fixture(), crate::pg::Role::Copy, &io).unwrap();
     source.start_copy_out("COPY (SELECT CASE WHEN n=3 THEN 1/(n-3) ELSE n END FROM generate_series(1,3) n) TO STDOUT", &io).unwrap();
     let mut frames = 0;
     loop {
@@ -157,7 +157,7 @@ fn late_copy_error_and_copy_abort_leave_transactions_rollbackable() {
     }
     assert_eq!(frames, 2);
     assert!(source.query("SELECT 1", &io).is_ok());
-    let mut target = PgConnection::connect(&fixture(), &io).unwrap();
+    let mut target = PgConnection::connect(&fixture(), crate::pg::Role::Copy, &io).unwrap();
     target
         .query("CREATE TEMP TABLE pg_transport(n integer)", &io)
         .unwrap();
@@ -185,13 +185,15 @@ fn late_copy_error_and_copy_abort_leave_transactions_rollbackable() {
 #[test]
 #[ignore = "requires isolated harness connection"]
 fn query_deadline_and_cancellation_stop_waiting() {
-    let mut connection = PgConnection::connect(&fixture(), &control()).unwrap();
+    let mut connection =
+        PgConnection::connect(&fixture(), crate::pg::Role::Copy, &control()).unwrap();
     let mut io = control();
     io.deadline = Instant::now() + Duration::from_millis(20);
     let started = Instant::now();
     assert!(connection.query("SELECT pg_sleep(10)", &io).is_err());
     assert!(started.elapsed() < Duration::from_secs(1));
-    let mut connection = PgConnection::connect(&fixture(), &control()).unwrap();
+    let mut connection =
+        PgConnection::connect(&fixture(), crate::pg::Role::Copy, &control()).unwrap();
     let io = control();
     let cancellation = Arc::clone(&io.cancelled);
     let trigger = std::thread::spawn(move || {

@@ -620,7 +620,8 @@ fn run_page(
             let failure = &failure;
             handles.push(scope.spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut source = PgConnection::connect(&options.source, io)?;
+                    let mut source =
+                        PgConnection::connect(&options.source, crate::pg::Role::Copy, io)?;
                     crate::snapshot::import(&mut source, ticket, io)?;
                     let mut receipts = Vec::new();
                     loop {
@@ -630,7 +631,8 @@ fn run_page(
                             .map_err(|_| refusal("large-objects: worker queue is unavailable"))?
                             .next();
                         let Some(object) = object else { break };
-                        let mut target = PgConnection::connect(&options.target, io)?;
+                        let mut target =
+                            PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
                         crate::catalog::configure_session(&mut target, io)?;
                         let mut transaction =
                             LargeObjectTxn::begin(target, permit, object.oid, io)?;
@@ -795,7 +797,7 @@ pub(crate) fn run_final(
         return Ok(completion);
     }
     let mut snapshot = crate::snapshot::CloneSnapshot::export(
-        PgConnection::connect(&options.source, io)?,
+        PgConnection::connect(&options.source, crate::pg::Role::Copy, io)?,
         plan.generation,
         io,
     )?;
@@ -1162,7 +1164,7 @@ fn compare_snapshot(
     policy: &RestorePolicy,
     io: &IoControl,
 ) -> Result<()> {
-    let mut target = PgConnection::connect(&options.target, io)?;
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
     crate::catalog::configure_session(&mut target, io)?;
     crate::catalog::command(
         &mut target,

@@ -48,7 +48,7 @@ impl Fixture {
                 .expect("owned source admin required"),
         )
         .unwrap();
-        let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+        let mut admin = PgConnection::connect(&admin_info, crate::pg::Role::Copy, &io).unwrap();
         let database = format!(
             "m3_fault_{}_{}",
             std::process::id(),
@@ -71,7 +71,7 @@ impl Fixture {
             .into(),
         )
         .unwrap();
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
         catalog::configure_session(&mut source, &io).unwrap();
         if !empty {
             source
@@ -394,8 +394,12 @@ fn live_follow_control_permission_denied() {
             .into(),
         )
         .unwrap();
-        let mut restricted =
-            PgConnection::connect(&fixture.options.clone.source, &fixture.io).unwrap();
+        let mut restricted = PgConnection::connect(
+            &fixture.options.clone.source,
+            crate::pg::Role::Copy,
+            &fixture.io,
+        )
+        .unwrap();
         let flags=restricted.query("SELECT rolreplication,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls,pg_catalog.has_database_privilege(pg_catalog.current_database(),'CREATE'),pg_catalog.has_function_privilege('pg_catalog.pg_control_system()','EXECUTE'),pg_catalog.has_function_privilege('pg_catalog.pg_control_checkpoint()','EXECUTE') FROM pg_catalog.pg_roles WHERE rolname=CURRENT_USER",&fixture.io).unwrap();
         assert_eq!(flags.rows(), 1);
         for (column, expected) in [

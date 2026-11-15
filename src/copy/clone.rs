@@ -158,9 +158,9 @@ pub(crate) fn run_tables(
         table.table.all_columns != table.table.writable_columns
             && execution(plan, table.table.source_oid).is_ok_and(|profile| profile.parts.len() > 1)
     }) {
-        let mut source = PgConnection::connect(&options.source, io)?;
+        let mut source = PgConnection::connect(&options.source, crate::pg::Role::Copy, io)?;
         snapshot::import(&mut source, &ticket, io)?;
-        let mut target = PgConnection::connect(&options.target, io)?;
+        let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
         for table in &owned {
             if table.table.all_columns != table.table.writable_columns
                 && execution(plan, table.table.source_oid)?.parts.len() > 1
@@ -191,7 +191,7 @@ fn run_worker(
     queue: &Mutex<std::vec::IntoIter<(usize, CopyFormat, CopyPart, CopyPermit)>>,
     io: &IoControl,
 ) -> Result<Vec<TableReceipt>> {
-    let mut source = PgConnection::connect(&options.source, io)?;
+    let mut source = PgConnection::connect(&options.source, crate::pg::Role::Copy, io)?;
     snapshot::import(&mut source, ticket, io)?;
     let mut receipts = Vec::new();
     loop {
@@ -203,7 +203,7 @@ fn run_worker(
         let Some((index, format, part, permit)) = task else {
             break;
         };
-        let mut target = PgConnection::connect(&options.target, io)?;
+        let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)?;
         configure_session(&mut target, io)?;
         let mut transaction = CopyTxn::begin(target, permit, io)?;
         let report = transfer_clone_table(

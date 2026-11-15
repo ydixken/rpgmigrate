@@ -250,7 +250,7 @@ fn live_pipeline_commands_counts_dispatched_commands() {
     let conninfo =
         Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_FOLLOW_RECEIVE_SOURCE").unwrap()).unwrap();
     let io = control();
-    let mut connection = PgConnection::connect(&conninfo, &io).unwrap();
+    let mut connection = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
     connection.query("BEGIN", &io).unwrap();
     let mut pipeline: Pipeline<'_> = connection.pipeline(&io).unwrap();
     assert_eq!(pipeline.commands(), 0);
@@ -291,7 +291,7 @@ fn live_pipeline_commands_counts_dispatched_commands() {
         let prepared = connection.query("SELECT count(*) FROM pg_catalog.pg_prepared_statements WHERE name='blocked_transaction'", &io).unwrap();
         assert_eq!(prepared.cell(0, 0).unwrap(), Some(b"0".as_slice()));
     }
-    let mut observer = PgConnection::connect(&conninfo, &io).unwrap();
+    let mut observer = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
     let table = format!("receive_pipeline_guard_{}", std::process::id());
     observer
         .query(&format!("CREATE TABLE public.{table}(id integer)"), &io)
@@ -306,7 +306,7 @@ fn live_pipeline_commands_counts_dispatched_commands() {
         "/* leading */ COMMIT",
         "-- leading\nCOMMIT",
     ] {
-        let mut target = PgConnection::connect(&conninfo, &io).unwrap();
+        let mut target = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
         target.query("BEGIN", &io).unwrap();
         let mut pipeline = target.pipeline(&io).unwrap();
         pipeline
@@ -334,7 +334,7 @@ fn live_pipeline_commands_counts_dispatched_commands() {
             "pipeline transaction control reached dispatch: {command}"
         );
     }
-    let mut target = PgConnection::connect(&conninfo, &io).unwrap();
+    let mut target = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
     target.query("BEGIN", &io).unwrap();
     let mut pipeline = target.pipeline(&io).unwrap();
     pipeline

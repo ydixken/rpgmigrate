@@ -1360,7 +1360,7 @@ mod tests {
         let info =
             crate::contracts::Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_SOURCE").unwrap())
                 .unwrap();
-        let mut connection = PgConnection::connect(&info, &io).unwrap();
+        let mut connection = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
         configure_session(&mut connection, &io).unwrap();
         command(&mut connection, "BEGIN", "BEGIN", &io).unwrap();
         let schema = format!("identity_catalog_{}", std::process::id());

@@ -271,8 +271,8 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(30),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
-        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
         target
             .query("SET synchronous_commit = remote_apply", &io)
             .unwrap();

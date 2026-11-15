@@ -119,8 +119,8 @@ impl Fixture {
         )
         .unwrap();
         let io = control();
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
-        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
         let schema = format!(
             "m2_copy_{}_{}",
             std::process::id(),
@@ -139,7 +139,7 @@ impl Fixture {
             source.query(sql, &io).unwrap();
         }
         let mut snapshot = CloneSnapshot::export(
-            PgConnection::connect(&source_info, &io).unwrap(),
+            PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap(),
             CopyGeneration(1),
             &io,
         )
@@ -185,7 +185,7 @@ impl Fixture {
         let mut state = state::open_clone(&options.state, None, &io).unwrap();
         state.bind_clone(&plan, snapshot.ticket()).unwrap();
         let mut authority = CloneAuthority::acquire(
-            PgConnection::connect(&options.target, &io).unwrap(),
+            PgConnection::connect(&options.target, crate::pg::Role::Copy, &io).unwrap(),
             &mut state,
             &plan,
             &io,
@@ -236,7 +236,7 @@ impl Fixture {
     }
 
     fn target(&self) -> PgConnection {
-        PgConnection::connect(&self.options.target, &control()).unwrap()
+        PgConnection::connect(&self.options.target, crate::pg::Role::Copy, &control()).unwrap()
     }
 }
 
@@ -273,7 +273,7 @@ fn live_parallel_clone_preserves_snapshot_physical_heaps_identity_generated_and_
     let (ready, waiting) = std::sync::mpsc::sync_channel(1);
     let writer = std::thread::spawn(move || {
         let io = control();
-        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
         target.query("BEGIN", &io).unwrap();
         target
             .query(
@@ -294,7 +294,7 @@ fn live_parallel_clone_preserves_snapshot_physical_heaps_identity_generated_and_
             }
             std::thread::yield_now();
         }
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
         source
             .query(
                 &format!("INSERT INTO {schema}.parent VALUES (99,'written during COPY')"),
@@ -569,7 +569,7 @@ fn live_clone_rejects_replaced_snapshot_in_same_generation_before_copy() {
     let ddl = ["CREATE TABLE payload (value text)"];
     let mut fixture = Fixture::new(&ddl, &ddl, &["INSERT INTO payload VALUES ('original')"]);
     fixture.snapshot = CloneSnapshot::export(
-        PgConnection::connect(&fixture.options.source, &fixture.io).unwrap(),
+        PgConnection::connect(&fixture.options.source, crate::pg::Role::Copy, &fixture.io).unwrap(),
         CopyGeneration(1),
         &fixture.io,
     )

@@ -83,7 +83,8 @@ impl FollowSnapshot {
                 ));
             }
         };
-        let mut source = PgConnection::connect(&options.clone.source, io)?;
+        let mut source =
+            PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         catalog::configure_session(&mut source, io)?;
         catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
         if let Some(publication) = &publication {
@@ -203,7 +204,8 @@ impl FollowSnapshot {
                 "follow-restart: new source snapshot was lost after binding; fresh resource ownership requires manual inspection",
             ));
         }
-        let mut source = PgConnection::connect(&options.clone.source, io)?;
+        let mut source =
+            PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         catalog::configure_session(&mut source, io)?;
         catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
         catalog::command(
@@ -393,7 +395,8 @@ impl FollowSnapshot {
         io: &IoControl,
     ) -> Result<Self> {
         check_control(io)?;
-        let mut source = PgConnection::connect(&options.clone.source, io)?;
+        let mut source =
+            PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         require_clone_idle(&source)?;
         catalog::configure_session(&mut source, io)?;
         catalog::follow::preflight_follow(&mut source, plan, io)?;

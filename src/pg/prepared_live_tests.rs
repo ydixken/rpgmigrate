@@ -17,7 +17,7 @@ fn connection(io: &IoControl) -> PgConnection {
             .expect("isolated harness connection is required"),
     )
     .unwrap();
-    PgConnection::connect(&conninfo, io).unwrap()
+    PgConnection::connect(&conninfo, crate::pg::Role::Copy, io).unwrap()
 }
 
 pub(super) const IDENTITY_REWRITE_SQL: &str = "WITH rpgmigrate_old AS (DELETE FROM ONLY \"pg_temp\".\"identity_rewrite\" WHERE ctid = (SELECT ctid FROM ONLY \"pg_temp\".\"identity_rewrite\" WHERE \"id\" IS NOT DISTINCT FROM $3 AND \"other\" IS NOT DISTINCT FROM $4 LIMIT 1 FOR UPDATE) RETURNING \"id\", \"body\", \"other\") INSERT INTO \"pg_temp\".\"identity_rewrite\" (\"id\", \"body\", \"other\") OVERRIDING SYSTEM VALUE SELECT $1, rpgmigrate_old.\"body\", $2 FROM rpgmigrate_old";

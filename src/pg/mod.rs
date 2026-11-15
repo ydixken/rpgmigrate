@@ -19,7 +19,7 @@ mod test_support;
     unused_imports,
     reason = "The opaque handles are the crate's transport interface."
 )]
-pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, validate_conninfo};
+pub(crate) use ffi::{CopyBuffer, PgConnection, PgResult, Role, validate_conninfo};
 
 pub(crate) use ffi::CommitObservation;
 pub(crate) use ffi::PgParam;
@@ -39,7 +39,8 @@ pub(crate) use replication::ReplicationEnvelope;
 use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};
 
 pub(crate) fn ping(conninfo: &Conninfo, io: &IoControl) -> Result<()> {
-    let result = PgConnection::connect(conninfo, io)?.query("SELECT 1", io)?;
+    let result =
+        PgConnection::connect(conninfo, crate::pg::Role::Copy, io)?.query("SELECT 1", io)?;
     if result.rows() != 1 || result.cell(0, 0)? != Some(b"1") {
         return Err(error("PostgreSQL ping returned an unexpected result"));
     }

@@ -158,7 +158,7 @@ Each value MUST be ASCII digits only; any other value refuses.
 Without these settings, `pg_dump` gets no `--dbname` and `pg_restore` gets an empty `--dbname=` as before.
 
 > [!important]
-> Every other set option without a libpq environment variable, such as `sslpassword`, `oauth_client_secret`, `scram_client_key`, `replication` or `fallback_application_name`, refuses with exit 2 (`native:BadConfig`) before any mutation.
+> Every other set option without a libpq environment variable, such as `sslpassword`, `oauth_client_secret`, `scram_client_key`, `replication` or a caller-supplied `fallback_application_name`, refuses with exit 2 (`native:BadConfig`) before any mutation.
 > Secret-bearing and security settings never reach utility argv.
 
 ## Work identity and ownership
@@ -198,6 +198,17 @@ Its strict request binds version, stream, copy generation, slot nonce, target no
 Never adopt, convert, resume, restart, or clean pgcopydb state or resources.
 
 Application names are `rpgmigrate[<pid>] <role>` with exactly `copy`, `apply`, `receive`, and `compare` roles.
+The engine sets the name as libpq's `fallback_application_name` at connect time, so an `application_name` the caller pins in its conninfo or `PGAPPNAME` still wins.
+A caller's own `fallback_application_name`, from the conninfo or a service file, also keeps precedence, and utilities still refuse it.
+The phase that opens a session picks its role:
+
+- `receive`: replication-protocol connections, the source health check, and slot or publication creation, restart and cleanup, including `stream cleanup` on both sides.
+- `copy`: planning, snapshot export and import, schema, table and sequence copy, ANALYZE, large objects, `ping`, `copy table-data`, and every `pg_dump` and `pg_restore` child.
+- `apply`: apply, checkpoint, barrier, fence and drain sessions, final source sequence synchronization, and the `stream sentinel` commands.
+- `compare`: `compare schema` and `compare data`.
+
+`<pid>` is the engine process ID, including in a child's name.
+Children get the name through `PGAPPNAME`, because `pg_dump` and `pg_restore` pass their own `fallback_application_name`.
 The SQL LIKE prefix is `rpgmigrate[%`.
 The future runner flag is `--rpgmigrate-runner-image`, its chart value is `rpgmigrateRunnerImage`, and its default stays empty until image qualification.
 The runner executable is `/usr/local/bin/rpgmigrate`.

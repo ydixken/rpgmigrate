@@ -57,7 +57,7 @@ pub(crate) fn run(
     }
     let publication = source.quote_identifier(&binding.publication.name)?;
     let mut decoder = super::pgoutput::Decoder::new(stream, binding, options.limits)?;
-    let mut health = PgConnection::connect(&options.clone.source, io)?;
+    let mut health = PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
     source.start_replication(
         binding.slot.intent.binding.slot_name(),
         start.start_lsn().0,
@@ -1112,7 +1112,8 @@ mod tests {
             source.transaction_status().unwrap(),
             crate::pg::TransactionStatus::Idle
         );
-        let mut importer = PgConnection::connect(&conninfo, &control).unwrap();
+        let mut importer =
+            PgConnection::connect(&conninfo, crate::pg::Role::Copy, &control).unwrap();
         importer
             .query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", &control)
             .unwrap();
@@ -1151,7 +1152,7 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(5),
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        let mut admin = PgConnection::connect(&conninfo, &control).unwrap();
+        let mut admin = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &control).unwrap();
         let source = crate::catalog::read_clone_source(&mut admin, &control).unwrap();
         let stream = StreamId {
             run: RunId([3; 16]),

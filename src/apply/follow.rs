@@ -45,7 +45,8 @@ pub(crate) fn run(
         ));
     }
     let operation = operation_control(io);
-    let mut connection = PgConnection::connect(&options.clone.target, &operation)?;
+    let mut connection =
+        PgConnection::connect(&options.clone.target, crate::pg::Role::Apply, &operation)?;
     configure(&mut connection, &operation)?;
     let owned = native.owned_copy_tables()?;
     let mut authority = TargetAuthority::acquire_follow(connection, native, binding, &operation)?;
@@ -396,8 +397,12 @@ fn try_complete(
     if let Some(safe) = proof.feedback() {
         feedback.publish(safe)?;
     }
-    let mut source = PgConnection::connect(&options.clone.source, &operation_control(io))
-        .map_err(|error| crate::endpoint_error(error, crate::contracts::ErrorKind::Source))?;
+    let mut source = PgConnection::connect(
+        &options.clone.source,
+        crate::pg::Role::Apply,
+        &operation_control(io),
+    )
+    .map_err(|error| crate::endpoint_error(error, crate::contracts::ErrorKind::Source))?;
     catalog::configure_session(&mut source, &operation_control(io))?;
     let completed = authority.complete_follow(
         &options.clone,
