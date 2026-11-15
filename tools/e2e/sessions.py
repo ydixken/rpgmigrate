@@ -1,5 +1,6 @@
 """Census of the engine's PostgreSQL session names across clone, follow to endpos, compare and cleanup."""
 
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,7 @@ class ServerCensus:
         token = uuid.uuid4().hex[:12]
         self.stop_table, self.procedure = "census_stop_" + token, "census_" + token
         database.sql("postgres", SAMPLER.format(stop=self.stop_table, procedure=self.procedure))
+        self.address = database.sql("postgres", "SELECT host(inet_server_addr());").decode().strip()
         call = f"CALL {self.procedure}(ARRAY['{name}'], '{{}}'::jsonb);"
         self.process = subprocess.Popen([str(database.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
                                          "--dbname", database.connection("postgres"), "-c", call],
@@ -80,8 +82,17 @@ class ServerCensus:
         return list(json.loads(output).values())
 
 
+def address(text):
+    """Decodes a /proc/net/tcp{,6} address, which stores each 32-bit word little-endian."""
+    raw = bytes.fromhex(text)
+    if len(raw) == 4:
+        return str(ipaddress.IPv4Address(raw[::-1]))
+    value = ipaddress.IPv6Address(b"".join(raw[index:index + 4][::-1] for index in range(0, 16, 4)))
+    return str(value.ipv4_mapped or value)
+
+
 class ProcessCensus(threading.Thread):
-    """Maps local TCP ports to the engine and its pg_dump and pg_restore children while they live."""
+    """Maps (server address, local port) to the engine and its pg_dump and pg_restore children while they live."""
 
     KINDS = ("rpgmigrate", "pg_dump", "pg_restore")
 
@@ -133,8 +144,9 @@ class ProcessCensus(threading.Thread):
                 engine = pid
                 while engine in processes and processes[engine][1] != "rpgmigrate":
                     engine = processes[engine][0]
-                self.ports[int(fields[1].rsplit(":", 1)[1], 16)] = {"kind": processes[pid][1], "pid": pid,
-                                                                    "engine": engine if engine in processes else None}
+                # Connections to different servers may share a local port, so the server address is part of the key.
+                key = (address(fields[2].rsplit(":", 1)[0]), int(fields[1].rsplit(":", 1)[1], 16))
+                self.ports[key] = {"kind": processes[pid][1], "pid": pid, "engine": engine if engine in processes else None}
 
     def stop(self):
         self.finished.set()
@@ -253,7 +265,8 @@ def run(source, target, case, launch, driver):
                 driver.environment["PGAPPNAME"] = previous
         coverage, counts = set(), {}
         for side, database in (("source", source), ("target", target)):
-            observed, counts[side] = judge(side, rows[side], ports, phases, database.application, pinned)
+            local = {port: client for (host, port), client in ports.items() if host == censuses[side].address}
+            observed, counts[side] = judge(side, rows[side], local, phases, database.application, pinned)
             coverage |= observed
         required = REQUIRED if pinned is None else REQUIRED_PINNED
         missing = [item for item in required if item not in coverage]

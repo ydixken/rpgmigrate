@@ -79,14 +79,23 @@ class ProcessCensusTests(unittest.TestCase):
                 os.symlink(f"socket:[{inode}]", proc / str(pid) / "fd" / "3")
             (proc / "net").mkdir()
             header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
-            lines = [f"   0: 0100007F:{port:04X} 0200007F:1538 {state} 0:0 00:0 0 0 0 {inode}" for port, state, inode in
-                     ((40001, "01", 7001), (40002, "01", 7002), (40003, "01", 7003), (40004, "01", 7004), (40005, "0A", 7001))]
+            lines = [f"   0: 0100007F:{port:04X} {remote}:1538 {state} 0:0 00:0 0 0 0 {inode}" for port, remote, state, inode in
+                     ((40001, "0200007F", "01", 7001), (40002, "0300007F", "01", 7002), (40001, "0300007F", "01", 7003),
+                      (40004, "0200007F", "01", 7004), (40005, "0200007F", "0A", 7001))]
             (proc / "net/tcp").write_text(header + "\n".join(lines) + "\n")
+            mapped = "0000000000000000FFFF00000400007F"
+            (proc / "net/tcp6").write_text(header + f"   0: {mapped}:9C46 {mapped}:1538 01 0:0 00:0 0 0 0 7002\n")
             census = sessions.ProcessCensus(proc)
             census.sample()
-            self.assertEqual(census.ports, {40001: {"kind": "rpgmigrate", "pid": 10, "engine": 10},
-                                            40002: {"kind": "pg_restore", "pid": 11, "engine": 10},
-                                            40003: {"kind": "pg_restore", "pid": 12, "engine": 10}})
+            self.assertEqual(census.ports, {("127.0.0.2", 40001): {"kind": "rpgmigrate", "pid": 10, "engine": 10},
+                                            ("127.0.0.3", 40002): {"kind": "pg_restore", "pid": 11, "engine": 10},
+                                            ("127.0.0.3", 40001): {"kind": "pg_restore", "pid": 12, "engine": 10},
+                                            ("127.0.0.4", 40006): {"kind": "pg_restore", "pid": 11, "engine": 10}})
+
+    def test_addresses_decode_little_endian_words(self):
+        self.assertEqual(sessions.address("0A580A0A"), "10.10.88.10")
+        self.assertEqual(sessions.address("0000000000000000FFFF0000050A580A"), "10.88.10.5")
+        self.assertEqual(sessions.address("B80D01200000000000000000FF000000"), "2001:db8::ff")
 
 
 if __name__ == "__main__":
