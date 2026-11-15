@@ -46,6 +46,15 @@ class JudgeTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(RuntimeError):
                 self.judge(rows)
 
+    def test_sampler_controls_pass_only_once_the_backend_is_named(self):
+        for name, script in sessions.CONTROLS.items():
+            rows = [row for sample in script for row in sample]
+            with self.subTest(name=name):
+                if name == "settles":
+                    self.assertEqual(self.judge(rows)[0], {("source", "follow", "compare")})
+                else:
+                    self.assertRaises(RuntimeError, self.judge, rows)
+
     def test_pinned_names_must_survive_on_every_session(self):
         coverage, _ = self.judge([row(1, "pinned", 5001), row(2, "pinned", 5002)], pinned="pinned")
         self.assertEqual(coverage, {("source", "follow", "rpgmigrate"), ("source", "follow", "pg_dump")})
@@ -54,7 +63,7 @@ class JudgeTests(unittest.TestCase):
                 self.judge([row(1, "pinned", 5001), row(2, name, 5002)], pinned="pinned")
 
     def test_receipt_requires_every_variant_and_observation(self):
-        receipt = {"mode": "session_names", "cases": {
+        receipt = {"mode": "session_names", "sampler_controls": {side: list(sessions.CONTROLS) for side in ("source", "target")}, "cases": {
             variant: {"pinned": variant != "default", "counts": {"source": {"sessions": 1}, "target": {"sessions": 1}},
                       "observed": [list(item) for item in (sessions.REQUIRED if variant == "default" else sessions.REQUIRED_PINNED)]}
             for variant in sessions.VARIANTS}}
@@ -62,7 +71,9 @@ class JudgeTests(unittest.TestCase):
         broken = {**receipt, "cases": {**receipt["cases"], "default": {**receipt["cases"]["default"], "observed": receipt["cases"]["default"]["observed"][1:]}}}
         missing = {**receipt, "cases": {key: value for key, value in receipt["cases"].items() if key != "conninfo"}}
         empty = {**receipt, "cases": {**receipt["cases"], "environment": {**receipt["cases"]["environment"], "counts": {"source": {"sessions": 0}}}}}
-        for value in (broken, missing, empty, {**receipt, "mode": "smoke"}):
+        uncontrolled = {**receipt, "sampler_controls": {"source": list(sessions.CONTROLS), "target": ["settles"]}}
+        for value in (broken, missing, empty, uncontrolled, {key: item for key, item in receipt.items() if key != "sampler_controls"},
+                      {**receipt, "mode": "smoke"}):
             with self.assertRaises(RuntimeError):
                 sessions.validate_receipt(value)
 

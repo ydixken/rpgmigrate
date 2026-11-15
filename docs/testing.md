@@ -476,6 +476,9 @@ Run integrated lint/tests, independent safety review, and assigned Go suites onc
 
 The session census runs clone, follow to an endpos, `compare data`, `compare schema` and `stream cleanup` three times: unpinned, with `PGAPPNAME`, and with a conninfo `application_name`.
 A procedure inside each server samples `pg_stat_activity` every few milliseconds, and the harness maps each client socket, by server address and local port, to the engine and its `pg_dump` and `pg_restore` children through `/proc`.
+PostgreSQL publishes a new backend's entry a moment before its application name.
+So the procedure re-reads a backend that has no state and no name, for up to a second, until it reports either.
+A backend that stays unnamed, turns idle unnamed or exits unnamed still fails, and scripted controls on both servers prove each case before every run.
 Every client backend and walsender in the case databases, other than the harness's own, must carry `rpgmigrate[<pid>] <role>` for the invocation and phase that opened it, or the pinned name.
 Each required side, phase and role, the walsender and both utility children must be observed, so a census that sees no engine session fails.
 
