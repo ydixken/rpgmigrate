@@ -261,8 +261,9 @@ fn utility_command(
         .find(|(name, _)| name == "PGOPTIONS")
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
+    // pg_dump and pg_restore clear the other session timeouts themselves; idle parallel restore workers need this one.
     options.push(
-        " -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C",
+        " -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C -c idle_session_timeout=0",
     );
     let mut command = Command::new(program);
     command
@@ -1435,7 +1436,7 @@ mod tests {
                         b"-c statement_timeout=23456"
                     };
                     let mut expected_options = options.to_vec();
-                    expected_options.extend_from_slice(b" -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C");
+                    expected_options.extend_from_slice(b" -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C -c idle_session_timeout=0");
                     assert!(
                         command.get_envs().any(|(key, value)| key == "PGOPTIONS"
                             && value.is_some_and(|value| value.as_bytes() == expected_options)),

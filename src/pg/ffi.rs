@@ -524,14 +524,57 @@ impl PgConnection {
         if unsafe { pq::PQsetnonblocking(raw.as_ptr(), 1) } != 0 {
             return Err(error("PostgreSQL nonblocking mode could not be enabled"));
         }
-        Ok(Self {
+        let mut connection = Self {
             raw: Some(owner),
             phase: Phase::Idle,
             mode,
             replication: ReplicationState::default(),
             copy_pending: Vec::new(),
-        })
+        };
+        // Replication sessions disable them in their own setup, before their first protocol command.
+        if mode == Mode::Sql {
+            connection.disable_timeouts(io)?;
+        }
+        Ok(connection)
     }
+
+    /// Clears server, database and role timeouts that would end a long engine phase.
+    pub(crate) fn disable_timeouts(&mut self, io: &IoControl) -> Result<()> {
+        let mut names = vec![
+            "statement_timeout",
+            "lock_timeout",
+            "idle_in_transaction_session_timeout",
+            "idle_session_timeout",
+        ];
+        if self.server_version()? >= 170_000 {
+            names.push("transaction_timeout");
+        }
+        let run = |connection: &mut Self, sql: &str| match connection.mode {
+            Mode::Sql => connection.query(sql, io),
+            Mode::Logical => connection.logical_query(sql, io),
+        };
+        for name in &names {
+            if run(self, &format!("SET {name} TO 0"))?.command_tag()? != "SET" {
+                return Err(error("PostgreSQL session timeout was not disabled"));
+            }
+        }
+        let settings = names
+            .iter()
+            .map(|name| format!("pg_catalog.current_setting('{name}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = run(self, &format!("SELECT {settings}"))?;
+        if result.rows() != 1 || result.columns()? != names.len() {
+            return Err(error("PostgreSQL session timeouts are unconfirmed"));
+        }
+        for column in 0..names.len() {
+            if result.cell(0, column)? != Some(b"0") {
+                return Err(error("PostgreSQL session timeout remains enabled"));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn query(&mut self, sql: &str, io: &IoControl) -> Result<PgResult> {
         self.require_mode(Mode::Sql)?;
         self.operation(io, |connection, io| {

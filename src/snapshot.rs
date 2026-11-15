@@ -49,7 +49,6 @@ impl CloneSnapshot {
         require_clone_idle(&source)?;
         catalog::configure_session(&mut source, io)?;
         let before = catalog::read_clone_source(&mut source, io)?;
-        disable_clone_timeouts(&mut source, before.major, io)?;
         let pid = source.backend_pid()?;
         catalog::command(
             &mut source,
@@ -126,7 +125,6 @@ pub(crate) fn import(
             "clone-snapshot: importer source identity does not match",
         ));
     }
-    disable_clone_timeouts(source, ticket.source.major, io)?;
     let token = source.quote_literal(&ticket.token)?;
     catalog::command(
         source,
@@ -153,18 +151,6 @@ fn require_clone_idle(source: &PgConnection) -> Result<()> {
         return Err(refusal(
             "clone-snapshot: dedicated idle SQL connection required",
         ));
-    }
-    Ok(())
-}
-
-fn disable_clone_timeouts(source: &mut PgConnection, major: u32, io: &IoControl) -> Result<()> {
-    for name in ["statement_timeout", "idle_in_transaction_session_timeout"] {
-        catalog::command(source, &format!("SET {name} TO 0"), "SET", io)?;
-        catalog::require_setting(source, name, "0", io)?;
-    }
-    if major >= 17 {
-        catalog::command(source, "SET transaction_timeout TO 0", "SET", io)?;
-        catalog::require_setting(source, "transaction_timeout", "0", io)?;
     }
     Ok(())
 }

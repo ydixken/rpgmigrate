@@ -42,12 +42,12 @@ def validate(source):
         "engine-e2e": ("CONTAINER_RUNTIME: podman", "RPGMIGRATE_E2E_CAPACITY: hosted-linux", "podman --version", 'test "$podman_major" -ge 5', '["podman", "pull", "--quiet", reference]', "task test-e2e-clone-${{ matrix.pair }}",
                        'validate_receipt(report, clone.load_manifest())', 'test -s "target/e2e/${{ matrix.pair }}.json"',
                        "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
-                       "task test-e2e-sessions-${{ matrix.pair }}",
+                       "task test-e2e-sessions-${{ matrix.pair }}", "task test-e2e-timeouts-${{ matrix.pair }}",
                        "follow.validate_receipt(smoke, follow.load_manifest())",
                        "cutover.validate_receipt(producer, cutover.load_manifest(), require_images=True)",
-                       "sessions.validate_receipt(names)",
+                       "sessions.validate_receipt(names)", "timeouts.validate_receipt(limits)",
                        'test -s "target/e2e/follow-smoke-${{ matrix.pair }}.json"', 'test -s "target/e2e/follow-cutover-${{ matrix.pair }}.json"',
-                       'test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"'),
+                       'test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"', 'test -s "target/e2e/follow-timeouts-${{ matrix.pair }}.json"'),
         "runner-image": ("CONTAINER_RUNTIME: podman", "podman --version", "task image:build", "task --silent image:smoke",
                          "test -s target/image/smoke.json"),
     }
@@ -88,12 +88,12 @@ def validate(source):
     if "path: target/e2e/${{ matrix.pair }}.json" not in sections["engine-e2e"]:
         raise ValueError("clone artifacts must contain only the sanitized receipt")
     if ("            target/e2e/follow-smoke-${{ matrix.pair }}.json\n            target/e2e/follow-cutover-${{ matrix.pair }}.json\n"
-            "            target/e2e/follow-sessions-${{ matrix.pair }}.json\n") not in sections["engine-e2e"]:
-        raise ValueError("follow artifacts must contain only the sanitized smoke, cutover and session census receipts")
+            "            target/e2e/follow-sessions-${{ matrix.pair }}.json\n            target/e2e/follow-timeouts-${{ matrix.pair }}.json\n") not in sections["engine-e2e"]:
+        raise ValueError("follow artifacts must contain only the sanitized smoke, cutover, session census and timeout receipts")
     steps = re.findall(r"^      - name: [^\n]+\n        run: (task test-e2e-[a-z-]+-\$\{\{ matrix\.pair \}\})\n(?=      - )", sections["engine-e2e"], re.MULTILINE)
     if steps != ["task test-e2e-clone-${{ matrix.pair }}", "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
-                 "task test-e2e-sessions-${{ matrix.pair }}"]:
-        raise ValueError("every pair must run clone, follow smoke, cutover and session census once, unconditionally, in that order")
+                 "task test-e2e-sessions-${{ matrix.pair }}", "task test-e2e-timeouts-${{ matrix.pair }}"]:
+        raise ValueError("every pair must run clone, follow smoke, cutover, session census and session timeouts once, unconditionally, in that order")
     if "path: target/image/smoke.json" not in sections["runner-image"]:
         raise ValueError("image artifact must bind the smoke receipt")
 
@@ -165,6 +165,7 @@ class WorkflowTests(unittest.TestCase):
                         "test -s target/image/smoke.json", 'test "$podman_major" -ge 5', "runs-on: ubuntu-26.04",
                         "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
                         "task test-e2e-sessions-${{ matrix.pair }}", "sessions.validate_receipt(names)",
+                        "task test-e2e-timeouts-${{ matrix.pair }}", "timeouts.validate_receipt(limits)",
                         "follow.validate_receipt(smoke, follow.load_manifest())"):
             for replacement in ("", "true"):
                 with self.subTest(command=command, replacement=replacement), self.assertRaises(ValueError):

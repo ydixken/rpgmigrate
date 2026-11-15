@@ -208,6 +208,21 @@ The phase that opens a session picks its role:
 - `compare`: `compare schema` and `compare data`.
 
 `<pid>` is the engine process ID, including in a child's name.
+
+### Session timeouts
+
+Every engine session sets `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` and `idle_session_timeout` to `0`, and `transaction_timeout` to `0` on PostgreSQL 17 and later.
+SQL sessions do this at connect, before their first engine statement; replication sessions do it in their setup, before `CREATE_REPLICATION_SLOT` or `START_REPLICATION`.
+The engine then reads all of them back and refuses the session unless each is `0`.
+These values override the server, database and role settings and any `options` the caller passes, as `pg_dump` and `pg_restore` do.
+We clear them because a copy, an index build or a comparison legitimately outlasts any production value, and because the engine's own copy workers queue on the owned checkpoint lock, so even `lock_timeout` fails a clone without outside contention.
+`pg_dump` and `pg_restore` clear the first four and `transaction_timeout` themselves; the engine adds `-c idle_session_timeout=0` to their `PGOPTIONS`, because an idle parallel restore worker would otherwise be ended between items.
+
+> [!warning]
+> The source snapshot session stays in one `REPEATABLE READ READ ONLY` transaction from snapshot import to the end of the table copy.
+> It holds an `ACCESS SHARE` lock on every copied table, its indexes and its sequences, and its snapshot holds back the source's removal horizon.
+> A source `ALTER TABLE`, `TRUNCATE`, `DROP` or `VACUUM FULL` on a copied table waits for the whole copy, and queries queued behind that DDL wait with it.
+> With `--follow` the same session first creates the publication, so it is named `receive`; a plain clone names it `copy`.
 Children get the name through `PGAPPNAME`, because `pg_dump` and `pg_restore` pass their own `fallback_application_name`.
 The SQL LIKE prefix is `rpgmigrate[%`.
 The future runner flag is `--rpgmigrate-runner-image`, its chart value is `rpgmigrateRunnerImage`, and its default stays empty until image qualification.

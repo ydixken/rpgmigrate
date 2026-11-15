@@ -494,7 +494,7 @@ impl FollowSnapshot {
                 "follow-source: replication exporter identity differs from the plan",
             ));
         }
-        configure_follow_exporter(&mut exporter, plan.source.major, io)?;
+        configure_follow_exporter(&mut exporter, io)?;
         let publication = if let Some(publication) = reusable_publication {
             publication
         } else {
@@ -669,14 +669,9 @@ fn pending_publication_present(
     Ok(true)
 }
 
-fn configure_follow_exporter(
-    exporter: &mut PgConnection,
-    major: u32,
-    io: &IoControl,
-) -> Result<()> {
+fn configure_follow_exporter(exporter: &mut PgConnection, io: &IoControl) -> Result<()> {
+    exporter.disable_timeouts(io)?;
     for (name, value) in [
-        ("statement_timeout", "0"),
-        ("idle_in_transaction_session_timeout", "0"),
         ("client_encoding", "UTF8"),
         ("DateStyle", "ISO, YMD"),
         ("IntervalStyle", "postgres"),
@@ -693,20 +688,6 @@ fn configure_follow_exporter(
         let observed = exporter.logical_query(&format!("SHOW {name}"), io)?;
         if observed.rows() != 1 || observed.cell(0, 0)? != Some(value.as_bytes()) {
             return Err(follow_refusal("follow-source: exporter setting differs"));
-        }
-    }
-    if major >= 17 {
-        let set = exporter.logical_query("SET transaction_timeout TO 0", io)?;
-        if set.command_tag()? != "SET" {
-            return Err(follow_refusal(
-                "follow-source: exporter transaction timeout was not disabled",
-            ));
-        }
-        let value = exporter.logical_query("SHOW transaction_timeout", io)?;
-        if value.rows() != 1 || value.cell(0, 0)? != Some(b"0") {
-            return Err(follow_refusal(
-                "follow-source: exporter transaction timeout differs",
-            ));
         }
     }
     Ok(())
