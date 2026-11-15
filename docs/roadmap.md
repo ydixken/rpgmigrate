@@ -909,6 +909,11 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-engine` at `abb3c53` merges it; hosted ci.yml run 43676012182 passed 8 of 8 jobs.
   Its `dev-abb3c53077448b04fe73ea068721852991d4aa85` runner images are arm64 `sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299` and amd64 `sha256:a73a393e9b62cf760705f6d455c868db068591f865e0fbac748f0d7fca6e71c3`.
   Against `2b9b11d` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
+- `fix/session-application-names-20261115` at `2829558` names every engine session, and the pg_dump and pg_restore children, `rpgmigrate[<pid>] <role>` through `fallback_application_name`, so a name the caller pins still wins (P-APPNAME).
+  Its session census fails on the `888a378` engine and runs in ci.yml for every pair.
+- `feat/native-engine` at `db50bc9` merges it; hosted ci.yml run 43705798269 passed 8 of 8 jobs.
+  Its `dev-db50bc999319956b2a0b220208c90f0b5fae274b` runner images are arm64 `sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87` and amd64 `sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412`.
+  Against `abb3c53` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -989,7 +994,18 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   - `fix/native-e2e-fault-copy-20261115` at `feb181c` kills fault-copy only while a sized bulk table is mid-COPY on the target.
   - `test/native-seams-20261115` at `7c2e279` adds the cluster-free native seam harness, which found P-CLEANED-SOURCE-REUSE, P-SCHEMA-ACL and P-SCHEMA-CHUNKS.
 - `feat/native-operator-integration11-20261115` at `53231a0` merges those six and passed the seam harness on 24 of 27 steps on each pair, so it stopped at the gate and the line stays at `8fab794`.
-  The three failed steps are follow verification, cleaned evidence and finish, on P-SCHEMA-ACL and P-CLEANED-SOURCE-REUSE; M7-RUN5 did not start.
+  The three failed steps are follow verification, cleaned evidence and finish, on P-SCHEMA-ACL and P-CLEANED-SOURCE-REUSE; M7-RUN5 did not start then.
+- Wave 12 branches from `53231a0`:
+  - `fix/native-cleaned-sessions-20261115` at `34d36fc` gives each cleaned and cleanup-rejoin completion session its own connection input (P-CLEANED-SOURCE-REUSE).
+  - `fix/native-origin-grants-20261115` at `66edab8` grants the replication origin functions for pgcopydb only, gates the legacy preflight's grant block to pgcopydb, and lets the seam harness override its PostgreSQL images by digest (P-SCHEMA-ACL).
+  - `fix/native-catalog-engine-sync-20261115` at `873bb1f` renders the v7 receipt catalogs from the engine source and fails when their recorded engine commit is not the qualified runner's.
+  - `ci/logical-wal-level-20261115` at `5b61da4` runs the ci.yml PostgreSQL services with `wal_level=logical` and fails the logical-slot live case instead of skipping it; no hosted ci.yml run covers it.
+  - The native LSN gauges branch of decision (w) was not delivered.
+- `feat/rpgmigrate-native-operator` at `861ff86` merges those four onto `53231a0` and admits only the `abb3c53` runner.
+  The seam harness passed 27 of 27 steps on 16:16, 18:18 and 16:18, on the locked images and on the newest CloudNativePG builds `ghcr.io/cloudnative-pg/postgresql@sha256:a3af182e7b0ac01d01cb9dacbde55cf46dbfeda44d43dd5a69a580118428a9c9` (16.15) and `ghcr.io/cloudnative-pg/postgresql@sha256:d7ac905ba127791b973125a8004a7250eeb49878eee30d3a858794e860312a0c` (18.6).
+  Its manager images are arm64 `sha256:7db68a1e076bc64503bc7670d97f81e83d2b97ba7efe8e0e37f7c3f7e1e74261` and amd64 `sha256:af008dbc23a212b075380d30f5b91091921faf1a1a8effba6cf884012fb9a1bd`, and its arm64 lock has SHA-256 `d8c1548c1653cad1bd5a671b9bb77c322561276af55ac6f3ef204c56fba0a74e`.
+  M7-RUN5 passed fault-delete, fresh-clone and `native-refusal` on 16:16 on it, and both TERM receipts passed.
+  automatic-cutover on all three pairs, live-writer and fault-suspend stalled at `CuttingOver` on P-CLEANED-CLOSURE, and fault-copy failed because the engine left its session names empty (P-APPNAME).
 
 ### Leader decisions, 2026-11-12
 
@@ -1081,6 +1097,17 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - Native sets the write, replay and source LSN gauges from the same sample as `status.replication`.
 - Operator CI runs PostgreSQL with `wal_level=logical` and fails when the logical-slot live cases skip.
 - The seam harness gates integration on all three pairs twice: on the locked images, and on the newest CloudNativePG 16 and 18 minor images, with their digests recorded.
+
+### Decisions, wave 13, 2026-11-15
+
+- When a state-helper relay is refused, the operator waits for that helper Job to end with the same poll and inside the same 90 s context as the success path, then judges closure with the same checks; a mismatch, or a failed Job where success was expected, still fails at once.
+  The fix lands once in the shared code, and the seam harness drives `finishNativeFollow` in the manager's own order.
+- The engine names every libpq session it opens `rpgmigrate[<pid>] <role>` with exactly the contract roles `copy`, `apply`, `receive` and `compare`, as `fallback_application_name`, so a name the caller pins still wins, and the operator qualifies the `db50bc9` runner this wave.
+- Every consumer of the engine session name gets a positive control, so a count of zero counts only after the same check saw the live engine's sessions, and the seam harness gains a streaming session-name census on each side.
+- The pass that triggers automatic cutover first applies the native progress sample, and within one attempt a missing or in-flight sample leaves the phase, `CaughtUp` and `status.replication` unchanged.
+- The guard's 1800 s cap stays and the native follow spec timeouts fit inside it; the fault-copy copy window is at least four times the probe's worst-case detection interval; the intermittent `TestCoverageCasesApply` failure is root-caused without weakening its check.
+- Gating the legacy origin-grant preflight block to pgcopydb and revoking the grant for native in the suite are accepted, and a native preflight check for a leftover legacy grant is deferred to the M10 review.
+- The native LSN gauges are re-delegated from `861ff86`, and hosted ci.yml for the logical `wal_level` change waits on a pull request that needs the user's go-ahead.
 
 M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
 

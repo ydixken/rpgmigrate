@@ -1960,7 +1960,7 @@ M0–M5 remain closed and M6–M10 remain open.
 - [x] M7-RUN5 (operator) did not start, because INTEGRATE7 did not pass the seam harness; no kind cluster was created.
   Evidence: `/private/var/tmp/rpgmigrate-M7-RUN5-20261115/SHA256SUMS`, SHA-256 `53c444b0a1db3737144eb2fccbe0f4a9f66faf3efb9a26da1f75e0f1b43826f2`.
 - [x] The runner built from `09eecff` was not qualified; the operator kept the `2b9b11d` runner in wave 11.
-- [ ] The wave 11 operator fixes have run only in the seam harness: none is on the operator line, in a manager image or in a lock, and fault-copy and the lag-dependent specs have not run on kind.
+- [x] The wave 11 operator fixes reached the operator line at `861ff86` through INTEGRATE8, and M7-RUN5 ran fault-copy and the lag-dependent specs on kind (wave 12 below).
 
 Leader decisions, wave 11:
 
@@ -1991,10 +1991,67 @@ Leader decisions, wave 11:
   Against `2b9b11d` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures, because the `e078818` retry flags touch only the builder stage's key fetch.
   A re-extraction of `2b9b11d` reproduced the ENGINE-LAND6 values.
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND7-20261115/SHA256SUMS`, SHA-256 `48d6637741d1fdaab4fcc9f8cb2c81f2028e9df19dc4d4758c66f6068f31de57`.
-- [ ] Operator qualification of the `abb3c53` runner (decision u), with the fixes of decisions (s), (t), (v), (w) and (x), then the seam harness gate of decision (y), INTEGRATE8, a new manager image and lock, and M7-RUN5.
-- [ ] The live schema profile compares dumps within one major, so the cross-major compare is proven only by the unit tests and the reproduction until the seam harness runs 16:18 on the `abb3c53` runner.
+- [x] OP-CLEANED-SESSIONS (operator): `fix/native-cleaned-sessions-20261115` at `34d36fc` implements decision (s).
+  `cleaned_inputs` and `rejoin_inputs` add `source_before` and `source_after` connection inputs, so each source session claims its own input, and the one-use check in `evidence_program.py` is unchanged.
+  `TestNativeCompletionSessionsLive` runs both observations with real libpq sessions on PostgreSQL 16.15 and 18.6 in six cases, and all 7 mutations failed the offline tests.
+  The non-e2e Go suite passed 6012 tests on 16.15 and 18.6, and the 16:16 seam harness passed 26 of 27 steps, failing only follow verification on P-SCHEMA-ACL.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-CLEANED-SESSIONS-20261115/SHA256SUMS`, SHA-256 `55fc8df9735988a9730f9ca3bd77499af5b02f3a11078ae0d2bd25e1c5950810`.
+- [x] OP-NATIVE-GRANTS (operator): `fix/native-origin-grants-20261115` at `66edab8` implements decision (t) and the seam harness image override of decision (y).
+  The suite grants `EXECUTE` on `pg_catalog.pg_replication_origin_*` for pgcopydb only and revokes it for native, the harness grants only `SET` on `session_replication_role`, and the legacy preflight's origin-grant block runs for pgcopydb only.
+  `SOURCE_IMAGE` and `TARGET_IMAGE` must be `repository@sha256:<64 hex>`, and the harness refuses a server whose major does not match its side of `PAIR`.
+  The cluster-free e2e suite passed 212 tests with `-race` on PostgreSQL 16 and 18, and 5 of 5 mutations failed the tests.
+  Its one red gate, `TestNativeEvidenceSQLLive/test_ReceiptCatalogVerdicts`, failed the same way on `53231a0` and passes after OP-CATALOG-SYNC.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-GRANTS-20261115/SHA256SUMS`, SHA-256 `ed459bca82cf8c58640c157448ed5994b578168ef965e98004099967a94b1f41`.
+- [x] OP-CATALOG-SYNC (operator): `fix/native-catalog-engine-sync-20261115` at `873bb1f` implements decision (v).
+  `hack/sync-native-catalogs.py` renders the v7 receipt catalogs, their columns and the source manifest from engine `src/apply/metadata.rs`, reproduces the `53231a0` fixtures from `daeac05` byte for byte, and refuses when the engine snippets it copies change.
+  `TestCatalogFixturesMatchQualifiedRunner` fails when the manifest's `source_commit` differs from `qualifiedRunnerSourceCommit` or is missing.
+  The evidence program is repinned to SHA-256 `a091c85a7545b580b8b2aa782e5d1c310a1714e05a77f15dff0411d505ef1e62` (122199 of 122880 bytes).
+  The live test failed 2 cases on 16.16 and 18.7 before the fix and passes on 16.16, 18.7, 16.15 and 18.6 after it, the non-e2e Go suite passed 6006 tests on 16.15 and 18.6, and every mutation failed a test.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-CATALOG-SYNC-20261115/SHA256SUMS`, SHA-256 `0d1f3b57427e8ba38c0f343888d8bd025b4070e369782f908f8b44e8615627f0`.
+- [x] OP-CI-LOGICAL (operator): `ci/logical-wal-level-20261115` at `5b61da4` implements decision (x), proven locally only.
+  Both ci.yml test services set `POSTGRES_INITDB_ARGS: -c wal_level=logical`, every step that sets `PGCOPYDB_TEST_PGURI` sets `PGCOPYDB_TEST_REQUIRE_LOGICAL=1`, and the logical-slot live case then fails on a `replica` server instead of skipping.
+  `TestCIRunsLogicalSlotCases` fails when either setting leaves ci.yml, and 2 of 2 mutations showed it.
+  ci.yml runs only on `main`, one test branch and pull requests, so no hosted ci.yml run covers the change.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-CI-LOGICAL-20261115/SHA256SUMS`, SHA-256 `45e6195fd92619a57d67d5693afd4e7a76badca55886fbb12dee17a7147787d6`.
+- [ ] OP-NATIVE-LSN-GAUGES (decision w) was not delivered: its agent died with uncommitted edits in six files, so nothing was integrated, and decision (af) re-delegates it.
+- [x] INTEGRATE8 (operator): `feat/native-operator-integration11-20261115` at `861ff86` merges the four branches above onto `53231a0` and qualifies the `abb3c53` runner, refusing both `2b9b11d` digests.
+  The seam harness passed 27 of 27 steps, with the retry run 9 of 9, in six runs: 16:16, 18:18 and 16:18 on the locked CloudNativePG images and again on the newest builds.
+  The newest builds are `ghcr.io/cloudnative-pg/postgresql@sha256:a3af182e7b0ac01d01cb9dacbde55cf46dbfeda44d43dd5a69a580118428a9c9` (16.15) and `ghcr.io/cloudnative-pg/postgresql@sha256:d7ac905ba127791b973125a8004a7250eeb49878eee30d3a858794e860312a0c` (18.6), because CloudNativePG publishes no newer minor.
+  The 16:18 schema compare matched on both image sets, so P-SCHEMA-CHUNKS is fixed live.
+  The non-e2e Go suite passed 6021 tests on 16.15 and 18.6, the cluster-free e2e suite passed 839 and 840 tests with `-race`, and 8 of 8 mutations failed the tests.
+  `feat/rpgmigrate-native-operator` fast-forwarded from `8fab794` to `861ff86`, whose manager images are arm64 `sha256:7db68a1e076bc64503bc7670d97f81e83d2b97ba7efe8e0e37f7c3f7e1e74261` and amd64 `sha256:af008dbc23a212b075380d30f5b91091921faf1a1a8effba6cf884012fb9a1bd`.
+  The arm64 lock outside Git has SHA-256 `d8c1548c1653cad1bd5a671b9bb77c322561276af55ac6f3ef204c56fba0a74e`.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE8-20261115/SHA256SUMS`, SHA-256 `d957cc24b0d6db82c13ce52e95a51e7a16cad3c7cdb7bc5ee838ba0d5ff111c0`.
+- [x] M7-RUN5 (operator) ran nine specs on `861ff86` with lock `d8c1548c`, one kind cluster at a time; three passed and six failed on two new production defects.
+
+  | Pair  | Spec              | Result | Cause             |
+  | ----- | ----------------- | ------ | ----------------- |
+  | 16:16 | automatic-cutover | FAIL   | P-CLEANED-CLOSURE |
+  | 18:18 | automatic-cutover | FAIL   | P-CLEANED-CLOSURE |
+  | 16:18 | automatic-cutover | FAIL   | P-CLEANED-CLOSURE |
+  | 16:16 | live-writer       | FAIL   | P-CLEANED-CLOSURE |
+  | 16:16 | fault-copy        | FAIL   | P-APPNAME         |
+  | 16:16 | fault-suspend     | FAIL   | P-CLEANED-CLOSURE |
+  | 16:16 | fault-delete      | PASS   |                   |
+  | 16:16 | fresh-clone       | PASS   |                   |
+  | 16:16 | native-refusal    | PASS   |                   |
+
+  Both TERM receipts passed `hack/native-term-receipt.py`: engine exit code 4, no signal, no restart, and the same 16 foreign objects before and after.
+  Lag sampling, automatic cutover at endpos, `status.replication` and the deletion inventory worked live, while the drain proof, native verification and cleaned completion never ran.
+  fault-delete's `expectNoSessions` and fault-suspend's no-session check passed only vacuously under P-APPNAME, and early-manual, fault-stream, fault-failover and fault-drain did not run.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-RUN5-20261115/SHA256SUMS`, SHA-256 `e505d1556bcd08a3718ff89cc198f3e64634fe8019e6edcf92a2f37ea40433ef`, with the wave 11 not-started record under `prior-not-started/`.
+- [x] P-CLEANED-CLOSURE (operator): the refused pre-cleanup relay returns at `internal/native/cleaned_completion.go:45` without waiting for its helper Job, so `nativeStateHelperClosed` (`internal/controller/native_cleanup_flow.go:169`, `:239-244`) reads the Job while it is still active and reports it not closed.
+  Every native follow completion therefore stalled at `CuttingOver`, creating 237 to 265 `rpgmigrate-cleaned` Jobs until the guard's budget ran out.
+  The seam harness missed it because it ran cleanup before the first finish pass; patch 0001 drives finish in the manager's order and fails, and with patch 0002 it passes 20 of 20 steps to `Completed`.
+- [x] P-APPNAME (engine): the `abb3c53` engine named only its compare sessions, so the copy, apply and receive sessions that `docs/native-protocol.md:200` promises had an empty `application_name`.
+  The fault-copy probe never matched, the fault-drain probe cannot match, the suite's no-session checks always read zero, and by reading the code the retry-gate census at `evidence_program.py:1682` sees no engine session.
+  Reproduction `58cf711` saw 0 sessions matching `rpgmigrate[%` on either side while streaming.
+- [x] O-1: an automatic cutover pass never records `CaughtUp=True`, because `native_reconcile.go:301-303` cuts over before `applyNativeProgress` at `:305`.
+- [x] O-2: in live-writer the phase went from Streaming back to Cloning, with `CaughtUp` unknown and an empty replication block, for about 75 s within attempt 1; the suspected in-flight sample read is not reproduced.
+- [x] S-GUARD-BUDGET: the guard's 1800 s budget (`hack/e2e-kind.py:1433`) is shorter than the 45-minute `followTimeout`, so a stalled follow spec ends as a timeout with no Ginkgo failure or capture.
+- [x] The seam harness ran 16:18 on the `abb3c53` runner in INTEGRATE8 and its schema compare matched, so the cross-major compare is now proven live as well as by the unit tests.
 - [ ] Whether the engine compare should scope out catalog ACLs is open for the M10 review (decision t).
-- [ ] The PGDG key fetches in `.github/workflows/ci.yml:32` and `live-minors.yml:37` still run without retries; neither has failed so far.
+- [ ] The PGDG key fetches in `.github/workflows/ci.yml:31` and `live-minors.yml:36` still run without retries; neither has failed so far.
 - [ ] The `rpgmigrate-m2-dev:stock` image has no `cargo-fmt` for toolchain 1.99.1, so the Linux lint gate cannot run in it; hosted `checks` covers Linux lint.
 
 Leader decisions, wave 12:
@@ -2009,6 +2066,44 @@ Leader decisions, wave 12:
 - (w) Native sets the write, replay and source LSN gauges from the same sample as `status.replication`, instead of deleting them.
 - (x) Operator CI runs its PostgreSQL with `wal_level=logical` and fails when the logical-slot live cases skip there.
 - (y) The seam harness gates integration on all three pairs twice: on the locked images, and on the newest CloudNativePG 16 and 18 minor images, with their digests recorded.
+
+### Wave 13, 2026-11-15
+
+- [x] ENGINE-APPNAME: `fix/session-application-names-20261115` at `2829558` implements decision (aa).
+  `PgConnection::connect` takes a `Role` (`copy`, `apply`, `receive` or `compare`) at every connect site and sends `rpgmigrate[<pid>] <role>` as `fallback_application_name`, so a name pinned in the conninfo, a service file or `PGAPPNAME` still wins.
+  The pg_dump and pg_restore children get the copy name through `PGAPPNAME` unless the caller pinned one, and compare no longer runs `SET application_name`.
+  A caller's own `fallback_application_name` still refuses for the utilities, checked by a libpq option probe that opens no socket.
+  `tools/e2e/sessions.py` (`follow.py --sessions`) censuses every engine session through clone, follow to endpos, both compares and stream cleanup, unpinned, with `PGAPPNAME` and with a conninfo name, and fails unless each required side, phase and role was seen.
+  The census fails on the `888a378` engine with "default source engine session has no application name", passes on 16-16, 18-18 and 16-18, and each of 5 mutations failed it.
+  `task check lint test` passed with 571 Rust unit, 28 CLI and 549 portable tests, the live `test-db` profiles passed on PostgreSQL 16.16 and 18.7, and hosted ci.yml run 43704672674 passed 8 of 8.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-APPNAME-20261115/SHA256SUMS`, SHA-256 `803d9254b39da02c6c62ecc15913703eeb3c95fb1c960302c08a00359cdc8ecf`.
+- [x] ENGINE-LAND8: `integrate/engine-land8-20261115` at `db50bc999319956b2a0b220208c90f0b5fae274b` merges `2829558` onto `888a378` without conflicts, and `task check lint test` passed with 571 Rust unit, 28 CLI and 549 portable tests.
+  Hosted ci.yml run 43705403476 passed 8 of 8, and `feat/native-engine` fast-forwarded from `888a378` to `db50bc9`, where ci.yml run 43705798269 passed 8 of 8, both on the first attempt.
+  Development runner image run 43705798261 published `dev-db50bc999319956b2a0b220208c90f0b5fae274b` as arm64 `sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87` (executable SHA-256 `914444bf5cc02fd8ad5ed52e1620ddaa63624284902aa08b0c09ec94e286fef8`) and amd64 `sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412` (executable SHA-256 `5a1ff9072cbdfc02fc4a4775e499f06b5419240361131d60496166c54b5502ea`), both pulled anonymously with every layer verified.
+  Against `abb3c53` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures, because no packaging file changed.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND8-20261115/SHA256SUMS`, SHA-256 `548023137fd6ffa630351412271fa4230c27320e2205963f67396319dbbdf240`.
+- [ ] Operator qualification of the `db50bc9` runner with decisions (z) and (ab) to (af), the seam harness gate with its session-name census, a new manager image and lock, and M7-RUN6.
+- [ ] The local `task test-e2e-sessions-*` targets need 32 GiB free disk and the shared VM has about 30 GiB, so the census ran locally in capped containers with the same code, and in full in hosted ci.yml.
+
+Leader decisions, wave 13:
+
+- (z) P-CLEANED-CLOSURE: when a state-helper relay is refused (`internal/native/cleaned_completion.go:45`), the operator waits for that helper Job to end with the same poll and inside the same 90 s context as the success path (`JobCompletedNative` at `:49`, `nativePreflightPoll`).
+  `nativeStateHelperClosed` (`internal/controller/native_cleanup_flow.go:169`, `:239-244`) then judges closure with the same checks, and a mismatch, or a failed Job where success was expected, still fails at once.
+  Patch 0002 is the reference, the fix lands once in the shared code for every caller, and the seam harness drives `finishNativeFollow` in the manager's order (patch 0001) to gate integration.
+- (aa) P-APPNAME: the engine names every libpq session it opens `rpgmigrate[<pid>] <role>` with exactly the contract roles `copy`, `apply`, `receive` and `compare`, set at connect time as `fallback_application_name`, so a name the caller pins still wins.
+  Replication connections and slot or publication lifecycle, cleanup included, are `receive`; copy-phase sessions and the pg_dump and pg_restore children are `copy`; apply, checkpoint, barrier, fence, drain and final sequence sync are `apply`; compare stays `compare`.
+  `docs/native-protocol.md` gains one sentence on the precedence, and the new runner is qualified this wave.
+- (ab) Every consumer of the engine session name gets a positive control, so a count of zero counts only after the same check saw the live engine's sessions.
+  That covers the retry-gate census (`evidence_program.py:1682`), the native sampler and any reaper that applies to native, the suite's fault-copy and fault-drain probes, and its no-session checks (`native_fault_helpers_test.go:50`, `expectNoSessions`).
+  The seam harness gains a streaming session-name census step, from reproduction `58cf711`, that asserts each expected role on each side.
+- (ac) The reconcile pass that triggers automatic cutover first applies the native progress sample (`native_reconcile.go:301-305`), so `CaughtUp=True` is recorded.
+  Within one attempt a missing or in-flight sample leaves the phase, `CaughtUp` and `status.replication` unchanged and never defaults the phase back to Cloning (O-2, `native_sampler.go:187-189`, `native_progress.go:51`), after its root cause is found.
+- (ad) The guard's 1800 s cap (`hack/e2e-kind.py:1433`) stays, and the native follow spec timeouts fit inside it so a stall ends as a Ginkgo failure with its capture.
+  The fault-copy copy window is at least four times the probe's worst-case detection interval, growing the bulk table only if needed and within free disk.
+  The intermittent "touched objects outside its schemas" failure of `TestCoverageCasesApply` is root-caused and fixed without weakening that check.
+- (ae) Gating the legacy origin-grant preflight block to pgcopydb and revoking the grant for native in the suite are accepted; a native preflight check for a leftover legacy grant is deferred to the M10 review.
+- (af) Decision (w) is re-delegated from `861ff86`, with the dead agent's clone kept untouched as reference.
+  Hosted ci.yml for decision (x) needs a pull request, which needs the user's go-ahead, so until then (x) is proven locally.
 
 M0–M5 remain closed and M6–M10 remain open.
 
