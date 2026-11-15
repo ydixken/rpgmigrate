@@ -31,17 +31,36 @@ REQUIRED = sorted({
 # A pinned name hides the PID and role, so these require sessions joined to the long-lived follow processes.
 REQUIRED_PINNED = sorted({("source", "follow", "rpgmigrate"), ("source", "follow", "pg_dump"), ("source", "follow", "walsender"),
                           ("target", "follow", "rpgmigrate"), ("target", "follow", "pg_restore")})
+SAMPLE = """CREATE FUNCTION {sample}(databases text[], target int DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $sample$
+  SELECT coalesce(jsonb_object_agg(concat_ws('/', a.pid, a.backend_start, a.state, a.application_name),
+      jsonb_build_object('pid', a.pid, 'start', a.backend_start::text, 'type', a.backend_type, 'name', a.application_name,
+                         'port', a.client_port, 'state', a.state)), '{{}}')
+  FROM pg_catalog.pg_stat_activity a
+  WHERE a.datname = ANY(databases) AND a.backend_type IN ('client backend', 'walsender') AND (target IS NULL OR a.pid = target)
+$sample$;"""
+# pgstat_bestart (16) and pgstat_bestart_final (18) publish a NULL state before pgstat_report_appname, so a session sampled
+# only there looks unnamed; that backend alone is re-read until it leaves the window, vanishes or a second passes.
 SAMPLER = """CREATE TABLE {stop}();
 CREATE PROCEDURE {procedure}(databases text[], INOUT seen jsonb DEFAULT '{{}}') LANGUAGE plpgsql AS $census$
 DECLARE deadline timestamptz := clock_timestamp() + interval '900 seconds';
+  sample jsonb; latest jsonb; pending record; settle timestamptz;
 BEGIN
   LOOP
     PERFORM pg_catalog.pg_stat_clear_snapshot();
-    seen := seen || coalesce((SELECT jsonb_object_agg(concat_ws('/', a.pid, a.backend_start, a.state, a.application_name),
-        jsonb_build_object('pid', a.pid, 'start', a.backend_start::text, 'type', a.backend_type, 'name', a.application_name,
-                           'port', a.client_port, 'state', a.state))
-      FROM pg_catalog.pg_stat_activity a
-      WHERE a.datname = ANY(databases) AND a.backend_type IN ('client backend', 'walsender')), '{{}}');
+    sample := {sample}(databases);
+    seen := seen || sample;
+    FOR pending IN SELECT (value->>'pid')::int AS pid, value->>'start' AS start FROM jsonb_each(sample)
+                   WHERE coalesce(value->>'name', '') = '' AND value->>'state' IS NULL LOOP
+      settle := clock_timestamp() + interval '1 second';
+      LOOP
+        PERFORM pg_catalog.pg_sleep(0.0002);
+        PERFORM pg_catalog.pg_stat_clear_snapshot();
+        latest := {sample}(databases, pending.pid);
+        seen := seen || latest;
+        EXIT WHEN clock_timestamp() > settle OR NOT EXISTS (SELECT FROM jsonb_each(latest) WHERE value->>'start' = pending.start
+          AND coalesce(value->>'name', '') = '' AND value->>'state' IS NULL);
+      END LOOP;
+    END LOOP;
     EXIT WHEN EXISTS (SELECT FROM {stop}) OR clock_timestamp() > deadline;
     PERFORM pg_catalog.pg_sleep(0.002);
   END LOOP;
@@ -55,8 +74,8 @@ class ServerCensus:
     def __init__(self, database, name):
         self.database, self.name = database, name
         token = uuid.uuid4().hex[:12]
-        self.stop_table, self.procedure = "census_stop_" + token, "census_" + token
-        database.sql("postgres", SAMPLER.format(stop=self.stop_table, procedure=self.procedure))
+        self.stop_table, self.procedure, sample = "census_stop_" + token, "census_" + token, "census_sample_" + token
+        database.sql("postgres", SAMPLE.format(sample=sample) + SAMPLER.format(stop=self.stop_table, procedure=self.procedure, sample=sample))
         self.address = database.sql("postgres", "SELECT host(inet_server_addr());").decode().strip()
         call = f"CALL {self.procedure}(ARRAY['{name}'], '{{}}'::jsonb);"
         self.process = subprocess.Popen([str(database.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
@@ -80,6 +99,39 @@ class ServerCensus:
         if self.process.returncode != 0:
             raise RuntimeError("server session census failed")
         return list(json.loads(output).values())
+
+
+# Scripted pg_stat_activity samples for one backend caught before its name: only the settled case may pass the judge.
+WINDOW = {"pid": 7, "start": "s", "type": "client backend", "name": "", "port": 9000, "state": None}
+CONTROLS = {"settles": [[WINDOW], [WINDOW], [{**WINDOW, "name": "rpgmigrate[100] compare"}]], "stays_unnamed": [[WINDOW]],
+            "unnamed_idle": [[WINDOW], [{**WINDOW, "state": "idle"}]], "vanishes": [[WINDOW], []]}
+SCRIPT = """CREATE SEQUENCE {sample}_calls;
+CREATE FUNCTION {sample}(databases text[], target int DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $script$
+  SELECT samples->(least(nextval('{sample}_calls'), jsonb_array_length(samples)) - 1)::int FROM (SELECT $json${samples}$json$::jsonb AS samples) s
+$script$;"""
+
+
+def controls(source, target):
+    """Runs the real sampler procedure over each scripted backend on both servers; returns the controls that held."""
+    held = {}
+    for side, database in (("source", source), ("target", target)):
+        for name, script in CONTROLS.items():
+            token = uuid.uuid4().hex[:12]
+            stop, procedure, sample = "control_stop_" + token, "control_" + token, "control_sample_" + token
+            samples = json.dumps([{"/".join(str(row[key]) for key in ("pid", "start", "state", "name") if row[key] is not None): row
+                                   for row in rows} for rows in script])
+            output = database.sql("postgres", SCRIPT.format(sample=sample, samples=samples)
+                                  + SAMPLER.format(stop=stop, procedure=procedure, sample=sample)
+                                  + f"INSERT INTO {stop} DEFAULT VALUES; CALL {procedure}(ARRAY['control'], '{{}}'::jsonb);")
+            try:
+                judge(side, list(json.loads(output).values()), {}, {100: "compare-data"}, "harness", None)
+                passed = True
+            except RuntimeError:
+                passed = False
+            if passed != (name == "settles"):
+                raise RuntimeError(f"{side} session sampler control {name} did not hold")
+            held.setdefault(side, []).append(name)
+    return held
 
 
 def address(text):
@@ -278,6 +330,8 @@ def run(source, target, case, launch, driver):
 
 
 def validate_receipt(report):
+    if report.get("sampler_controls") != {side: list(CONTROLS) for side in ("source", "target")}:
+        raise RuntimeError("session census receipt lacks its sampler controls")
     cases = report.get("cases")
     if report.get("mode") != "session_names" or not isinstance(cases, dict) or tuple(sorted(cases)) != tuple(sorted(VARIANTS)):
         raise RuntimeError("session census receipt lacks its variants")

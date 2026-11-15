@@ -1088,7 +1088,8 @@ def inner(args):
             return
         if getattr(args, "sessions", False):
             import sessions
-            receipt.update(mode="session_names", receipt_scope="session_names", cases=sessions.run(source, target, case, launch, driver))
+            receipt.update(mode="session_names", receipt_scope="session_names", sampler_controls=sessions.controls(source, target),
+                           cases=sessions.run(source, target, case, launch, driver))
             sessions.validate_receipt(receipt)
             Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
             print(json.dumps({"follow_e2e": "session_names_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
