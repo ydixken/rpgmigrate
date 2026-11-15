@@ -122,8 +122,6 @@ fn configure(source: &mut PgConnection, io: &IoControl) -> Result<()> {
         ("bytea_output", "hex"),
         ("row_security", "off"),
         ("search_path", "pg_catalog"),
-        ("statement_timeout", "0"),
-        ("idle_in_transaction_session_timeout", "0"),
         ("wal_sender_timeout", "60s"),
         ("tcp_keepalives_idle", "60"),
         ("tcp_keepalives_interval", "10"),
@@ -142,14 +140,7 @@ fn configure(source: &mut PgConnection, io: &IoControl) -> Result<()> {
         };
         require_setting(source, name, expected, io)?;
     }
-    if version >= 17 {
-        let result = source.logical_query("SET transaction_timeout TO 0", io)?;
-        if result.command_tag()? != "SET" {
-            return Err(gap("follow source timeout was not confirmed"));
-        }
-        require_setting(source, "transaction_timeout", "0", io)?;
-    }
-    Ok(())
+    source.disable_timeouts(io)
 }
 
 fn require_setting(
@@ -1076,6 +1067,43 @@ mod tests {
         ));
         let mut source = PgConnection::connect_replication(&conninfo, &control).unwrap();
         configure(&mut source, &control).unwrap();
+        // Startup options stand in for server, database and role timeouts, which configure must clear.
+        let mut names = vec![
+            "statement_timeout",
+            "lock_timeout",
+            "idle_in_transaction_session_timeout",
+            "idle_session_timeout",
+        ];
+        if source.server_version().unwrap() >= 170_000 {
+            names.push("transaction_timeout");
+        }
+        let mut timed = std::env::var_os("RPGMIGRATE_TEST_FOLLOW_RECEIVE_SOURCE").unwrap();
+        timed.push(" options='");
+        for name in &names {
+            timed.push(format!(" -c {name}=4321"));
+        }
+        timed.push("'");
+        let mut timed = PgConnection::connect_replication(
+            &crate::contracts::Conninfo::new(timed).unwrap(),
+            &control,
+        )
+        .unwrap();
+        let settings = names
+            .iter()
+            .map(|name| format!("pg_catalog.current_setting('{name}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let select = format!("SELECT {settings}");
+        for expected in [b"4321ms".as_slice(), b"0"] {
+            let observed = timed.logical_query(&select, &control).unwrap();
+            for column in 0..names.len() {
+                assert_eq!(observed.cell(0, column).unwrap(), Some(expected));
+            }
+            if expected != b"0" {
+                configure(&mut timed, &control).unwrap();
+            }
+        }
+        drop(timed);
         for sql in ["SELECT 1/0", "SELECT 1; SELECT 2"] {
             assert!(source.logical_query(sql, &control).is_err());
             assert_eq!(

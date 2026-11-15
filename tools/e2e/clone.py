@@ -1355,7 +1355,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
     token = "rpgmigrate-" + ("m8" if feature_mode else "m2" if program == "clone" else "m3") + "-" + uuid.uuid4().hex
     label = "io.rpgmigrate.e2e=" + token
     image = "localhost/" + token + ":dev"
-    output = Path(args.receipt).absolute() if args.receipt else ROOT / "target/e2e" / (("clone-m8-" if feature_mode else "" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-sessions-" if getattr(args, "sessions", False) else "-")) + args.pair + ".json")
+    output = Path(args.receipt).absolute() if args.receipt else ROOT / "target/e2e" / (("clone-m8-" if feature_mode else "" if program == "clone" else program + ("-cutover-" if cutover_mode else "-smoke-" if getattr(args, "smoke", False) else "-sessions-" if getattr(args, "sessions", False) else "-timeouts-" if getattr(args, "timeouts", False) else "-")) + args.pair + ".json")
     if output.is_symlink() or (diagnostic_case or feature_mode) and output.exists():
         raise RuntimeError("explicit diagnostic/candidate receipt already exists or is replaced")
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1556,6 +1556,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                       *(["--profile", "m8", "--feature-binding", "/receipt/m8-input.json"] if feature_mode else []),
                       *(["--smoke"] if getattr(args, "smoke", False) else []), *(["--cutover"] if cutover_mode else []),
                       *(["--sessions"] if getattr(args, "sessions", False) else []),
+                      *(["--timeouts"] if getattr(args, "timeouts", False) else []),
                       *(["--diagnostic-case", diagnostic_case] if diagnostic_case else [])], timeout=1200, role="runner", image_id=image_id, mounts=mounts, memory=4*GIB)
         report = json.loads((receipt_dir / "result.json").read_text())
         report.update(runner_image_id=image_id, server_image_ids=server_images)

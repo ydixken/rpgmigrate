@@ -200,6 +200,8 @@ jobs:
         run: task test-e2e-cutover-${{ matrix.pair }}
       - name: Qualify the engine session names
         run: task test-e2e-sessions-${{ matrix.pair }}
+      - name: Qualify the engine under server session timeouts
+        run: task test-e2e-timeouts-${{ matrix.pair }}
       - name: Summarize runtime cleanup on failure
         if: failure()
         run: |
@@ -246,6 +248,7 @@ jobs:
           test -s "target/e2e/follow-smoke-${{ matrix.pair }}.json"
           test -s "target/e2e/follow-cutover-${{ matrix.pair }}.json"
           test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"
+          test -s "target/e2e/follow-timeouts-${{ matrix.pair }}.json"
           python3 - <<'PYFOLLOW'
           import json
           import sys
@@ -254,6 +257,7 @@ jobs:
           import cutover
           import follow
           import sessions
+          import timeouts
           smoke = json.loads(Path("target/e2e/follow-smoke-${{ matrix.pair }}.json").read_text())
           producer = json.loads(Path("target/e2e/follow-cutover-${{ matrix.pair }}.json").read_text())
           if smoke.get("pair") != "${{ matrix.pair }}" or producer.get("pair") != "${{ matrix.pair }}":
@@ -264,6 +268,10 @@ jobs:
           if names.get("pair") != "${{ matrix.pair }}":
               raise SystemExit("session census receipt does not match the selected pair")
           sessions.validate_receipt(names)
+          limits = json.loads(Path("target/e2e/follow-timeouts-${{ matrix.pair }}.json").read_text())
+          if limits.get("pair") != "${{ matrix.pair }}":
+              raise SystemExit("session timeout receipt does not match the selected pair")
+          timeouts.validate_receipt(limits)
           PYFOLLOW
       - name: Retain sanitized follow smoke and cutover qualification
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -273,6 +281,7 @@ jobs:
             target/e2e/follow-smoke-${{ matrix.pair }}.json
             target/e2e/follow-cutover-${{ matrix.pair }}.json
             target/e2e/follow-sessions-${{ matrix.pair }}.json
+            target/e2e/follow-timeouts-${{ matrix.pair }}.json
           if-no-files-found: error
 
   runner-image:

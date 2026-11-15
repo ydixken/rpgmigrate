@@ -699,12 +699,60 @@ mod tests {
         let mut startup = vec![0; size as usize - 4];
         stream.read_exact(&mut startup).unwrap();
         stream
-            .write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I")
+            .write_all(
+                &[
+                    peer_message(b'R', &[0; 4]),
+                    peer_message(b'S', b"server_version\x0016.0\0"),
+                    peer_message(b'Z', b"I"),
+                ]
+                .concat(),
+            )
             .unwrap();
+        answer_session_timeouts(&mut stream);
         for tag in b"PBDES" {
             assert_eq!(read_peer_message(&mut stream), *tag);
         }
         stream
+    }
+
+    fn peer_message(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut message = vec![tag];
+        message.extend((body.len() as u32 + 4).to_be_bytes());
+        message.extend(body);
+        message
+    }
+
+    /// Answers a PostgreSQL 16 peer's share of the connect-time timeout reset.
+    fn answer_session_timeouts(stream: &mut TcpStream) {
+        let parsed = [peer_message(b'1', b""), peer_message(b'2', b"")].concat();
+        for _ in 0..4 {
+            for tag in b"PBDES" {
+                assert_eq!(read_peer_message(stream), *tag);
+            }
+            let reply = [
+                parsed.clone(),
+                peer_message(b'n', b""),
+                peer_message(b'C', b"SET\0"),
+                peer_message(b'Z', b"I"),
+            ];
+            stream.write_all(&reply.concat()).unwrap();
+        }
+        for tag in b"PBDES" {
+            assert_eq!(read_peer_message(stream), *tag);
+        }
+        let (mut fields, mut row) = (4u16.to_be_bytes().to_vec(), 4u16.to_be_bytes().to_vec());
+        for _ in 0..4 {
+            fields.extend(b"c\0\0\0\0\0\0\0\0\0\0\x19\xff\xff\xff\xff\xff\xff\0\0");
+            row.extend(b"\0\0\0\x010");
+        }
+        let reply = [
+            parsed,
+            peer_message(b'T', &fields),
+            peer_message(b'D', &row),
+            peer_message(b'C', b"SELECT 1\0"),
+            peer_message(b'Z', b"I"),
+        ];
+        stream.write_all(&reply.concat()).unwrap();
     }
 
     fn health_conninfo(port: u16) -> crate::contracts::Conninfo {

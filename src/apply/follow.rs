@@ -640,18 +640,6 @@ fn configure(connection: &mut PgConnection, io: &IoControl) -> Result<()> {
     ] {
         catalog::command(connection, &format!("SET {setting}"), "SET", io)?;
     }
-    let result = connection.query("SHOW server_version_num", io)?;
-    if result.rows() != 1 {
-        return Err(refusal("follow apply: missing target version"));
-    }
-    let version = result
-        .cell(0, 0)?
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|v| v.parse::<u32>().ok())
-        .ok_or_else(|| refusal("follow apply: invalid target version"))?;
-    if version / 10000 >= 17 {
-        catalog::command(connection, "SET transaction_timeout = 0", "SET", io)?;
-    }
     Ok(())
 }
 fn check(io: &IoControl) -> Result<()> {

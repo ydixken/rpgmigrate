@@ -35,7 +35,8 @@ TARGETS = {"check", "fmt-check", "lint", "build", "test", "test-unit", "test-cli
            "test-e2e-clone-16-16", "test-e2e-clone-18-18", "test-e2e-clone-16-18",
            "test-e2e-follow-smoke-16-16", "test-e2e-follow-smoke-18-18", "test-e2e-follow-smoke-16-18",
            "test-follow-source", "test-follow-snapshot", "test-follow-authority", "test-follow-receive", "test-follow-apply", "test-e2e-follow-unit", "test-e2e-follow", "test-e2e-follow-16-16", "test-e2e-follow-18-18", "test-e2e-follow-16-18", "test-e2e-cutover", "test-e2e-cutover-16-16", "test-e2e-cutover-18-18", "test-e2e-cutover-16-18",
-           "test-e2e-sessions-16-16", "test-e2e-sessions-18-18", "test-e2e-sessions-16-18"}
+           "test-e2e-sessions-16-16", "test-e2e-sessions-18-18", "test-e2e-sessions-16-18",
+           "test-e2e-timeouts-16-16", "test-e2e-timeouts-18-18", "test-e2e-timeouts-16-18"}
 FORWARDED = ("RPGMIGRATE_E2E_REPORT_PROBE", "CONTAINER_RUNTIME", "CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG_PATH", "PG_BINDIR", "PG_CONFIG",
              "CARGO_TARGET_DIR", "RPGMIGRATE_BIN", "RPGMIGRATE_TEST_EXPECTED_PG_VERSION",
              "RPGMIGRATE_TEST_EXPECTED_PG_VERSION_NUM")
@@ -656,16 +657,17 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
         self.passed(self.run_task("test-e2e-follow-unit"))
         self.assertEqual([row["argv"] for row in self.calls()],
                          [["-W", "error", "tools/e2e/" + name] for name in
-                          ("test_follow.py", "test_follow_wire_protocol.py", "test_cutover.py", "test_sessions.py")])
+                          ("test_follow.py", "test_follow_wire_protocol.py", "test_cutover.py", "test_sessions.py", "test_timeouts.py")])
 
     def test_session_census_tasks_select_one_exact_pair_and_fail(self):
-        for pair in ("16-16", "18-18", "16-18"):
-            with self.subTest(pair=pair):
-                self.log.unlink(missing_ok=True)
-                self.passed(self.run_task("test-e2e-sessions-" + pair))
-                self.assertEqual([row["argv"] for row in self.calls()], [["tools/e2e/follow.py", "--sessions", "--pair", pair]])
-                self.log.unlink()
-                self.assertNotEqual(self.run_task("test-e2e-sessions-" + pair, env={"FAIL_MATCH": pair}).returncode, 0)
+        for mode in ("sessions", "timeouts"):
+            for pair in ("16-16", "18-18", "16-18"):
+                with self.subTest(mode=mode, pair=pair):
+                    self.log.unlink(missing_ok=True)
+                    self.passed(self.run_task(f"test-e2e-{mode}-{pair}"))
+                    self.assertEqual([row["argv"] for row in self.calls()], [["tools/e2e/follow.py", "--" + mode, "--pair", pair]])
+                    self.log.unlink()
+                    self.assertNotEqual(self.run_task(f"test-e2e-{mode}-{pair}", env={"FAIL_MATCH": pair}).returncode, 0)
 
     def test_cutover_matrix_is_separate_and_preserves_exact_pairs_and_failures(self):
         self.passed(self.run_task("test-e2e-cutover"))
