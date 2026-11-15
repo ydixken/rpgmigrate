@@ -230,6 +230,14 @@ jobs:
               print(path.read_text())
               if json.loads(path.read_text())["callsite"]["function"] == "raw":
                   print([line[:300] for line in path.with_suffix(".stderr").read_text(errors="replace").splitlines() if line.lstrip().startswith(("Error:", "* "))])
+          # Runner-side failures: the exception type and file:line trace only.
+          for path in sorted(Path("target/e2e/failures").glob("*/*.json")):
+              try:
+                  detail = json.loads(path.with_suffix(".stderr").read_text())
+                  print(path.parent.name, {"exception_type": detail.get("exception_type"), "trace": detail.get("trace")})
+              except (OSError, ValueError, AttributeError):
+                  metadata = json.loads(path.read_text())
+                  print(path.parent.name, metadata.get("command_kind"), metadata.get("callsite"), metadata.get("callers"))
           PYLEDGER
           podman image ls --all --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}} {{.CreatedAt}} {{index .Labels "io.rpgmigrate.e2e"}}'
           sudo dmesg | grep -E 'apparmor="(DENIED|ALLOWED)"' | tail -n 20 || true
