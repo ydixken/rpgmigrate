@@ -74,6 +74,7 @@ The executable implements plain clone and pgoutput follow on the PostgreSQL [16/
 | `task test-follow-apply` | Run row semantics and catalog identity checks. |
 | `task test-e2e-follow` | Run the three-pair ongoing follow matrix. |
 | `task test-e2e-cutover` | Run the three-pair cutover producer matrix. |
+| `task test-e2e-sessions-16-16` | Check engine session names on one pair. |
 | `task image:build` | Build the local native runner image. |
 | `task image:smoke` | Inspect the local image and emit a packaging receipt. |
 
