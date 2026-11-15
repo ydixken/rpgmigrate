@@ -77,7 +77,7 @@ fn target(options: &StreamOptions, io: &IoControl) -> Result<PgConnection> {
             "--target is required for measured stream state",
         )
     })?;
-    PgConnection::connect(conninfo, io)
+    PgConnection::connect(conninfo, crate::pg::Role::Apply, io)
 }
 
 fn current_endpos(
@@ -89,7 +89,7 @@ fn current_endpos(
         .source
         .as_ref()
         .ok_or_else(|| Error::new(ErrorKind::BadArgs, "--current requires --source"))?;
-    let mut source = PgConnection::connect(conninfo, io)?;
+    let mut source = PgConnection::connect(conninfo, crate::pg::Role::Apply, io)?;
     if crate::catalog::read_clone_source(&mut source, io)? != control.plan().source {
         return Err(refusal(
             "stream source identity or timeline differs from native binding",

@@ -11,7 +11,7 @@ use crate::contracts::{
     ClonePlan, CopyGeneration, Error, ErrorKind, FollowBinding, FollowOptions, IoControl,
     RestorePolicy, Result, StateAction,
 };
-use crate::pg::{PgConnection, operation_control};
+use crate::pg::{PgConnection, Role, operation_control};
 use crate::snapshot::{CloneSnapshot, FollowSnapshot};
 use crate::state::ControlHandle;
 use crate::state::{self, ClonePhase, CloneState, NativeState};
@@ -82,7 +82,7 @@ pub(crate) fn run(mut options: FollowOptions, io: &IoControl) -> Result<String> 
         let binding = binding
             .as_ref()
             .ok_or_else(|| refusal("follow: native binding is absent"))?;
-        let connection = target(&options, io)?;
+        let connection = target(&options, Role::Apply, io)?;
         let mut authority = TargetAuthority::acquire_follow(connection, &mut native, binding, io)?;
         let anchored = authority.has_follow_anchor();
         if anchored {
@@ -130,8 +130,8 @@ fn fresh(
     native: &mut NativeState,
     io: &IoControl,
 ) -> Result<(ClonePlan, FollowBinding)> {
-    let mut source = source(options, io)?;
-    let mut target_sql = target(options, io)?;
+    let mut source = source(options, Role::Copy, io)?;
+    let mut target_sql = target(options, Role::Copy, io)?;
     // Catalog table locks require a transaction before the slot snapshot exists.
     catalog::command(
         &mut source,
@@ -163,7 +163,7 @@ fn fresh(
     let mut snapshot = FollowSnapshot::create(options, &plan, native, io)?;
     let binding = snapshot.binding().clone();
     native.bind_follow(&plan, snapshot.snapshot_mut().ticket(), &binding)?;
-    let coordinator = target(options, io)?;
+    let coordinator = target(options, Role::Copy, io)?;
     let mut authority = CloneAuthority::acquire(coordinator, native, &plan, io)?;
     let plan = copy_initial(
         options,
@@ -186,9 +186,9 @@ fn recopy(
     let saved = native
         .checked_clone()?
         .ok_or_else(|| refusal("follow: restart lacks owned copy state"))?;
-    let coordinator = target(options, io)?;
+    let coordinator = target(options, Role::Copy, io)?;
     let mut authority = CloneAuthority::acquire(coordinator, native, &saved.plan, io)?;
-    let mut target = target(options, io)?;
+    let mut target = target(options, Role::Copy, io)?;
     if let Some(restart) = native.checked_follow_restart()? {
         if restart.new_bound {
             authority.advance_generation(native, io)?;
@@ -233,7 +233,8 @@ fn restart_plan(
     target: &mut PgConnection,
     io: &IoControl,
 ) -> Result<ClonePlan> {
-    let mut snapshot = CloneSnapshot::export(source(options, io)?, saved.plan.generation, io)?;
+    let mut snapshot =
+        CloneSnapshot::export(source(options, Role::Copy, io)?, saved.plan.generation, io)?;
     let metadata = crate::clone::metadata(native, &saved.plan, target, io)?;
     let checked = catalog::plan_clone(
         snapshot.connection()?,
@@ -333,13 +334,13 @@ fn require_resource_names(options: &FollowOptions, binding: &FollowBinding) -> R
     Ok(())
 }
 
-fn source(options: &FollowOptions, io: &IoControl) -> Result<PgConnection> {
-    PgConnection::connect(&options.clone.source, &operation_control(io))
+fn source(options: &FollowOptions, role: Role, io: &IoControl) -> Result<PgConnection> {
+    PgConnection::connect(&options.clone.source, role, &operation_control(io))
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Source))
 }
 
-fn target(options: &FollowOptions, io: &IoControl) -> Result<PgConnection> {
-    PgConnection::connect(&options.clone.target, &operation_control(io))
+fn target(options: &FollowOptions, role: Role, io: &IoControl) -> Result<PgConnection> {
+    PgConnection::connect(&options.clone.target, role, &operation_control(io))
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Target))
 }
 
@@ -355,7 +356,7 @@ fn with_source_health<T>(
         let (stop, stopped) = mpsc::sync_channel(1);
         let monitor = scope.spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut source = source(options, io)?;
+                let mut source = source(options, Role::Receive, io)?;
                 loop {
                     catalog::check_follow_health(&mut source, plan, binding, pid, io)?;
                     match stopped.recv_timeout(HEALTH_INTERVAL) {
@@ -400,7 +401,7 @@ fn stream(
     io: &IoControl,
 ) -> Result<CompletedFollow> {
     let control = ControlHandle::for_worker(native, io)?;
-    let mut source = source(options, io)?;
+    let mut source = source(options, Role::Receive, io)?;
     let confirmed = catalog::follow_confirmed_flush(&mut source, plan, binding, None, io)?;
     let (send, input) = channel::bounded(options.limits)?;
     let (feedback, proofs) = channel::feedback();
@@ -748,7 +749,8 @@ mod tests {
                 );
                 queued.send(()).unwrap();
             });
-            let mut source = PgConnection::connect(&health_conninfo(port), &io).unwrap();
+            let mut source =
+                PgConnection::connect(&health_conninfo(port), crate::pg::Role::Copy, &io).unwrap();
             let error = source.query("SELECT 1", &io).err().unwrap();
             complete.recv_timeout(Duration::from_secs(5)).unwrap();
             let error = coordinator_error(error, &failure);
@@ -790,7 +792,8 @@ mod tests {
                 stream.write_all(b"Z\0\0\0\x05I").unwrap();
                 stopped.recv_timeout(Duration::from_secs(5)).unwrap();
             });
-            let mut source = PgConnection::connect(&health_conninfo(port), &io).unwrap();
+            let mut source =
+                PgConnection::connect(&health_conninfo(port), crate::pg::Role::Copy, &io).unwrap();
             let error = source.query("SELECT 1", &io).err().unwrap();
             let origin = error.origin;
             let error = coordinator_error(error, &failure);

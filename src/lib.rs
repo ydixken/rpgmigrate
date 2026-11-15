@@ -91,9 +91,9 @@ fn execute(invocation: Invocation) -> Result<String> {
             state,
         } => (|| {
             let mut native = state::open(&state)?;
-            let mut source = pg::PgConnection::connect(&source, &io)
+            let mut source = pg::PgConnection::connect(&source, crate::pg::Role::Copy, &io)
                 .map_err(|error| endpoint_error(error, ErrorKind::Source))?;
-            let mut target = pg::PgConnection::connect(&target, &io)
+            let mut target = pg::PgConnection::connect(&target, crate::pg::Role::Copy, &io)
                 .map_err(|error| endpoint_error(error, ErrorKind::Target))?;
             let plan = catalog::plan_copy(&mut source, &mut target, &io, COPY_BUFFER_BYTES)?;
             let report = copy::run_copy(&mut source, &mut target, &mut native, &plan, &io)?;

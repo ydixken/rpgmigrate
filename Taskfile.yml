@@ -321,12 +321,28 @@ tasks:
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --smoke --pair 16-18'
 
+  test-e2e-sessions-16-16:
+    desc: Check engine session names through clone, endpos, compare and cleanup on PostgreSQL 16 to 16
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --sessions --pair 16-16'
+
+  test-e2e-sessions-18-18:
+    desc: Check engine session names through clone, endpos, compare and cleanup on PostgreSQL 18 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --sessions --pair 18-18'
+
+  test-e2e-sessions-16-18:
+    desc: Check engine session names through clone, endpos, compare and cleanup on PostgreSQL 16 to 18
+    cmds:
+      - '{{.RUN}} {{.PYTHON_COMMAND}} tools/e2e/follow.py --sessions --pair 16-18'
+
   test-e2e-follow-unit:
     desc: Check disposable follow harness controls without containers
     cmds:
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_follow.py'
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_follow_wire_protocol.py'
       - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_cutover.py'
+      - '{{.RUN}} {{.PYTHON_COMMAND}} -W error tools/e2e/test_sessions.py'
 
   test-e2e-follow-16-16:
     desc: Qualify ongoing follow and recovery boundaries on PostgreSQL 16 to 16

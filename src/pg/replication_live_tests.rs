@@ -25,7 +25,12 @@ fn fixture(key: &str) -> std::ffi::OsString {
 }
 
 fn normal(key: &str, io: &IoControl) -> PgConnection {
-    PgConnection::connect(&Conninfo::new(fixture(key)).unwrap(), io).unwrap()
+    PgConnection::connect(
+        &Conninfo::new(fixture(key)).unwrap(),
+        crate::pg::Role::Copy,
+        io,
+    )
+    .unwrap()
 }
 
 fn logical(io: &IoControl) -> PgConnection {

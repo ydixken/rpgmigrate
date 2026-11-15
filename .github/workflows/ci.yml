@@ -198,6 +198,8 @@ jobs:
         run: task test-e2e-follow-smoke-${{ matrix.pair }}
       - name: Qualify the cutover producer
         run: task test-e2e-cutover-${{ matrix.pair }}
+      - name: Qualify the engine session names
+        run: task test-e2e-sessions-${{ matrix.pair }}
       - name: Summarize runtime cleanup on failure
         if: failure()
         run: |
@@ -228,6 +230,14 @@ jobs:
               print(path.read_text())
               if json.loads(path.read_text())["callsite"]["function"] == "raw":
                   print([line[:300] for line in path.with_suffix(".stderr").read_text(errors="replace").splitlines() if line.lstrip().startswith(("Error:", "* "))])
+          # Runner-side failures: the exception type and file:line trace only.
+          for path in sorted(Path("target/e2e/failures").glob("*/*.json")):
+              try:
+                  detail = json.loads(path.with_suffix(".stderr").read_text())
+                  print(path.parent.name, {"exception_type": detail.get("exception_type"), "trace": detail.get("trace")})
+              except (OSError, ValueError, AttributeError):
+                  metadata = json.loads(path.read_text())
+                  print(path.parent.name, metadata.get("command_kind"), metadata.get("callsite"), metadata.get("callers"))
           PYLEDGER
           podman image ls --all --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}} {{.CreatedAt}} {{index .Labels "io.rpgmigrate.e2e"}}'
           sudo dmesg | grep -E 'apparmor="(DENIED|ALLOWED)"' | tail -n 20 || true
@@ -235,6 +245,7 @@ jobs:
         run: |
           test -s "target/e2e/follow-smoke-${{ matrix.pair }}.json"
           test -s "target/e2e/follow-cutover-${{ matrix.pair }}.json"
+          test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"
           python3 - <<'PYFOLLOW'
           import json
           import sys
@@ -242,12 +253,17 @@ jobs:
           sys.path.insert(0, "tools/e2e")
           import cutover
           import follow
+          import sessions
           smoke = json.loads(Path("target/e2e/follow-smoke-${{ matrix.pair }}.json").read_text())
           producer = json.loads(Path("target/e2e/follow-cutover-${{ matrix.pair }}.json").read_text())
           if smoke.get("pair") != "${{ matrix.pair }}" or producer.get("pair") != "${{ matrix.pair }}":
               raise SystemExit("follow receipts do not match the selected pair")
           follow.validate_receipt(smoke, follow.load_manifest())
           cutover.validate_receipt(producer, cutover.load_manifest(), require_images=True)
+          names = json.loads(Path("target/e2e/follow-sessions-${{ matrix.pair }}.json").read_text())
+          if names.get("pair") != "${{ matrix.pair }}":
+              raise SystemExit("session census receipt does not match the selected pair")
+          sessions.validate_receipt(names)
           PYFOLLOW
       - name: Retain sanitized follow smoke and cutover qualification
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -256,6 +272,7 @@ jobs:
           path: |
             target/e2e/follow-smoke-${{ matrix.pair }}.json
             target/e2e/follow-cutover-${{ matrix.pair }}.json
+            target/e2e/follow-sessions-${{ matrix.pair }}.json
           if-no-files-found: error
 
   runner-image:

@@ -472,6 +472,19 @@ Its receipts use `local_m4_producer` with `probe_checked=false`.
 Actual engine/Go interoperability and the independent M6 reader are separate checks.
 Run integrated lint/tests, independent safety review, and assigned Go suites once at milestone close against the same frozen handoff.
 
+### Session names
+
+The session census runs clone, follow to an endpos, `compare data`, `compare schema` and `stream cleanup` three times: unpinned, with `PGAPPNAME`, and with a conninfo `application_name`.
+A procedure inside each server samples `pg_stat_activity` every few milliseconds, and the harness maps each client socket, by server address and local port, to the engine and its `pg_dump` and `pg_restore` children through `/proc`.
+Every client backend and walsender in the case databases, other than the harness's own, must carry `rpgmigrate[<pid>] <role>` for the invocation and phase that opened it, or the pinned name.
+Each required side, phase and role, the walsender and both utility children must be observed, so a census that sees no engine session fails.
+
+```sh
+task test-e2e-sessions-16-16
+```
+
+Matching `test-e2e-sessions-18-18` and `test-e2e-sessions-16-18` tasks check the other pairs and write `target/e2e/follow-sessions-<pair>.json`.
+
 ## Local runner packaging
 
 The M5 runner image is separate from the development E2E image.

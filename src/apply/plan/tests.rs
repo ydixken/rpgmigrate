@@ -270,7 +270,7 @@ fn live_connection(io: &crate::contracts::IoControl) -> crate::pg::PgConnection 
         std::env::var_os("RPGMIGRATE_TEST_SOURCE").expect("owned database source required"),
     )
     .unwrap();
-    crate::pg::PgConnection::connect(&conninfo, io).unwrap()
+    crate::pg::PgConnection::connect(&conninfo, crate::pg::Role::Copy, io).unwrap()
 }
 fn live_control() -> crate::contracts::IoControl {
     crate::contracts::IoControl {

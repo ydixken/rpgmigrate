@@ -1427,7 +1427,7 @@ mod tests {
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let info = crate::contracts::Conninfo::new(std::env::var_os(source_key).unwrap()).unwrap();
-        let mut connection = PgConnection::connect(&info, &io).unwrap();
+        let mut connection = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
         configure_session(&mut connection, &io).unwrap();
         command(&mut connection, "BEGIN", "BEGIN", &io).unwrap();
         let schema = format!("identity_{label}_{}", std::process::id());

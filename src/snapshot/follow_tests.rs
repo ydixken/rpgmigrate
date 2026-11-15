@@ -405,7 +405,7 @@ impl Fixture {
         )
         .unwrap();
         let io = IoControl::unbounded(Arc::new(AtomicBool::new(false)));
-        let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+        let mut admin = PgConnection::connect(&admin_info, crate::pg::Role::Copy, &io).unwrap();
         let database = format!(
             "m3_source_{}_{}",
             std::process::id(),
@@ -422,7 +422,7 @@ impl Fixture {
             .into(),
         )
         .unwrap();
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
         catalog::configure_session(&mut source, &io).unwrap();
         for statement in ddl.split(';').filter(|s| !s.trim().is_empty()) {
             source.query(statement, &io).unwrap();
@@ -544,7 +544,12 @@ fn live_follow_slot_snapshot_preserves_initial_boundary_and_exporter_lifetime() 
         .query("SELECT count(*) FROM public.items", &fixture.io)
         .unwrap();
     assert_eq!(rows.cell(0, 0).unwrap(), Some(b"1".as_slice()));
-    let mut importer = PgConnection::connect(&fixture.options.clone.source, &fixture.io).unwrap();
+    let mut importer = PgConnection::connect(
+        &fixture.options.clone.source,
+        crate::pg::Role::Copy,
+        &fixture.io,
+    )
+    .unwrap();
     import(&mut importer, &ticket, &fixture.io).unwrap();
     let binding = snapshot.binding().clone();
     catalog::check_follow_health(
@@ -572,7 +577,12 @@ fn live_follow_slot_snapshot_preserves_initial_boundary_and_exporter_lifetime() 
         .unwrap();
     assert_eq!(rows.cell(0, 0).unwrap(), Some(b"1".as_slice()));
     catalog::command(&mut importer, "COMMIT", "COMMIT", &fixture.io).unwrap();
-    let mut late = PgConnection::connect(&fixture.options.clone.source, &fixture.io).unwrap();
+    let mut late = PgConnection::connect(
+        &fixture.options.clone.source,
+        crate::pg::Role::Copy,
+        &fixture.io,
+    )
+    .unwrap();
     assert!(import(&mut late, &ticket, &fixture.io).is_err());
     assert_eq!(
         catalog::follow_confirmed_flush(

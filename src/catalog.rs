@@ -2205,7 +2205,7 @@ mod tests {
             std::env::var_os(variable).expect("owned source catalog connection is required"),
         )
         .unwrap();
-        PgConnection::connect(&info, io).unwrap()
+        PgConnection::connect(&info, crate::pg::Role::Copy, io).unwrap()
     }
 
     #[test]
@@ -2840,7 +2840,7 @@ mod tests {
                 )
                 .unwrap();
             let info = Conninfo::new(format!("{base} dbname={name}").into()).unwrap();
-            let mut db = PgConnection::connect(&info, &io).unwrap();
+            let mut db = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
             command(&mut db, "BEGIN", "BEGIN", &io).unwrap();
             for sql in [
                 "CREATE COLLATION und_icu (provider=icu, locale='und')",
@@ -2923,7 +2923,7 @@ mod tests {
             (&source_admin, "e1_source", "de_DE.UTF-8"),
             (&target_admin, "e1_target", "en_US.UTF-8"),
         ] {
-            let mut admin = PgConnection::connect(info, &io).unwrap();
+            let mut admin = PgConnection::connect(info, crate::pg::Role::Copy, &io).unwrap();
             let actual = admin.query("SHOW cluster_name", &io).unwrap();
             assert_eq!(actual.cell(0, 0).unwrap(), Some(token.as_bytes()));
             admin
@@ -2934,8 +2934,8 @@ mod tests {
                 .unwrap();
             admin.query(&format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system(),pg_catalog.pg_control_checkpoint() TO {role}"),&io).unwrap();
         }
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
-        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
         for (connection, locale) in [(&mut source, "de_DE.UTF-8"), (&mut target, "en_US.UTF-8")] {
             require_setting(connection, "lc_monetary", locale, &io).unwrap();
             let role=connection.query("SELECT NOT rolsuper AND NOT rolreplication AND NOT rolcreatedb AND NOT rolcreaterole FROM pg_catalog.pg_roles WHERE rolname=CURRENT_USER",&io).unwrap();
@@ -3006,7 +3006,7 @@ mod tests {
         crate::schema::preflight(snapshot.connection().unwrap(), &target, &plan, &io).unwrap();
         let archive = crate::schema::dump(&options, snapshot.ticket(), &state, &io).unwrap();
         let mut authority = crate::apply::CloneAuthority::acquire(
-            PgConnection::connect(&options.target, &io).unwrap(),
+            PgConnection::connect(&options.target, crate::pg::Role::Copy, &io).unwrap(),
             &mut state,
             &plan,
             &io,
@@ -3165,7 +3165,7 @@ mod tests {
             std::env::var_os(variable).expect("owned catalog target connection is required"),
         )
         .unwrap();
-        PgConnection::connect(&info, io).unwrap()
+        PgConnection::connect(&info, crate::pg::Role::Copy, io).unwrap()
     }
 
     fn cdc_target_fixture(
@@ -3745,7 +3745,7 @@ mod tests {
             std::env::var_os(variable).expect("owned catalog database connection is required"),
         )
         .unwrap();
-        PgConnection::connect(&info, io).unwrap()
+        PgConnection::connect(&info, crate::pg::Role::Copy, io).unwrap()
     }
 
     fn cdc_schema(source: &mut PgConnection, label: &str, io: &IoControl) -> (String, String) {
@@ -4446,10 +4446,12 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(20),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
-        let mut target = PgConnection::connect(&target_info, &io).unwrap();
-        let mut source_writer = PgConnection::connect(&source_info, &io).unwrap();
-        let mut target_writer = PgConnection::connect(&target_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut source_writer =
+            PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut target_writer =
+            PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
         source_writer
             .query("SET lock_timeout = '100ms'", &io)
             .unwrap();

@@ -23,6 +23,7 @@ fn connect(io: &IoControl) -> PgConnection {
                 .expect("isolated harness connection is required"),
         )
         .unwrap(),
+        crate::pg::Role::Copy,
         io,
     )
     .unwrap()

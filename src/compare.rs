@@ -166,8 +166,8 @@ pub(crate) fn peers(
     Vec<OwnedObject>,
 )> {
     let inspection = state::inspect_clone(&options.state, options.operator.as_ref(), io)?;
-    let mut source = PgConnection::connect(&options.source, io)?;
-    let mut target = PgConnection::connect(&options.target, io)?;
+    let mut source = PgConnection::connect(&options.source, crate::pg::Role::Compare, io)?;
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Compare, io)?;
     for connection in [&mut source, &mut target] {
         catalog::command(
             connection,
@@ -176,15 +176,6 @@ pub(crate) fn peers(
             io,
         )?;
         catalog::configure_session(connection, io)?;
-        catalog::command(
-            connection,
-            &format!(
-                "SET application_name TO 'rpgmigrate[{}] compare'",
-                std::process::id()
-            ),
-            "SET",
-            io,
-        )?;
     }
     if catalog::read_clone_source(&mut source, io)? != inspection.clone_state.plan.source
         || catalog::read_clone_target(&mut target, io)? != inspection.clone_state.plan.target

@@ -93,7 +93,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             .as_ref()
             .map_or(CopyGeneration(1), |state| state.plan.generation)
     };
-    let source = PgConnection::connect(&options.source, io)
+    let source = PgConnection::connect(&options.source, crate::pg::Role::Copy, io)
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Source))?;
     let mut snapshot = CloneSnapshot::export(source, generation, io)?;
     if let Some(previous) = &previous
@@ -103,7 +103,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             "clone-recovery: source identity, timeline, or major differs from native state",
         ));
     }
-    let mut target = PgConnection::connect(&options.target, io)
+    let mut target = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Target))?;
     let plan = if let Some(previous) = &previous {
         if catalog::read_clone_target(&mut target, io)? != previous.plan.target {
@@ -127,7 +127,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
         plan
     };
     crate::schema::preflight(snapshot.connection()?, &target, &plan, io)?;
-    let coordinator = PgConnection::connect(&options.target, io)
+    let coordinator = PgConnection::connect(&options.target, crate::pg::Role::Copy, io)
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Target))?;
     let mut authority = CloneAuthority::acquire(coordinator, &mut native, &plan, io)?;
     if entry == Entry::Complete {

@@ -7,7 +7,7 @@ use crate::contracts::connection_files::ConnectionFiles;
 use crate::contracts::{Conninfo, Error, ErrorKind, IoControl, Result};
 use pq_sys as pq;
 use std::cell::Cell;
-use std::ffi::{CStr, CString, OsString, c_void};
+use std::ffi::{CStr, CString, OsString, c_char, c_void};
 use std::marker::PhantomData;
 use std::os::unix::ffi::OsStringExt;
 use std::ptr::{self, NonNull};
@@ -78,6 +78,7 @@ fn liveness_setting(keyword: &[u8], value: &[u8]) -> Result<String> {
 /// Retain the live, keyword-terminated libpq option array throughout this call.
 unsafe fn copy_utility_options(
     options: NonNull<pq::PQconninfoOption>,
+    own_name: Option<&CStr>,
 ) -> Result<UtilityEnvironment> {
     let mut environment = UtilityEnvironment {
         remove: Vec::new(),
@@ -99,7 +100,12 @@ unsafe fn copy_utility_options(
                         CStr::from_ptr(option.val).to_bytes(),
                     )
                 };
-                environment.liveness.push(liveness_setting(keyword, value)?);
+                // Only the engine's own fallback passes; a caller-supplied one still refuses.
+                if keyword != b"fallback_application_name"
+                    || own_name.is_none_or(|own| own.to_bytes() != value)
+                {
+                    environment.liveness.push(liveness_setting(keyword, value)?);
+                }
             }
         } else {
             // SAFETY: each non-null field is a terminated string owned by the option array.
@@ -119,12 +125,33 @@ unsafe fn copy_utility_options(
         // SAFETY: a non-null keyword guarantees a following entry, possibly the terminator.
         current = unsafe { current.add(1) };
     }
+    // An unpinned child takes the copy name; a pinned PGAPPNAME or application_name is kept.
+    if own_name.is_some()
+        && !environment
+            .values
+            .iter()
+            .any(|(name, value)| name == "PGAPPNAME" && !value.is_empty())
+    {
+        environment.values.retain(|(name, _)| name != "PGAPPNAME");
+        environment.values.push((
+            "PGAPPNAME".into(),
+            OsString::from_vec(Role::Copy.application_name().into_bytes()),
+        ));
+    }
     Ok(environment)
 }
 
 /// Parses synthetic settings the way a live connection's effective options are copied.
 #[cfg(test)]
 pub(crate) fn parsed_utility_environment(bytes: &[u8]) -> Result<UtilityEnvironment> {
+    parsed_named_utility_environment(bytes, None)
+}
+
+#[cfg(test)]
+fn parsed_named_utility_environment(
+    bytes: &[u8],
+    own_name: Option<&CStr>,
+) -> Result<UtilityEnvironment> {
     let input = CString::new(bytes).unwrap();
     let mut diagnostic = ptr::null_mut();
     // SAFETY: input and diagnostic are live; both returned allocations are freed below.
@@ -135,10 +162,32 @@ pub(crate) fn parsed_utility_environment(bytes: &[u8]) -> Result<UtilityEnvironm
     }
     let options = NonNull::new(options).expect("synthetic settings must parse");
     // SAFETY: libpq returned a complete live option array.
-    let result = unsafe { copy_utility_options(options) };
+    let result = unsafe { copy_utility_options(options, own_name) };
     // SAFETY: release the array once, including expected refusal cases.
     unsafe { pq::PQconninfoFree(options.as_ptr()) };
     result
+}
+
+/// Contract session roles, named `rpgmigrate[<pid>] <role>` (docs/native-protocol.md).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Role {
+    Copy,
+    Apply,
+    Receive,
+    Compare,
+}
+
+impl Role {
+    pub(crate) fn application_name(self) -> CString {
+        let role = match self {
+            Role::Copy => "copy",
+            Role::Apply => "apply",
+            Role::Receive => "receive",
+            Role::Compare => "compare",
+        };
+        CString::new(format!("rpgmigrate[{}] {role}", std::process::id()))
+            .expect("formatted application names contain no NUL")
+    }
 }
 
 pub(crate) struct PgConnection {
@@ -159,6 +208,7 @@ enum Mode {
 
 struct Connection {
     raw: NonNull<pq::PGconn>,
+    application_name: CString,
     notices: Rc<NoticeState>,
     files: Option<Arc<ConnectionFiles>>,
     _owner: PhantomData<Rc<()>>,
@@ -266,33 +316,80 @@ fn is_data_command(sql: &str) -> bool {
     )
 }
 
-fn connect_start(conninfo: &Conninfo, mode: Mode) -> Result<*mut pq::PGconn> {
-    if mode == Mode::Sql {
-        if let Some(files) = conninfo.files() {
+fn connect_start(conninfo: &Conninfo, mode: Mode, name: &CStr) -> Result<*mut pq::PGconn> {
+    let mut keys = vec![c"dbname".as_ptr()];
+    let mut values = vec![conninfo.as_c_str().as_ptr()];
+    match (mode, conninfo.files()) {
+        (Mode::Sql, Some(files)) => {
             files.validate()?;
-            let mut keys = vec![c"dbname".as_ptr()];
-            let mut values = vec![conninfo.as_c_str().as_ptr()];
             for (key, value) in files.options() {
                 keys.push(key.as_ptr());
                 values.push(value.as_ptr());
             }
-            keys.push(ptr::null());
-            values.push(ptr::null());
-            // SAFETY: libpq expands the untouched first dbname and copies these live options.
-            return Ok(unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) });
         }
-        // SAFETY: Conninfo owns a valid NUL-terminated string for this call.
-        return Ok(unsafe { pq::PQconnectStart(conninfo.as_c_str().as_ptr()) });
+        (Mode::Sql, None) => validate_conninfo(conninfo)?,
+        (Mode::Logical, _) => {
+            validate_conninfo(conninfo)?;
+            keys.push(c"replication".as_ptr());
+            values.push(c"database".as_ptr());
+        }
     }
-    validate_conninfo(conninfo)?;
-    let keys = [c"dbname".as_ptr(), c"replication".as_ptr(), ptr::null()];
-    let values = [
-        conninfo.as_c_str().as_ptr(),
-        c"database".as_ptr(),
-        ptr::null(),
-    ];
+    // A caller's own fallback name, from the DSN or a service file, keeps precedence over ours.
+    if !caller_fallback(&keys, &values)? {
+        keys.push(c"fallback_application_name".as_ptr());
+        values.push(name.as_ptr());
+    }
+    keys.push(ptr::null());
+    values.push(ptr::null());
     // SAFETY: terminated arrays and strings stay live while libpq expands and copies them.
     Ok(unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) })
+}
+
+/// Reports whether libpq resolves a fallback_application_name from the caller's settings.
+fn caller_fallback(keys: &[*const c_char], values: &[*const c_char]) -> Result<bool> {
+    // An invalid sslmode stops libpq after it applied the DSN, service file and environment, before any socket.
+    let keys: Vec<_> = keys
+        .iter()
+        .copied()
+        .chain([c"sslmode".as_ptr(), ptr::null()])
+        .collect();
+    let values: Vec<_> = (values.iter().copied())
+        .chain([c"rpgmigrate-option-probe".as_ptr(), ptr::null()])
+        .collect();
+    // SAFETY: terminated arrays and strings stay live while libpq expands and copies them.
+    let probe =
+        NonNull::new(unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) })
+            .ok_or_else(|| error("PostgreSQL connection allocation failed"))?;
+    // SAFETY: probe is a live connection object; a socket would mean libpq started connecting.
+    let value = if unsafe { pq::PQsocket(probe.as_ptr()) } >= 0 {
+        Err(error("PostgreSQL option probe opened a socket"))
+    } else {
+        connection_option(probe, c"fallback_application_name")
+    };
+    // SAFETY: the probe is released once here.
+    unsafe { pq::PQfinish(probe.as_ptr()) };
+    Ok(value?.is_some_and(|value| !value.is_empty()))
+}
+
+/// Copies one effective option of a connection object, or None when it is unset.
+fn connection_option(connection: NonNull<pq::PGconn>, keyword: &CStr) -> Result<Option<Vec<u8>>> {
+    // SAFETY: the connection object is live; PQconninfo copies its parsed options.
+    let options = NonNull::new(unsafe { pq::PQconninfo(connection.as_ptr()) })
+        .ok_or_else(|| error("PostgreSQL connection settings are unavailable"))?;
+    let mut value = None;
+    let mut current = options.as_ptr();
+    // SAFETY: the keyword-terminated array and its strings stay live until its single release.
+    unsafe {
+        while !(*current).keyword.is_null() {
+            let option = &*current;
+            if CStr::from_ptr(option.keyword) == keyword && !option.val.is_null() {
+                value = Some(CStr::from_ptr(option.val).to_bytes().to_vec());
+            }
+            current = current.add(1);
+        }
+        pq::PQconninfoFree(options.as_ptr());
+    }
+    Ok(value)
 }
 
 impl PgConnection {
@@ -315,8 +412,13 @@ impl PgConnection {
         // SAFETY: PQconninfo copies this owned connection's effective options into a new array.
         let options = NonNull::new(unsafe { pq::PQconninfo(raw) })
             .ok_or_else(|| error("PostgreSQL utility connection settings are unavailable"))?;
+        let own_name = &self
+            .raw
+            .as_ref()
+            .ok_or_else(|| error("PostgreSQL utility connection is unavailable"))?
+            .application_name;
         // SAFETY: options is a live libpq array and no pointer escapes this copy.
-        let outcome = unsafe { copy_utility_options(options) };
+        let outcome = unsafe { copy_utility_options(options, Some(own_name)) };
         // SAFETY: this is the single release of PQconninfo's array, including refusal paths.
         unsafe { pq::PQconninfoFree(options.as_ptr()) };
         let mut environment = outcome?;
@@ -371,18 +473,20 @@ impl PgConnection {
         Ok(environment)
     }
 
-    pub(crate) fn connect(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
-        Self::connect_mode(conninfo, Mode::Sql, io)
+    pub(crate) fn connect(conninfo: &Conninfo, role: Role, io: &IoControl) -> Result<Self> {
+        Self::connect_mode(conninfo, Mode::Sql, role, io)
     }
 
-    fn connect_mode(conninfo: &Conninfo, mode: Mode, io: &IoControl) -> Result<Self> {
+    fn connect_mode(conninfo: &Conninfo, mode: Mode, role: Role, io: &IoControl) -> Result<Self> {
         let io = &io::operation_control(io);
         io::check(io)?;
-        let raw = connect_start(conninfo, mode)?;
+        let application_name = role.application_name();
+        let raw = connect_start(conninfo, mode, &application_name)?;
         let raw =
             NonNull::new(raw).ok_or_else(|| error("PostgreSQL connection allocation failed"))?;
         let owner = Connection {
             raw,
+            application_name,
             notices: Rc::new(NoticeState::default()),
             files: conninfo.files().cloned(),
             _owner: PhantomData,
@@ -818,7 +922,7 @@ impl PgConnection {
 
     /// Opens a dedicated logical session with replication=database overriding conninfo.
     pub(crate) fn connect_replication(conninfo: &Conninfo, io: &IoControl) -> Result<Self> {
-        Self::connect_mode(conninfo, Mode::Logical, io)
+        Self::connect_mode(conninfo, Mode::Logical, Role::Receive, io)
     }
 
     pub(crate) fn identify_system(&mut self, io: &IoControl) -> Result<IdentifySystem> {
@@ -1766,6 +1870,7 @@ mod tests {
         PgConnection {
             raw: Some(Connection {
                 raw: NonNull::new(raw).unwrap(),
+                application_name: Role::Copy.application_name(),
                 notices: Rc::new(NoticeState::default()),
                 files: None,
                 _owner: PhantomData,
@@ -1836,7 +1941,10 @@ mod tests {
     fn connection_failures_use_redacted_postgresql_errors() {
         let conninfo =
             Conninfo::new("rpgmigrate_invalid_option=private-connection-value".into()).unwrap();
-        for connect in [PgConnection::connect, PgConnection::connect_replication] {
+        for connect in [
+            |conninfo: &Conninfo, io: &IoControl| PgConnection::connect(conninfo, Role::Copy, io),
+            PgConnection::connect_replication,
+        ] {
             let failure = connect(&conninfo, &control()).err().unwrap();
             assert_eq!(failure.kind, crate::contracts::ErrorKind::Pgsql);
             assert!(!failure.message.contains("private-connection-value"));
@@ -1863,9 +1971,11 @@ mod tests {
             .1
             .to_owned();
         let lifetime = Arc::downgrade(bound.source.files().unwrap());
-        let raw = NonNull::new(connect_start(&bound.source, Mode::Sql).unwrap()).unwrap();
+        let name = Role::Copy.application_name();
+        let raw = NonNull::new(connect_start(&bound.source, Mode::Sql, &name).unwrap()).unwrap();
         let owner = Connection {
             raw,
+            application_name: name.clone(),
             notices: Rc::new(NoticeState::default()),
             files: bound.source.files().cloned(),
             _owner: PhantomData,
@@ -1873,11 +1983,12 @@ mod tests {
         // SAFETY: the owner keeps the connection live throughout option capture.
         let settings = NonNull::new(unsafe { pq::PQconninfo(raw.as_ptr()) }).unwrap();
         // SAFETY: libpq returned the complete live option array.
-        let environment = unsafe { copy_utility_options(settings) }.unwrap();
+        let environment = unsafe { copy_utility_options(settings, Some(&name)) }.unwrap();
         // SAFETY: release exactly the option allocation returned above.
         unsafe { pq::PQconninfoFree(settings.as_ptr()) };
         for (key, expected) in [
             ("PGPASSFILE", expected.to_bytes()),
+            ("PGAPPNAME", name.to_bytes()),
             ("PGDATABASE", b"fixture"),
             ("PGUSER", b"fixture"),
             ("PGHOST", b"/rpgmigrate-no-such-private-socket"),
@@ -1952,6 +2063,73 @@ mod tests {
             );
             assert_eq!(failure.kind, ErrorKind::BadConfig);
         }
+    }
+
+    fn started_fallback(conninfo: &str) -> Option<Vec<u8>> {
+        let conninfo = Conninfo::new(conninfo.into()).unwrap();
+        let name = Role::Apply.application_name();
+        let raw = NonNull::new(connect_start(&conninfo, Mode::Sql, &name).unwrap()).unwrap();
+        // Positive control: a real start has a socket, which the probe's guard refuses.
+        // SAFETY: raw stays live until PQfinish below.
+        assert!(unsafe { pq::PQsocket(raw.as_ptr()) } >= 0);
+        let value = connection_option(raw, c"fallback_application_name").unwrap();
+        // SAFETY: the started connection is released once.
+        unsafe { pq::PQfinish(raw.as_ptr()) };
+        value
+    }
+
+    #[test]
+    fn caller_fallback_names_win_and_the_probe_opens_no_socket() {
+        // The service-file case runs live in schema's auth and TLS utility test.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("host=127.0.0.1 port={port} dbname=x connect_timeout=2");
+        let caller = format!("{base} fallback_application_name=from-dsn");
+        let own = Role::Apply.application_name().to_bytes().to_vec();
+        for (input, expected, found) in [(base, own, false), (caller, b"from-dsn".to_vec(), true)] {
+            let conninfo = Conninfo::new(input.clone().into()).unwrap();
+            let keys = [c"dbname".as_ptr()];
+            let values = [conninfo.as_c_str().as_ptr()];
+            assert_eq!(caller_fallback(&keys, &values).unwrap(), found, "{input}");
+            assert_eq!(started_fallback(&input), Some(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn utility_children_take_the_copy_name_unless_pinned() {
+        let own = Role::Compare.application_name();
+        let copy = Role::Copy.application_name();
+        let appname = |environment: &UtilityEnvironment| {
+            let names: Vec<_> = environment
+                .values
+                .iter()
+                .filter(|(name, _)| name == "PGAPPNAME")
+                .map(|(_, value)| value.as_encoded_bytes().to_vec())
+                .collect();
+            assert_eq!(names.len(), 1, "exactly one PGAPPNAME reaches the child");
+            names[0].clone()
+        };
+        let mut unpinned = b"host=/x fallback_application_name='".to_vec();
+        unpinned.extend_from_slice(own.to_bytes());
+        unpinned.push(b'\'');
+        for input in [
+            unpinned.clone(),
+            [unpinned.as_slice(), b" application_name=''"].concat(),
+        ] {
+            let environment = parsed_named_utility_environment(&input, Some(&own)).unwrap();
+            assert_eq!(appname(&environment), copy.to_bytes());
+            assert!(environment.liveness.is_empty());
+        }
+        let pinned = [unpinned.as_slice(), b" application_name=pinned"].concat();
+        let environment = parsed_named_utility_environment(&pinned, Some(&own)).unwrap();
+        assert_eq!(appname(&environment), b"pinned");
+        let failure = parsed_named_utility_environment(
+            b"host=/x fallback_application_name='caller'",
+            Some(&own),
+        )
+        .err()
+        .expect("a caller-supplied fallback name still refuses");
+        assert_eq!(failure.kind, ErrorKind::BadConfig);
     }
 
     #[test]
@@ -2444,7 +2622,7 @@ mod tests {
     #[test]
     fn invalid_private_socket_diagnostics_do_not_reveal_credentials() {
         let conninfo = Conninfo::new("host=/rpgmigrate-no-such-private-socket port=1 user=private-user password=private-password dbname=private-db".into()).unwrap();
-        let error = match PgConnection::connect(&conninfo, &control()) {
+        let error = match PgConnection::connect(&conninfo, crate::pg::Role::Copy, &control()) {
             Ok(_) => panic!("nonexistent private socket unexpectedly connected"),
             Err(error) => error,
         };

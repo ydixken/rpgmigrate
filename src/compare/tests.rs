@@ -277,8 +277,8 @@ fn live_canonical_rows_preserve_only_generated_identity_null_and_duplicates() {
         deadline: Instant::now() + Duration::from_secs(60),
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
-    let mut source = PgConnection::connect(&conninfo, &io).unwrap();
-    let mut target = PgConnection::connect(&conninfo, &io).unwrap();
+    let mut source = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
+    let mut target = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
     for (connection, style) in [(&mut source, "SQL, DMY"), (&mut target, "German, DMY")] {
         connection
             .query(&format!("SET DateStyle TO '{style}'"), &io)

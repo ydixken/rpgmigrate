@@ -24,7 +24,7 @@ fn connection(io: &IoControl) -> PgConnection {
         std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_TARGET").expect("owned target required"),
     )
     .unwrap();
-    PgConnection::connect(&conninfo, io).unwrap()
+    PgConnection::connect(&conninfo, crate::pg::Role::Copy, io).unwrap()
 }
 
 fn state() -> NativeState {
@@ -672,7 +672,7 @@ fn readonly_refusal() {
     let stream = stream_for(&native);
     let conninfo =
         Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_READONLY").unwrap()).unwrap();
-    let target = PgConnection::connect(&conninfo, &io).unwrap();
+    let target = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
     assert!(TargetAuthority::acquire(target, stream, &mut native, &io).is_err());
     assert!(native.target_provenance(&stream).is_none());
 }
@@ -680,7 +680,7 @@ fn readonly_refusal() {
 fn named_connection(variable: &str, io: &IoControl) -> PgConnection {
     let value = Conninfo::new(std::env::var_os(variable).expect("owned fixture connection absent"))
         .unwrap();
-    PgConnection::connect(&value, io).unwrap()
+    PgConnection::connect(&value, crate::pg::Role::Copy, io).unwrap()
 }
 
 fn owned_provenance(native: &NativeState, stream: StreamId) -> ConfirmedProvenance {
@@ -1537,7 +1537,7 @@ fn missing_privileges() {
         let base = std::env::var("RPGMIGRATE_TEST_AUTHORITY_RESTRICTED").unwrap();
         let escaped = writer.replace('\\', "\\\\").replace('\'', "\\'");
         let conninfo = Conninfo::new(format!("{base} user='{escaped}'").into()).unwrap();
-        let mut runtime = PgConnection::connect(&conninfo, &io).unwrap();
+        let mut runtime = PgConnection::connect(&conninfo, crate::pg::Role::Copy, &io).unwrap();
         let privileges = runtime.query(&format!(
             "SELECT rolname, oid <> {owner},
                 NOT pg_catalog.pg_has_role(CURRENT_USER, {owner}::oid, 'MEMBER'),
@@ -2015,7 +2015,7 @@ impl Fault {
     }
 
     fn connect(&self, io: &IoControl) -> PgConnection {
-        PgConnection::connect(&self.conninfo, io).unwrap()
+        PgConnection::connect(&self.conninfo, crate::pg::Role::Copy, io).unwrap()
     }
 
     fn request(&mut self, operation: &str) -> serde_json::Value {
@@ -2912,7 +2912,7 @@ fn follow_cancelled_sync_wait_never_proves_group_or_certification() {
         std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").expect("owned admin required"),
     )
     .unwrap();
-    let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+    let mut admin = PgConnection::connect(&admin_info, crate::pg::Role::Copy, &io).unwrap();
     let identity = admin
         .query("SELECT pg_catalog.current_setting('cluster_name')", &io)
         .unwrap();
@@ -3043,7 +3043,8 @@ fn follow_cancelled_sync_wait_never_proves_group_or_certification() {
             let cancel_info = admin_info.clone();
             let cancel_io = io.clone();
             let cancel = std::thread::spawn(move || {
-                let mut observer = PgConnection::connect(&cancel_info, &cancel_io).unwrap();
+                let mut observer =
+                    PgConnection::connect(&cancel_info, crate::pg::Role::Copy, &cancel_io).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     assert!(
@@ -3962,6 +3963,7 @@ impl Fault {
         value.extend_from_slice(b" user=e1_admin");
         PgConnection::connect(
             &Conninfo::new(std::ffi::OsString::from_vec(value)).unwrap(),
+            crate::pg::Role::Copy,
             io,
         )
         .unwrap()
@@ -4075,7 +4077,7 @@ fn follow_cancelled_sync_wait_never_proves_drain_completion_or_observation() {
     );
     let admin_info =
         Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").unwrap()).unwrap();
-    let mut admin = PgConnection::connect(&admin_info, &io).unwrap();
+    let mut admin = PgConnection::connect(&admin_info, crate::pg::Role::Copy, &io).unwrap();
     assert_eq!(
         admin
             .query("SELECT pg_catalog.current_setting('cluster_name')", &io)

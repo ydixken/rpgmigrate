@@ -1086,6 +1086,13 @@ def inner(args):
             Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
             print(json.dumps({"follow_e2e": "engine_producer_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
             return
+        if getattr(args, "sessions", False):
+            import sessions
+            receipt.update(mode="session_names", receipt_scope="session_names", cases=sessions.run(source, target, case, launch, driver))
+            sessions.validate_receipt(receipt)
+            Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            print(json.dumps({"follow_e2e": "session_names_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
+            return
         if not diagnostic_case:
             srcname, dstname, src, dst, state = case("dml")
             check_workload(source, srcname, manifest)
@@ -1362,6 +1369,7 @@ def main():
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--cutover", action="store_true", help="check M4 engine producer cases; independent M6/Go evidence remains required")
     selection.add_argument("--smoke", action="store_true", help="run only the separately scoped initial copy and DML smoke case")
+    selection.add_argument("--sessions", action="store_true", help="check the engine's session names through clone, endpos, compare and cleanup")
     selection.add_argument("--diagnostic-case", choices=("before_commit_rollback",), help="run one separately scoped fault diagnostic; requires a new explicit receipt path")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--binary", default="/build/debug/rpgmigrate")
@@ -1384,6 +1392,10 @@ def main():
             import cutover
             manifest = cutover.load_manifest()
             validator = lambda report, manifest: cutover.validate_receipt(report, manifest, require_images=True)
+        elif args.sessions:
+            import sessions
+            manifest = load_manifest()
+            validator = lambda report, manifest: sessions.validate_receipt(report)
         else:
             manifest = load_manifest()
             validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case)

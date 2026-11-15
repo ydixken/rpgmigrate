@@ -4946,7 +4946,7 @@ mod clone_marker_tests {
         let target = target.clone();
         let io = io.clone();
         std::thread::spawn(move || {
-            let mut observer = PgConnection::connect(&target, &io).unwrap();
+            let mut observer = PgConnection::connect(&target, crate::pg::Role::Copy, &io).unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let result = observer.query(&format!("SELECT wait_event='SyncRep' AND query='COMMIT' FROM pg_catalog.pg_stat_activity WHERE pid={pid}"), &io).unwrap();
@@ -5041,7 +5041,7 @@ mod clone_marker_tests {
         authority.advance_generation(state, io).unwrap();
         authority.authority.session.close();
         let plan = state.checked_clone().unwrap().unwrap().plan;
-        let mut connection = PgConnection::connect(target_info, io).unwrap();
+        let mut connection = PgConnection::connect(target_info, crate::pg::Role::Copy, io).unwrap();
         connection
             .query("SET synchronous_commit=remote_apply", io)
             .unwrap();
@@ -5054,7 +5054,7 @@ mod clone_marker_tests {
             "remote_apply"
         );
         let table = state.owned_copy_tables().unwrap().remove(0);
-        let mut connection = PgConnection::connect(target_info, io).unwrap();
+        let mut connection = PgConnection::connect(target_info, crate::pg::Role::Copy, io).unwrap();
         connection
             .query("SET synchronous_commit=remote_apply", io)
             .unwrap();
@@ -5094,7 +5094,7 @@ mod clone_marker_tests {
         canceller.join().unwrap();
         set_missing_sync_standby(target, false, io);
         authority.authority.session.close();
-        let mut connection = PgConnection::connect(target_info, io).unwrap();
+        let mut connection = PgConnection::connect(target_info, crate::pg::Role::Copy, io).unwrap();
         connection
             .query("SET synchronous_commit=remote_apply", io)
             .unwrap();
@@ -5141,7 +5141,7 @@ mod clone_marker_tests {
         let (ready, started) = std::sync::mpsc::sync_channel(0);
         let handle = std::thread::spawn(move || {
             let mut tx = CopyTxn::begin(
-                PgConnection::connect(&target, &io_worker).unwrap(),
+                PgConnection::connect(&target, crate::pg::Role::Copy, &io_worker).unwrap(),
                 permit,
                 &io_worker,
             )
@@ -5263,7 +5263,11 @@ mod clone_marker_tests {
         target
             .query(&format!("INSERT INTO {schema}.{name} VALUES(777)"), io)
             .unwrap();
-        let attempt = CopyTxn::begin(PgConnection::connect(target_info, io).unwrap(), permit, io);
+        let attempt = CopyTxn::begin(
+            PgConnection::connect(target_info, crate::pg::Role::Copy, io).unwrap(),
+            permit,
+            io,
+        );
         let refused = attempt.is_err();
         drop(attempt);
         assert_eq!(
@@ -5322,7 +5326,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
         let conninfo =
             crate::contracts::Conninfo::new(ready["conninfo"].as_str().unwrap().into()).unwrap();
         let mut tx = CopyTxn::begin(
-            PgConnection::connect(&conninfo, io).unwrap(),
+            PgConnection::connect(&conninfo, crate::pg::Role::Copy, io).unwrap(),
             authority.permit(table, &single_part()).unwrap(),
             io,
         )
@@ -5359,7 +5363,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
                 bytes: 2
             })
         );
-        let mut observer = PgConnection::connect(target, io).unwrap();
+        let mut observer = PgConnection::connect(target, crate::pg::Role::Copy, io).unwrap();
         assert_eq!(
             observer
                 .query(&format!("SELECT id FROM {name}"), io)
@@ -5395,8 +5399,8 @@ with ProtocolFault(context,'commit_unknown') as relay:
             Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN").unwrap()).unwrap();
         let target_info =
             Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_CLONE_TARGET_ADMIN").unwrap()).unwrap();
-        let mut source = PgConnection::connect(&source_info, &io).unwrap();
-        let mut target = PgConnection::connect(&target_info, &io).unwrap();
+        let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
+        let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
         let schema = format!("m2_marker_{}", std::process::id());
         for sql in [
             format!("CREATE SCHEMA {schema}"),
@@ -5456,7 +5460,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
             )
             .unwrap();
         let mut authority = CloneAuthority::acquire(
-            PgConnection::connect(&target_info, &io).unwrap(),
+            PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap(),
             &mut state,
             &plan,
             &io,
@@ -5498,9 +5502,12 @@ with ProtocolFault(context,'commit_unknown') as relay:
                 let io = io.clone();
                 handles.push(scope.spawn(move || {
                     let name = permit.table.table.name.clone();
-                    let mut tx =
-                        CopyTxn::begin(PgConnection::connect(&info, &io).unwrap(), permit, &io)
-                            .unwrap();
+                    let mut tx = CopyTxn::begin(
+                        PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap(),
+                        permit,
+                        &io,
+                    )
+                    .unwrap();
                     tx.connection_mut()
                         .unwrap()
                         .start_copy_in(
@@ -5560,7 +5567,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
         authority.advance_generation(&state, &io).unwrap();
         assert!(
             CopyTxn::begin(
-                PgConnection::connect(&target_info, &io).unwrap(),
+                PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap(),
                 stale,
                 &io
             )
@@ -5584,7 +5591,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
         let current = state.owned_copy_tables().unwrap();
         let permit = authority.permit(&current[0], &single_part()).unwrap();
         let mut dropped = CopyTxn::begin(
-            PgConnection::connect(&target_info, &io).unwrap(),
+            PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap(),
             permit,
             &io,
         )
@@ -5641,7 +5648,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
             .advance_copy_generation(&restart_plan, &restart_ticket)
             .unwrap();
         authority = CloneAuthority::acquire(
-            PgConnection::connect(&target_info, &io).unwrap(),
+            PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap(),
             &mut state,
             &restart_plan,
             &io,

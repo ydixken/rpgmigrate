@@ -52,9 +52,9 @@ pub(crate) fn run(options: &StreamOptions, io: &IoControl) -> Result<String> {
             "cleanup target receipt differs from its recorded plan",
         ));
     }
-    let mut source = PgConnection::connect(source, io)
+    let mut source = PgConnection::connect(source, crate::pg::Role::Receive, io)
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Source))?;
-    let mut target = PgConnection::connect(target, io)
+    let mut target = PgConnection::connect(target, crate::pg::Role::Receive, io)
         .map_err(|error| crate::endpoint_error(error, ErrorKind::Target))?;
     catalog::configure_session(&mut source, io)?;
     catalog::configure_session(&mut target, io)?;

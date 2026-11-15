@@ -204,7 +204,7 @@ mod clone_tests {
         )
         .unwrap();
         let io = IoControl::unbounded(Arc::new(AtomicBool::new(false)));
-        let mut writer = PgConnection::connect(&info, &io).unwrap();
+        let mut writer = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
         let counts_sql = "SELECT (SELECT count(*) FROM pg_catalog.pg_replication_slots), (SELECT count(*) FROM pg_catalog.pg_publication)";
         let before = writer.query(counts_sql, &io).unwrap();
         let table = format!("m2_snapshot_{}", std::process::id());
@@ -216,7 +216,7 @@ mod clone_tests {
             .query(&format!("INSERT INTO public.{table} VALUES (1)"), &io)
             .unwrap();
         let exporter = CloneSnapshot::export(
-            PgConnection::connect(&info, &io).unwrap(),
+            PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap(),
             CopyGeneration(1),
             &io,
         )
@@ -225,7 +225,7 @@ mod clone_tests {
         writer
             .query(&format!("INSERT INTO public.{table} VALUES (2)"), &io)
             .unwrap();
-        let mut importer = PgConnection::connect(&info, &io).unwrap();
+        let mut importer = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
         import(&mut importer, &ticket, &io).unwrap();
         let rows = importer
             .query(
@@ -241,7 +241,7 @@ mod clone_tests {
             .unwrap();
         assert_eq!(rows.cell(0, 0).unwrap(), Some(b"1".as_slice()));
         command_importer_commit(&mut importer, &io);
-        let mut late = PgConnection::connect(&info, &io).unwrap();
+        let mut late = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
         let error = import(&mut late, &ticket, &io).unwrap_err();
         assert!(
             error.message.contains(if ticket.source.major == 16 {
