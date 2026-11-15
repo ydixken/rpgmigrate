@@ -688,6 +688,17 @@ No manual proof JSON or lease renewal is allowed.
 - [ ] Native runs on 16:16, 18:18 and 16:18: live writer load follow, manual and automatic cutover, verification, runner kill mid-copy, mid-stream and mid-drain, target primary kill with CNPG synchronous replication, suspend/resume, deletion cleanup.
 - [ ] Hosted GitHub Actions job on kind at small scale.
 
+#### Status after M7-RUN6, 2026-11-15
+
+M7-RUN6 is the first passing operator-driven native run.
+On operator `db23902`, runner `db50bc9` and lock `7d4ce671`, every native spec passed on 16:16: automatic-cutover, early-manual, live-writer, fault-copy, fault-stream, fault-drain, fault-failover, fault-suspend, fault-delete, fresh-clone and `native-refusal`.
+automatic-cutover also passed on 18:18 and 16:18.
+The runs proved lag sampling and automatic cutover with `CaughtUp=True`, the drain proof, schema and data verification, `status.replication` and the LSN gauges, the retry gate, engine session names per role, the deletion inventory, cleaned completion and both TERM receipts.
+The [ledger](../tasks/todo.md#wave-13-2026-11-15) binds the evidence.
+
+To close M7, the ten specs that ran only on 16:16 run on 18:18 and 16:18 on the same frozen state, and a hosted kind job on GitHub amd64 runners gives the first live amd64 native runs.
+To close M6, two independent reviews of the production code at `db23902` find and verify defects; any production fix goes to the M8 line.
+
 ### M8: Feature widening (each item enables its capability)
 
 Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03eb6d34fc` passed six profiles and nine local reports on each of 16 to 16 and 18 to 18.
@@ -1000,12 +1011,24 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   - `fix/native-origin-grants-20261115` at `66edab8` grants the replication origin functions for pgcopydb only, gates the legacy preflight's grant block to pgcopydb, and lets the seam harness override its PostgreSQL images by digest (P-SCHEMA-ACL).
   - `fix/native-catalog-engine-sync-20261115` at `873bb1f` renders the v7 receipt catalogs from the engine source and fails when their recorded engine commit is not the qualified runner's.
   - `ci/logical-wal-level-20261115` at `5b61da4` runs the ci.yml PostgreSQL services with `wal_level=logical` and fails the logical-slot live case instead of skipping it; no hosted ci.yml run covers it.
-  - The native LSN gauges branch of decision (w) was not delivered.
+  - The native LSN gauges branch of decision (w) was not delivered in wave 12.
 - `feat/rpgmigrate-native-operator` at `861ff86` merges those four onto `53231a0` and admits only the `abb3c53` runner.
   The seam harness passed 27 of 27 steps on 16:16, 18:18 and 16:18, on the locked images and on the newest CloudNativePG builds `ghcr.io/cloudnative-pg/postgresql@sha256:a3af182e7b0ac01d01cb9dacbde55cf46dbfeda44d43dd5a69a580118428a9c9` (16.15) and `ghcr.io/cloudnative-pg/postgresql@sha256:d7ac905ba127791b973125a8004a7250eeb49878eee30d3a858794e860312a0c` (18.6).
   Its manager images are arm64 `sha256:7db68a1e076bc64503bc7670d97f81e83d2b97ba7efe8e0e37f7c3f7e1e74261` and amd64 `sha256:af008dbc23a212b075380d30f5b91091921faf1a1a8effba6cf884012fb9a1bd`, and its arm64 lock has SHA-256 `d8c1548c1653cad1bd5a671b9bb77c322561276af55ac6f3ef204c56fba0a74e`.
   M7-RUN5 passed fault-delete, fresh-clone and `native-refusal` on 16:16 on it, and both TERM receipts passed.
   automatic-cutover on all three pairs, live-writer and fault-suspend stalled at `CuttingOver` on P-CLEANED-CLOSURE, and fault-copy failed because the engine left its session names empty (P-APPNAME).
+- Wave 13 branches from `861ff86`:
+  - `fix/native-helper-closure-20261115` at `389207e` waits for a refused state helper's Job inside the caller's 90 s context before judging closure, and the seam harness finishes the follow run in the manager's order (P-CLEANED-CLOSURE).
+  - `test/native-session-controls-20261115` at `3e5abb1` gives every native consumer of the engine session name a positive control and adds a streaming session-name census to the seam harness.
+  - `fix/native-status-ordering-20261115` at `4f6d0c5` records `CaughtUp` before the cutover pass saves endpos (O-1) and applies only complete samples within an attempt (O-2).
+  - `fix/native-lsn-gauges-20261115` at `7038168` publishes the native write, replay and source LSN gauges from the same sample as `status.replication`.
+  - `test/native-suite-hygiene-20261115` at `c93f19a` fits the follow waits inside the guard's 1800 s budget, records the fault-copy probe gap, and runs the coverage apply leak check on its own database.
+- `feat/rpgmigrate-native-operator` at `adf1f34` merges those five onto `861ff86` and admits only the `db50bc9` runner.
+  The seam harness passed 25 of 25 steps on 16:16, 18:18 and 16:18, on the locked images and on the newest CloudNativePG builds, with the session-name census passing on both sides.
+  Its manager images are arm64 `sha256:78aa168613185da71cb1c148a22f1ec18d5967b83dbf26823a6a755dbd18c924` and amd64 `sha256:5ad25ec2da75d21ae2f17d90adffd9f03c254c41e4bcfde975e10fae2dcc630b`, and its arm64 lock has SHA-256 `3c9ad4af89b81a420aed1eec3de957c4f23b58e66a341ca1804bb0d363c337f7`.
+- `feat/rpgmigrate-native-operator` at `db23902` fixes S-JOB-WATCH: the suite's `create()` read the Migration's engine before the labeling client filled it, so the follow specs never watched their Jobs.
+  Its arm64 manager image is `sha256:0adc848623c4a1e96c94c44681cca280824af9cc7c2d6e5bab78417027f61b5c`, and its arm64 lock has SHA-256 `7d4ce671ef8c2b19d819646e4b0b0ad9b2815a60acacf8e46c9a7f5d301ad678`.
+  M7-RUN6 passed every native spec on 16:16 and automatic-cutover on 18:18 and 16:18 on it, 13 spec and pair runs, with no production defect.
 
 ### Leader decisions, 2026-11-12
 
@@ -1109,7 +1132,22 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - Gating the legacy origin-grant preflight block to pgcopydb and revoking the grant for native in the suite are accepted, and a native preflight check for a leftover legacy grant is deferred to the M10 review.
 - The native LSN gauges are re-delegated from `861ff86`, and hosted ci.yml for the logical `wal_level` change waits on a pull request that needs the user's go-ahead.
 
-M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
+### Decisions, wave 14, 2026-11-15
+
+- A refused state-helper relay closes only on a Failed helper Job, and a Succeeded Job after a refused relay is a mismatch.
+- M6 and M7 close on the frozen operator `db23902`, runner `db50bc9` and lock `7d4ce671`; follow-up branches integrate after the close, and any production fix found now goes to the M8 line.
+- M7 acceptance needs every native spec on all three pairs.
+- The whole-M6 review is two independent xhigh reviews split by area over production code at `db23902`, which verify each finding and fix nothing.
+- The bounded Linux-native-host guard transport and a hosted kind job on GitHub amd64 runners at small scale give the first live amd64 native runs.
+- The engine's session handling is audited for idle-in-transaction exposure and server-side session timeouts, with fixes on a branch for the M8 runner.
+- The `PgcopydbMigrationCutoverStalled` alert changes only if a healthy native drain can fire it.
+- The fault-copy report never reports an unmeasured probe gap as 0 s, the suite's Job watch resumes from its `resourceVersion` across client timeouts, and `hack/__pycache__` is untracked.
+- The seam harness covers the completion rejoin route on all three pairs.
+- The sampler phase-lock latency after approvals and new attempts is deferred to M9, and stale status with a stopped sampler is accepted, because cutover needs a fresh catch-up confirmation.
+- A pull request for hosted operator ci.yml and deleting scratch clones wait for the user.
+
+M0–M5 remain closed and M6–M10 remain open.
+M7-RUN6 passed native operator migrations on kind, but no native operator migration or capability activation is qualified until M6 and M7 close.
 
 ## Execution model
 

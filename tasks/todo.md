@@ -2013,7 +2013,7 @@ Leader decisions, wave 11:
   `TestCIRunsLogicalSlotCases` fails when either setting leaves ci.yml, and 2 of 2 mutations showed it.
   ci.yml runs only on `main`, one test branch and pull requests, so no hosted ci.yml run covers the change.
   Evidence: `/private/var/tmp/rpgmigrate-OP-CI-LOGICAL-20261115/SHA256SUMS`, SHA-256 `45e6195fd92619a57d67d5693afd4e7a76badca55886fbb12dee17a7147787d6`.
-- [ ] OP-NATIVE-LSN-GAUGES (decision w) was not delivered: its agent died with uncommitted edits in six files, so nothing was integrated, and decision (af) re-delegates it.
+- [x] OP-NATIVE-LSN-GAUGES (decision w) was not delivered in wave 12: its agent died with uncommitted edits in six files, so nothing was integrated, and decision (af) re-delegated it to wave 13 (below).
 - [x] INTEGRATE8 (operator): `feat/native-operator-integration11-20261115` at `861ff86` merges the four branches above onto `53231a0` and qualifies the `abb3c53` runner, refusing both `2b9b11d` digests.
   The seam harness passed 27 of 27 steps, with the retry run 9 of 9, in six runs: 16:16, 18:18 and 16:18 on the locked CloudNativePG images and again on the newest builds.
   The newest builds are `ghcr.io/cloudnative-pg/postgresql@sha256:a3af182e7b0ac01d01cb9dacbde55cf46dbfeda44d43dd5a69a580118428a9c9` (16.15) and `ghcr.io/cloudnative-pg/postgresql@sha256:d7ac905ba127791b973125a8004a7250eeb49878eee30d3a858794e860312a0c` (18.6), because CloudNativePG publishes no newer minor.
@@ -2047,7 +2047,7 @@ Leader decisions, wave 11:
   The fault-copy probe never matched, the fault-drain probe cannot match, the suite's no-session checks always read zero, and by reading the code the retry-gate census at `evidence_program.py:1682` sees no engine session.
   Reproduction `58cf711` saw 0 sessions matching `rpgmigrate[%` on either side while streaming.
 - [x] O-1: an automatic cutover pass never records `CaughtUp=True`, because `native_reconcile.go:301-303` cuts over before `applyNativeProgress` at `:305`.
-- [x] O-2: in live-writer the phase went from Streaming back to Cloning, with `CaughtUp` unknown and an empty replication block, for about 75 s within attempt 1; the suspected in-flight sample read is not reproduced.
+- [x] O-2: in live-writer the phase went from Streaming back to Cloning, with `CaughtUp` unknown and an empty replication block, for about 75 s within attempt 1; OP-NATIVE-STATUS later reproduced the in-flight sample read in a controller test (wave 13).
 - [x] S-GUARD-BUDGET: the guard's 1800 s budget (`hack/e2e-kind.py:1433`) is shorter than the 45-minute `followTimeout`, so a stalled follow spec ends as a timeout with no Ginkgo failure or capture.
 - [x] The seam harness ran 16:18 on the `abb3c53` runner in INTEGRATE8 and its schema compare matched, so the cross-major compare is now proven live as well as by the unit tests.
 - [ ] Whether the engine compare should scope out catalog ACLs is open for the M10 review (decision t).
@@ -2082,7 +2082,79 @@ Leader decisions, wave 12:
   Development runner image run 43705798261 published `dev-db50bc999319956b2a0b220208c90f0b5fae274b` as arm64 `sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87` (executable SHA-256 `914444bf5cc02fd8ad5ed52e1620ddaa63624284902aa08b0c09ec94e286fef8`) and amd64 `sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412` (executable SHA-256 `5a1ff9072cbdfc02fc4a4775e499f06b5419240361131d60496166c54b5502ea`), both pulled anonymously with every layer verified.
   Against `abb3c53` only the executable changed: `libc.so.6`, `/etc/nsswitch.conf`, `/etc/passwd`, the libpq runtime JSON, `libpq.so.5.18` and package `libpq5` `18.7-1.pgdg13+2` are identical on both architectures, because no packaging file changed.
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND8-20261115/SHA256SUMS`, SHA-256 `548023137fd6ffa630351412271fa4230c27320e2205963f67396319dbbdf240`.
-- [ ] Operator qualification of the `db50bc9` runner with decisions (z) and (ab) to (af), the seam harness gate with its session-name census, a new manager image and lock, and M7-RUN6.
+- [x] OP-CLEANED-CLOSURE (operator): `fix/native-helper-closure-20261115` at `389207e` implements decision (z) in `nativeStateHelperClosed` (`internal/controller/native_cleanup_flow.go:164`), so all four callers share it.
+  After a refused relay it polls the helper Job with `nativePreflightPoll` inside the caller's 90 s context, and a changed Job, a Failed Job after a successful relay or a Succeeded Job after a refused relay still fails at once.
+  The seam harness drops `completionReads`, runs finish straight from the drain in the manager's order, and gains `follow/owned` and `follow/helpers` as positive controls.
+  The harness passed 23 of 23 steps on 16:16, 18:18 and 16:18, reaching `Completed` after 3 passes, and on the unfixed closure it stalled at `CuttingOver` after 142 passes with 122 leaked `rpgmigrate-cleaned` Jobs.
+  The non-e2e Go suite passed 6027 tests on 16.15 and 18.6, and 5 of 5 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-CLEANED-CLOSURE-20261115/SHA256SUMS`, SHA-256 `7ac8cb53750e0ff6c767581df5de76f3c40801fe512d086bd10e69fd92b20c8f`.
+- [x] OP-SESSION-CONTROLS (operator): `test/native-session-controls-20261115` at `3e5abb1` implements decision (ab).
+  `expectNoSessions` and the suspend check refuse a zero unless `nativeFaultSessionSQL` matched the engine on that side earlier in the spec, fault-drain first requires an `rpgmigrate[%] apply` session, and fault-copy refuses a COPY whose `application_name` is not `rpgmigrate[<pid>] copy`.
+  `test_RetryCensusCountsEngineSessions` runs the real `target_retry_census` beside a session of each role and expects 1, then 0, and the seam harness gains a `session-names` step on the follow and the retry run that `retry/gate` depends on.
+  On the `abb3c53` runner the harness failed exactly `follow/session-names`, `retry/session-names` and `retry/gate`, with every engine session name empty.
+  The non-e2e Go suite passed 6023 tests on PostgreSQL 16 and 18, and 19 of 19 mutations failed the tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SESSION-CONTROLS-20261115/SHA256SUMS`, SHA-256 `ead3eba84970dc9c93a67f595e5b3bb4ea4780623b816b3094a37dcd702f79b3`.
+- [x] OP-NATIVE-STATUS (operator): `fix/native-status-ordering-20261115` at `4f6d0c5` implements decision (ac) in two commits.
+  `0d2fc7c` applies the sample and writes status before the cutover pass saves endpos, so `CaughtUp=True` is recorded first (O-1).
+  `4f6d0c5` applies only a complete sample (`nativeSampleComplete`), so an in-flight, expired or failed sample leaves phase, `CaughtUp`, replication and progress unchanged, and a new attempt clears progress, the LSNs and `CaughtUp` but keeps endpos and Streaming (O-2).
+  The root cause of O-2 is `nativeSampler.Observe` returning an empty sample while one is in flight, which `applyNativeProgress` turned into Cloning; the phase-lock with the 10 s requeue is inferred, not replayed on a cluster.
+  The 3 new controller tests fail on `861ff86` and pass on the fix, 7 of 7 mutations failed them, and the non-e2e Go suite passed 6030 tests on 16.15 and 18.6.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-STATUS-20261115/SHA256SUMS`, SHA-256 `8cbae469eb8c0d37bd3ca1e553ae79a517f9f6334c5b674b6c98d9636ffabf84`.
+- [x] OP-NATIVE-LSN-GAUGES (operator): `fix/native-lsn-gauges-20261115` at `7038168` implements decisions (w) and (af).
+  `metrics.RecordNativeLag` sets lag, write and source to the source insert position and replay to the slot's `confirmed_flush_lsn` from one sample, and an unknown sample deletes all four instead of setting zero.
+  Both feeds, the sampler's publish path and `recordNativeReplication`, take the values from the same sample as `status.replication`, and the non-e2e Go suite passed all 15 packages on 16.15 and 18.7.
+  Each of 8 mutations failed a test.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-NATIVE-LSN-GAUGES-20261115/SHA256SUMS`, SHA-256 `89ed02215930a6b689646ceea48faa50b9ec361355a9fa0f369a7f0eb789cb03`, covering the successor's `packages.txt`, `pg16.log` and `pg18.log`; the older files beside it are the dead agent's and are not covered.
+- [x] OP-SUITE-HYGIENE (operator): `test/native-suite-hygiene-20261115` at `c93f19a` implements decision (ad) in three commits.
+  `87a99cd` runs `e2e:kind:suite` with `-timeout 28m` and a 25-minute Ginkgo timeout, and routes the follow waits through `suiteWait` so each ends 6 minutes before the Ginkgo deadline (S-GUARD-BUDGET); `SUITE_BUDGET_SECONDS = 1800` is unchanged.
+  `203296d` records `probe_gap_max` in the fault-copy kill report; the measured worst gap between probe starts was 1.148 s against a window of about 14 s, so the bulk table did not grow.
+  `c93f19a` runs both coverage apply tests in their own database, because the leak query counted catalog rows a second test process created in the shared one; with that peer process running, 4 of 4 iterations failed before the fix on 16 and 18 and passed after it.
+  The cluster-free e2e suite passed 2520 and 2523 tests with `-race -count=3` on 16 and 18.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SUITE-HYGIENE-20261115/SHA256SUMS`, SHA-256 `bcbc0519e6a058bca7924f32354f828ce850f2d87a5df5bb2ce28c0093df8019`.
+- [x] INTEGRATE9 (operator): `feat/native-operator-integration12-20261115` at `adf1f34` merges the five branches above onto `861ff86` and qualifies the `db50bc9` runner, refusing both `abb3c53` digests.
+  Only `test/e2e/native_fault_helpers_test.go` conflicted, and both sides were kept; the catalogs were re-synced at `db50bc9`, with `metadata.rs` byte-identical, and the M6 driver binary pin is `914444bf…fef8`.
+  The seam harness passed 25 of 25 steps (15 follow, 10 retry) in six runs: 16:16, 18:18 and 16:18 on the locked CloudNativePG images and on the newest builds `a3af182e…` (16.15) and `d7ac905b…` (18.6).
+  Every run reached `Completed` in the manager's order, and the session-name census saw `rpgmigrate[1] receive` on the source and `rpgmigrate[1] apply` on the target on both the follow and the retry run.
+  Its harness lock has SHA-256 `d17d449245659a7f89ffcc8319c3e1d3e095154242d20bdcdd326aa62f9d917b`.
+  The non-e2e Go suite passed 6043 tests on 16.15 and 18.7, the cluster-free e2e suite passed 842 and 843 tests with `-race`, and 8 of 8 mutations failed the tests.
+  `feat/rpgmigrate-native-operator` fast-forwarded from `861ff86` to `adf1f34`, whose manager images (run 43710512210) are arm64 `sha256:78aa168613185da71cb1c148a22f1ec18d5967b83dbf26823a6a755dbd18c924` and amd64 `sha256:5ad25ec2da75d21ae2f17d90adffd9f03c254c41e4bcfde975e10fae2dcc630b`.
+  The arm64 lock outside Git has SHA-256 `3c9ad4af89b81a420aed1eec3de957c4f23b58e66a341ca1804bb0d363c337f7`.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE9-20261115/SHA256SUMS`, SHA-256 `a32d8de858485b62a9ca913d021bba88573ee8d609925a13b11ec8982277533e`.
+- [x] S-JOB-WATCH (suite): `create()` at `test/e2e/e2e_test.go:1283` read `m.Spec.Engine` to decide whether to start the native Job watch, but the labeling client fills it from `E2E_ENGINE` only inside `Create` (`e2e_suite_test.go:225-226`), so the follow specs never watched their Jobs.
+  `db23902` on `feat/m7-run6-20261115` makes both use one `migrationEngine(m)` helper, and `TestCreateStartsTheJobWatchForTheSuiteEngine` with 3 of 3 mutations covers it; the seam harness passed 25 of 25 on all three pairs at `db23902`.
+  `feat/rpgmigrate-native-operator` fast-forwarded from `adf1f34` to `db23902`, whose arm64 manager image (run 43714203150) is `sha256:0adc848623c4a1e96c94c44681cca280824af9cc7c2d6e5bab78417027f61b5c`.
+  The arm64 lock outside Git has SHA-256 `7d4ce671ef8c2b19d819646e4b0b0ad9b2815a60acacf8e46c9a7f5d301ad678`; against `3c9ad4af` only the manager and operator source entries changed.
+- [x] M7-RUN6 (operator) is the first passing operator-driven native run: on `db23902` with lock `7d4ce671` and the `db50bc9` runner, 13 spec and pair runs passed through the guard, one kind cluster at a time, and no production defect was found.
+  The first automatic-cutover run, on lock `3c9ad4af`, reached `Completed` but failed on S-JOB-WATCH, and every run after the re-lock passed.
+
+  | Pair  | Spec              | Result                         |
+  | ----- | ----------------- | ------------------------------ |
+  | 16:16 | automatic-cutover | FAIL, S-JOB-WATCH              |
+  | 16:16 | automatic-cutover | PASS                           |
+  | 18:18 | automatic-cutover | PASS                           |
+  | 16:18 | automatic-cutover | PASS                           |
+  | 16:16 | early-manual      | PASS                           |
+  | 16:16 | live-writer       | PASS                           |
+  | 16:16 | fault-copy        | PASS, resumed on attempt 2     |
+  | 16:16 | fault-stream      | PASS, resumed on attempt 2     |
+  | 16:16 | fault-drain       | PASS, resumed on attempt 2     |
+  | 16:16 | fault-failover    | PASS, resumed on attempt 2     |
+  | 16:16 | fault-suspend     | PASS, resumed on attempt 2     |
+  | 16:16 | fault-delete      | PASS                           |
+  | 16:16 | fresh-clone       | PASS                           |
+  | 16:16 | native-refusal    | PASS                           |
+
+  `CaughtUp=True` was recorded before `CuttingOver` in every follow run, and the phase never went backwards in live-writer or the five retry runs.
+  The drain proof, schema verification on the three automatic-cutover runs, the native data compare in live-writer and the suite's fingerprint on the five resumed fault runs all passed.
+  `status.replication` and the source, write, replay, lag and endpos gauges matched in every follow run, the retry gate passed with the same pacing in all five retry runs, and a read-only census saw every role named with 0 misnamed sessions.
+  The deletion inventory, cleaned completion and both TERM receipts passed: engine exit code 4, no signal, no restart, and the same 16 foreign objects before and after.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-RUN6-20261115/SHA256SUMS`, SHA-256 `93dfe54f7b0ea22b79762f83007001df07a6f61ed3d90b42a4716d13f8916e58`.
+- [ ] The fault-copy report showed `probe_gap_max=0s`, because the first probe already saw the COPY, so the gap is unmeasured rather than zero (decision an).
+- [ ] During the copy phase a source client backend named `rpgmigrate[1] receive` sat idle in a transaction running `pg_relation_size(...)`; which engine session it is was not determined (decision al).
+- [ ] With the replay gauge published, `PgcopydbMigrationCutoverStalled` can fire for native; M7-RUN6 drains took 61 to 122 s and kind has no Prometheus, so a false fire on a long drain is unproven either way (decision am).
+- [ ] The suite's Job watch inherits the 1-minute client timeout and restarts about every minute; cleanup Jobs lived about 7 s after succeeding, so the risk is small (decision an).
+- [ ] `hack/__pycache__/test_e2e_kind.cpython-315.pyc` is tracked on the operator line (decision an).
+- [ ] No live amd64 native run exists, M7-RUN6 used only the locked CloudNativePG images on kind, and the seam harness never exercises the completion rejoin route (decisions ak and ao).
 - [ ] The local `task test-e2e-sessions-*` targets need 32 GiB free disk and the shared VM has about 30 GiB, so the census ran locally in capped containers with the same code, and in full in hosted ci.yml.
 
 Leader decisions, wave 13:
@@ -2104,6 +2176,27 @@ Leader decisions, wave 13:
 - (ae) Gating the legacy origin-grant preflight block to pgcopydb and revoking the grant for native in the suite are accepted; a native preflight check for a leftover legacy grant is deferred to the M10 review.
 - (af) Decision (w) is re-delegated from `861ff86`, with the dead agent's clone kept untouched as reference.
   Hosted ci.yml for decision (x) needs a pull request, which needs the user's go-ahead, so until then (x) is proven locally.
+
+### Wave 14, 2026-11-15
+
+M6 and M7 close on a frozen state: operator line `db23902`, runner `db50bc9` and lock `7d4ce671`.
+To close M7, M7-MATRIX runs the ten specs M7-RUN6 ran only on 16:16 on 18:18 and 16:18 (decision ai), and M7-HOSTED adds the hosted kind job on GitHub amd64 runners (decision ak).
+To close M6, two independent xhigh reviews of production code at `db23902` find and verify defects without fixing them (decision aj).
+
+Leader decisions, wave 14:
+
+- (ag) A refused state-helper relay closes only on a Failed helper Job; a Succeeded Job after a refused relay is a mismatch, as OP-CLEANED-CLOSURE implements, and that rule stays.
+- (ah) M6 and M7 close on the frozen operator `db23902`, runner `db50bc9` and lock `7d4ce671`.
+  Follow-up branches this wave are pushed only and integrate after the close, and any production fix found now goes to the M8 line.
+- (ai) M7 acceptance needs every native spec on all three pairs, so M7-MATRIX runs the ten specs M7-RUN6 ran only on 16:16 on 18:18 and 16:18.
+- (aj) The whole-M6 review is two independent xhigh reviews split by area over production code at `db23902`; they verify each finding and fix nothing.
+- (ak) M7-HOSTED implements the bounded Linux-native-host guard transport this ledger requires before hosted kind runtime, and a hosted kind job on GitHub amd64 runners at small scale, which gives the first live amd64 native runs.
+- (al) The engine's session handling is audited for idle-in-transaction exposure and server-side session timeouts, and fixes go on a branch for the M8 runner.
+- (am) The `PgcopydbMigrationCutoverStalled` alert may change only if a healthy native drain can fire it.
+- (an) The fault-copy report records each probe's own exec time and reports an unmeasured gap as unmeasured, never 0 s; the suite's Job watch resumes from its `resourceVersion` across client timeouts; `hack/__pycache__` is untracked and ignored.
+- (ao) The seam harness covers the completion rejoin route (partial cleanup) on all three pairs.
+- (ap) The phase-lock latency after approvals and new attempts is deferred to M9, and stale status with a stopped sampler is accepted, because cutover needs a fresh catch-up confirmation.
+- (aq) A pull request for hosted ci.yml (decision x) and deleting scratch clones wait for the user.
 
 M0–M5 remain closed and M6–M10 remain open.
 
