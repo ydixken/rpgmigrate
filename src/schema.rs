@@ -727,21 +727,24 @@ fn compare_schemas(
     );
     normalized_header(&mut left)?;
     normalized_header(&mut right)?;
-    let mut a = [0u8; 65536];
-    let mut b = [0u8; 65536];
+    same_remainder(&mut left, &mut right)
+        .map_err(|_| failure("cannot read schema comparison input"))
+}
+
+// Headers of different lengths leave the two buffers at different offsets, so compare
+// only the bytes both readers have in hand and never assume their fills line up.
+fn same_remainder(left: &mut impl BufRead, right: &mut impl BufRead) -> std::io::Result<bool> {
     loop {
-        let al = left
-            .read(&mut a)
-            .map_err(|_| failure("cannot read schema comparison input"))?;
-        let bl = right
-            .read(&mut b)
-            .map_err(|_| failure("cannot read schema comparison input"))?;
-        if al != bl || a[..al] != b[..bl] {
+        let (a, b) = (left.fill_buf()?, right.fill_buf()?);
+        let n = a.len().min(b.len());
+        if a[..n] != b[..n] {
             return Ok(false);
         }
-        if al == 0 {
-            return Ok(true);
+        if n == 0 {
+            return Ok(a.is_empty() && b.is_empty());
         }
+        left.consume(n);
+        right.consume(n);
     }
 }
 
@@ -2154,6 +2157,139 @@ mod tests {
         reader.read_to_string(&mut tail).unwrap();
         assert!(tail.contains("-- Dumped from database version evil"));
     }
+    fn dump_with(server: &str, tool: &str, body: &[u8]) -> Vec<u8> {
+        let mut dump = format!(
+            "--\n-- PostgreSQL database dump\n--\n\n\\restrict RpgmigrateSchemaComparison\n\n\
+             -- Dumped from database version {server}\n-- Dumped by pg_dump version {tool}\n"
+        )
+        .into_bytes();
+        dump.extend_from_slice(body);
+        dump
+    }
+
+    fn header_len(dump: &[u8]) -> usize {
+        let mut reader = BufReader::new(dump);
+        normalized_header(&mut reader).unwrap();
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        dump.len() - rest.len()
+    }
+
+    fn bodies_match(left: &[u8], right: &[u8], capacity: usize) -> bool {
+        let mut left = BufReader::with_capacity(capacity, left);
+        let mut right = BufReader::with_capacity(capacity, right);
+        normalized_header(&mut left).unwrap();
+        normalized_header(&mut right).unwrap();
+        same_remainder(&mut left, &mut right).unwrap()
+    }
+
+    const VERSION_PAIRS: [(&str, &str); 3] = [
+        (
+            "16.15 (Debian 16.15-1.pgdg11+2)",
+            "16.15 (Debian 16.15-1.pgdg11+2)",
+        ),
+        (
+            "16.15 (Debian 16.15-1.pgdg11+2)",
+            "18.6 (Debian 18.6-1.pgdg11+2)",
+        ),
+        (
+            "16.9 (Debian 16.9-1.pgdg13+1)",
+            "16.10 (Debian 16.10-1.pgdg13+1)",
+        ),
+    ];
+    const CAPACITIES: [usize; 3] = [7, 8192, 65536];
+
+    fn schema_body() -> Vec<u8> {
+        (0..6000)
+            .flat_map(|i| {
+                format!("CREATE TABLE \"public\".\"t{i}\" (\"id\" bigint);\n").into_bytes()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn identical_bodies_match_after_headers_of_different_lengths() {
+        let body = schema_body();
+        for (source, target) in VERSION_PAIRS {
+            for tool in [
+                "18.6 (Debian 18.6-1.pgdg11+2)",
+                "18.10 (Debian 18.10-1.pgdg13+1)",
+            ] {
+                let left = dump_with(source, "18.7 (Debian 18.7-1.pgdg13+2)", &body);
+                let right = dump_with(target, tool, &body);
+                for capacity in CAPACITIES {
+                    assert!(
+                        bodies_match(&left, &right, capacity),
+                        "{source} {target} {tool} {capacity}"
+                    );
+                    assert!(
+                        bodies_match(&right, &left, capacity),
+                        "{target} {source} {tool} {capacity}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_byte_difference_at_and_around_every_buffer_boundary_mismatches() {
+        let body = schema_body();
+        for (source, target) in VERSION_PAIRS {
+            let left = dump_with(source, "18.7", &body);
+            let (left_header, right_header) = (
+                header_len(&left),
+                header_len(&dump_with(target, "18.7", b"")),
+            );
+            for capacity in CAPACITIES {
+                let mut positions = vec![0, body.len() - 1];
+                for header in [left_header, right_header] {
+                    for fill in 1..=3 {
+                        let boundary = fill * capacity - header % capacity;
+                        positions.extend([boundary - 1, boundary, boundary + 1]);
+                    }
+                }
+                for position in positions {
+                    let mut changed = body.clone();
+                    changed[position] ^= 1;
+                    let right = dump_with(target, "18.7", &changed);
+                    assert!(
+                        !bodies_match(&left, &right, capacity),
+                        "{source} {target} {capacity} {position}"
+                    );
+                    assert!(
+                        !bodies_match(&right, &left, capacity),
+                        "{target} {source} {capacity} {position}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_that_is_a_prefix_of_the_other_mismatches() {
+        let body = schema_body();
+        let (source, target) = VERSION_PAIRS[1];
+        for length in [0, 1, 8191, 8192, 8193, body.len() - 1] {
+            let left = dump_with(source, "18.7", &body[..length]);
+            let right = dump_with(target, "18.7", &body);
+            for capacity in CAPACITIES {
+                assert!(
+                    !bodies_match(&left, &right, capacity),
+                    "{length} {capacity}"
+                );
+                assert!(
+                    !bodies_match(&right, &left, capacity),
+                    "{length} {capacity}"
+                );
+            }
+        }
+        assert!(bodies_match(
+            &dump_with(source, "18.7", b""),
+            &dump_with(target, "18.7", b""),
+            7
+        ));
+    }
+
     #[test]
     fn normalization_requires_the_complete_provenance_header() {
         for input in [
