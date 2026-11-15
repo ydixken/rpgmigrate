@@ -1367,9 +1367,13 @@ The successful preparation binds only its exact source; verified node caps in th
 No manual proof JSON, renewed lease, or new schema is allowed.
 
 - [ ] kind (podman provider) bootstrap with pinned CNPG, CRD apply and image load as Task targets; validated first with engine=pgcopydb on 17:17 (can start right after M1).
-- [ ] Suite knobs: `E2E_ENGINE`, `E2E_RUNNER_IMAGE`, `E2E_SMALL`; DropIfExists off and filters dropped under native; engine-aware `checkMajors`; a positive `native` label set.
-- [ ] Native runs on 16:16, 18:18 and 16:18: live writer load follow, manual and automatic cutover, verification, runner kill mid-copy, mid-stream and mid-drain, target primary kill with CNPG synchronous replication, suspend/resume, deletion cleanup.
+- [x] Suite knobs: `E2E_ENGINE`, `E2E_RUNNER_IMAGE`, `E2E_SMALL`; DropIfExists off and filters dropped under native; engine-aware `checkMajors`; a positive `native` label set.
+- [x] Native runs on 16:16, 18:18 and 16:18: live writer load follow, manual and automatic cutover, verification, runner kill mid-copy, mid-stream and mid-drain, target primary kill with CNPG synchronous replication, suspend/resume, deletion cleanup.
 - [ ] Hosted GitHub Actions job on kind at small scale.
+
+At operator `db23902` the Task targets `e2e:kind:prepare`, `check`, `up`, `pull`, `native` and `down` bootstrap kind with CloudNativePG 1.30.1 pinned by SHA-256 and apply the Migration CRD, and the approved registry pull replaces image load.
+The bootstrap item stays open only because its pgcopydb 17:17 selection (`e2e:kind:legacy`) has no passing run in this ledger.
+The suite reads `E2E_ENGINE`, `E2E_RUNNER_IMAGE` and `E2E_SMALL` (`test/e2e/e2e_suite_test.go`), `nativeClone` drops DropIfExists and the filters, and `checkMajors` admits exactly the three native pairs.
 
 ## M8: Feature widening (each item enables its capability)
 
@@ -2149,12 +2153,18 @@ Leader decisions, wave 12:
   `status.replication` and the source, write, replay, lag and endpos gauges matched in every follow run, the retry gate passed with the same pacing in all five retry runs, and a read-only census saw every role named with 0 misnamed sessions.
   The deletion inventory, cleaned completion and both TERM receipts passed: engine exit code 4, no signal, no restart, and the same 16 foreign objects before and after.
   Evidence: `/private/var/tmp/rpgmigrate-M7-RUN6-20261115/SHA256SUMS`, SHA-256 `93dfe54f7b0ea22b79762f83007001df07a6f61ed3d90b42a4716d13f8916e58`.
-- [ ] The fault-copy report showed `probe_gap_max=0s`, because the first probe already saw the COPY, so the gap is unmeasured rather than zero (decision an).
-- [ ] During the copy phase a source client backend named `rpgmigrate[1] receive` sat idle in a transaction running `pg_relation_size(...)`; which engine session it is was not determined (decision al).
-- [ ] With the replay gauge published, `PgcopydbMigrationCutoverStalled` can fire for native; M7-RUN6 drains took 61 to 122 s and kind has no Prometheus, so a false fire on a long drain is unproven either way (decision am).
-- [ ] The suite's Job watch inherits the 1-minute client timeout and restarts about every minute; cleanup Jobs lived about 7 s after succeeding, so the risk is small (decision an).
-- [ ] `hack/__pycache__/test_e2e_kind.cpython-315.pyc` is tracked on the operator line (decision an).
+- [x] The fault-copy report showed `probe_gap_max=0s`, because the first probe already saw the COPY, so the gap is unmeasured rather than zero (decision an).
+  `73114ef` on `test/native-suite-tidy-20261115` reports it as unmeasured.
+- [x] During the copy phase a source client backend named `rpgmigrate[1] receive` sat idle in a transaction running `pg_relation_size(...)`; which engine session it is was not determined (decision al).
+  ENGINE-SESSION-AUDIT identified it as the follow source snapshot session, which keeps the role `receive` (decision ba).
+- [x] With the replay gauge published, `PgcopydbMigrationCutoverStalled` can fire for native; M7-RUN6 drains took 61 to 122 s and kind has no Prometheus, so a false fire on a long drain is unproven either way (decision am).
+  OP-ALERT-NATIVE showed that a healthy drain can fire it, and `0067dce` changes the rule.
+- [x] The suite's Job watch inherits the 1-minute client timeout and restarts about every minute; cleanup Jobs lived about 7 s after succeeding, so the risk is small (decision an).
+  `eb34ffe` on `test/native-suite-tidy-20261115` resumes the watch from its `resourceVersion`.
+- [x] `hack/__pycache__/test_e2e_kind.cpython-315.pyc` is tracked on the operator line (decision an).
+  `f2db7dd` untracks it.
 - [ ] No live amd64 native run exists, M7-RUN6 used only the locked CloudNativePG images on kind, and the seam harness never exercises the completion rejoin route (decisions ak and ao).
+  The seam harness covers the rejoin route since `fd3977f`; the amd64 run waits for a host (M7-HOSTED).
 - [ ] The local `task test-e2e-sessions-*` targets need 32 GiB free disk and the shared VM has about 30 GiB, so the census ran locally in capped containers with the same code, and in full in hosted ci.yml.
 
 Leader decisions, wave 13:
@@ -2198,7 +2208,132 @@ Leader decisions, wave 14:
 - (ap) The phase-lock latency after approvals and new attempts is deferred to M9, and stale status with a stopped sampler is accepted, because cutover needs a fresh catch-up confirmation.
 - (aq) A pull request for hosted ci.yml (decision x) and deleting scratch clones wait for the user.
 
-M0–M5 remain closed and M6–M10 remain open.
+Results, wave 14:
+
+- [x] M6-RUNTIME4 (operator): on `db23902` with lock `7d4ce671` and the `db50bc9` runner (arm64 `1080cf35…6f87`), run `969cf6efccbb4159842c625279daa645` passed all four runtime qualification phases, 38 of 38 cases, each receipt with complete cleanup.
+  metadata passed 12 of 12 (7 objects, receipt `cf960388…bf92`), password_tls_probe 12 of 12 (13 objects, 0 canary hits in 21 buffers, `fd4ea77f…ea09`), delivery 9 of 9 (22 objects, `c236dbbc…1fc0`) and controller 5 of 5 (11 objects, `NativePreflightPassed`, `60fca82e…c609`).
+  The pass counts equal M6-RUNTIME3's; the receipt hashes differ because the qualification source and the evidence program changed.
+  The guarded `task e2e:kind:down` refused three times on a volume-inventory race with a concurrent seam run, so the cluster went down through the unmodified guard `down()` under the same lock, and the cleanup proof shows nothing of the run left.
+  Evidence: `/private/var/tmp/rpgmigrate-M6-RUNTIME4-20261115/SHA256SUMS`, SHA-256 `351ebf2551bb5ce3e226f993217be9c5b1c0f466aa075b1c6ca138a1d9ea19cc`.
+- [x] M7-MATRIX (operator): on the same frozen state, 18 of 18 runs passed through the guard, the nine specs other than `native-refusal` on 18:18 and on 16:18, one kind cluster at a time, with no production defect.
+  The guard admits `native-refusal` on 16:16 only (`hack/e2e-kind.py:1325-1329`), and the suite writes the TERM receipts on 16:16 only (`nativeTermPair()`).
+  The combined acceptance table from its `summary.json` (SHA-256 `b4453f0b2b8816c0e84f72fb8fda73b3d9c9050288e96b2e23a9bcc5cd830a0c`) names the run that passed each spec; the five fault specs resumed on attempt 2.
+
+  | Spec              | 16:16 | 18:18         | 16:18         |
+  | ----------------- | ----- | ------------- | ------------- |
+  | automatic-cutover | RUN6  | RUN6          | RUN6          |
+  | early-manual      | RUN6  | MATRIX        | MATRIX        |
+  | live-writer       | RUN6  | MATRIX        | MATRIX        |
+  | fault-copy        | RUN6  | MATRIX        | MATRIX        |
+  | fault-stream      | RUN6  | MATRIX        | MATRIX        |
+  | fault-drain       | RUN6  | MATRIX        | MATRIX        |
+  | fault-failover    | RUN6  | MATRIX        | MATRIX        |
+  | fault-suspend     | RUN6  | MATRIX        | MATRIX        |
+  | fault-delete      | RUN6  | MATRIX        | MATRIX        |
+  | fresh-clone       | RUN6  | MATRIX        | MATRIX        |
+  | native-refusal    | RUN6  | guard refuses | guard refuses |
+
+  Read-only observers saw `CaughtUp=True` before every cutover, the drain proof, data verification by four routes, all five LSN gauges in every follow run, the retry gate's pacing, 0 misnamed sessions, the deletion inventory, cleaned completion and 0 phase regressions.
+  Schema verification on 18:18 and 16:18 comes from the M7-RUN6 automatic-cutover runs, and fault-copy again reported `probe_gap_max=0s`, the unmeasured case of decision (an).
+  A bounded wait for quiet podman volumes before each `up` and `down` avoided the guard's volume race.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-MATRIX-20261115/SHA256SUMS`, SHA-256 `48b9619f9e7991c31449bc129f8f06e956bb26bb61aa45de6e26287d26d0e233`.
+- [x] M6-REVIEW-LIFECYCLE (operator): no defect lets a native Migration reach `Completed` or `Verified` without its evidence, or drops or duplicates data on retry.
+  It verified 11 findings, 2 P1, 6 P2 and 3 P3, with 13 probe tests; each fails closed and leaves the Migration stuck with no status condition.
+  The P1s: a vanished worker pod blocks retry, finish, suspend and deletion (`native_retry.go:297-302`), and foreground cascading or namespace deletion deadlocks against the finalizer (`native_reconcile.go:201`).
+  Evidence: `/private/var/tmp/rpgmigrate-M6-REVIEW-LIFECYCLE-20261115/SHA256SUMS`, SHA-256 `1f200bb4c779e0a6603b331f031d5740673c06d753cfb845b39336c165a0450c`.
+- [x] M6-REVIEW-BOUNDARY (operator): no P0; 2 P1, 1 P2 and 4 P3.
+  The P1s: an edit of `spec.runner` or the clone tuning on a running native Migration blocks it for good, deletion included (F1), and Kubernetes Service environment variables make native helpers refuse, through an `LD_` name or more than 64 KiB (F2).
+  The others: the plaintext passfile on disk-backed `/tmp` in the worker and evidence pods (F3, P2), the unescaped inline username (F4), whole-status removal clearing the runner record (F5), a password in the URI query (F6), and a Migration author sending any namespace Secret to a host of their choice (F7).
+  Evidence: `/private/var/tmp/rpgmigrate-M6-REVIEW-BOUNDARY-20261115/SHA256SUMS`, SHA-256 `948e0afc03f0e6f0b11f255dcb74cc94f59822a15248a73f46c8b08032fed946`.
+- [ ] M7-HOSTED (operator): `ci/m7-hosted-kind-20261115` at `7bf4431` adds a hosted runner admission probe, and runs 43733796216 and 43733906710 failed, the second with the guard refusing all three capacity profiles.
+  The guard's lease needs 6 CPUs and 12 GiB for the nodes plus an 8-CPU reserve during `up`, and the ubuntu-24.04 runner has 4 CPUs and 16 GiB.
+  The legacy executable qualification, the storage manifest and the pins lock are arm64 only, and the guard pins Podman 6.2.0 and skopeo 1.22.2 against the runner's 4.9.3 and 1.13.3.
+  The transport was not written; the amd64 host waits for the user.
+  Evidence: `/private/var/tmp/rpgmigrate-M7-HOSTED-20261115/SHA256SUMS`, SHA-256 `2c3702777ee25db663534aa4dbfc66e64bbb7055400e47ffcefdb0124fe05978`.
+- [x] ENGINE-SESSION-AUDIT (engine): `fix/session-timeouts-20261115` at `b029bd3` implements decision (al).
+  Before the fix, database-level `statement_timeout` and `lock_timeout` failed the target copy workers, `idle_in_transaction_session_timeout` the compare session, `idle_session_timeout` idle copy and receive sessions, and `transaction_timeout` the target copy sessions on 18.
+  Every SQL session now sets the timeouts to 0 at connect, reads them back and refuses otherwise (`disable_timeouts` in `src/pg/ffi.rs`), pg_dump and pg_restore get `idle_session_timeout=0`, and `tools/e2e/follow.py --timeouts` gates each setting with 0 fatal sessions on every pair.
+  The M7-RUN6 `rpgmigrate[1] receive` session is the follow source snapshot session, which holds its snapshot and `ACCESS SHARE` locks on the copied tables until the table copy ends.
+  `task check lint test` passed with 571 Rust, 28 CLI and 552 portable tests, `task test-db` passed on 16.16 and 18.7, and 7 of 8 end-to-end mutations failed it, with live tests catching the other two.
+  Hosted ci.yml run 43739649289 passed 8 of 8 on attempt 2, after curl error 56 failed the checks job on attempt 1.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-SESSION-AUDIT-20261115/SHA256SUMS`, SHA-256 `87b69fa33e7e3cd4b1891c3f67a9cfeb035ca7fa1acce0033ea981d18735427f`.
+- [x] OP-ALERT-NATIVE (operator): `test/native-cutover-alert-20261115` at `0067dce` implements decision (am).
+  In two healthy M7-RUN6 runs the replay gauge stood 56 bytes short of endpos for all of CuttingOver, because the status path republished the pre-drain replay after the sampler stopped.
+  The rule now stays quiet while `changes(pgcopydb_migration_replay_lsn_bytes[5m]) > 0`, with `for: 15m` unchanged, and 7 of 7 mutations, the old rule among them, failed the promtool tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-ALERT-NATIVE-20261115/SHA256SUMS`, SHA-256 `46c2b71545cb7df24aab5917043ce47fca1d0b8217b1072960578880e978c44e`.
+- [x] OP-SUITE-TIDY (operator): `test/native-suite-tidy-20261115` at `f2db7dd` implements decision (an) in three commits.
+  `73114ef` reports an unmeasured copy-kill probe gap, `eb34ffe` resumes the Job watch from its `resourceVersion` and restarts from current state only on 410, and `f2db7dd` untracks `hack/__pycache__`.
+  5 of 5 mutations failed the tests, and the cluster-free e2e suite passed 849 and 850 tests with `-race` on 16.15 and 18.7.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SUITE-TIDY-20261115/SHA256SUMS`, SHA-256 `70217d46c0e5d9d03664855f4cb08dfa1c0e30954a15bbcb5b4f335cd2a4a818`.
+- [ ] OP-SEAMS-REJOIN (operator): `test/native-seams-rejoin-20261115` at `fd3977f` implements decision (ao): it crashes the follow cleanup at four points and finishes through the rejoin route to `Completed` on 16:16, 18:18 and 16:18.
+  The harness passed 64 of 67 steps on each pair; the three `rejoin-*/helpers` steps fail, kept strict, on two production leaks at `db23902`.
+  D1: a refused ordinary-completion probe leaves one `rpgmigrate-endpos-` and one `rpgmigrate-evidence-` Job per pass (`native_follow_flow.go:189-191`, `native_lifecycle.go:100-102`).
+  D2: a cleanup Job whose engine died stays after `Completed` (`native_cleanup_flow.go:313-320`).
+  Both harness mutations failed it, and the non-e2e Go suite passed 6043 tests on 16.15 and 18.6.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SEAMS-REJOIN-20261115/SHA256SUMS`, SHA-256 `37bdbb64eeb82a2d56a59f260b3cffa70c46d9888487989634b9045be9ad37b2`.
+
+Through wave 14, M0–M5 were closed and M6–M10 open.
+
+### Wave 15, 2026-11-16
+
+Wave 15a fixed four boundary findings, the replay gap and the guard's volume race on branches from `db23902`, and designed the lifecycle fix twice.
+OP-HELPER-LEAKS (D1 and D2) and ENGINE-CENSUS-FLAKE have no result in this record.
+
+- [x] OP-GUARD-VOLUME-RACE (operator): `fix/kind-guard-volume-race-20261115` at `f546ada` implements decision (ay).
+  When `podman volume inspect` fails, `volume_inventory` counts the volume as absent only if the run owns it by neither label nor ledger, the failure is not a cancellation, and a fresh listing no longer shows it; otherwise it still refuses.
+  Before the fix the race made `down` raise `CalledProcessError`; after it the 4 new fake-podman tests pass, 6 of 6 mutations failed them, and the offline gate passed 264 tests.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-GUARD-VOLUME-RACE-20261115/SHA256SUMS`, SHA-256 `a981c71467f5bc036f5c5d767fa2c017ca07d59ae4d5c61c5e70acec9bb2cfe4`.
+- [x] OP-STATUS-CEL (operator): `fix/native-status-record-cel-20261115` at `f40e106` implements decision (av) for F5 with a root rule on `Migration` in both API versions.
+  At `db23902` the new envtest spec failed with `[FAILED] status removal: <nil>`; after the fix 4 of 4 pass, and dropping the rule from v1alpha1 alone fails them.
+  `internal/controller` passed 323 of 323 Ginkgo specs on PostgreSQL 18.7.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-STATUS-CEL-20261115/SHA256SUMS`, SHA-256 `a74a4d1a4a8405b6bb75f88b7371ff7305ea0304d7fd3e5dbf9d072a079ad855`.
+- [x] OP-SERVICE-LINKS (operator): `fix/native-service-links-20261115` at `73329dd` implements decision (at) for F2 in two commits.
+  The version, worker and evidence builders, which all 11 native builders reuse, set `enableServiceLinks: false`, and admission and the live-pod matcher refuse a native pod without an explicit false; the `LD_` refusal and the 64 KiB cap stay.
+  With a Service named `ld-cache` and 300 others, 25 subtests failed before the fix and all pass after it; 12 of 13 mutations failed the tests, and the survivor exposed a redundant check, which was removed.
+  `make test` passed 15 of 15 packages on 16.15 and 18.6.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SERVICE-LINKS-20261115/SHA256SUMS`, SHA-256 `4d9dc111c261b0b09faa65f09a02c087021c2044eecb56544b4aed180e99ec0a`.
+- [x] OP-CONN-HARDENING (operator): `fix/conn-username-and-uri-secrets-20261115` at `3a8e64f` implements decision (au) for F4 and F6 in two commits.
+  `0b3c062` passfile-escapes and shell-quotes the inline host and username, and quotes the remapped password key name; `3a8e64f` refuses `password`, `sslpassword`, `oauth_client_secret`, `scram_client_key` and `scram_server_key` in a URI query.
+  Before the fix 4 of 8 roles failed on PostgreSQL 16, `x'; echo INJECTED >&2; '` among them printing `INJECTED`; after it 9 of 9 pass, each role with a wrong-password control.
+  10 of 10 mutations failed the tests, and the non-e2e Go suite passed 6070 tests on 16.14 and 18.7.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-CONN-HARDENING-20261115/SHA256SUMS`, SHA-256 `2887a4f099ca9b28266d40734a9724be46681d12a403f35ee9a613a9c43aa3b1`.
+- [x] OP-REPLAY-PROOF (operator): `fix/native-replay-after-drain-20261115` at `46ff4ed` implements decision (ax).
+  Once the operator verifies the drain proof, `raiseNativeDrainReplay` raises `status.replication.replayLSN` and the replay gauge to its durable replay LSN in a status write of its own while still in CuttingOver, and never lowers it.
+  Before the fix the run-02 positions failed with "verified proof left replay at 0/A4B8270"; after it they pass, 9 of 9 mutations failed the tests, and the non-e2e Go suite passed 6051 tests on 16.15 and 18.6.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-REPLAY-PROOF-20261115/SHA256SUMS`, SHA-256 `4590f0cfb81c56e137297c764c42071c3acccd6fec5500d8584a2d1f5124bd31`.
+- [x] OP-LIFECYCLE-DESIGN-A (operator): a minimal-change design for lifecycle findings 1 to 11 and F1, with pod-less quiescence in the controller and in four `internal/native` reader admissions, a clone report receipt, a `CleanupFailed` release on a lost work volume, an attempt intent without a nonce, a CEL freeze of the template fields and a `Blocked` condition.
+  Its throwaway prototype took the 10 review reproductions that fail at `db23902` to 0.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-LIFECYCLE-DESIGN-A-20261115/SHA256SUMS`, SHA-256 `b9524ac5ed38e28424dcd6bd77e9e8665061223fcc298827076eeb665300eaf5`.
+- [x] OP-LIFECYCLE-DESIGN-B (operator): an invariant-first design with a disposition table, rules R1 to R9, four status fields, the `Blocked` and `CleanupFailed` conditions, drift tolerated through the admission digest `nativeJobSHA256`, an attempt intent with a nonce and a Job annotation, and tasks T1 to T4.
+  Its envtest 1.37 probes P1 to P5 passed.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-LIFECYCLE-DESIGN-B-20261115/SHA256SUMS`, SHA-256 `45f98c04c603eca499d7352f5bf22ed1c678658eec0789bef2a1051be8316e71`.
+
+Leader decisions, wave 15a:
+
+- (ar) M6 stays open until the four review P1s are fixed and re-reviewed.
+- (as) The lifecycle wedges are designed before they are implemented.
+- (at) Native pods set `enableServiceLinks: false`.
+- (au) The inline username is quoted, and a URI that carries a secret is refused.
+- (av) A root CEL rule protects the runner record.
+- (aw) D1 and D2 are fixed, and the seam helper checks stay strict.
+- (ax) The verified drain replay is recorded in status.
+- (ay) The guard's volume race is fixed.
+- (az) The engine session census race is root-caused.
+- (ba) The follow source snapshot session keeps the role `receive`, and the engine keeps `lock_timeout` 0 on the source, as pg_dump does.
+- (bb) Memory-backed credential files (F3), F7, an amd64 host, a draft pull request and deleting scratch clones wait for the user.
+
+Leader decisions, wave 15b:
+
+- (bc) M7 closes on arm64 kind with the combined acceptance table of M7-RUN6 and M7-MATRIX, every native spec on 16:16, 18:18 and 16:18.
+  `native-refusal` and the TERM receipts stay 16:16 only, `native-refusal` on PostgreSQL 18 joins the M8 rerun, and the hosted amd64 item waits for the user.
+- (bd) The lifecycle fix follows design B, grafting design A's C1d: the reader admissions `retry_admission.go`, `owned_admission.go`, `cleaned_admission.go` and `cleanup_rejoin_admission.go` accept an absent pod of a finished worker, as part of T2.
+  Design A's review and design probes join design B's as regression inputs, and because native refuses `target.synchronousCommit` at admission (`backend.go:67`), `troubleshooting.md:454` is corrected for native.
+  Design B's choices stand: drift tolerated through the admission digest, the attempt intent with nonce and Job annotation, the `Blocked` and `CleanupFailed` conditions with B's reasons, and R1 to R9.
+- (be) Design B's R5 (a follow work PVC without owner reference, deleted by the finalizer path, with RBAC `delete` on `persistentvolumeclaims`) and the rest of its T4 wait for the user's RBAC answer; T1 to T3 keep today's PVC ownership and identity.
+- (bf) The M8 operator line is `feat/native-operator-m8-20261116`, which INTEGRATE10 creates from `db23902` with the wave 14 and 15a branches and T1 merged; T2 and T3 build on it.
+- (bg) The engine line takes the session-timeout fix, the census fix and the (ba) docs amendment now; no new runner is qualified before the M8 engine integration lands, so the M8 operator line gets one runner bump.
+
+M0–M5 are closed, M7 is closed on arm64 kind with its hosted amd64 item open, and M6 and M8–M10 remain open.
 
 ## Capacity and parallel execution, user update 2026-11-08
 

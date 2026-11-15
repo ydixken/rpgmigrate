@@ -94,7 +94,8 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > The prior nine-profile 266-case native subset retains its original provenance and is separate from the forty fresh samples.
 > The single whole-M4 review is resolved with no findings remaining; operator test-only evidence is committed separately as `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
-> M6–M10 remain open: production native adapter, kind E2E, feature widening, power-loss/performance qualification, and release gates remain unqualified.
+> M6 and M8–M10 remain open: production native adapter, feature widening, power-loss/performance qualification, and release gates remain unqualified.
+> M7 is closed on arm64 kind, and its hosted amd64 item stays open.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
 > VM preservation/resize maintenance and exact failed-run retirement passed; fresh `f59a7f4b` M7 UP/handover/LOAD passed, then the legacy storage image-ID guard refused the successful probe as recorded below.
 > The 2026-11-10 checkpoints below record committed completion/sampler components, separate completion-rejoin packets, and fresh ARM packaging, without native lifecycle/authentication/TLS/PVC or three-pair acceptance.
@@ -542,6 +543,16 @@ One independent whole-M6 review belongs at milestone close, and users retain wri
 - [ ] ORed application_name patterns for the retry-gate census, sampler and zombie reaper; native error-class prefixes in the log matchers.
 - [ ] Unit and envtest coverage; operator docs for the native engine.
 
+#### Status after the M6 reviews, 2026-11-16
+
+M6-RUNTIME4 passed the four runtime qualification phases on the frozen line `db23902` with lock `7d4ce671` and runner `db50bc9`: 38 of 38 cases, each receipt with complete cleanup.
+The two independent reviews of production code at `db23902` found no P0.
+The lifecycle review verified 2 P1, 6 P2 and 3 P3 findings, and the boundary review 2 P1, 1 P2 and 4 P3.
+The four P1s: a vanished worker pod blocks retry, finish, suspend and deletion; foreground and namespace deletion deadlock against the finalizer; an edit of `spec.runner` or the clone tuning wedges a running native Migration (F1); Service environment variables make native helpers refuse (F2).
+F2 is fixed on `fix/native-service-links-20261115`, and the lifecycle fix follows design B with grafts from design A on the M8 line.
+M6 stays open until the four P1s are fixed and re-reviewed.
+The [ledger](../tasks/todo.md#wave-14-2026-11-15) binds the evidence.
+
 ### M7: Operator-driven E2E
 
 #### Approved registry amendment, 2026-11-10
@@ -684,9 +695,13 @@ The successful preparation binds only its exact source; verified node caps in th
 No manual proof JSON or lease renewal is allowed.
 
 - [ ] kind (podman provider) bootstrap with pinned CNPG, CRD apply and image load as Task targets; validated first with engine=pgcopydb on 17:17 (can start right after M1).
-- [ ] Suite knobs: `E2E_ENGINE`, `E2E_RUNNER_IMAGE`, `E2E_SMALL`; DropIfExists off and filters dropped under native; engine-aware `checkMajors`; a positive `native` label set.
-- [ ] Native runs on 16:16, 18:18 and 16:18: live writer load follow, manual and automatic cutover, verification, runner kill mid-copy, mid-stream and mid-drain, target primary kill with CNPG synchronous replication, suspend/resume, deletion cleanup.
+- [x] Suite knobs: `E2E_ENGINE`, `E2E_RUNNER_IMAGE`, `E2E_SMALL`; DropIfExists off and filters dropped under native; engine-aware `checkMajors`; a positive `native` label set.
+- [x] Native runs on 16:16, 18:18 and 16:18: live writer load follow, manual and automatic cutover, verification, runner kill mid-copy, mid-stream and mid-drain, target primary kill with CNPG synchronous replication, suspend/resume, deletion cleanup.
 - [ ] Hosted GitHub Actions job on kind at small scale.
+
+At operator `db23902` the Task targets `e2e:kind:prepare`, `check`, `up`, `pull`, `native` and `down` bootstrap kind with CloudNativePG 1.30.1 pinned by SHA-256 and apply the Migration CRD, and the approved registry pull replaces image load.
+The bootstrap item stays open only because its pgcopydb 17:17 selection (`e2e:kind:legacy`) has no passing run in this ledger.
+The suite reads `E2E_ENGINE`, `E2E_RUNNER_IMAGE` and `E2E_SMALL` (`test/e2e/e2e_suite_test.go`), `nativeClone` drops DropIfExists and the filters, and `checkMajors` admits exactly the three native pairs.
 
 #### Status after M7-RUN6, 2026-11-15
 
@@ -696,8 +711,31 @@ automatic-cutover also passed on 18:18 and 16:18.
 The runs proved lag sampling and automatic cutover with `CaughtUp=True`, the drain proof, schema and data verification, `status.replication` and the LSN gauges, the retry gate, engine session names per role, the deletion inventory, cleaned completion and both TERM receipts.
 The [ledger](../tasks/todo.md#wave-13-2026-11-15) binds the evidence.
 
-To close M7, the ten specs that ran only on 16:16 run on 18:18 and 16:18 on the same frozen state, and a hosted kind job on GitHub amd64 runners gives the first live amd64 native runs.
-To close M6, two independent reviews of the production code at `db23902` find and verify defects; any production fix goes to the M8 line.
+#### Status after M7-MATRIX, 2026-11-16
+
+M7 is closed on arm64 kind, and the hosted amd64 item stays open.
+M7-MATRIX ran the nine specs other than `native-refusal` on 18:18 and on 16:18 on the same frozen state: 18 of 18 passed through the guard, with no production defect.
+With M7-RUN6, every native spec passed on every pair, except `native-refusal`, which the guard admits on 16:16 only and which joins the M8 rerun on PostgreSQL 18.
+The suite writes the TERM receipts on 16:16 only.
+Each cell names the run that passed the spec; the five fault specs resumed on attempt 2.
+
+| Spec              | 16:16 | 18:18         | 16:18         |
+| ----------------- | ----- | ------------- | ------------- |
+| automatic-cutover | RUN6  | RUN6          | RUN6          |
+| early-manual      | RUN6  | MATRIX        | MATRIX        |
+| live-writer       | RUN6  | MATRIX        | MATRIX        |
+| fault-copy        | RUN6  | MATRIX        | MATRIX        |
+| fault-stream      | RUN6  | MATRIX        | MATRIX        |
+| fault-drain       | RUN6  | MATRIX        | MATRIX        |
+| fault-failover    | RUN6  | MATRIX        | MATRIX        |
+| fault-suspend     | RUN6  | MATRIX        | MATRIX        |
+| fault-delete      | RUN6  | MATRIX        | MATRIX        |
+| fresh-clone       | RUN6  | MATRIX        | MATRIX        |
+| native-refusal    | RUN6  | guard refuses | guard refuses |
+
+M7-HOSTED found that a hosted amd64 kind run cannot pass without weakening a guard cap or a refusal.
+The guard's capacity profile needs more than the 4 CPUs of a hosted runner, and the legacy executable qualification, the storage pin and the pins lock are arm64 only, so the amd64 host waits for the user.
+The [ledger](../tasks/todo.md#wave-14-2026-11-15) binds the evidence.
 
 ### M8: Feature widening (each item enables its capability)
 
@@ -925,6 +963,9 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/native-engine` at `db50bc9` merges it; hosted ci.yml run 43705798269 passed 8 of 8 jobs.
   Its `dev-db50bc999319956b2a0b220208c90f0b5fae274b` runner images are arm64 `sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87` and amd64 `sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412`.
   Against `abb3c53` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
+- `fix/session-timeouts-20261115` at `b029bd3` sets `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `idle_session_timeout` and, on 17 and later, `transaction_timeout` to 0 on every engine SQL session, reads them back and refuses the session otherwise.
+  pg_dump and pg_restore get `idle_session_timeout=0`, `tools/e2e/follow.py --timeouts` gates each setting on every pair, and hosted ci.yml run 43739649289 passed 8 of 8.
+  It reaches `feat/native-engine` with the census fix and the snapshot-session docs amendment through ENGINE-LAND9, and no runner is qualified from it before the M8 engine integration.
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -1029,6 +1070,18 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
 - `feat/rpgmigrate-native-operator` at `db23902` fixes S-JOB-WATCH: the suite's `create()` read the Migration's engine before the labeling client filled it, so the follow specs never watched their Jobs.
   Its arm64 manager image is `sha256:0adc848623c4a1e96c94c44681cca280824af9cc7c2d6e5bab78417027f61b5c`, and its arm64 lock has SHA-256 `7d4ce671ef8c2b19d819646e4b0b0ad9b2815a60acacf8e46c9a7f5d301ad678`.
   M7-RUN6 passed every native spec on 16:16 and automatic-cutover on 18:18 and 16:18 on it, 13 spec and pair runs, with no production defect.
+  M7-MATRIX passed the nine other follow and clone specs on 18:18 and 16:18 on it, and M6-RUNTIME4 passed 38 of 38 runtime qualification cases.
+- Wave 14 and 15a branches from `db23902`, pushed only, integrate on the M8 line `feat/native-operator-m8-20261116`:
+  - `test/native-cutover-alert-20261115` at `0067dce` fires `PgcopydbMigrationCutoverStalled` only when the replay gauge has stopped moving, because a healthy native drain fired the old rule.
+  - `test/native-suite-tidy-20261115` at `f2db7dd` reports an unmeasured copy-kill probe gap, resumes the suite's Job watch from its `resourceVersion`, and untracks `hack/__pycache__`.
+  - `test/native-seams-rejoin-20261115` at `fd3977f` adds the completion rejoin route to the seam harness, whose strict helper checks fail on the production leaks D1 and D2.
+  - `fix/kind-guard-volume-race-20261115` at `f546ada` treats a foreign volume removed during the guard's volume inventory as absent and still refuses when an owned one vanishes.
+  - `fix/native-status-record-cel-20261115` at `f40e106` rejects a write that removes the whole status once the runner record exists (F5).
+  - `fix/conn-username-and-uri-secrets-20261115` at `3a8e64f` shell-quotes and passfile-escapes the inline username (F4) and refuses libpq secret keys in a URI query (F6).
+  - `fix/native-service-links-20261115` at `73329dd` sets `enableServiceLinks: false` on every native pod and refuses a native pod without it (F2).
+  - `fix/native-replay-after-drain-20261115` at `46ff4ed` raises the status replay LSN and the replay gauge to the verified drain proof's durable replay LSN.
+  - `fix/native-helper-leaks-20261115`, cut from `fd3977f`, is the branch for D1 and D2.
+- `ci/m7-hosted-kind-20261115` at `7bf4431` probes hosted runner admission for the guard and does not integrate.
 
 ### Leader decisions, 2026-11-12
 
@@ -1146,8 +1199,21 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - The sampler phase-lock latency after approvals and new attempts is deferred to M9, and stale status with a stopped sampler is accepted, because cutover needs a fresh catch-up confirmation.
 - A pull request for hosted operator ci.yml and deleting scratch clones wait for the user.
 
-M0–M5 remain closed and M6–M10 remain open.
-M7-RUN6 passed native operator migrations on kind, but no native operator migration or capability activation is qualified until M6 and M7 close.
+### Decisions, wave 15, 2026-11-16
+
+- M6 stays open until the four review P1s are fixed and re-reviewed, and the lifecycle wedges are designed before they are implemented.
+- Native pods set `enableServiceLinks: false`; the inline username is quoted and a URI query that carries a secret is refused; a root CEL rule protects the runner record.
+- The helper leaks D1 and D2 are fixed while the seam helper checks stay strict, the verified drain replay is recorded in status, the guard's volume race is fixed, and the engine session census race is root-caused.
+- The follow source snapshot session keeps the role `receive`, and the engine keeps `lock_timeout` 0 on the source, as pg_dump does.
+- M7 closes on arm64 kind with the combined M7-RUN6 and M7-MATRIX acceptance table; `native-refusal` and the TERM receipts stay 16:16 only, and `native-refusal` on PostgreSQL 18 joins the M8 rerun.
+- The lifecycle fix follows design B, with design A's absent-pod admission for the four `internal/native` readers and its probes as regression inputs; native refuses `target.synchronousCommit` at admission, so the operator's troubleshooting advice for it is legacy-only.
+- Design B's PVC lifetime rule and the rest of its T4 wait for the user's RBAC answer, and T1 to T3 keep today's PVC ownership.
+- The M8 operator line is `feat/native-operator-m8-20261116`, from `db23902` with the wave 14 and 15a branches and T1, and T2 and T3 build on it.
+- The engine line takes the session-timeout fix, the census fix and the snapshot-session docs amendment now, and the M8 operator line gets one runner bump after the M8 engine integration.
+- Memory-backed credential files (F3), F7, an amd64 host, a draft pull request and deleting scratch clones wait for the user.
+
+M0–M5 are closed, M7 is closed on arm64 kind with its hosted amd64 item open, and M6 and M8–M10 remain open.
+No native operator migration or capability activation is qualified until M6 closes.
 
 ## Execution model
 
