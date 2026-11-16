@@ -454,18 +454,29 @@ fn create_loss(case: &str, phase: &str) -> (Value, Value) {
     };
     fixture.native = Some(crate::state::open_follow(&resume, None, None, &fixture.io).unwrap());
     assert_eq!(manifest(&fixture), before);
-    let error = refused(fixture.attempt());
-    assert!(
-        error.message.starts_with(
-            "follow-source: publication retry lacks the exact persisted preliminary source plan"
-        ),
-        "unexpected retry refusal: {}",
-        error.message
+    // The persisted slot's export died with its session, so the retry drops it and creates again.
+    let snapshot = fixture
+        .attempt()
+        .unwrap_or_else(|error| panic!("pending slot retry refused: {}", error.message));
+    let after = manifest(&fixture);
+    assert_eq!(after["source_slot"]["phase"], "confirmed");
+    assert_ne!(
+        after["source_slot"]["record"]["intent"]["nonce"],
+        before["source_slot"]["record"]["nonce"]
     );
-    assert_eq!(manifest(&fixture), before);
-    helper.request(json!({"op":"retry_refused"}));
+    assert_eq!(
+        after["source_slot"]["record"]["intent"]["binding"],
+        before["source_slot"]["record"]["binding"]
+    );
+    assert_eq!(
+        after["follow_state"]["publication"],
+        before["follow_state"]["publication"]
+    );
+    helper.request(json!({"op":"retried"}));
+    snapshot.finish(&fixture.io).unwrap();
     let value = helper.finish();
-    assert_eq!(value["create_dispatches"], 1);
+    assert_eq!(value["create_dispatches"], 2);
+    assert_eq!(value["retry_recreated"], true);
     if case != "create_tail_lost" {
         fixture.write_receipt(case, value.clone());
     }

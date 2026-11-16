@@ -14,8 +14,8 @@ PHASE_FIELDS = {
     "publication", "slot", "source_slot_phase", "slot_nonce", "publication_before_slot",
     "intent_before_create", "sql_pid", "exporter_pid", "helper_pid", "armed", "fault_hits",
     "client_failed", "fault_before_deadline", "failure_before_deadline", "deadline_seconds",
-    "sql_closed", "exporter_closed", "helper_reaped", "helper_returncode", "retry_refused",
-    "create_dispatches", "details",
+    "sql_closed", "exporter_closed", "helper_reaped", "helper_returncode", "retry_recreated",
+    "create_dispatches", "retry_slot_nonce", "retry_slot", "details",
 }
 DETAIL_FIELDS = {
     "import_seen", "imported", "identity_before", "identity_after", "row_seen", "row_delivered",
@@ -128,30 +128,34 @@ def validate_native(value, context, case):
     assert intent["run"] == stream["run"] and intent["name"] == receipt["name"] and identifier(intent["nonce"]), "foreign publication intent"
     create_loss = case in ("create_reply_lost", "create_tail_lost")
     slot_state = native["source_slot"]
-    expected_phase = "provisioning" if create_loss else "confirmed"
+    # A create-loss leaves a pending intent; its retry drops that slot and confirms one new CREATE.
     assert isinstance(slot_state, dict) and set(slot_state) == {"phase", "record"}, "invalid native source slot fields"
-    assert value["source_slot_phase"] == slot_state["phase"] == expected_phase, "wrong source slot creation phase"
+    assert slot_state["phase"] == "confirmed", "the native source slot is not positively confirmed"
+    assert value["source_slot_phase"] == ("provisioning" if create_loss else "confirmed"), "wrong source slot creation phase"
     slot_record = slot_state["record"]
-    if create_loss:
-        slot_intent = slot_record
-    else:
-        assert isinstance(slot_record, dict) and set(slot_record) == {"intent", "consistent_point", "snapshot_token"}, "confirmed source slot fields differ"
-        assert isinstance(slot_record["snapshot_token"], str) and 0 < len(slot_record["snapshot_token"]) <= 4096, "confirmed source snapshot token is missing"
-        slot_intent = slot_record["intent"]
+    assert isinstance(slot_record, dict) and set(slot_record) == {"intent", "consistent_point", "snapshot_token"}, "confirmed source slot fields differ"
+    assert isinstance(slot_record["snapshot_token"], str) and 0 < len(slot_record["snapshot_token"]) <= 4096, "confirmed source snapshot token is missing"
+    slot_intent = slot_record["intent"]
     assert isinstance(slot_intent, dict) and set(slot_intent) == {"binding", "nonce"}, "invalid source slot intent fields"
-    assert identifier(value["slot_nonce"]) and slot_intent["nonce"] == value["slot_nonce"], "foreign source slot nonce"
+    assert identifier(value["slot_nonce"]), "foreign source slot nonce"
+    if create_loss:
+        assert identifier(value["retry_slot_nonce"]) and value["retry_slot_nonce"] != value["slot_nonce"], "the retry reused the pending slot intent"
+        assert slot_intent["nonce"] == value["retry_slot_nonce"], "foreign retry slot nonce"
+    else:
+        assert value["retry_slot_nonce"] is None and value["retry_slot"] is None, "unexpected source slot retry"
+        assert slot_intent["nonce"] == value["slot_nonce"], "foreign source slot nonce"
     binding = slot_intent["binding"]
     assert isinstance(binding, dict) and set(binding) == {"stream", "slot_name", "plugin", "catalog_epoch"}, "invalid source slot binding fields"
-    slot = value["slot"]
-    assert isinstance(slot, dict) and set(slot) == {"name", "plugin", "database", "database_oid", "temporary", "consistent_point"}, "invalid observed source slot fields"
-    assert isinstance(slot["name"], str) and re.fullmatch(r"[a-z_][a-z_0-9]{0,62}", slot["name"]), "invalid fixture slot name"
-    assert slot["database"] == path.parent.name and positive(slot["database_oid"], 0xffffffff) and slot["database_oid"] == source["database_oid"], "foreign source slot database"
-    assert slot["temporary"] is False and slot["plugin"] == binding["plugin"] == "pgoutput", "wrong source slot plugin or persistence"
-    assert binding["stream"] == stream and binding["slot_name"] == slot["name"] and positive(binding["catalog_epoch"]), "foreign source slot binding"
-    point = lsn(slot["consistent_point"])
-    assert point > 0, "source slot consistent point is absent"
-    if not create_loss:
-        assert type(slot_record["consistent_point"]) is int and slot_record["consistent_point"] == point, "source slot consistent point differs from native receipt"
+    observed = [value["slot"], *([value["retry_slot"]] if create_loss else [])]
+    for slot in observed:
+        assert isinstance(slot, dict) and set(slot) == {"name", "plugin", "database", "database_oid", "temporary", "consistent_point"}, "invalid observed source slot fields"
+        assert isinstance(slot["name"], str) and re.fullmatch(r"[a-z_][a-z_0-9]{0,62}", slot["name"]), "invalid fixture slot name"
+        assert slot["database"] == path.parent.name and positive(slot["database_oid"], 0xffffffff) and slot["database_oid"] == source["database_oid"], "foreign source slot database"
+        assert slot["temporary"] is False and slot["plugin"] == binding["plugin"] == "pgoutput", "wrong source slot plugin or persistence"
+        assert binding["stream"] == stream and binding["slot_name"] == slot["name"] and positive(binding["catalog_epoch"]), "foreign source slot binding"
+    points = [lsn(slot["consistent_point"]) for slot in observed]
+    assert points[0] > 0 and points == sorted(set(points)), "source slot consistent point is absent or a retry adopted the pending slot"
+    assert type(slot_record["consistent_point"]) is int and slot_record["consistent_point"] == points[-1], "source slot consistent point differs from native receipt"
     plan = follow["preliminary"]
     validate_identity_modes(plan)
     assert isinstance(plan, dict) and type(plan.get("generation")) is int and plan["generation"] == binding["catalog_epoch"], "source preliminary plan generation differs"
@@ -164,7 +168,8 @@ def validate_phase(value, context, case, phase):
     assert value["owner"] == context["token"] and value["profile"] == "follow_snapshot" and value["case"] == case and value["phase"] == phase, "foreign follow snapshot fault receipt"
     assert value["status"] == "observed", "pending follow snapshot fault receipt"
     version(value["server_version_num"], context)
-    assert type(value["fault_hits"]) is int and value["fault_hits"] == 1 and type(value["create_dispatches"]) is int and value["create_dispatches"] == 1, "missing or repeated intended CREATE/fault"
+    expected_creates = 2 if case in ("create_reply_lost", "create_tail_lost") else 1
+    assert type(value["fault_hits"]) is int and value["fault_hits"] == 1 and type(value["create_dispatches"]) is int and value["create_dispatches"] == expected_creates, "missing or repeated intended CREATE/fault"
     for key in ("publication_before_slot", "intent_before_create", "armed", "client_failed", "fault_before_deadline", "failure_before_deadline", "sql_closed", "exporter_closed", "helper_reaped"):
         assert value[key] is True, "missing ordered creation, closure, deadline, or helper evidence"
     assert type(value["helper_returncode"]) is int and value["helper_returncode"] == 0, "follow snapshot helper failed"
@@ -173,7 +178,7 @@ def validate_phase(value, context, case, phase):
         assert positive(value[key], 0x7fffffff), "missing actual follow snapshot process identity"
     assert value["sql_pid"] != value["exporter_pid"], "source SQL and exporter sessions are not distinct"
     create_loss = case in ("create_reply_lost", "create_tail_lost")
-    assert value["retry_refused"] is create_loss, "CREATE retry refusal is missing or fabricated"
+    assert value["retry_recreated"] is create_loss, "pending slot retirement and new CREATE are missing or fabricated"
     validate_native(value, context, case)
     details = value["details"]
     assert isinstance(details, dict) and set(details) == DETAIL_FIELDS, "follow snapshot fault details differ"

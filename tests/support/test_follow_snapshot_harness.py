@@ -55,12 +55,15 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
         intent = {"binding": binding, "nonce": nonce}
         create_loss = case in ("create_reply_lost", "create_tail_lost")
         point = 256 + number
-        record = intent if create_loss else {"intent": intent, "consistent_point": point, "snapshot_token": "00000001-00000001-1"}
+        # A create-loss retry confirms a new intent and a later slot under the same name.
+        retry_nonce, retry_point = [number + 60] * 16, 4096 + number
+        record = {"intent": {**intent, "nonce": retry_nonce} if create_loss else intent,
+                  "consistent_point": retry_point if create_loss else point, "snapshot_token": "00000001-00000001-1"}
         native = {
             "magic": "RPGMIGRATE", "format_version": 8, "run": run, "canonical_path": str(native_dir),
             "directory_device": native_dir.stat().st_dev, "directory_inode": native_dir.stat().st_ino,
             "copy_complete": None, "target_provenance": [], "clone_state": None, "operator": None,
-            "source_slot": {"phase": "provisioning" if create_loss else "confirmed", "record": record},
+            "source_slot": {"phase": "confirmed", "record": record},
             "follow_state": {"cleanup": None, "origin_name": None, "binding": None, "restart": None,
                              "preliminary": {"source": {"identity": stream["source"], "timeline": 1, "major": self.context["server_version_num"] // 10000}, "generation": 1, "tables": [{"source_oid": 42, "name": {"schema": "public", "name": "items"}, "writable_columns": ["id", "value"], "all_columns": ["id", "value"], "identity_modes": [97, 0], "partition_identity_modes": None}]},
                              "publication": {"phase": "confirmed", "intent": {"run": run, "name": publication["name"], "nonce": [number + 40] * 16}, "receipt": publication}},
@@ -74,12 +77,15 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             "server_version_num": self.context["server_version_num"], "native_path": str(path), "stream": stream,
             "publication": publication, "slot": {"name": binding["slot_name"], "plugin": "pgoutput", "database": name,
                                                    "database_oid": stream["source"]["database_oid"], "temporary": False, "consistent_point": f"0/{point:X}"},
-            "source_slot_phase": native["source_slot"]["phase"], "slot_nonce": nonce, "publication_before_slot": True,
+            "source_slot_phase": "provisioning" if create_loss else "confirmed", "slot_nonce": nonce, "publication_before_slot": True,
             "intent_before_create": True, "sql_pid": 40000 + number, "exporter_pid": 50000 + number,
             "helper_pid": 60000 + number, "armed": True, "fault_hits": 1, "client_failed": True,
             "fault_before_deadline": True, "failure_before_deadline": True, "deadline_seconds": 20,
             "sql_closed": True, "exporter_closed": True, "helper_reaped": True, "helper_returncode": 0,
-            "retry_refused": create_loss, "create_dispatches": 1,
+            "retry_recreated": create_loss, "create_dispatches": 2 if create_loss else 1,
+            "retry_slot_nonce": retry_nonce if create_loss else None,
+            "retry_slot": {"name": binding["slot_name"], "plugin": "pgoutput", "database": name, "database_oid": stream["source"]["database_oid"],
+                           "temporary": False, "consistent_point": f"0/{retry_point:X}"} if create_loss else None,
             "details": {"import_seen": not create_loss, "imported": case in ("imported_identity_mismatch", "source_finish_unknown"),
                         "identity_before": 40000 + number if case == "imported_identity_mismatch" else None,
                         "identity_after": 70000 + number if case == "imported_identity_mismatch" else None,
@@ -165,13 +171,31 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
             del bad[key]
             with self.subTest(missing=key), self.assertRaises(AssertionError):
                 fixture.validate_phase(bad, self.context, "create_reply_lost", "create_reply_lost")
-        for key, bad_value in (("owner", "foreign"), ("fault_hits", 0), ("fault_hits", True), ("create_dispatches", 2),
-                               ("retry_refused", False), ("helper_returncode", 9), ("helper_reaped", False),
+        for key, bad_value in (("owner", "foreign"), ("fault_hits", 0), ("fault_hits", True), ("create_dispatches", 1),
+                               ("create_dispatches", 3), ("retry_recreated", False), ("retry_slot_nonce", value["slot_nonce"]),
+                               ("retry_slot_nonce", None), ("retry_slot", None), ("retry_slot", value["slot"]),
+                               ("source_slot_phase", "confirmed"), ("helper_returncode", 9), ("helper_reaped", False),
                                ("sql_closed", False), ("exporter_closed", False), ("sql_pid", 0), ("helper_pid", True),
                                ("exporter_pid", value["sql_pid"]), ("fault_before_deadline", False),
                                ("failure_before_deadline", False), ("publication_before_slot", False), ("intent_before_create", False)):
             with self.subTest(key=key), self.assertRaises(AssertionError):
                 fixture.validate_phase({**value, key: bad_value}, self.context, "create_reply_lost", "create_reply_lost")
+
+    def test_create_loss_requires_the_retired_intent_replaced_by_one_new_confirmed_slot(self):
+        value = self.phase("create_reply_lost")
+        path = Path(value["native_path"])
+        native = json.loads(path.read_text())
+        fixture.validate_phase(value, self.context, value["case"], value["phase"])
+        pending = copy.deepcopy(native)
+        pending["source_slot"] = {"phase": "provisioning", "record": {**native["source_slot"]["record"]["intent"], "nonce": value["slot_nonce"]}}
+        adopted = copy.deepcopy(native)
+        adopted["source_slot"]["record"]["intent"]["nonce"] = value["slot_nonce"]
+        stale = copy.deepcopy(native)
+        stale["source_slot"]["record"]["consistent_point"] = fixture.lsn(value["slot"]["consistent_point"])
+        for name, bad in (("pending", pending), ("adopted", adopted), ("stale", stale)):
+            path.write_text(json.dumps(bad))
+            with self.subTest(native=name), self.assertRaises(AssertionError):
+                fixture.validate_phase(value, self.context, value["case"], value["phase"])
 
     def test_native_identity_modes_require_exact_fields_widths_and_bytes(self):
         value = self.phase("source_finish_unknown")

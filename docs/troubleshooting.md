@@ -62,7 +62,7 @@ Do not recreate a same-name slot, silently start from a later position, or turn 
 
 `CREATE_REPLICATION_SLOT` waits until every source transaction that holds a transaction ID ends, so a long source transaction can hold a follow at slot creation.
 A kill there, such as a node drain or a timeout, leaves a pending slot intent without its receipt.
-The next `--restart` drops exactly the recorded slot if it exists and then creates it again under a new intent.
+The next start, a first-run retry or `--restart`, drops exactly the recorded slot if it exists and then creates it again under a new intent.
 It never adopts that slot, because the snapshot it exported ended with the session that created it.
 It drops only a logical `pgoutput` slot on the source database that is not temporary; any other slot under that name refuses with exit 3 and stays.
 
@@ -70,7 +70,7 @@ It drops only a logical `pgoutput` slot on the source database that is not tempo
 > While the creating session still waits, the slot is active and the start refuses with exit 3, naming the slot and its backend.
 > End the blocking source transaction or wait for that session to end, then retry.
 
-A first run killed there still refuses on retry, and an interrupted publication CREATE refuses for manual inspection, so preserve the native state.
+An interrupted publication CREATE still refuses for manual inspection, so preserve the native state.
 
 ## Unknown COMMIT or target fence conflict
 

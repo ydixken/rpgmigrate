@@ -468,6 +468,20 @@ fn restart_retires_its_pending_slot_intent_without_a_receipt_but_never_a_changed
         );
         assert_eq!(fixture.manifest(), before);
     }
+    // The first-run rule never retires a restart's intent.
+    assert!(
+        fixture
+            .native
+            .require_pending_source_slot_retirement(&pending)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .native
+            .confirm_pending_source_slot_absent(&pending)
+            .is_err()
+    );
+    assert_eq!(fixture.manifest(), before);
     let proof = super::follow::PendingFollowSlotAbsence {
         restart: restart.clone(),
         slot: SourceSlotProvenance::Provisioning(pending.clone()),
@@ -494,6 +508,78 @@ fn restart_retires_its_pending_slot_intent_without_a_receipt_but_never_a_changed
         .unwrap();
     let fresh = PendingFixture::resources(&mut fixture.native, &fixture.plan, 60);
     assert_ne!(fresh.slot.intent.nonce, pending.nonce);
+}
+
+#[test]
+fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create() {
+    let plan = PendingFixture::plan();
+    // A slot intent without a confirmed publication was never authorized by create.
+    let (unpublished, mut native) = PendingFixture::open();
+    native.prepare_follow_source(&plan).unwrap();
+    let orphan = native
+        .begin_source_slot(&PendingFixture::slot_binding(&native, &plan))
+        .unwrap();
+    let before = std::fs::read(unpublished.join("state/manifest.json")).unwrap();
+    assert!(
+        native
+            .require_pending_source_slot_retirement(&orphan)
+            .is_err()
+    );
+    assert!(native.confirm_pending_source_slot_absent(&orphan).is_err());
+    assert_eq!(
+        std::fs::read(unpublished.join("state/manifest.json")).unwrap(),
+        before
+    );
+    drop(native);
+    std::fs::remove_dir_all(&unpublished).unwrap();
+
+    let (root, mut native) = PendingFixture::open();
+    native.prepare_follow_source(&plan).unwrap();
+    PendingFixture::publication(&mut native, 30);
+    let pending = native
+        .begin_source_slot(&PendingFixture::slot_binding(&native, &plan))
+        .unwrap();
+    drop(native);
+    let mut native = PendingFixture::reopen(&root, StateAction::Restart);
+    let manifest = || std::fs::read(root.join("state/manifest.json")).unwrap();
+    let before = manifest();
+    let mut changed = pending.clone();
+    changed.nonce[0] ^= 1;
+    assert!(
+        native
+            .require_pending_source_slot_retirement(&changed)
+            .is_err()
+    );
+    assert!(native.confirm_pending_source_slot_absent(&changed).is_err());
+    assert_eq!(manifest(), before);
+    native
+        .require_pending_source_slot_retirement(&pending)
+        .unwrap();
+    assert_eq!(manifest(), before);
+    native.confirm_pending_source_slot_absent(&pending).unwrap();
+    assert!(native.checked_source_slot().unwrap().is_none());
+    assert!(native.confirm_pending_source_slot_absent(&pending).is_err());
+    let binding = PendingFixture::slot_binding(&native, &plan);
+    let replacement = native.begin_source_slot(&binding).unwrap();
+    assert_ne!(replacement.nonce, pending.nonce);
+    assert!(native.begin_source_slot(&binding).is_err());
+    let receipt = native
+        .confirm_source_slot(
+            &replacement,
+            CreatedSlotData {
+                consistent_point: crate::identity::SourceEndLsn(70),
+                snapshot_name: "snapshot-70".into(),
+            },
+        )
+        .unwrap();
+    // A receipt is retired only through a restart, never by the pending-intent rule.
+    assert!(
+        native
+            .require_pending_source_slot_retirement(&receipt.intent)
+            .is_err()
+    );
+    drop(native);
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 struct Fixture {
@@ -1810,7 +1896,7 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
         SlotKill::ForeignPlugin,
         SlotKill::Physical,
     ];
-    for restart in [true] {
+    for restart in [false, true] {
         for kill in kills {
             let case = format!("restart={restart} kill={kill:?}");
             let mut fixture = Fixture::new(

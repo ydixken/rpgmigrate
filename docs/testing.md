@@ -210,7 +210,7 @@ A restart killed again while it resumes the intent leaves the same intent, and a
 The next drain must reconcile, refuse after source drift, and report completion only once the target matches the source.
 A second case stops a follow restart after its new binding and before the publish that resets the previous generation, then adds a foreign large object.
 The restart must refuse naming only that object and leave the target row and objects unchanged, then publish and unlink only owned objects once it is gone.
-`task test-follow-source` adds one case that stops a restart's slot creation while a source transaction holds a transaction ID.
+`task test-follow-source` adds one case that stops slot creation while a source transaction holds a transaction ID, on a first run and on a restart.
 It then leaves the recorded slot absent, active, persisted, or replaced by a `test_decoding` or physical slot under that name.
 An active or foreign slot must refuse with the native state and the slot unchanged.
 Every other start must drop the slot and create it again under a new intent, whose snapshot holds each source row and large object exactly once.
@@ -360,7 +360,10 @@ The current snapshot profile requires nine exact passed cases plus five independ
 The CREATE-tail receipt contains three required subphases.
 Its owned Unix relay binds the actual source publication, slot, stream, an explicit native format 8 or 9 intent, and importer/exporter process identities.
 Missing fields or phases, an unhit post-import PID mutation, or a late fault fail that receipt check.
-A live backend, unreaped helper, or ambiguous creation retry also fails.
+A live backend or unreaped helper also fails.
+Each CREATE-loss case then retries through the relay.
+The retry must drop the pending slot, mint one new intent, and confirm a later slot under the same name, so its receipt records two CREATE dispatches.
+A retry that reuses the pending intent or adopts its slot fails that receipt.
 An explicit child `PGAPPNAME` supports the application-name case without changing the Rust process environment.
 Direct unknown source-finish evidence proves no target anchor absence.
 The coordinator call-order and process-level qualification remain separate evidence.

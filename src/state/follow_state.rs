@@ -587,6 +587,25 @@ impl NativeState {
         self.replace_manifest(next)
     }
 
+    /// A first run's retry may retire only the pending slot intent its exact preliminary plan and
+    /// confirmed publication authorized; the intent has no receipt, so its slot is never adopted.
+    pub(crate) fn require_pending_source_slot_retirement(
+        &self,
+        intent: &SourceSlotIntent,
+    ) -> Result<()> {
+        require_pending_source_slot(&self.checked_manifest()?, intent)
+    }
+
+    pub(crate) fn confirm_pending_source_slot_absent(
+        &mut self,
+        intent: &SourceSlotIntent,
+    ) -> Result<()> {
+        let mut next = self.checked_manifest()?;
+        require_pending_source_slot(&next, intent)?;
+        next.source_slot = None;
+        self.replace_manifest(next)
+    }
+
     pub(crate) fn confirm_pending_follow_publication_absent(
         &mut self,
         proof: &crate::snapshot::PendingFollowPublicationAbsence,
@@ -833,6 +852,37 @@ impl NativeState {
         follow.preliminary = None;
         self.replace_manifest(next)
     }
+}
+
+fn require_pending_source_slot(manifest: &Manifest, intent: &SourceSlotIntent) -> Result<()> {
+    let follow = manifest
+        .follow_state
+        .as_ref()
+        .ok_or_else(|| bad_state("state-follow: native state is not a follow run"))?;
+    let binding = &intent.binding;
+    let authorized = follow.preliminary.as_ref().is_some_and(|plan| {
+        binding.stream().run == manifest.run
+            && binding.stream().source == plan.source.identity
+            && binding.stream().generation == 1
+            && binding.catalog_epoch() == plan.generation.0
+    });
+    if !authorized
+        || binding.plugin() != Plugin::Pgoutput
+        || follow.restart.is_some()
+        || follow.binding.is_some()
+        || manifest.clone_state.is_some()
+        || follow
+            .publication
+            .as_ref()
+            .and_then(PublicationProvenance::confirmed)
+            .is_none()
+        || manifest.source_slot != Some(SourceSlotProvenance::Provisioning(intent.clone()))
+    {
+        return Err(bad_state(
+            "state-follow: pending slot retirement differs from its exact unconfirmed first-run intent",
+        ));
+    }
+    Ok(())
 }
 
 fn require_pending_resource_retirement(

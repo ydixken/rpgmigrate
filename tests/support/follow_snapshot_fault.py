@@ -64,7 +64,8 @@ class Relay:
         self.hits = self.create_dispatches = 0
         self.failed = False
         self.finish_armed = False
-        self.retry_refused = False
+        self.retry_recreated = self.retired_before_retry = False
+        self.retry_intent = self.retry_slot = None
         self.details = {"import_seen": False, "imported": False, "identity_before": None,
                         "identity_after": None, "row_seen": False, "row_delivered": False,
                         "completion_seen": False, "command_tag": None, "ready_before": None,
@@ -159,8 +160,11 @@ class Relay:
                 session = {"client": client, "server": server, "replication": replication,
                            "pid": None, "command": "", "imported": False, "publication": False,
                            "client_closed": False, "backend_closed": False}
-                if any(s["replication"] == replication for s in self.sessions):
-                    assert not replication and self.failed and self.case in ("create_reply_lost", "create_tail_lost"), "duplicate session role"
+                # Only a create-loss retry opens a second session of either role, after the refusal.
+                session["retry"] = any(s["replication"] == replication for s in self.sessions)
+                if session["retry"]:
+                    assert self.failed and self.case in ("create_reply_lost", "create_tail_lost"), "duplicate session role"
+                    assert not any(s["retry"] and s["replication"] == replication for s in self.sessions), "second retry session"
                 self.sessions.append(session)
                 server.sendall(startup)
                 for function in (self.upstream, self.downstream):
@@ -188,12 +192,23 @@ class Relay:
         if command.startswith("CREATE_REPLICATION_SLOT"):
             self.create_dispatches += 1
             _, slot, intent, publication = self.native()
-            assert self.creation_intent is None, "a second CREATE attempted to replace the original intent"
-            self.creation_intent, self.creation_publication = intent, publication["receipt"]
             assert session["replication"] and self.publication_commit and slot["phase"] == "provisioning"
             assert f'"{self.slot_name}"' in command and '"pgoutput"' in command
-            self.intent_before_create = True
-        if command.startswith("SET TRANSACTION SNAPSHOT"):
+            if session["retry"]:
+                # The retry retired the pending intent and dropped its slot before minting one new intent.
+                assert self.create_dispatches == 2 and self.failed and self.retry_intent is None
+                assert intent["nonce"] != self.creation_intent["nonce"], "a retry reused the pending slot intent"
+                assert {**intent, "nonce": None} == {**self.creation_intent, "nonce": None}, "a retry changed the slot binding"
+                assert publication["receipt"] == self.creation_publication, "a retry replaced the confirmed publication"
+                self.retired_before_retry = not psql(self.context, self.database, "SELECT 1 FROM pg_replication_slots "
+                                                     f"WHERE slot_name={quote(self.slot_name)};")
+                assert self.retired_before_retry, "the pending slot survived its retirement"
+                self.retry_intent = intent
+            else:
+                assert self.creation_intent is None, "a second CREATE attempted to replace the original intent"
+                self.creation_intent, self.creation_publication = intent, publication["receipt"]
+                self.intent_before_create = True
+        if command.startswith("SET TRANSACTION SNAPSHOT") and not session["retry"]:
             self.details["import_seen"] = True
             self.native()
             if self.case == "expired_export_refused":
@@ -207,7 +222,7 @@ class Relay:
         if command == "COMMIT" and kind == b"C" and session["publication"] and not session["imported"]:
             assert payload == b"COMMIT\0"
             self.publication_commit = True
-        if command.startswith("SET TRANSACTION SNAPSHOT") and kind == b"C":
+        if command.startswith("SET TRANSACTION SNAPSHOT") and kind == b"C" and not session["retry"]:
             assert payload == b"SET\0"
             session["imported"] = self.details["imported"] = True
         if (self.case == "imported_identity_mismatch" and session["imported"] and kind == b"D"
@@ -220,7 +235,7 @@ class Relay:
                 frame, replacement = changed_pid(payload, session["pid"])
                 self.details["identity_after"] = replacement
                 self.hit()
-        creating = command.startswith("CREATE_REPLICATION_SLOT")
+        creating = command.startswith("CREATE_REPLICATION_SLOT") and not session["retry"]
         if creating and self.case in ("create_reply_lost", "create_tail_lost"):
             if kind == b"D":
                 values = fields(payload)
@@ -280,19 +295,24 @@ class Relay:
         assert raw, "owned slot is missing"
         value = json.loads(raw, object_pairs_hook=unique_fields)
         native, slot, intent, publication = self.native()
-        assert intent == self.creation_intent and publication["receipt"] == self.creation_publication, "original source ownership was replaced"
+        owner = self.retry_intent if self.retry_recreated else self.creation_intent
+        assert intent == owner and publication["receipt"] == self.creation_publication, "original source ownership was replaced"
         assert value["name"] == self.slot_name and value["plugin"] == "pgoutput"
         assert value["database"] == self.database and value["database_oid"] == intent["binding"]["stream"]["source"]["database_oid"]
         assert value["temporary"] is False
-        if self.slot is not None:
+        point = lambda text: (int(text.split("/")[0], 16) << 32) | int(text.split("/")[1], 16)
+        if self.retry_recreated:
+            assert slot["phase"] == "confirmed" and point(value["consistent_point"]) > point(self.slot["consistent_point"]), "the retry adopted the pending slot"
+            self.retry_slot = value
+        elif self.slot is not None:
             assert value == self.slot, "slot changed after CREATE"
         if slot["phase"] == "confirmed":
-            high, low = value["consistent_point"].split("/")
-            assert (int(high, 16) << 32) | int(low, 16) == slot["record"]["consistent_point"]
+            assert point(value["consistent_point"]) == slot["record"]["consistent_point"]
         actual = psql(self.context, self.database, "SELECT json_build_object('name',pubname,'oid',oid::bigint,'owner_oid',pubowner::bigint) "
                       f"FROM pg_publication WHERE pubname={quote(self.publication_name)};")
         assert json.loads(actual) == publication["receipt"], "owned publication changed"
-        self.slot = value
+        if not self.retry_recreated:
+            self.slot = value
         return native, slot, intent, publication
 
     def expire(self):
@@ -309,25 +329,29 @@ class Relay:
         self.details["exporter_expired"] = True
 
     def complete(self):
+        create_loss = self.case in ("create_reply_lost", "create_tail_lost")
         assert self.hits == 1 and self.failed, "missing intended fault or client refusal"
-        assert 2 <= len(self.sessions) <= 4 and sum(session["replication"] for session in self.sessions) == 1
+        if create_loss:
+            assert len(self.sessions) == 4 and sum(session["replication"] for session in self.sessions) == 2, "missing create-loss retry sessions"
+        else:
+            assert 2 <= len(self.sessions) <= 4 and sum(session["replication"] for session in self.sessions) == 1
         for session in self.sessions:
             while self.backend_present(session) or not session["backend_closed"]:
                 assert time.monotonic() < self.deadline, "owned session closure deadline"
                 self.stop.wait(0.01)
         assert not self.errors, self.errors
         native, source_slot, intent, publication = self.slot_evidence()
-        create_loss = self.case in ("create_reply_lost", "create_tail_lost")
-        assert source_slot["phase"] == ("provisioning" if create_loss else "confirmed")
-        assert not create_loss or self.retry_refused, "missing one-shot retry refusal"
-        assert self.create_dispatches == 1 and self.publication_commit and self.intent_before_create
+        assert source_slot["phase"] == "confirmed"
+        assert self.retry_recreated is create_loss and self.retired_before_retry is create_loss, "missing pending slot retirement and new CREATE"
+        assert self.create_dispatches == (2 if create_loss else 1) and self.publication_commit and self.intent_before_create
         if self.phase in ("ready_transaction", "ready_failed"):
             assert self.details["client_closed_after_ready"]
         return {"owner": self.context["token"], "profile": "follow_snapshot", "case": self.case,
                 "phase": self.phase, "status": "observed", "server_version_num": self.context["server_version_num"],
                 "native_path": str(self.native_path), "stream": intent["binding"]["stream"],
-                "publication": publication["receipt"], "slot": self.slot, "source_slot_phase": source_slot["phase"],
-                "slot_nonce": intent["nonce"], "publication_before_slot": self.publication_commit,
+                "publication": publication["receipt"], "slot": self.slot,
+                "source_slot_phase": "provisioning" if create_loss else source_slot["phase"],
+                "slot_nonce": self.creation_intent["nonce"], "publication_before_slot": self.publication_commit,
                 "intent_before_create": self.intent_before_create,
                 "sql_pid": next(s["pid"] for s in self.sessions if not s["replication"]),
                 "exporter_pid": next(s["pid"] for s in self.sessions if s["replication"]),
@@ -335,7 +359,8 @@ class Relay:
                 "client_failed": self.failed, "fault_before_deadline": self.fault_before_deadline,
                 "failure_before_deadline": self.failure_before_deadline, "deadline_seconds": 20,
                 "sql_closed": True, "exporter_closed": True, "helper_reaped": False, "helper_returncode": None,
-                "retry_refused": self.retry_refused, "create_dispatches": self.create_dispatches,
+                "retry_recreated": self.retry_recreated, "create_dispatches": self.create_dispatches,
+                "retry_slot_nonce": self.retry_intent["nonce"] if create_loss else None, "retry_slot": self.retry_slot,
                 "details": dict(self.details)}
 
     def upstream(self, session):
@@ -429,10 +454,10 @@ def main():
                 assert set(request) == {"op"} and relay.hits == 1 and not relay.failed
                 relay.failed = True
                 relay.failure_before_deadline = time.monotonic() < relay.deadline
-            elif operation == "retry_refused":
-                assert set(request) == {"op"} and relay.failed and relay.create_dispatches == 1
-                assert args.case in ("create_reply_lost", "create_tail_lost")
-                relay.retry_refused = True
+            elif operation == "retried":
+                assert set(request) == {"op"} and relay.failed and relay.create_dispatches == 2
+                assert args.case in ("create_reply_lost", "create_tail_lost") and relay.retired_before_retry
+                relay.retry_recreated = True
             elif operation == "quit":
                 assert set(request) == {"op"}
                 value = relay.stats() if phase == "control" else relay.complete()
