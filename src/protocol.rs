@@ -18,6 +18,9 @@ impl Version {
             engine_version: env!("CARGO_PKG_VERSION"),
             capabilities: &[
                 "clone.single_db",
+                "copy.large_objects",
+                "copy.binary_fallback",
+                "copy.split",
                 "cdc.pgoutput",
                 "progress.v1",
                 "cutover.v1",

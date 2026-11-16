@@ -192,7 +192,7 @@ def validate_build_smoke(smoke, binding, pair):
             or not re.fullmatch(r"[a-f0-9]{64}", smoke.get("library_sha256", ""))
             or set(discovery) != {"protocol_version", "engine_version", "capabilities"} or type(discovery.get("protocol_version")) is not int or discovery["protocol_version"] != 1
             or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.\-]+)?", discovery.get("engine_version", ""))
-            or discovery.get("capabilities") != ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
+            or discovery.get("capabilities") != ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
             or smoke.get("version_text") != "rpgmigrate " + discovery["engine_version"] + "\nlibpq " + str(LINKED_LIBPQ) + "\n"):
         raise RuntimeError("candidate source-bound debug version, tools, or library smoke differs")
     packages = smoke.get("packages", {})

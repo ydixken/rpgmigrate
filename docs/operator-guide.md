@@ -26,8 +26,8 @@ A supplied identity alone grants no authority over existing state.
 Select one immutable image digest for the intended architecture.
 Bind its executable hash and source identity to the retained packaging and runtime receipts.
 A tag or successful image smoke cannot replace exact-image database and operator qualification.
-Linux discovery requires the ordered seven-capability profile, including `verify.sealed_files.v1`.
-The historical six-name profile still parses but fails the native M6 prerequisite before credential projection.
+Linux discovery requires the ordered ten-capability M8 profile, including the three copy capabilities and `verify.sealed_files.v1`.
+A profile without `verify.sealed_files.v1` still parses but fails the native M6 prerequisite before credential projection.
 Use the [runner image guide](runner-image.md) for mounts, uid, tools, and artifact identities.
 
 The declared version pairs are PostgreSQL 16 to 16, 18 to 18, and 16 to 18.

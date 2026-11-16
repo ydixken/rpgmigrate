@@ -3,6 +3,9 @@
   "engine_version": "0.1.0",
   "capabilities": [
     "clone.single_db",
+    "copy.large_objects",
+    "copy.binary_fallback",
+    "copy.split",
     "cdc.pgoutput",
     "progress.v1",
     "cutover.v1",

@@ -20,7 +20,7 @@ MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 CONFIG = "application/vnd.oci.image.config.v1+json"
 LAYER = "application/vnd.oci.image.layer.v1.tar"
 INDEX = "application/vnd.oci.image.index.v1+json"
-CAPABILITIES = ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
+CAPABILITIES = ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
 
 
 def encoded(value):

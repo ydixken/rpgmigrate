@@ -7,7 +7,7 @@
     },
     {
       "path": "contract.json",
-      "sha256": "af1b23cb633ed388cdabcb01a1785f23b353c1b7be159c48d9ffbb1329a6677c"
+      "sha256": "cd31030500110da467b0d9ca38e64f820c8465487bfa58abc848b136f4a4d655"
     },
     {
       "path": "payloads/cleanup-complete.json",
@@ -519,11 +519,11 @@
     },
     {
       "path": "payloads/version-qualified-linux-profile.json",
-      "sha256": "ee9603440da07985c896c9a4ca35f181827eb861be64b3f87a6d664aa6dae707"
+      "sha256": "6ac2115d65b4ea4e41aaa0bcfe8633bb16227aa9837db48e9134d722e70e672b"
     },
     {
       "path": "payloads/version-qualified-profile.json",
-      "sha256": "103d3dc6de6b66f963fd5aaf47c18f07f093f2a91637100f99e1cae33f11209a"
+      "sha256": "f84cf4353135603691a54f55dd7eb7a0ebe5b74681154ae124c735888203d9ff"
     },
     {
       "path": "payloads/version-truncated.json",
