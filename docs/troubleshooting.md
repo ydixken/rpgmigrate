@@ -63,6 +63,8 @@ Do not recreate a same-name slot, silently start from a later position, or turn 
 A lost COMMIT reply or synchronous-wait warning leaves the outcome unknown.
 Do not infer rollback from the connection error or advance feedback from visible data.
 Require the checked independent barrier described in [target observation](native-cutover-handoff.md#independent-m6-observation).
+During the initial copy, an absent COPY marker or large-object receipt after that barrier needs `--restart` under a new copy generation.
+In the final large-object re-sync the follow is anchored and cannot restart its copy generation, so resume the follow and let its next drain repeat the re-sync.
 
 An active worker can hold the target fence after set-endpos has persisted E locally.
 Keep the saved E, wait for worker exit, and retry identical-E JSON observation with the standalone helper.
