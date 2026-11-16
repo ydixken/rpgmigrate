@@ -242,13 +242,20 @@ fn tools_in(major: u32, io: &IoControl, stock_root: &Path, internal_files: bool)
 
 /// `restore` selects pg_restore's connection mode with an explicit, possibly empty --dbname.
 fn utility(program: &Path, connection: &PgConnection, restore: bool) -> Result<Command> {
-    utility_command(program, connection.utility_environment()?, restore)
+    utility_command(
+        program,
+        connection.utility_environment()?,
+        restore,
+        connection.server_version()?,
+    )
 }
 
+/// `server_version` is the peer's, so a 16 source behind an 18 pg_dump gets no 17+ switch.
 fn utility_command(
     program: &Path,
     environment: UtilityEnvironment,
     restore: bool,
+    server_version: u32,
 ) -> Result<Command> {
     let UtilityEnvironment {
         remove,
@@ -265,6 +272,10 @@ fn utility_command(
     options.push(
         " -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C -c idle_session_timeout=0",
     );
+    // Their own SET comes after BEGIN under --single-transaction, inside the server's limit; 16 rejects the name.
+    if server_version >= 170_000 {
+        options.push(" -c transaction_timeout=0");
+    }
     let mut command = Command::new(program);
     command
         .env_remove(SOURCE_FILES_ENV)
@@ -761,11 +772,47 @@ mod tests {
 
     fn utility_args(settings: &[u8], restore: bool) -> Vec<String> {
         let environment = parsed_utility_environment(settings).unwrap();
-        utility_command(Path::new("/nonexistent/pg_dump"), environment, restore)
-            .unwrap()
-            .get_args()
-            .map(|arg| arg.to_str().unwrap().to_owned())
-            .collect()
+        utility_command(
+            Path::new("/nonexistent/pg_dump"),
+            environment,
+            restore,
+            180_000,
+        )
+        .unwrap()
+        .get_args()
+        .map(|arg| arg.to_str().unwrap().to_owned())
+        .collect()
+    }
+
+    #[test]
+    fn utility_options_clear_transaction_timeout_only_on_servers_that_have_it() {
+        let options = |version| {
+            let environment =
+                parsed_utility_environment(b"host=db options='-c statement_timeout=0'").unwrap();
+            let command = utility_command(
+                Path::new("/nonexistent/pg_dump"),
+                environment,
+                true,
+                version,
+            )
+            .unwrap();
+            let (_, value) = command
+                .get_envs()
+                .find(|(key, _)| *key == "PGOPTIONS")
+                .unwrap();
+            value.unwrap().to_str().unwrap().to_owned()
+        };
+        let base = "-c statement_timeout=0 -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C -c idle_session_timeout=0";
+        for version in [160_000, 160_016, 169_999] {
+            assert_eq!(options(version), base, "{version}");
+        }
+        for version in [170_000, 180_007] {
+            assert_eq!(
+                options(version),
+                format!("{base} -c transaction_timeout=0"),
+                "{version}"
+            );
+        }
     }
 
     #[test]
@@ -921,7 +968,7 @@ mod tests {
             files: Some(files),
             liveness: vec![],
         };
-        let mut command = utility_command(&program, environment, false).unwrap();
+        let mut command = utility_command(&program, environment, false, 180_000).unwrap();
         command
             .env(MODE, "probe")
             .env(PROBE, serde_json::to_string(&probe).unwrap());
@@ -1439,6 +1486,9 @@ mod tests {
                     // The connection's own startup options follow the caller's, then the utility's.
                     expected_options.extend_from_slice(b" -c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c idle_session_timeout=0");
                     expected_options.extend_from_slice(b" -c synchronous_commit=on -c row_security=off -c client_encoding=UTF8 -c lc_monetary=C -c idle_session_timeout=0");
+                    if connection.server_version().unwrap() >= 170_000 {
+                        expected_options.extend_from_slice(b" -c transaction_timeout=0");
+                    }
                     assert!(
                         command.get_envs().any(|(key, value)| key == "PGOPTIONS"
                             && value.is_some_and(|value| value.as_bytes() == expected_options)),
@@ -1618,6 +1668,129 @@ mod tests {
             }
             utility_child_completed(&mut child);
         }
+    }
+
+    #[test]
+    #[ignore = "requires an owned PostgreSQL schema fixture"]
+    fn live_utility_children_outlast_server_timeouts_behind_a_slow_client() {
+        use std::io::Write;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        let io = utility_io();
+        let (context, mut admin) = utility_context(&io);
+        let version = admin.server_version().unwrap();
+        let mut settings = vec![
+            ("statement_timeout", "20ms"),
+            ("lock_timeout", "1ms"),
+            ("idle_in_transaction_session_timeout", "20ms"),
+            ("idle_session_timeout", "20ms"),
+        ];
+        if version >= 170_000 {
+            settings.push(("transaction_timeout", "50ms"));
+        }
+        let names = ["e1_slow_child_s", "e1_slow_child_t"];
+        for name in names {
+            admin
+                .query(&format!("CREATE DATABASE {name} TEMPLATE template0"), &io)
+                .unwrap();
+            for (setting, value) in &settings {
+                admin
+                    .query(
+                        &format!("ALTER DATABASE {name} SET {setting} = '{value}'"),
+                        &io,
+                    )
+                    .unwrap();
+            }
+        }
+        let files = PrivateFiles::new().unwrap();
+        let port = context["port"].as_u64().unwrap();
+        let listener =
+            UnixListener::bind(files.directory.join(format!(".s.PGSQL.{port}"))).unwrap();
+        let upstream =
+            Path::new(context["socket_dir"].as_str().unwrap()).join(format!(".s.PGSQL.{port}"));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        // Detached: it outlives the test's sessions, and each relay ends when its client closes.
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let mut client = client.unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut server = UnixStream::connect(&upstream).unwrap();
+                let (mut replies, mut back) =
+                    (server.try_clone().unwrap(), client.try_clone().unwrap());
+                std::thread::spawn(move || std::io::copy(&mut replies, &mut back).map(drop));
+                // Each client message reaches the server four times the transaction timeout late.
+                std::thread::spawn(move || {
+                    let mut buffer = [0; 8192];
+                    while let Ok(count @ 1..) = client.read(&mut buffer) {
+                        std::thread::sleep(Duration::from_millis(200));
+                        if server.write_all(&buffer[..count]).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = server.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        let info = |name: &str, slow: bool| {
+            let mut info = std::env::var_os("RPGMIGRATE_TEST_SCHEMA_SOURCE_ADMIN").unwrap();
+            info.push(format!(" dbname={name}"));
+            if slow {
+                info.push(format!(" host='{}'", files.directory.to_str().unwrap()));
+            }
+            Conninfo::new(info).unwrap()
+        };
+        let mut source =
+            PgConnection::connect(&info(names[0], false), crate::pg::Role::Copy, &io).unwrap();
+        for sql in [
+            "CREATE SCHEMA slow",
+            "CREATE TABLE slow.parent(id integer PRIMARY KEY)",
+            "CREATE TABLE slow.child(id integer REFERENCES slow.parent, payload text)",
+            "CREATE VIEW slow.joined AS SELECT parent.id, payload FROM slow.parent JOIN slow.child USING (id)",
+        ] {
+            source.query(sql, &io).unwrap();
+        }
+        drop(source);
+        let tools = tools(version / 10_000, &io).unwrap();
+        let mut archive_files = PrivateFiles::new().unwrap();
+        let (archive, _) = archive_files.file("slow.dump").unwrap();
+        let source =
+            PgConnection::connect(&info(names[0], true), crate::pg::Role::Copy, &io).unwrap();
+        let mut command = utility(&tools.dump, &source, false).unwrap();
+        command
+            .args(["--format=custom", "--schema-only"])
+            .arg("--file")
+            .arg(&archive);
+        assert!(
+            run(&mut command, &io, None).unwrap().success(),
+            "pg_dump must outlast the source's session timeouts behind a slow client"
+        );
+        let target =
+            PgConnection::connect(&info(names[1], true), crate::pg::Role::Copy, &io).unwrap();
+        let mut command = utility(&tools.restore, &target, true).unwrap();
+        command
+            .args([
+                "--section=pre-data",
+                "--single-transaction",
+                "--exit-on-error",
+            ])
+            .arg(&archive);
+        assert!(
+            run(&mut command, &io, None).unwrap().success(),
+            "pg_restore must outlast the target's session timeouts behind a slow client"
+        );
+        // Two engine sessions and both children went through the delay, so none bypassed it.
+        assert_eq!(accepted.load(Ordering::SeqCst), 4);
+        let mut check =
+            PgConnection::connect(&info(names[1], false), crate::pg::Role::Copy, &io).unwrap();
+        let restored = check
+            .query(
+                "SELECT count(*) FROM pg_catalog.pg_class WHERE relnamespace = 'slow'::regnamespace AND relkind IN ('r', 'v')",
+                &io,
+            )
+            .unwrap();
+        assert_eq!(restored.cell(0, 0).unwrap(), Some(b"3".as_slice()));
     }
 
     #[test]
