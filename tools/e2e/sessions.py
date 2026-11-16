@@ -129,19 +129,26 @@ class ServerCensus:
 WINDOW = {"pid": 7, "start": "2026-11-16 10:00:00.25+00", "type": "client backend", "name": "", "port": 9000, "state": None}
 
 
-def logline(name, start="2026-11-16 10:00:00 UTC"):
-    message = "connection authorized: user=postgres database=control" + ("" if name is None else " application_name=" + name)
+def logline(name, start="2026-11-16 10:00:00 UTC", message=None, **fields):
+    if message is None:
+        message = "connection authorized: user=postgres database=control" + ("" if name is None else " application_name=" + name)
     return json.dumps({"user": "postgres", "dbname": "control", "pid": 7, "remote_port": 9000, "session_start": start,
-                       "backend_type": "client backend", "message": message})
+                       "backend_type": "client backend", "message": message, **fields})
 
 
 ENGINE = logline("rpgmigrate[100] compare")
+ENGINE_OTHER_DATABASE = "connection authorized: user=postgres database=other application_name=rpgmigrate[100] compare"
+DISCONNECTED = logline(None, message="disconnection: session time: 0:00:00.010 user=postgres")
 CONTROLS = {"settles": ([[WINDOW], [WINDOW], [{**WINDOW, "name": "rpgmigrate[100] compare"}]], []),
             "stays_unnamed": ([[WINDOW]], [ENGINE]), "unnamed_idle": ([[WINDOW], [{**WINDOW, "state": "idle"}]], [ENGINE]),
-            "vanishes": ([[WINDOW], []], []), "vanishes_logged": ([[WINDOW], []], [ENGINE]),
+            "vanishes": ([[WINDOW], []], []), "vanishes_logged": ([[WINDOW], []], [ENGINE, DISCONNECTED]),
             "vanishes_logged_other": ([[WINDOW], []], [logline("psql")]), "vanishes_logged_unnamed": ([[WINDOW], []], [logline(None)]),
             "vanishes_logged_elsewhere": ([[WINDOW], []], [logline("rpgmigrate[100] compare", "2026-11-16 10:00:01 UTC")]),
-            "vanishes_logged_twice": ([[WINDOW], []], [ENGINE, ENGINE]), "vanishes_logged_harness": ([[WINDOW], []], [logline("harness")])}
+            "vanishes_logged_twice": ([[WINDOW], []], [ENGINE, ENGINE]),
+            "vanishes_logged_other_backend": ([[WINDOW], []], [logline("rpgmigrate[100] compare", **field) for field in
+                                                               ({"pid": 8}, {"remote_port": 9001}, {"backend_type": "walsender"},
+                                                                {"dbname": "other", "message": ENGINE_OTHER_DATABASE})]),
+            "vanishes_logged_harness": ([[WINDOW], []], [logline("harness")])}
 PASSING = {"settles", "vanishes_logged", "vanishes_logged_harness"}
 SCRIPT = """CREATE SEQUENCE {sample}_calls;
 CREATE FUNCTION {sample}(databases text[], target int DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $script$
