@@ -117,6 +117,8 @@ impl FollowSender {
             || (!state.messages.is_empty() && !fits_bytes)
         {
             state.last_full = Some((state.messages.len(), state.bytes + self.0.storage_bytes));
+            #[cfg(test)]
+            self.0.available.notify_all();
             return Err(TrySendError::Full(message));
         }
         state.bytes += charge;
@@ -136,6 +138,18 @@ impl Drop for FollowSender {
 }
 
 impl FollowReceiver {
+    /// True once the FIFO has refused a send because it was full; only tests wait for this.
+    #[cfg(test)]
+    pub(crate) fn wait_full(&self, timeout: Duration) -> bool {
+        let state = self.0.state.lock().unwrap();
+        let (state, _) = self
+            .0
+            .available
+            .wait_timeout_while(state, timeout, |state| state.last_full.is_none())
+            .unwrap();
+        state.last_full.is_some()
+    }
+
     pub(crate) fn recv_timeout(
         &self,
         timeout: Duration,

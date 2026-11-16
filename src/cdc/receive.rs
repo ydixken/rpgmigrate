@@ -940,6 +940,9 @@ mod tests {
         });
         let mut peer = ready_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         peer.blocked(if real_timeout { 8 } else { 3 });
+        // Timer statuses can reach the peer before the receiver decodes any frame;
+        // only a refused send proves the receiver is blocked on the full FIFO.
+        assert!(receiver.wait_full(Duration::from_secs(2)));
         if !cancel_while_full && !completed_stop {
             let messages: Vec<_> = (0..7)
                 .map(|_| receiver.recv_timeout(Duration::from_secs(1)).unwrap())
