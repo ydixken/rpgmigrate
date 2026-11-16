@@ -161,6 +161,26 @@ Without these settings, `pg_dump` gets no `--dbname` and `pg_restore` gets an em
 > Every other set option without a libpq environment variable, such as `sslpassword`, `oauth_client_secret`, `scram_client_key`, `replication` or a caller-supplied `fallback_application_name`, refuses with exit 2 (`native:BadConfig`) before any mutation.
 > Secret-bearing and security settings never reach utility argv.
 
+## Materialized views
+
+Clone and follow admit materialized views that use the `heap` access method; foreign tables, unlogged tables and other access methods still refuse.
+A schema-only archive creates every materialized view `WITH NO DATA` and carries no `MATERIALIZED VIEW DATA` entries, on both PostgreSQL 16 and 18, so `pg_restore` never refreshes one.
+The engine does it itself, after the post-data restore and before the sequence sync.
+It refreshes each view that was populated in the copy snapshot, in `pg_dump`'s dependency order, which follows references through plain views, so a view over another view refreshes after it.
+A view that was unpopulated in the snapshot stays unpopulated.
+The refresh runs with `search_path` empty and `row_security` off, as `pg_restore` runs its own refresh entries.
+The engine then reads every view's population state back and fails unless it matches the snapshot.
+
+> [!warning]
+> Clone and follow refuse a source where a populated materialized view depends on an unpopulated one, at the schema dump, before pre-data restores anything.
+> A refresh on the target would fail, and `pg_dump` would silently leave the view empty.
+> Refresh the dependency on the source, or run `REFRESH MATERIALIZED VIEW ... WITH NO DATA` on the dependent view, then start again.
+
+With `--follow`, the refresh reads the tables as the copy left them, before apply starts.
+Follow replicates tables only: it keeps each materialized view's content from the copy snapshot and does not refresh at cutover.
+Refresh the views on the target after cutover when their content must reflect later changes.
+`compare data` counts no materialized view as a table, and `compare schema` sees only their definitions.
+
 ## Work identity and ownership
 
 Operator runs supply all four environment variables together:

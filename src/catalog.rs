@@ -3075,10 +3075,6 @@ mod tests {
                 "clone refuses",
             ),
             (
-                &["CREATE MATERIALIZED VIEW {s}.item AS SELECT 1 AS id"],
-                "clone refuses",
-            ),
-            (
                 &[
                     "CREATE FOREIGN DATA WRAPPER clone_fdw",
                     "CREATE SERVER clone_srv FOREIGN DATA WRAPPER clone_fdw",

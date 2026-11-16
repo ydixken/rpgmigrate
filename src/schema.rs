@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use crate::catalog;
 use crate::contracts::connection_files::{ConnectionFiles, SOURCE_FILES_ENV, TARGET_FILES_ENV};
 use crate::contracts::{
-    CloneOptions, ClonePlan, CloneTarget, Error, ErrorKind, IoControl, OwnedObject, RestorePolicy,
-    Result, SnapshotTicket,
+    CloneOptions, ClonePlan, CloneTarget, Error, ErrorKind, IoControl, OwnedObject, QualifiedTable,
+    RestorePolicy, Result, SnapshotTicket,
 };
 use crate::pg::{PgConnection, UtilityEnvironment};
 use crate::state::{ClonePhase, NativeState};
@@ -311,6 +311,7 @@ pub(crate) struct SchemaArchive {
     ticket: SnapshotTicket,
     policy: RestorePolicy,
     target: CloneTarget,
+    views: MaterializedViews,
 }
 
 pub(crate) fn preflight(
@@ -350,6 +351,7 @@ pub(crate) fn dump(
             "schema dump database version or identity binding differs",
         ));
     }
+    let views = snapshot_materialized_views(&mut source, ticket, io)?;
     let tools = tools(target_identity.major, io)?;
     let mut files = PrivateFiles::new()?;
     let (path, file) = files.file("schema.dump")?;
@@ -388,7 +390,193 @@ pub(crate) fn dump(
         ticket: ticket.clone(),
         policy: options.policy,
         target: target_identity,
+        views,
     })
+}
+
+const MAX_MATERIALIZED_VIEWS: usize = 4096;
+const MAX_MATERIALIZED_VIEW_EDGES: usize = 65_536;
+const MATERIALIZED_VIEWS_SQL: &str = "SELECT c.oid,n.nspname,c.relname,c.relispopulated FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='m' AND n.nspname !~ '^pg_' AND n.nspname<>'information_schema' ORDER BY c.oid";
+// pg_dump's matview refresh dependencies: a rule's references, followed through plain views.
+const MATERIALIZED_VIEW_EDGES_SQL: &str = "WITH RECURSIVE w(objid,refobjid,refkind) AS (SELECT r.ev_class,d.refobjid,c.relkind FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class m ON m.oid=r.ev_class AND m.relkind='m' JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass AND d.refobjid<>r.ev_class JOIN pg_catalog.pg_class c ON c.oid=d.refobjid AND c.relkind IN ('m','v') UNION SELECT w.objid,d.refobjid,c.relkind FROM w JOIN pg_catalog.pg_rewrite r ON r.ev_class=w.refobjid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass AND d.refobjid<>r.ev_class JOIN pg_catalog.pg_class c ON c.oid=d.refobjid AND c.relkind IN ('m','v') WHERE w.refkind='v') SELECT DISTINCT objid,refobjid FROM w WHERE refkind='m' AND objid<>refobjid ORDER BY 1,2";
+
+/// Source materialized views at the snapshot: the populated ones in refresh order, then the rest.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MaterializedViews {
+    refresh: Vec<QualifiedTable>,
+    unpopulated: Vec<QualifiedTable>,
+}
+
+fn snapshot_materialized_views(
+    source: &mut PgConnection,
+    ticket: &SnapshotTicket,
+    io: &IoControl,
+) -> Result<MaterializedViews> {
+    crate::snapshot::import(source, ticket, io)?;
+    let oid = |text: String| -> Result<u32> {
+        text.parse()
+            .map_err(|_| failure("materialized view catalog returned an invalid OID"))
+    };
+    let result = source.query(
+        &format!(
+            "{MATERIALIZED_VIEWS_SQL} LIMIT {}",
+            MAX_MATERIALIZED_VIEWS + 1
+        ),
+        io,
+    )?;
+    if result.rows() > MAX_MATERIALIZED_VIEWS {
+        return Err(failure("clone exceeds the 4096 materialized view bound"));
+    }
+    let mut views = Vec::with_capacity(result.rows());
+    for row in 0..result.rows() {
+        let name = QualifiedTable {
+            schema: cell(&result, row, 1)?,
+            table: cell(&result, row, 2)?,
+        };
+        views.push((
+            oid(cell(&result, row, 0)?)?,
+            name,
+            cell(&result, row, 3)? == "t",
+        ));
+    }
+    let result = source.query(
+        &format!(
+            "{MATERIALIZED_VIEW_EDGES_SQL} LIMIT {}",
+            MAX_MATERIALIZED_VIEW_EDGES + 1
+        ),
+        io,
+    )?;
+    if result.rows() > MAX_MATERIALIZED_VIEW_EDGES {
+        return Err(failure(
+            "clone exceeds the materialized view dependency bound",
+        ));
+    }
+    let mut edges = Vec::with_capacity(result.rows());
+    for row in 0..result.rows() {
+        edges.push((oid(cell(&result, row, 0)?)?, oid(cell(&result, row, 1)?)?));
+    }
+    catalog::command(source, "COMMIT", "COMMIT", io)?;
+    refresh_order(&views, &edges)
+}
+
+fn cell(result: &crate::pg::PgResult, row: usize, column: usize) -> Result<String> {
+    let bytes = result
+        .cell(row, column)?
+        .ok_or_else(|| failure("materialized view catalog returned NULL"))?;
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| failure("materialized view catalog returned invalid UTF8"))
+}
+
+/// Kahn's order over populated views; `views` is sorted by OID, which breaks ties.
+fn refresh_order(
+    views: &[(u32, QualifiedTable, bool)],
+    edges: &[(u32, u32)],
+) -> Result<MaterializedViews> {
+    let index = views
+        .iter()
+        .enumerate()
+        .map(|(position, view)| (view.0, position))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = vec![0usize; views.len()];
+    let mut dependents = vec![Vec::new(); views.len()];
+    for (view, dependency) in edges {
+        let (Some(&view), Some(&dependency)) = (index.get(view), index.get(dependency)) else {
+            return Err(failure(
+                "materialized view dependency is outside the source inventory",
+            ));
+        };
+        if !views[view].2 {
+            continue;
+        }
+        // REFRESH would fail on the target, and pg_dump would silently leave the view empty.
+        if !views[dependency].2 {
+            return Err(failure(
+                "clone refuses a populated materialized view that depends on an unpopulated one",
+            ));
+        }
+        pending[view] += 1;
+        dependents[dependency].push(view);
+    }
+    let mut ready = (0..views.len())
+        .filter(|&view| views[view].2 && pending[view] == 0)
+        .collect::<BTreeSet<_>>();
+    let mut refresh = Vec::new();
+    while let Some(view) = ready.pop_first() {
+        refresh.push(views[view].1.clone());
+        for &dependent in &dependents[view] {
+            pending[dependent] -= 1;
+            if pending[dependent] == 0 {
+                ready.insert(dependent);
+            }
+        }
+    }
+    if refresh.len() != views.iter().filter(|view| view.2).count() {
+        return Err(failure("materialized view dependencies form a cycle"));
+    }
+    Ok(MaterializedViews {
+        refresh,
+        unpopulated: views
+            .iter()
+            .filter(|view| !view.2)
+            .map(|view| view.1.clone())
+            .collect(),
+    })
+}
+
+/// A schema-only archive creates every view WITH NO DATA, so populate exactly what the snapshot had.
+fn refresh_materialized_views(
+    target: &mut PgConnection,
+    views: &MaterializedViews,
+    io: &IoControl,
+) -> Result<()> {
+    // The settings pg_restore uses for its own REFRESH entries.
+    catalog::command(
+        target,
+        "SELECT pg_catalog.set_config('search_path', '', false)",
+        "SELECT 1",
+        io,
+    )?;
+    catalog::command(target, "SET row_security TO off", "SET", io)?;
+    for view in &views.refresh {
+        let name = format!(
+            "{}.{}",
+            target.quote_identifier(&view.schema)?,
+            target.quote_identifier(&view.table)?
+        );
+        catalog::command(
+            target,
+            &format!("REFRESH MATERIALIZED VIEW {name}"),
+            "REFRESH MATERIALIZED VIEW",
+            io,
+        )?;
+    }
+    let result = target.query(
+        &format!(
+            "{MATERIALIZED_VIEWS_SQL} LIMIT {}",
+            MAX_MATERIALIZED_VIEWS + 1
+        ),
+        io,
+    )?;
+    let mut populated = BTreeMap::new();
+    for row in 0..result.rows() {
+        populated.insert(
+            (cell(&result, row, 1)?, cell(&result, row, 2)?),
+            cell(&result, row, 3)? == "t",
+        );
+    }
+    let expected = views
+        .refresh
+        .iter()
+        .map(|view| (view, true))
+        .chain(views.unpopulated.iter().map(|view| (view, false)));
+    for (view, state) in expected {
+        if populated.get(&(view.schema.clone(), view.table.clone())) != Some(&state) {
+            return Err(failure(
+                "target materialized view population differs from the source snapshot",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn created_objects(
@@ -515,7 +703,7 @@ pub(crate) fn restore_post(
             "post-data utility did not positively complete; automatic recopy is refused",
         ));
     }
-    Ok(())
+    refresh_materialized_views(&mut target, &archive.views, io)
 }
 
 fn exact_schema_pattern(name: &str) -> String {
@@ -1674,6 +1862,23 @@ mod tests {
                     &io,
                 )
                 .unwrap();
+            // OID order differs from dependency order: early reads late through bridge.
+            for sql in [
+                "CREATE TABLE utility_route.base(id integer, v integer)",
+                "INSERT INTO utility_route.base SELECT g, g % 3 FROM generate_series(1, 10) g",
+                "CREATE VIEW utility_route.bridge AS SELECT v FROM utility_route.base",
+                "CREATE MATERIALIZED VIEW utility_route.early AS SELECT count(*) AS n FROM utility_route.bridge",
+                "CREATE MATERIALIZED VIEW utility_route.late AS SELECT v FROM utility_route.base WHERE v > 0",
+                "CREATE OR REPLACE VIEW utility_route.bridge AS SELECT v FROM utility_route.late",
+                "REFRESH MATERIALIZED VIEW utility_route.early",
+                "CREATE MATERIALIZED VIEW utility_route.over_early AS SELECT n * 2 AS doubled FROM utility_route.early",
+                "CREATE UNIQUE INDEX over_early_doubled ON utility_route.over_early(doubled)",
+                "CREATE MATERIALIZED VIEW utility_route.unpopulated AS SELECT id FROM utility_route.base WITH NO DATA",
+            ] {
+                source.query(sql, &io).unwrap();
+            }
+            let mut source_writer =
+                PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
             let mut snapshot = crate::snapshot::CloneSnapshot::export(
                 source,
                 crate::contracts::CopyGeneration(1),
@@ -1750,6 +1955,32 @@ mod tests {
                 objects.iter().any(|object| object.name == "empty_item"),
                 "pre-data restore omitted its relation"
             );
+            assert_eq!(
+                archive.views,
+                MaterializedViews {
+                    refresh: ["late", "early", "over_early"]
+                        .map(|table| QualifiedTable {
+                            schema: "utility_route".into(),
+                            table: table.into(),
+                        })
+                        .into(),
+                    unpopulated: vec![QualifiedTable {
+                        schema: "utility_route".into(),
+                        table: "unpopulated".into(),
+                    }],
+                },
+                "refresh plan lost the dependency order or the unpopulated view"
+            );
+            // Stands in for the table copy; the source changes after the snapshot must not show.
+            target
+                .query(
+                    "INSERT INTO utility_route.base SELECT g, g % 3 FROM generate_series(1, 10) g",
+                    &io,
+                )
+                .unwrap();
+            source_writer
+                .query("INSERT INTO utility_route.base VALUES (11, 1)", &io)
+                .unwrap();
             assert!(
                 compare_pre_data(&options, snapshot.ticket(), &[], &io).unwrap(),
                 "snapshot schema comparison used a different database"
@@ -1775,6 +2006,35 @@ mod tests {
             assert!(
                 result.cell(0, 0).unwrap() == Some(b"t"),
                 "post-data restore omitted its index"
+            );
+            let result = target
+                .query(
+                    "SELECT (SELECT string_agg(c.relname || '=' || c.relispopulated, ',' ORDER BY c.relname) FROM pg_catalog.pg_class c WHERE c.relnamespace = 'utility_route'::regnamespace AND c.relkind = 'm'), (SELECT count(*) FROM utility_route.late), (SELECT n FROM utility_route.early), (SELECT doubled FROM utility_route.over_early)",
+                    &io,
+                )
+                .unwrap();
+            assert_eq!(
+                (0..4)
+                    .map(|column| result.cell(0, column).unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    Some(b"early=true,late=true,over_early=true,unpopulated=false".as_slice()),
+                    Some(b"7".as_slice()),
+                    Some(b"7".as_slice()),
+                    Some(b"14".as_slice()),
+                ],
+                "post-data did not refresh exactly the populated source views from the copy"
+            );
+            catalog::command(&mut target, "BEGIN", "BEGIN", &io).unwrap();
+            let tables = catalog::inspect_clone_tables(&mut target, &[], &io).unwrap();
+            catalog::command(&mut target, "ROLLBACK", "ROLLBACK", &io).unwrap();
+            assert_eq!(
+                tables
+                    .iter()
+                    .map(|table| table.name.table.as_str())
+                    .collect::<Vec<_>>(),
+                ["base", "empty_item"],
+                "comparison inventory counted a materialized view as a table"
             );
             let mut captured_dump =
                 utility(&archive.tools.dump, snapshot.connection().unwrap(), false).unwrap();
@@ -2357,6 +2617,62 @@ mod tests {
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
     }
+    fn views(specs: &[(u32, &str, bool)]) -> Vec<(u32, QualifiedTable, bool)> {
+        specs
+            .iter()
+            .map(|&(oid, table, populated)| {
+                let name = QualifiedTable {
+                    schema: "s".into(),
+                    table: table.into(),
+                };
+                (oid, name, populated)
+            })
+            .collect()
+    }
+
+    fn names(views: &[QualifiedTable]) -> Vec<&str> {
+        views.iter().map(|view| view.table.as_str()).collect()
+    }
+
+    #[test]
+    fn refresh_order_follows_dependencies_not_oids_and_skips_unpopulated_views() {
+        let inventory = views(&[
+            (10, "early", true),
+            (11, "late", true),
+            (12, "over_both", true),
+            (13, "empty", false),
+            (14, "over_empty", false),
+            (15, "alone", true),
+        ]);
+        let plan = refresh_order(
+            &inventory,
+            &[(10, 11), (12, 10), (12, 11), (14, 13), (14, 10)],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&plan.refresh),
+            ["late", "early", "over_both", "alone"]
+        );
+        assert_eq!(names(&plan.unpopulated), ["empty", "over_empty"]);
+        assert_eq!(
+            refresh_order(&[], &[]).unwrap(),
+            MaterializedViews::default()
+        );
+    }
+
+    #[test]
+    fn refresh_order_refuses_what_a_target_refresh_cannot_reproduce() {
+        let inventory = views(&[(10, "empty", false), (11, "over", true)]);
+        let error = refresh_order(&inventory, &[(11, 10)]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "clone refuses a populated materialized view that depends on an unpopulated one"
+        );
+        let inventory = views(&[(10, "a", true), (11, "b", true)]);
+        assert!(refresh_order(&inventory, &[(10, 11), (11, 10)]).is_err());
+        assert!(refresh_order(&inventory, &[(10, 99)]).is_err());
+    }
+
     #[test]
     fn public_baseline_owner_change_never_adopts_the_existing_namespace() {
         let baseline = OwnedObject {
