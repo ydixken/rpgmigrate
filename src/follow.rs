@@ -147,6 +147,7 @@ fn fresh(
         options.clone.copy_policy(),
         &[],
         &[],
+        &[],
         io,
     )?;
     catalog::command(&mut source, "COMMIT", "COMMIT", io)?;
@@ -203,7 +204,15 @@ fn recopy(
     let saved = native
         .checked_clone()?
         .ok_or_else(|| refusal("follow: restart lost owned copy state"))?;
-    let checked = restart_plan(options, native, &saved, &mut target, io)?;
+    let owned_large_objects = authority.owned_large_object_oids(io)?;
+    let checked = restart_plan(
+        options,
+        native,
+        &saved,
+        &mut target,
+        &owned_large_objects,
+        io,
+    )?;
     let restart = authority.begin_follow_restart(native, &checked, io)?;
     let mut plan = checked;
     plan.generation = restart.next_generation;
@@ -232,6 +241,7 @@ fn restart_plan(
     native: &NativeState,
     saved: &CloneState,
     target: &mut PgConnection,
+    owned_large_objects: &[u32],
     io: &IoControl,
 ) -> Result<ClonePlan> {
     let mut snapshot =
@@ -245,6 +255,7 @@ fn restart_plan(
         options.clone.copy_policy(),
         &metadata,
         &saved.owned_objects,
+        owned_large_objects,
         io,
     )?;
     crate::clone::require_same_catalog(&saved.plan, &checked)?;

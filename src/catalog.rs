@@ -2980,6 +2980,7 @@ mod tests {
             crate::contracts::CloneCopyPolicy::default(),
             &[],
             &[],
+            &[],
             &io,
         )
         .unwrap();

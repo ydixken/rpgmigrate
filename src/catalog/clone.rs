@@ -825,6 +825,33 @@ pub(crate) fn inspect_clone_tables(
     Ok(tables)
 }
 
+/// Target large objects are never adopted: only OIDs this run's receipts own are admitted.
+/// The metadata catalog is read directly, since a bootstrap-superuser object has no pg_shdepend row.
+pub(crate) fn require_owned_large_objects(
+    target: &mut PgConnection,
+    owned: &[u32],
+    io: &IoControl,
+) -> Result<()> {
+    let owned = owned
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let result = target.query(&format!("SELECT pg_catalog.count(*),pg_catalog.min(m.oid) FROM pg_catalog.pg_largeobject_metadata m WHERE m.oid<>ALL('{{{owned}}}'::pg_catalog.oid[])"), io)?;
+    if result.rows() != 1 || result.columns()? != 2 {
+        return Err(refusal(
+            "clone target large-object inventory has an invalid shape",
+        ));
+    }
+    match text(&result, 0, 0)? {
+        "0" => Ok(()),
+        count => Err(refusal(&format!(
+            "clone refuses {count} target large objects this run does not own, first OID {}; existing objects are never adopted",
+            text(&result, 0, 1)?
+        ))),
+    }
+}
+
 /// The caller keeps source and target DDL quiescent through the ownership handoff.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_clone(
@@ -835,6 +862,7 @@ pub(crate) fn plan_clone(
     copy_policy: CloneCopyPolicy,
     exact_metadata: &[OwnedObject],
     owned_objects: &[OwnedObject],
+    owned_large_objects: &[u32],
     io: &IoControl,
 ) -> Result<ClonePlan> {
     configure_session(source, io)?;
@@ -853,6 +881,9 @@ pub(crate) fn plan_clone(
     require_identity_compatibility(source_id.major, target_id.major, &tables)?;
     require_target_extensions(source, target, &tables, io)?;
     source_obligations(target, io)?;
+    if !copy_policy.skip_large_objects {
+        require_owned_large_objects(target, owned_large_objects, io)?;
+    }
     let objects = clone_object_inventory(target, io)?;
     verify_exact_exclusions(&objects, exact_metadata)?;
     verify_exact_exclusions(&objects, owned_objects)?;
