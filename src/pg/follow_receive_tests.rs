@@ -66,6 +66,14 @@ impl Peer {
         assert_eq!(receipt["positions_unchanged"], true);
     }
 
+    pub(crate) fn status_while_full(&mut self) {
+        let mut line = String::new();
+        assert!(self.output.read_line(&mut line).unwrap() > 0);
+        let receipt: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(receipt["status_while_full"], true);
+        assert_eq!(receipt["positions_unchanged"], true);
+    }
+
     pub(crate) fn blocked(&mut self, minimum: u64) {
         let mut line = String::new();
         assert!(self.output.read_line(&mut line).unwrap() > 0);

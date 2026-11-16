@@ -26,7 +26,7 @@ def exact(connection, size):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("paused", "notice", "eof", "blocked", "follow", "follow_long",
+    parser.add_argument("--case", choices=("paused", "notice", "eof", "blocked", "follow", "follow_full", "follow_long",
                                                      "stop_idle", "stop_partial", "stop_error", "stop_extra", "stop_never"), required=True)
     args = parser.parse_args()
     with socket.socket() as listener:
@@ -58,6 +58,7 @@ def main():
             feedback_count = 0
             reply_requested_count = 0
             copy_done = False
+            reported = False
             if args.case == "notice":
                 kind = exact(connection, 1)
                 payload = exact(connection, struct.unpack("!I", exact(connection, 4))[0] - 4)
@@ -129,6 +130,12 @@ def main():
                     minimum = 8 if args.case == "follow_long" else 3
                     if args.case.startswith("follow") and feedback_count == minimum:
                         print(json.dumps({"blocked_status_count": minimum, "positions_unchanged": True}), flush=True)
+                    # The test sets the reply bit only after a refused send; a later timer status was sent while full.
+                    if args.case == "follow_full":
+                        assert reply_requested_count == 0 or (reply_requested_count == 1 and feedback_count > minimum)
+                        if reply_requested_count == 1 and payload[33] == 0 and not reported:
+                            print(json.dumps({"status_while_full": True, "positions_unchanged": True}), flush=True)
+                            reported = True
             except (EOFError, ConnectionResetError):
                 pass
             print(json.dumps({"status": "observed", "feedback_count": feedback_count,
