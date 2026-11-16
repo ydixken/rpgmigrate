@@ -67,6 +67,7 @@ def module_cases(manifest, profile):
             "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation",
             "schema::tests::live_utility_service_precedence_preserves_validated_database",
             "schema::tests::live_utility_effective_auth_and_tls_settings_are_private",
+            "schema::tests::live_utility_children_outlast_server_timeouts_behind_a_slow_client",
         ]
     if profile == "Clone":
         return [

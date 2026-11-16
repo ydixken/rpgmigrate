@@ -230,7 +230,7 @@ tasks:
         snapshot::follow_tests::live_follow_ catalog::follow::tests::live_cleanup_
 
   test-schema:
-    desc: Run three exact isolated schema utility and restart guard cases
+    desc: Run four exact isolated schema utility and restart guard cases
     cmds:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --schema -- {{.CARGO_COMMAND}}

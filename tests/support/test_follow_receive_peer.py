@@ -14,7 +14,7 @@ import follow_receive_peer as peer
 
 class ReceiverPeerTests(unittest.TestCase):
     @contextlib.contextmanager
-    def connect(self, case):
+    def connect(self, case, code=0):
         process = subprocess.Popen(
             [sys.executable, str(Path(peer.__file__)), "--case", case],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -35,7 +35,7 @@ class ReceiverPeerTests(unittest.TestCase):
             connection.close()
             connection = None
             process.wait(timeout=5)
-            self.assertEqual(process.returncode, 0, process.stderr.read())
+            self.assertEqual(process.returncode, code, process.stderr.read())
         finally:
             if connection is not None:
                 connection.close()
@@ -142,6 +142,36 @@ class ReceiverPeerTests(unittest.TestCase):
                 connection.sendall(peer.message(b"c", b""))
                 self.terminal(connection)
                 self.receipt(process, 1, 1)
+
+    def test_full_case_reports_only_a_timer_status_after_a_late_reply_bit(self):
+        for timer in (False, True):
+            with self.subTest(timer=timer), self.connect("follow_full") as (connection, process):
+                for _ in range(7):
+                    self.assertEqual(self.read(connection)[0], b"d")
+                for _ in range(3):
+                    self.status(connection)
+                self.assertEqual(json.loads(process.stdout.readline()), {
+                    "blocked_status_count": 3, "positions_unchanged": True,
+                })
+                self.status(connection, True)
+                if timer:
+                    self.status(connection)
+                    self.assertEqual(json.loads(process.stdout.readline()), {
+                        "status_while_full": True, "positions_unchanged": True,
+                    })
+                    self.status(connection)
+                connection.shutdown(socket.SHUT_RDWR)
+                self.assertEqual(json.loads(process.stdout.readline()), {
+                    "status": "observed", "feedback_count": 6 if timer else 4, "positions_unchanged": True,
+                    "closed": True, "copy_done": False, "reply_requested_count": 1,
+                })
+
+    def test_full_case_refuses_a_reply_bit_before_the_blocked_count(self):
+        with self.connect("follow_full", code=1) as (connection, process):
+            self.status(connection)
+            self.status(connection, True)
+            connection.shutdown(socket.SHUT_RDWR)
+            self.assertEqual(process.stdout.readline(), "")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 """Runs clone, follow to endpos, compare and cleanup under small database-level session timeouts."""
 
 import json
+import re
+import subprocess
 import time
 
 import clone
@@ -15,6 +17,10 @@ SETTINGS = (("statement_timeout", "20ms", 16), ("lock_timeout", "1ms", 16),
 HOLD_SECONDS = 2
 # A timeout ends its session with FATAL, which pg_stat_database counts even when a pg_restore worker shrugs it off.
 FATAL = "SELECT coalesce(sum(sessions_fatal), -1) FROM pg_catalog.pg_stat_database WHERE datname = '{}';"
+# psql's VERBOSITY=sqlstate line when idle_session_timeout ends a session (SQLSTATE 57P05).
+IDLE_SESSION_FATAL = re.compile(rb"^FATAL:  57P05$", re.MULTILINE)
+# Under CPU contention the idle-session setting can end a fresh session before its one query arrives.
+FRESH_ATTEMPTS = 5
 
 
 def harness_options(major):
@@ -33,6 +39,19 @@ def hold(worker, seconds, clock=time.monotonic):
     if worker.poll() is not None:
         raise RuntimeError("follow worker exited during the idle hold")
     return round(clock() - start, 3)
+
+
+def fresh_setting(database, database_name, name, attempts=FRESH_ATTEMPTS, run=subprocess.run):
+    """Reads a setting in a session without startup options; only the idle-session FATAL is retried."""
+    for _ in range(attempts):
+        result = run([str(database.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=sqlstate",
+                      "--dbname", database.connection(database_name)], env=database.environment,
+                     input=f"SELECT pg_catalog.current_setting('{name}');".encode(), capture_output=True, timeout=30)
+        if result.returncode == 0:
+            return result.stdout.decode().strip()
+        if not IDLE_SESSION_FATAL.search(result.stderr):
+            raise RuntimeError(f"fresh session could not read {name}")
+    raise RuntimeError(f"idle_session_timeout ended every fresh session reading {name}")
 
 
 def fatal_sessions(source, target, srcname, dstname):
@@ -57,7 +76,7 @@ def run(source, target, case, launch, driver):
                 continue
             database.sql(database_name, f"ALTER DATABASE {clone.quote(database_name)} SET {name} = '{value}';")
             # A fresh session must see the setting, so the run cannot pass because nothing was set.
-            if database.sql(database_name, f"SELECT pg_catalog.current_setting('{name}');").decode().strip() != value:
+            if fresh_setting(database, database_name, name) != value:
                 raise RuntimeError(f"{side} database setting {name} is not in force")
         # From here the harness's own sessions clear the case setting at startup, so a FATAL is an engine session's.
         source.harness_options, target.harness_options = harness_options(majors["source"]), harness_options(majors["target"])

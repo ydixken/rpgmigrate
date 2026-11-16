@@ -648,7 +648,7 @@ def copy_restart(source, target, driver, root, bindir, manifest, receipt, case):
 
 
 # On the hosted runner every Podman call waits seconds while a sibling owned container's exit cleanup unmounts its overlay root.
-CAP_EXEC_STALL_SECONDS = 30
+PODMAN_STALL_SECONDS = 30
 LOGICAL_SERVER_ARGUMENTS = ("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s")
 GIB = 1024 ** 3
 # Per-role CPU caps; admission needs the host CPUs to cover source, target and runner together.
@@ -842,8 +842,8 @@ class RuntimeGuard:
                        "deadline_unix": time.time() + 5400, "cleanup_reserve_seconds": 300, "samples": [], "capacity": capacity}
         self.persist()
         try:
-            versions = json.loads(self.raw(["version", "--format", "json"]))
-            info = json.loads(self.raw(["info", "--format", "json"]))
+            versions = json.loads(self.query(["version", "--format", "json"]))
+            info = json.loads(self.query(["info", "--format", "json"]))
             host = info.get("host", {})
             pasta = host.get("pasta") or {}
             # A remote service is the macOS podman machine; a local one shares this Linux host's kernel and filesystem.
@@ -854,7 +854,7 @@ class RuntimeGuard:
             server = versions.get("Server", {}) if self.machine else info.get("version") or {}
             if (host.get("security", {}).get("rootless") is not True or pasta.get("executable") != "/usr/bin/pasta"
                     or self.host(["which", "pasta"]).strip() != b"/usr/bin/pasta"
-                    or b"--network" not in self.raw(["run", "--help"])):
+                    or b"--network" not in self.query(["run", "--help"])):
                 raise RuntimeError("isolated rootless pasta build networking is unavailable")
             self.ledger["runtime_api"] = {"client": versions.get("Client", {}).get("Version"), "server": server.get("Version"), "machine": self.machine,
                                           "rootless": True, "network_backend": host.get("networkBackend"), "pasta_executable": pasta["executable"],
@@ -866,7 +866,7 @@ class RuntimeGuard:
             self.ledger["builtin_network_created_observations"] = []
             for identity, before in self.baseline["networks"].items():
                 if before.get("name") == "podman" and before.get("driver") == "bridge" and before.get("internal") is False:
-                    after = network_snapshot(json.loads(self.raw(["network", "inspect", identity]))[0])
+                    after = network_snapshot(json.loads(self.query(["network", "inspect", identity]))[0])
                     if {key: value for key, value in before.items() if key != "created"} != {key: value for key, value in after.items() if key != "created"}:
                         raise RuntimeError("builtin network changed during independent baseline reads")
                     self.ledger["builtin_network_created_observations"].append({"id": identity, "before": before["created"], "after": after["created"]})
@@ -898,41 +898,53 @@ class RuntimeGuard:
             raise RuntimeError("owned cleanup deadline expired")
         return run([self.runtime, *arguments] if runtime else list(arguments), timeout=min(timeout, remaining))
 
+    def query(self, arguments, timeout=5, *, runtime=True, stalls=None):
+        # Only for read-only calls: a mutating call that timed out may still have acted, so it is never repeated.
+        stalled_until = time.monotonic() + PODMAN_STALL_SECONDS
+        while True:
+            try:
+                return self.raw(arguments, timeout=timeout, runtime=runtime)
+            except SubprocessFailure as failure:
+                if not failure.timed_out or time.monotonic() >= stalled_until:
+                    raise
+                record, key = stalls or (self.ledger, "podman_query_stalls")
+                record.setdefault(key, []).append(failure.metadata["diagnostic_id"])
+
     def host(self, arguments, timeout=5):
-        return self.raw(["machine", "ssh", *arguments], timeout=timeout) if self.machine else self.raw(arguments, timeout=timeout, runtime=False)
+        return self.query(["machine", "ssh", *arguments], timeout=timeout) if self.machine else self.query(arguments, timeout=timeout, runtime=False)
 
     def inspect(self, cid):
-        rows = json.loads(self.raw(["inspect", cid]))
+        rows = json.loads(self.query(["inspect", cid]))
         if not isinstance(rows, list) or len(rows) != 1:
             raise RuntimeError("exact container inspection is unavailable")
         return rows[0]
 
     def inventory(self):
         def identifiers(arguments):
-            return sorted(set(self.raw(arguments, timeout=20).decode().splitlines()))
+            return sorted(set(self.query(arguments, timeout=20).decode().splitlines()))
         result = {"containers": {}, "external": identifiers(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"]),
                   "images": {}, "networks": {}, "volumes": {}}
         for cid in identifiers(["ps", "--all", "--no-trunc", "--format", "{{.ID}}"]):
             value = self.inspect(cid)
             result["containers"][cid] = container_snapshot(value)
         for identity in identifiers(["image", "ls", "--all", "--no-trunc", "--quiet"]):
-            value = json.loads(self.raw(["image", "inspect", identity]))[0]
+            value = json.loads(self.query(["image", "inspect", identity]))[0]
             key = image_identity(value["Id"])
-            history = json.loads(self.raw(["history", "--no-trunc", "--format", "json", identity]))
+            history = json.loads(self.query(["history", "--no-trunc", "--format", "json", identity]))
             if not isinstance(history, list):
                 raise RuntimeError("image history associations are unavailable")
             safe_history = [{key: next((item for name, item in row.items() if name.lower() == key), None) for key in ("id", "created", "size")} for row in history]
             result["images"][key] = {"tags": sorted(value.get("RepoTags") or []), "digests": sorted(value.get("RepoDigests") or []), "size": value["Size"],
                                      "history": safe_history, "run_label": (value.get("Labels") or {}).get("io.rpgmigrate.e2e")}
         for identity in identifiers(["network", "ls", "--no-trunc", "--quiet"]):
-            value = json.loads(self.raw(["network", "inspect", identity]))[0]
+            value = json.loads(self.query(["network", "inspect", identity]))[0]
             network = network_snapshot(value)
             identifier = network.get("id")
             if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{64}", identifier) or identifier in result["networks"]:
                 raise RuntimeError("network inventory has missing or duplicate full identities")
             result["networks"][identifier] = network
         for identity in identifiers(["volume", "ls", "--quiet"]):
-            value = json.loads(self.raw(["volume", "inspect", identity]))[0]
+            value = json.loads(self.query(["volume", "inspect", identity]))[0]
             if value.get("Options") not in ({}, None):
                 raise RuntimeError("volume descriptor has unreviewed options")
             result["volumes"][identity] = {key: value.get(key) for key in ("Name", "Driver", "Mountpoint", "CreatedAt", "Scope", "Options")}
@@ -943,21 +955,15 @@ class RuntimeGuard:
         actual = validate_owned_container(actual or self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
         if actual.get("State", {}).get("Running") is not True:
             raise RuntimeError("effective limits require a live exact owned container")
-        stalled_until = time.monotonic() + CAP_EXEC_STALL_SECONDS
-        while True:
-            try:
-                observed = self.raw(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]).splitlines()
-                break
-            except SubprocessFailure as failure:
-                # A stalled exec gave no answer, so it is repeated; only an answered exec can verify the caps.
-                if failure.timed_out and time.monotonic() < stalled_until:
-                    entry.setdefault("cgroup_exec_stalls", []).append(failure.metadata["diagnostic_id"])
-                    continue
-                # An exit between the inspect and the exec leaves the caps unobserved; the final check still requires them.
-                if validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"]).get("State", {}).get("Running") is not False:
-                    raise
-                entry.setdefault("cgroup_exec_after_exit", []).append(failure.metadata["diagnostic_id"])
-                return False
+        try:
+            # Only an answered exec can verify the caps.
+            observed = self.query(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"], stalls=(entry, "cgroup_exec_stalls")).splitlines()
+        except SubprocessFailure as failure:
+            # An exit between the inspect and the exec leaves the caps unobserved; the final check still requires them.
+            if validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"]).get("State", {}).get("Running") is not False:
+                raise
+            entry.setdefault("cgroup_exec_after_exit", []).append(failure.metadata["diagnostic_id"])
+            return False
         try:
             quota, period = (int(value) for value in observed[0].split())
             memory = int(observed[1])
@@ -1097,17 +1103,17 @@ class RuntimeGuard:
             entry["absent_before"] = True
         elif expected["kind"] == "network":
             receipt = output.decode().strip()
-            actual = json.loads(self.raw(["network", "inspect", expected["name"]]))[0]
+            actual = json.loads(self.query(["network", "inspect", expected["name"]]))[0]
             entry = {"id": actual.get("id", actual.get("Id")), "name": expected["name"], "absent_before": True, "cleanup_status": "pending"}
             if receipt not in (entry["name"], entry["id"]):
                 raise RuntimeError("fresh network creation result differs from inspected identity")
             validate_owned_network(actual, entry, self.token, self.baseline["networks"], empty=True)
-            if self.raw(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"]).strip():
+            if self.query(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"]).strip():
                 raise RuntimeError("fresh network has an unexpected filtered attachment")
             entry["created_observation"] = network_snapshot(actual)
             self.ledger["network"] = entry
         else:
-            actual = json.loads(self.raw(["image", "inspect", expected["tag"]]))[0]
+            actual = json.loads(self.query(["image", "inspect", expected["tag"]]))[0]
             identity = image_identity(actual["Id"])
             if identity in self.baseline["images"] or actual.get("Labels", {}).get("io.rpgmigrate.e2e") != self.token:
                 raise RuntimeError("built development image identity or run label differs")
@@ -1135,7 +1141,7 @@ class RuntimeGuard:
             if (actual.get("State", {}).get("Running") is not True or not self.observe_caps(entry, actual)) and entry.get("ready"):
                 raise RuntimeError("owned database stopped during resource sampling")
             if entry["role"] in ("source", "target") and entry.get("ready"):
-                raw = self.raw(["exec", entry["id"], "psql", "-X", "-qAt", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                raw = self.query(["exec", entry["id"], "psql", "-X", "-qAt", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
                                 "SELECT (SELECT sum(pg_database_size(oid)) FROM pg_catalog.pg_database),(SELECT coalesce(sum(size),0) FROM pg_catalog.pg_ls_waldir());"])
                 values = [int(value) for value in raw.strip().split(b"|")]
                 if len(values) != 2 or any(value < 0 or value > 2 * GIB for value in values):
@@ -1143,10 +1149,10 @@ class RuntimeGuard:
                 storage[entry["role"]] = values
         network = self.ledger.get("network")
         if network and network.get("cleanup_status") != "absent":
-            actual = json.loads(self.raw(["network", "inspect", network["id"]]))[0]
+            actual = json.loads(self.query(["network", "inspect", network["id"]]))[0]
             validate_owned_network(actual, network, self.token, self.baseline["networks"])
             attached = sorted(actual["containers"])
-            filtered = sorted(self.raw(["ps", "--all", "--filter", "network=" + network["id"], "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
+            filtered = sorted(self.query(["ps", "--all", "--filter", "network=" + network["id"], "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
             known = {entry["id"] for entry in self.ledger["containers"] if entry["role"] != "build"}
             unknown = set(attached).union(filtered).difference(known)
             if unknown:
@@ -1158,7 +1164,7 @@ class RuntimeGuard:
                 self._observe_pending_container(next(iter(unknown)))
             network.setdefault("membership_observations", []).append({"at": time.time(), "attached_ids": attached, "filtered_ids": filtered})
         self.last_sample = time.monotonic()
-        external = self.raw(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"], timeout=5).decode().splitlines()
+        external = self.query(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"], timeout=5).decode().splitlines()
         unknown = sorted(set(external).difference(self.baseline["external"], (entry["id"] for entry in self.ledger["containers"])))
         self.ledger["samples"].append({**sample, "at": time.time(), "storage": storage, "unattributed_external_build_ids": unknown})
         return sample
@@ -1261,7 +1267,8 @@ class RuntimeGuard:
         try:
             validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
             entry["ownership_verified"] = True
-            self.raw(["rm", "--force", entry["id"]], timeout=10)
+            # The runner's Python PID 1 ignores SIGTERM, so the default 10 s stop grace would use the whole bound.
+            self.raw(["rm", "--force", "--time", "2", entry["id"]], timeout=10)
             entry["cleanup_status"] = "present" if self.exists("container", entry["id"]) else "absent"
         except Exception as error:
             entry["cleanup_status"] = "unresolved"
@@ -1276,9 +1283,9 @@ class RuntimeGuard:
         if not entry:
             return
         try:
-            actual = json.loads(self.raw(["network", "inspect", entry["id"]]))[0]
+            actual = json.loads(self.query(["network", "inspect", entry["id"]]))[0]
             validate_owned_network(actual, entry, self.token, self.baseline["networks"], empty=True)
-            members = self.raw(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"])
+            members = self.query(["ps", "--all", "--filter", "network=" + entry["id"], "--no-trunc", "--format", "{{.ID}}"])
             if members.strip():
                 raise RuntimeError("owned network still has an exact filtered container attachment")
             observed = network_snapshot(actual)
@@ -1441,7 +1448,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
         def ensure_image(reference):
             if not guard.exists("image", reference):
                 raise RuntimeError("pinned public image reference is absent; provision it before protected baseline admission")
-            identity = image_identity(json.loads(guard.raw(["image", "inspect", reference]))[0]["Id"])
+            identity = image_identity(json.loads(guard.query(["image", "inspect", reference]))[0]["Id"])
             guard.ledger.setdefault("admitted_images", []).append(identity)
             guard.persist()
             return identity
@@ -1453,7 +1460,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             raise RuntimeError("run-unique development image already exists")
         guard.ledger["development_image"] = {"tag": image, "absent_before": True, "retained": True}
         guard.persist()
-        cpu_arguments = build_cpu_arguments(guard.raw(["build", "--help"]))
+        cpu_arguments = build_cpu_arguments(guard.query(["build", "--help"]))
         guard.ledger["image_build_limits"] = {"requested_memory_bytes": 4*GIB, "requested_cpu_arguments": cpu_arguments,
                                                "effective_cgroup_status": "not_proven_for_ephemeral_image_build"}
         guard.ledger["stage"] = "development_image"
@@ -1463,7 +1470,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
                               "--network", "private", "--tag", image, "--file", str(source_context / "tools/e2e/Containerfile"), str(source_context / "tools/e2e")],
                              {"kind": "image", "tag": image}, timeout=1200)
         image_id = built["id"]
-        external = set(guard.raw(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
+        external = set(guard.query(["ps", "--all", "--external", "--no-trunc", "--format", "{{.ID}}"]).decode().splitlines())
         unresolved = sorted(external.difference(guard.baseline["external"]))
         guard.ledger["unresolved_external_build_ids"] = unresolved
         if unresolved:
@@ -1539,7 +1546,7 @@ def outer(args, *, program="clone", manifest=None, receipt_validator=validate_re
             except Exception:
                 try:
                     entry["startup_state"] = {key: guard.inspect(cid)["State"].get(key) for key in ("Running", "Status", "StartedAt", "FinishedAt")}
-                    entry["startup_diagnostic"] = private_failure("owned-server-startup", None, guard.raw(["logs", "--tail", "200", cid]), None, sys._getframe())
+                    entry["startup_diagnostic"] = private_failure("owned-server-startup", None, guard.query(["logs", "--tail", "200", cid]), None, sys._getframe())
                     guard.persist()
                 except Exception:
                     entry["startup_diagnostic_unavailable"] = True

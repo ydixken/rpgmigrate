@@ -116,8 +116,11 @@ Admission refuses a host with fewer CPUs than the source, target and runner caps
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
 The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
 A container can exit between the inspect and the `exec` that reads its limits; when a fresh inspect then shows it stopped, the read counts as not observed and polling continues, while any other `exec` failure fails the run.
-An `exec` that gives no answer within its 5 s bound is repeated for up to 30 s, because on the hosted runner every Podman call waits while another owned container's exit cleanup unmounts its overlay root, which has taken seconds.
-Only an answered `exec` can verify the limits, and the runtime ledger keeps each stalled attempt's diagnostic id.
+On the hosted runner every Podman call waits while another owned container's exit cleanup unmounts its overlay root, which has taken seconds.
+So a read-only call (an `inspect`, a `ps`, a host capacity read, or that `exec`) that gives no answer within its bound is repeated for up to 30 s, and the runtime ledger keeps each stalled attempt's diagnostic id: the `exec`'s on its container entry, the others under `podman_query_stalls`.
+A call that changes something, such as `rm`, is never repeated, because one that timed out may still have acted.
+Only an answered `exec` can verify the limits.
+Cleanup removes a container with a 2 s stop grace inside its 10 s bound, because the runner's Python PID 1 ignores SIGTERM and Podman's default 10 s grace would use the whole bound.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 For each pair, the engine-e2e job runs the clone qualification, the follow smoke, the cutover producer, the session-name census and the session-timeout run in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.
@@ -517,6 +520,7 @@ Matching `test-e2e-sessions-18-18` and `test-e2e-sessions-16-18` tasks check the
 
 The timeout run sets one setting at a time on both case databases with `ALTER DATABASE`, the way a production server may: `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `idle_session_timeout` and, on PostgreSQL 17 and later, `transaction_timeout`.
 Each value is a few milliseconds, far below any engine phase, and a fresh session must report it before the run starts.
+Under CPU contention `idle_session_timeout` can end that fresh session before its query arrives, so the check starts a new one, at most five times in all, only when the session ended with SQLSTATE `57P05`; any other failure stops the run.
 Under each setting it runs clone, follow, a two-second idle hold, an endpos drain, `compare data`, `compare schema` and `stream cleanup`, and every step must succeed.
 `pg_stat_database.sessions_fatal` must not grow on either database, so a timeout that ends a `pg_restore` worker the utility shrugs off still fails the run.
 Once a fresh session has confirmed the setting, the harness's own `psql` sessions clear it in their startup options, so every counted FATAL is an engine session's; engine commands never get those options.

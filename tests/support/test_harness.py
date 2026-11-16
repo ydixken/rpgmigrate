@@ -1054,16 +1054,17 @@ copy_request(relay)
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate("Clone", cases, output, {})
 
-    def test_schema_inventory_requires_three_exact_cases_and_summary(self):
+    def test_schema_inventory_requires_four_exact_cases_and_summary(self):
         cases = module_cases(load_manifest(), "Schema")
         self.assertEqual(cases, [
             "schema::tests::live_pre_data_guard_refuses_schema_drift_without_target_mutation",
             "schema::tests::live_utility_service_precedence_preserves_validated_database",
             "schema::tests::live_utility_effective_auth_and_tls_settings_are_private",
+            "schema::tests::live_utility_children_outlast_server_timeouts_behind_a_slow_client",
         ])
         validate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "tools/test-db.py"))["validate_module_receipt"]
         records = "".join(f"test {name} ... ok\n" for name in cases)
-        summary = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
+        summary = "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 300 filtered out; finished in 0.01s\n"
         validate("Schema", cases, records + summary, {})
         for omitted in cases:
             with self.subTest(omitted=omitted), self.assertRaises(AssertionError):
@@ -1073,7 +1074,7 @@ copy_request(relay)
                        records.replace(cases[0], "unrelated") + summary,
                        records.replace(" ... ok", " ... ignored", 1) + summary,
                        records.replace(" ... ok", " ... FAILED", 1) + summary,
-                       records + summary.replace("3 passed", "0 passed"),
+                       records + summary.replace("4 passed", "0 passed"),
                        records + summary.replace("0 ignored", "1 ignored")):
             with self.subTest(output=output), self.assertRaises(AssertionError):
                 validate("Schema", cases, output, {})

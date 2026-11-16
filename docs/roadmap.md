@@ -95,7 +95,7 @@ The first operator E2E (M7) runs the vertical slice with binary COPY, split and 
 > The single whole-M4 review is resolved with no findings remaining; operator test-only evidence is committed separately as `c262322909ac03a7101ea3bfac2c4823efa62e95`.
 > Final repaired-runtime actual-seven Go evidence is private PostgreSQL 18 interoperability with mocked Kubernetes ownership and production admission disabled.
 > M6 and M8–M10 remain open: production native adapter, feature widening, power-loss/performance qualification, and release gates remain unqualified.
-> M7 is closed on arm64 kind, and its hosted amd64 item stays open.
+> M7 is closed on arm64 kind; an amd64 smoke passed on the user's runner, and the guard's Linux transport stays M10 work.
 > On 2026-11-09, the user authorized unused Podman image/volume/build-cache pruning, the PostgreSQL 18 preservation/128-GiB maintenance plan, and the scoped M6 Python/ctypes/libpq runner dependency exception.
 > VM preservation/resize maintenance and exact failed-run retirement passed; fresh `f59a7f4b` M7 UP/handover/LOAD passed, then the legacy storage image-ID guard refused the successful probe as recorded below.
 > The 2026-11-10 checkpoints below record committed completion/sampler components, separate completion-rejoin packets, and fresh ARM packaging, without native lifecycle/authentication/TLS/PVC or three-pair acceptance.
@@ -713,7 +713,7 @@ The [ledger](../tasks/todo.md#wave-13-2026-11-15) binds the evidence.
 
 #### Status after M7-MATRIX, 2026-11-16
 
-M7 is closed on arm64 kind, and the hosted amd64 item stays open.
+M7 is closed on arm64 kind.
 M7-MATRIX ran the nine specs other than `native-refusal` on 18:18 and on 16:18 on the same frozen state: 18 of 18 passed through the guard, with no production defect.
 With M7-RUN6, every native spec passed on every pair, except `native-refusal`, which the guard admits on 16:16 only and which joins the M8 rerun on PostgreSQL 18.
 The suite writes the TERM receipts on 16:16 only.
@@ -734,32 +734,54 @@ Each cell names the run that passed the spec; the five fault specs resumed on at
 | native-refusal    | RUN6  | guard refuses | guard refuses |
 
 M7-HOSTED found that a hosted amd64 kind run cannot pass without weakening a guard cap or a refusal.
-The guard's capacity profile needs more than the 4 CPUs of a hosted runner, and the legacy executable qualification, the storage pin and the pins lock are arm64 only, so the amd64 host waits for the user.
+The guard's capacity profile needs more than the 4 CPUs of a hosted runner, and the legacy executable qualification, the storage pin and the pins lock are arm64 only.
 The [ledger](../tasks/todo.md#wave-14-2026-11-15) binds the evidence.
+
+#### amd64 smoke, 2026-11-16
+
+On the user's decision (bo), app-of-apps commit `8dca743` on `dev` adds the runner scale set `github-runner-rpgmigrate-native`: privileged Docker-in-Docker, at most one runner.
+Run 43783002734 on `ci/native-amd64-smoke-20261116` passed four specs on amd64 against operator `db23902` and runner `dev-db50bc9`: automatic-cutover on 16:16, 18:18 and 16:18, and live-writer on 16:18.
+Each ended `Completed` with `CutoverCompleted=True/NativeDrainConfirmed`.
+It is a smoke and not a qualification (bq): kind ran in the runner's Docker-in-Docker without the guard, its lock or its receipts.
+Its own storage manifest prepares the work claims (bx), so neither architecture has exercised a CSI work volume with fsGroup.
+We suggest removing the privileged scale set after the M10 runs.
+The [ledger](../tasks/todo.md#amd64-runner-and-smoke-2026-11-16) binds the evidence.
 
 ### M8: Feature widening (each item enables its capability)
 
 Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03eb6d34fc` passed six profiles and nine local reports on each of 16 to 16 and 18 to 18.
 The cross-major 16-to-18 attempt failed before PostgreSQL at a Created-container receipt/adoption race, with zero executed pair profiles/reports; its exact owned empty container/network were retired and release proved while the original RED remains immutable.
 The pending-creation fix is signed as private workflow checkpoint `1d8e5f750df2dcfde7178acaca6d30966357d76b`, with clone 48/follow 60/cutover 36 focused checks passing and primary unchanged.
-Fresh cross-pair qualification is not yet available and its admission proposal is active without a new VM run; the two positive receipts remain bound to `8ad`, without operator or full M8 acceptance.
+A later 16-18 M8 profile receipt from a checkout at `1d8e5f7` (6 cases, exit 0) exists; the three receipts are bound to `8ad` or `1d8e5f7`, more than 70 commits behind the line, without operator or full M8 acceptance.
 
 The approved [M8 implementation plan](superpowers/plans/2026-11-09-m8-feature-widening.md) targets fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative whole-table binary fallback, and exact mandatory large-object comparison with the unchanged array contract plus a proven-empty inventory guard.
 These are implementation decisions, without format/runtime qualification or capability activation.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
-The root approved the Task 1 interface freeze; isolated state/CLI, catalog, authority, COPY/large-object, and phase/recovery owners are building against it.
+The root approved the Task 1 interface freeze, and the M8 copy source built against it landed on the line at `908ada6`.
 Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
 Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
 At the earlier joined-source checkpoint, compare/progress wiring had source tests only; the later component checkpoint above records the additional same-major runtime evidence.
 The earlier seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
-Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
-The isolated M8 code/docs handoff is signed as recorded above; M8 source reaches the engine primary only through the integration branch once its hosted CI is green, and no activation is authorized.
+The line writes native format 9 and target metadata 7, and runner `db50bc9` ran M7 on it, so no format 8 profile is active.
+The M8 copy source reached the line at `908ada6`; later M8 work accumulates on `integration/engine-m8-20261116`, E8 lands it, and no capability is activated.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
 The approved `sha2` 0.11.1 dependency disables default features; pinned cargo-deny 0.20.2 passed actual-graph license, advisory, and yank gates against the 2026-11-09 database, and the v5 affected units now pass known-vector and chunk-boundary hashing checks.
 The [ledger](../tasks/todo.md#m8-feature-widening-each-item-enables-its-capability) binds the approved interface.
+
+#### Status after M8 wave A, 2026-11-16
+
+ENGINE-M8-PLAN found that M8 needs proof and activation, not a port: binary COPY, split parts and large objects are on the line, and the operator switches them off.
+Its tasks are E1 to E8 in the engine and O1 to O6 in the operator, in waves A to G; its estimate of M8 around 2026-11-19 to 2026-11-21 is an inference, not a commitment.
+Wave A ran on `f681195`.
+E1 verified two defects: a kill inside the clone recopy's generation window wedges every later restart (F1), and a target that holds a large object is refused only after every table is copied (F2).
+E2 added the fault matrix for parts and large objects as live cases on 16 and 18 (`6d6da40`), with no production defect.
+E3 admits built-in CHECK, expression and partial indexes and extension opclasses in follow (`8386f3b`).
+E5 refreshes populated materialized views after post-data in dependency order (`c0f1f2d`).
+These branches are not on the line yet, so no box below is ticked.
+The [ledger](../tasks/todo.md#wave-16-2026-11-16) binds the evidence.
 
 - [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
 - [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
@@ -815,6 +837,8 @@ The integrated ten-guide checker passed as recorded above, while actual ASAN and
 - [ ] README index, getting started, durability, operator guide, troubleshooting; docs drift and STE100 checks.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
 - [ ] Independent reviews of durability, recovery and the operator diff; final matrix on the exact image digest.
+- [ ] A CSI work volume with fsGroup on both architectures.
+- [ ] Remove the privileged runner scale set `github-runner-rpgmigrate-native` after the M10 runs.
 
 ## M6 default Kubernetes delivery amendment, 2026-11-09
 
@@ -965,7 +989,13 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   Against `abb3c53` only the executable changed, so the operator keeps its libpq pins and adds the new digests and executable hashes.
 - `fix/session-timeouts-20261115` at `b029bd3` sets `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `idle_session_timeout` and, on 17 and later, `transaction_timeout` to 0 on every engine SQL session, reads them back and refuses the session otherwise.
   pg_dump and pg_restore get `idle_session_timeout=0`, `tools/e2e/follow.py --timeouts` gates each setting on every pair, and hosted ci.yml run 43739649289 passed 8 of 8.
-  It reaches `feat/native-engine` with the census fix and the snapshot-session docs amendment through ENGINE-LAND9, and no runner is qualified from it before the M8 engine integration.
+  It reached `feat/native-engine` at `f681195` with the census fix and the snapshot-session docs amendment through ENGINE-LAND9 and ENGINE-RECEIVE-LAND9.
+- ENGINE-LAND10 brought three follow-ups onto the line at `b28a77e`, and no runner is qualified from them before E8.
+  - `fix/observe-caps-exec-timeout-20261116` at `8c39c1f` repeats a cgroup cap exec that a Podman stall timed out, up to a 30 s deadline.
+  - `fix/session-census-connection-log-20261116` at `8a0a9ef` judges a census backend gone before its name by its single connection log line.
+  - `fix/session-timeouts-at-startup-20261116` at `e18f0c3` clears the session timeouts in the startup options of every SQL and replication session.
+- M8 wave A branches from `f681195`: `test/m8-fault-matrix-20261116` at `6d6da40`, `feat/follow-admission-widening-20261116` at `8386f3b` and `feat/matview-post-data-refresh-20261116` at `c0f1f2d`.
+- `ci/observe-caps-probe-20261116` at `cf2bac4` replaces the CI workflow with a probe, never merges, and is to be deleted (ce).
 - `feat/m9-join-20261112` at `0f6fa60` joins M9 commits `9eb3154`, `59abca5`, `371d19c`, `b566fb3` and `795a8c5` on `41db2ac`; H1 `0c507a7` was already contained.
   It adds the follow and cutover case inventories `tests/fixtures/follow/m9-cases.json` and `tests/fixtures/follow/m9-cutover-cases.json`.
   Its focused suites and the live PostgreSQL 16.15 and 18.6 follow-authority and clone runs passed.
@@ -1080,7 +1110,11 @@ The [ledger](../tasks/todo.md#leader-takeover-and-wave-results-2026-11-12) binds
   - `fix/conn-username-and-uri-secrets-20261115` at `3a8e64f` shell-quotes and passfile-escapes the inline username (F4) and refuses libpq secret keys in a URI query (F6).
   - `fix/native-service-links-20261115` at `73329dd` sets `enableServiceLinks: false` on every native pod and refuses a native pod without it (F2).
   - `fix/native-replay-after-drain-20261115` at `46ff4ed` raises the status replay LSN and the replay gauge to the verified drain proof's durable replay LSN.
-  - `fix/native-helper-leaks-20261115`, cut from `fd3977f`, is the branch for D1 and D2.
+  - `fix/native-helper-leaks-20261115` at `d53242c`, built on `fd3977f`, fixes D1 and D2, and its seam harness passed 67 of 67 on all three pairs.
+- `fix/native-lifecycle-t1-20261116` at `26980a5` adds design B's T1 status fields, conditions and seams.
+- `feat/native-operator-m8-20261116` at `d9674b7` is the M8 operator line: `db23902` with the wave 14 and 15a branches and T1 merged.
+- `docs/native-secret-reach-20261116` at `c95c278`, from the M8 line, documents boundary F7.
+- `ci/native-amd64-smoke-20261116` at `ce2b2f8` holds the amd64 smoke workflow and its actionlint runner label, and does not integrate.
 - `ci/m7-hosted-kind-20261115` at `7bf4431` probes hosted runner admission for the guard and does not integrate.
 
 ### Leader decisions, 2026-11-12
@@ -1212,7 +1246,40 @@ The six approved `ci/follow-smoke-*-20261113` branches were deleted after `feat/
 - The engine line takes the session-timeout fix, the census fix and the snapshot-session docs amendment now, and the M8 operator line gets one runner bump after the M8 engine integration.
 - Memory-backed credential files (F3), F7, an amd64 host, a draft pull request and deleting scratch clones wait for the user.
 
-M0–M5 are closed, M7 is closed on arm64 kind with its hosted amd64 item open, and M6 and M8–M10 remain open.
+### User decisions, 2026-11-16
+
+- The native follow work PVC carries no owner reference, and the operator deletes it after native cleanup; the ClusterRole gains `delete` on `persistentvolumeclaims`, the only approved RBAC change.
+- The native worker's and evidence Job's credential files move to a small memory-backed volume (boundary F3), and `/tmp` stays as it is.
+- Boundary F7 is documented only.
+- M7 is closed on arm64 kind, and the amd64 smoke counts as a smoke, not a qualification.
+- A dedicated runner scale set serves native amd64 E2E, and the leader's agents may push its app-of-apps change.
+- The user replied "continue" to the leader's restart plan, then gave full authority to push and merge feature, integration and line branches.
+  Main, tags, releases and GHCR release or `latest` publication stay out of scope.
+
+### Decisions, wave 16, 2026-11-16
+
+- The PostgreSQL 16 census window closes through `log_connections` lines matched by pid and backend start, the census excludes harness sessions under its existing rule, and it keeps the servers' logs with the run.
+- The session timeout overrides move into the startup options of SQL and replication sessions with the read-back refusal kept, and a pooler that strips them makes the session fail closed.
+- A flaky test gets a root cause, and a production defect behind it is fixed first.
+- The first amd64 runs are a smoke in the dedicated runner's Docker-in-Docker, with the guard unchanged; the guard's Linux transport stays M10 work, and the smoke keeps its own work-volume storage manifest.
+- The legacy event reason `CleanupFailed` and the native condition type `CleanupFailed` are separate API fields, and `docs/reference/conditions.md` tells them apart.
+- `native-refusal` moves to a still-refused `UNLOGGED` table on all three pairs, and a new `native-widening` spec covers `legacy.sql`.
+- The native empty or LO-only verification route stays deferred, hosted amd64 `PROFILE=m8` receipts count for the engine pairs, and M9 starts after E8 lands.
+
+### Decisions, wave 17, 2026-11-16
+
+- The clone recopy persists a restart intent as follow does, so a restart after a kill inside the generation window completes (E1 F1).
+- A fresh clone or follow with large objects selected refuses before the pre-data restore when the target holds any large object, and a restart admits only OIDs its own receipts own (E1 F2).
+- Follow admits an extension opclass when the target's extension version equals the source's or is reachable from it through the target's `pg_extension_update_paths`, the assumption that `ALTER EXTENSION UPDATE` and pg_upgrade make.
+- The refusal of a populated materialized view over an unpopulated one is confirmed.
+- The engine harness adds no real-process M8 kill receipts, because the operator's fault-copy spec kills the real runner mid split copy in the kind rerun.
+- Hosted CI uploads the copied census logs only when a census job fails, after the password scan, with 7-day retention.
+- Podman's read-only harness queries get the cap exec's bounded repeat on timeout, and teardown must not race its own bound.
+- The fresh-session timeout check retries only after the idle-session FATAL, pg_dump and pg_restore children clear `transaction_timeout` on 17 and later, and the engine's own `SET transaction_timeout` window is a documented fail-closed limit.
+- "A status goes out while the FIFO is full" gets a fast, deterministic, gated proof.
+- M8 work accumulates on `integration/engine-m8-20261116`, E8 lands it on the line, and harness follow-ups land separately.
+
+M0–M5 are closed, M7 is closed on arm64 kind, and M6 and M8–M10 remain open.
 No native operator migration or capability activation is qualified until M6 closes.
 
 ## Execution model
