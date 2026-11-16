@@ -122,7 +122,7 @@ A call that changes something, such as `rm`, is never repeated, because one that
 Only an answered `exec` can verify the limits.
 Cleanup removes a container with a 2 s stop grace inside its 10 s bound, because the runner's Python PID 1 ignores SIGTERM and Podman's default 10 s grace would use the whole bound.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
-For each pair, the engine-e2e job runs the clone qualification, the follow smoke, the cutover producer, the session-name census and the session-timeout run in that order, then revalidates and retains each sanitized receipt.
+For each pair, the engine-e2e job runs the clone qualification, the `PROFILE=m8` clone profile, the follow smoke, the follow widening run, the cutover producer, the session-name census and the session-timeout run in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.
 The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
 That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode; we accept this only because the runner is discarded after the job.
@@ -140,6 +140,9 @@ On failure, the engine-e2e job prints a cleanup summary to the public log, and n
 - the podman image list (ID, name, creation time and `io.rpgmigrate.e2e` label).
 
 It never prints a runtime ledger itself or any other stderr.
+A failed job also uploads its runtime ledgers, which carry the `podman_query_stalls` and `cgroup_exec_stalls` diagnostic ids, as the `engine-e2e-diagnostics-<pair>` artifact, kept for 7 days.
+When the session-name census step failed, the artifact also carries the census logs the harness copied.
+A scan runs first and uploads nothing when any of these files holds a password assignment, a credential URI or a fixture row value.
 
 1. Check the harness controls without containers.
 
@@ -532,6 +535,23 @@ task test-e2e-timeouts-16-16
 ```
 
 Matching `test-e2e-timeouts-18-18` and `test-e2e-timeouts-16-18` tasks check the other pairs and write `target/e2e/follow-timeouts-<pair>.json`.
+
+### Widening objects
+
+The widening run follows the objects of the operator's `legacy.sql` that M8 admits, from [`widening.sql`](../tests/fixtures/follow/widening.sql) on top of the follow fixture.
+These are a domain CHECK, an expression index, a partial index, a `citext` UNIQUE constraint, a stored generated column and a populated materialized view.
+A PostgreSQL 16 source adds a REPLICA IDENTITY FULL table with a stored generated column, and a PostgreSQL 18 source a virtual generated column.
+The run writes every table during streaming, drains to an endpos, and requires `compare data` and `compare schema` to match.
+It then compares every table and the view row by row between source and target, and checks each object's catalog facts on both sides.
+The view must keep its copy-snapshot content: it matches the source's unrefreshed view and differs from a fresh aggregate of the followed rows.
+On 16 to 18 the source's `citext` version must differ from the target's, so the UNIQUE constraint passes only through the extension update path.
+On an 18 source, a second case adds the FULL table and requires follow to refuse it with no slot, publication or target change, after which the source's own UPDATE and DELETE still work.
+
+```sh
+task test-e2e-follow-widening-16-16
+```
+
+Matching `test-e2e-follow-widening-18-18` and `test-e2e-follow-widening-16-18` tasks check the other pairs and write `target/e2e/follow-widening-<pair>.json`.
 
 ## Local runner packaging
 

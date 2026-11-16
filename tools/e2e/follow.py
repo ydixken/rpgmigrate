@@ -1104,6 +1104,13 @@ def inner(args):
             Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
             print(json.dumps({"follow_e2e": "session_timeouts_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
             return
+        if getattr(args, "widening", False):
+            import widening
+            receipt.update(mode="widening", receipt_scope="widening", cases=widening.run(source, target, case, launch, driver))
+            widening.validate_receipt(receipt)
+            Path(args.receipt).write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            print(json.dumps({"follow_e2e": "widening_passed", "pair": args.pair, "cases": len(receipt["cases"])}, sort_keys=True))
+            return
         if not diagnostic_case:
             srcname, dstname, src, dst, state = case("dml")
             check_workload(source, srcname, manifest)
@@ -1382,6 +1389,7 @@ def main():
     selection.add_argument("--smoke", action="store_true", help="run only the separately scoped initial copy and DML smoke case")
     selection.add_argument("--sessions", action="store_true", help="check the engine's session names through clone, endpos, compare and cleanup")
     selection.add_argument("--timeouts", action="store_true", help="run clone, endpos, compare and cleanup under small database-level session timeouts")
+    selection.add_argument("--widening", action="store_true", help="follow the M8 widening objects through endpos and compare each one")
     selection.add_argument("--diagnostic-case", choices=("before_commit_rollback",), help="run one separately scoped fault diagnostic; requires a new explicit receipt path")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--binary", default="/build/debug/rpgmigrate")
@@ -1414,6 +1422,10 @@ def main():
             import timeouts
             manifest = load_manifest()
             validator = lambda report, manifest: timeouts.validate_receipt(report)
+        elif args.widening:
+            import widening
+            manifest = load_manifest()
+            validator = lambda report, manifest: widening.validate_receipt(report)
         else:
             manifest = load_manifest()
             validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case)
