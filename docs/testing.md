@@ -224,7 +224,9 @@ Another case lets a foreign slot take the name inside the creation window, on a 
 Held at `CREATE PUBLICATION`, the repeated check must find the slot and refuse before any `CREATE_REPLICATION_SLOT` is sent.
 Held at `CREATE_REPLICATION_SLOT`, the server's 42710 must refuse it.
 Both must retire the intent, keep the slot unchanged and refuse again on the next start, then create this run's own slot once the foreign one is gone.
-A fourth case kills a first follow run in phase `fresh`: waiting on the target fence, inside its bookkeeping CREATE after the intent, after that CREATE committed without its reply, and after it was confirmed.
+A further case commits a source table while slot creation waits, so the snapshot refuses after the slot's receipt, on a restart and on a first run through the CLI path.
+The next start must drop that slot before it refuses on a replaced pending publication or on the changed plan, leaving no slot and no slot record.
+Another case kills a first follow run in phase `fresh`: waiting on the target fence, inside its bookkeeping CREATE after the intent, after that CREATE committed without its reply, and after it was confirmed.
 After the last point a second variant also kills the restart inside its generation publish.
 Each restart must reach `analyzing` at copy generation two, or three after the publish kill, with every row and large object exactly once and only that generation's slot and publication left on the source.
 A foreign target table after the fence kill, and a source CHECK added after a kill during the copy, must each refuse with the native state unchanged and the foreign table intact, then complete once removed.

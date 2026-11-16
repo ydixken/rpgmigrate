@@ -113,7 +113,7 @@ class FollowSnapshotHarnessTests(unittest.TestCase):
     def test_inventory_is_exact_nine_and_separate_from_source_cleanup(self):
         self.assertEqual(fixture.follow_snapshot_cases(), CASES)
         self.assertEqual(module_cases({}, "FollowSnapshot"), CASES)
-        self.assertEqual(len(module_cases({}, "FollowSource")), 20)
+        self.assertEqual(len(module_cases({}, "FollowSource")), 21)
         self.assertTrue(set(CASES).isdisjoint(module_cases({}, "FollowSource")))
         for bad in ([], CASES[:-1], [CASES[0]] * 9, [*CASES[:-1], "unrelated::case"]):
             with self.subTest(bad=bad), patch.object(fixture, "read_json", return_value=bad), self.assertRaises(AssertionError):

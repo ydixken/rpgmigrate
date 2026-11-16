@@ -2209,6 +2209,140 @@ fn kill_inside_slot_creation(
     hold
 }
 
+/// Runs `engine` while a held transaction ID makes CREATE_REPLICATION_SLOT wait, and runs `act` on
+/// the controller's own session once that walsender waits; the hold ends when `act` returns.
+fn during_slot_creation<T>(
+    info: &Conninfo,
+    act: impl FnOnce(&mut PgConnection) + Send,
+    engine: impl FnOnce() -> T,
+) -> T {
+    let mut hold = PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap();
+    hold.query("BEGIN", &control()).unwrap();
+    hold.query("SELECT pg_catalog.pg_current_xact_id()", &control())
+        .unwrap();
+    let pid = hold.backend_pid().unwrap();
+    std::thread::scope(|scope| {
+        let controller = scope.spawn(move || {
+            let mut session = PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap();
+            wait_until("slot creation never waited on the held xid", || {
+                scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_stat_activity a USING (pid) WHERE l.locktype='transactionid' AND NOT l.granted AND a.backend_type='walsender' AND a.datname=pg_catalog.current_database()") == "1"
+            });
+            act(&mut session);
+            scalar(
+                &mut session,
+                &format!("SELECT pg_catalog.pg_terminate_backend({pid})::text"),
+            );
+        });
+        let outcome = engine();
+        if let Err(panic) = controller.join() {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+    })
+}
+
+fn slot_present(session: &mut PgConnection, name: &str) -> bool {
+    let literal = session.quote_literal(name).unwrap();
+    scalar(
+        session,
+        &format!("SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"),
+    ) == "1"
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_it() {
+    let extra = |session: &mut PgConnection| {
+        session
+            .query(
+                "CREATE TABLE public.extra(id integer PRIMARY KEY)",
+                &control(),
+            )
+            .unwrap();
+    };
+    let changed = "follow-source: slot snapshot table plan differs from preliminary admission";
+    // A restart's receipt stays unbound when the snapshot refuses; its retry finds the pending publication replaced.
+    let mut fixture = Fixture::new(
+        "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+    );
+    let (next, _) = record_restart(&mut fixture);
+    let info = fixture.options.clone.source.clone();
+    let (options, io) = (fixture.options.clone(), fixture.io.clone());
+    let native = fixture.native.as_mut().unwrap();
+    let error = during_slot_creation(&info, extra, || {
+        FollowSnapshot::restart(&options, &next, native, &io)
+    })
+    .err()
+    .expect("a changed snapshot inventory was admitted");
+    assert_eq!(error.message, changed);
+    let manifest = || -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(fixture.options.clone.state.path.join("manifest.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let state = manifest();
+    assert_eq!(state["source_slot"]["phase"], "confirmed");
+    let name = state["source_slot"]["record"]["intent"]["binding"]["slot_name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let publication = fixture
+        .source
+        .quote_identifier(
+            state["follow_state"]["publication"]["receipt"]["name"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(slot_present(&mut fixture.source, &name));
+    for sql in [
+        format!("DROP PUBLICATION {publication}"),
+        format!("CREATE PUBLICATION {publication} FOR TABLE ONLY public.items"),
+    ] {
+        fixture.source.query(&sql, &fixture.io).unwrap();
+    }
+    let error = FollowSnapshot::retire_unbound(
+        &fixture.options,
+        &next,
+        fixture.native.as_mut().unwrap(),
+        &fixture.io,
+    )
+    .expect_err("a replaced pending publication was accepted");
+    assert_eq!(
+        error.message,
+        "follow-restart: pending publication was replaced"
+    );
+    assert!(!slot_present(&mut fixture.source, &name));
+    assert_eq!(manifest()["source_slot"], serde_json::Value::Null);
+
+    // A first run's receipt stays unbound the same way; its retry plans the changed inventory in fresh().
+    let pair = FreshPair::new(FRESH_SEED);
+    let mut options = pair.options();
+    options.slot_name = format!("{}_slot", pair.names[0]);
+    let error = during_slot_creation(&pair.endpoints.source, extra, || {
+        crate::follow::run(options.clone(), &control())
+    })
+    .expect_err("a changed snapshot inventory was admitted");
+    assert_eq!(error.message, changed);
+    assert_eq!(fresh_state(&options)["source_slot"]["phase"], "confirmed");
+    let mut source =
+        PgConnection::connect(&pair.endpoints.source, crate::pg::Role::Copy, &control()).unwrap();
+    assert!(slot_present(&mut source, &options.slot_name));
+    options.clone.state.action = StateAction::Resume;
+    let error =
+        crate::follow::run(options.clone(), &control()).expect_err("a changed plan was admitted");
+    assert_eq!(
+        error.message,
+        "follow: preliminary plan differs from its native source intent"
+    );
+    assert!(!slot_present(&mut source, &options.slot_name));
+    assert_eq!(
+        fresh_state(&options)["source_slot"],
+        serde_json::Value::Null
+    );
+}
+
 /// Leaves the recorded slot in the state `kill` names and returns the hold, if still open.
 fn shape_pending_slot(
     fixture: &mut Fixture,

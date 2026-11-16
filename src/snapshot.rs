@@ -320,7 +320,7 @@ fn created_data(
         }
         SlotCreateOutcome::Unknown(failure) => {
             return Err(refusal(&format!(
-                "source-slot-create-unknown: slot may retain WAL; retain native intent for manual review (failure category {:?})",
+                "source-slot-create-unknown: slot may retain WAL; the next start drops it by its recorded intent and creation shape, then creates it again (failure category {:?})",
                 failure.kind
             )));
         }
@@ -332,7 +332,7 @@ fn created_data(
         || created.snapshot_token.contains('\0')
     {
         return Err(refusal(
-            "source-slot-create-unknown: invalid creation receipt; retain native intent for manual review",
+            "source-slot-create-unknown: invalid creation receipt; the next start drops the slot by its recorded intent and creation shape, then creates it again",
         ));
     }
     Ok(CreatedSlotData {

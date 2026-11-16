@@ -18,5 +18,6 @@
   "snapshot::follow_tests::live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted",
   "snapshot::follow_tests::live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adopted",
   "snapshot::follow_tests::live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once",
-  "snapshot::follow_tests::live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept"
+  "snapshot::follow_tests::live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept",
+  "snapshot::follow_tests::live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_it"
 ]

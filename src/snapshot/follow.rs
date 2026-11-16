@@ -84,17 +84,16 @@ impl FollowSnapshot {
         let mut source =
             PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         catalog::configure_session(&mut source, io)?;
-        catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
-        if let Some(publication) = &publication {
-            pending_publication_present(&mut source, publication, plan, io)?;
-        }
+        // This run's slot goes first, so no later refusal leaves it retaining WAL.
         if let Some(slot) = slot {
+            require_plan_source(&mut source, plan, io)?;
             drop_unbound_slot(&mut source, &slot, plan, io)?;
             native.confirm_pending_follow_slot_absent(&PendingFollowSlotAbsence {
                 restart: restart.clone(),
                 slot,
             })?;
         }
+        catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
         if let Some(receipt) = publication {
             if pending_publication_present(&mut source, &receipt, plan, io)? {
                 let required = catalog::configure_durability(&mut source, io)?;
@@ -339,6 +338,22 @@ impl FollowSnapshot {
         Self::create(options, plan, native, io)
     }
 
+    /// Drops a first run's unbound slot, proven this run's by its intent or receipt, before any check
+    /// that does not concern it, so no refusal leaves the slot retaining WAL.
+    pub(crate) fn retire_first_run_slot(
+        options: &FollowOptions,
+        native: &mut NativeState,
+        io: &IoControl,
+    ) -> Result<()> {
+        if native.checked_source_slot()?.is_none() {
+            return Ok(());
+        }
+        let mut source =
+            PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
+        catalog::configure_session(&mut source, io)?;
+        retire_pending_first_run_slot(&mut source, native, io)
+    }
+
     pub(crate) fn create(
         options: &FollowOptions,
         plan: &ClonePlan,
@@ -350,6 +365,7 @@ impl FollowSnapshot {
             PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         require_clone_idle(&source)?;
         catalog::configure_session(&mut source, io)?;
+        retire_pending_first_run_slot(&mut source, native, io)?;
         catalog::follow::preflight_follow(&mut source, plan, io)?;
         catalog::command(
             &mut source,
@@ -389,12 +405,6 @@ impl FollowSnapshot {
             plan.generation.0,
         )?;
         native.prepare_follow_source(plan)?;
-        // A restart retires its unbound slot in retire_unbound, so this is a first run's retry.
-        if let Some(slot) = native.checked_source_slot()? {
-            native.require_pending_source_slot_retirement(&slot)?;
-            drop_unbound_slot(&mut source, &slot, plan, io)?;
-            native.confirm_pending_source_slot_absent(&slot)?;
-        }
         if let Some(pending) = native
             .checked_publication()?
             .filter(|p| p.confirmed().is_none())
@@ -619,6 +629,33 @@ pub(super) fn require_restart_plan(
     {
         return Err(follow_refusal(
             "follow-restart: source/target plan, ownership, or copy generation changed",
+        ));
+    }
+    Ok(())
+}
+
+fn retire_pending_first_run_slot(
+    source: &mut PgConnection,
+    native: &mut NativeState,
+    io: &IoControl,
+) -> Result<()> {
+    let Some(slot) = native.checked_source_slot()? else {
+        return Ok(());
+    };
+    native.require_pending_source_slot_retirement(&slot)?;
+    let plan = native.checked_follow_source()?.ok_or_else(|| {
+        follow_refusal("follow-source: pending slot retirement lacks its preliminary plan")
+    })?;
+    require_plan_source(source, &plan, io)?;
+    drop_unbound_slot(source, &slot, &plan, io)?;
+    native.confirm_pending_source_slot_absent(&slot)
+}
+
+/// A slot is dropped only on the source its plan recorded; the rest of the preflight may follow the drop.
+fn require_plan_source(source: &mut PgConnection, plan: &ClonePlan, io: &IoControl) -> Result<()> {
+    if catalog::read_clone_source(source, io)? != plan.source {
+        return Err(follow_refusal(
+            "follow-source: connected source differs from the recorded plan; its pending slot is never dropped there",
         ));
     }
     Ok(())

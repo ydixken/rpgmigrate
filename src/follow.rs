@@ -132,6 +132,8 @@ fn fresh(
     native: &mut NativeState,
     io: &IoControl,
 ) -> Result<(ClonePlan, FollowBinding)> {
+    // Before the plan and inventory comparisons, so their refusals never leave this run's slot behind.
+    FollowSnapshot::retire_first_run_slot(options, native, io)?;
     let mut source = source(options, Role::Copy, io)?;
     let mut target_sql = target(options, Role::Copy, io)?;
     // Catalog table locks require a transaction before the slot snapshot exists.

@@ -70,6 +70,7 @@ Do not recreate a same-name slot, silently start from a later position, or turn 
 
 `CREATE_REPLICATION_SLOT` waits until every source transaction that holds a transaction ID ends, so a long source transaction can hold a follow at slot creation.
 A kill there, such as a node drain or a timeout, leaves a pending slot intent without its receipt.
+A lost reply leaves the same state and exits with `source-slot-create-unknown: slot may retain WAL; the next start drops it by its recorded intent and creation shape, then creates it again`.
 The next start, a first-run retry or `--restart`, drops exactly the recorded slot if it exists and then creates it again under a new intent.
 It never adopts that slot, because the snapshot it exported ended with the session that created it.
 It drops only a logical `pgoutput` slot on the source database that is not temporary and has `two_phase`, `failover` and `synced` off; any other slot under that name refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
@@ -88,6 +89,7 @@ Later starts refuse while that slot exists, with the first text on a first run o
 
 A first run killed after the slot was created but before it bound the snapshot leaves the slot's receipt.
 The next start drops that slot only at its recorded consistent point and creates it again, so it does not keep retaining WAL.
+It drops this run's slot before its other checks, so a later refusal, such as a source table list that changed meanwhile, does not leave the slot behind.
 A slot under that name at another position or of another plugin refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
 
 ## Interrupted follow publication creation
