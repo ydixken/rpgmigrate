@@ -1016,7 +1016,7 @@ impl PgConnection {
     }
 
     /// Persist resource intent before calling; Unknown closes the exporter and cannot authorize retry.
-    /// Created requires the matching receipt, completion tag, and complete result drain.
+    /// Created and NameTaken each require one complete result followed by ReadyForQuery.
     pub(crate) fn create_logical_slot_export(
         &mut self,
         slot: &str,
@@ -1041,10 +1041,30 @@ impl PgConnection {
                 return Err(error("PostgreSQL logical slot creation dispatch failed"));
             }
             self.flush(io)?;
-            let result = self.drain(None, io)?;
+            let mut results = Vec::new();
+            while let Some(result) = self.next_result(io)? {
+                if matches!(
+                    result.status(),
+                    pq::ExecStatusType::PGRES_COPY_IN
+                        | pq::ExecStatusType::PGRES_COPY_OUT
+                        | pq::ExecStatusType::PGRES_COPY_BOTH
+                ) {
+                    return Err(error("PostgreSQL logical slot creation result is invalid"));
+                }
+                results.push(result);
+            }
             // SAFETY: the fully drained connection remains exclusively owned by this handle.
             let status = unsafe { pq::PQstatus(raw) };
             check_slot_export_completion(status, self.transaction_status()?)?;
+            let [result] = results.as_slice() else {
+                return Err(error("PostgreSQL logical slot creation result is invalid"));
+            };
+            // 42710 comes only from ReplicationSlotCreate's name check, before any slot exists (16.15 slot.c:312-314, 18.7 :412-414; no other site in walsender.c, slot.c, logical.c, snapbuild.c, pgoutput.c or snapmgr.c).
+            if result.status() == pq::ExecStatusType::PGRES_FATAL_ERROR
+                && result.sqlstate() == Some(b"42710".as_slice())
+            {
+                return Ok(None);
+            }
             // SAFETY: result owns its PGresult; dimensions are signed nonnegative integers.
             let columns = unsafe { pq::PQnfields(result.raw.as_ptr()) };
             if result.status() != pq::ExecStatusType::PGRES_TUPLES_OK
@@ -1065,11 +1085,16 @@ impl PgConnection {
                 ],
                 result.command_tag()?,
             )
+            .map(Some)
         })();
         Ok(match outcome {
-            Ok(created) => {
+            Ok(Some(created)) => {
                 self.phase = Phase::SnapshotExport;
                 SlotCreateOutcome::Created(created)
+            }
+            Ok(None) => {
+                self.phase = Phase::Idle;
+                SlotCreateOutcome::NameTaken
             }
             Err(failure) => {
                 self.raw.take();
@@ -1593,26 +1618,31 @@ impl PgResult {
         unsafe { pq::PQresultStatus(self.raw.as_ptr()) }
     }
 
-    #[track_caller]
-    fn failure(&self) -> Error {
-        // SAFETY: the optional SQLSTATE C string belongs to this live result and is copied below.
+    fn sqlstate(&self) -> Option<&[u8]> {
+        // SAFETY: the optional SQLSTATE C string belongs to this live result and outlives the borrow.
         let state =
             unsafe { pq::PQresultErrorField(self.raw.as_ptr(), pq::PG_DIAG_SQLSTATE.into()) };
-        if !state.is_null() {
-            // SAFETY: libpq returned a non-null, terminated error field owned by this result.
-            let bytes = unsafe { CStr::from_ptr(state) }.to_bytes();
-            if bytes.len() == 5
-                && bytes
-                    .iter()
-                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-            {
-                return error(&format!(
-                    "PostgreSQL command failed (SQLSTATE {})",
-                    std::str::from_utf8(bytes).unwrap()
-                ));
-            }
+        if state.is_null() {
+            return None;
         }
-        error("PostgreSQL command failed; server details redacted")
+        // SAFETY: libpq returned a non-null, terminated error field owned by this result.
+        let bytes = unsafe { CStr::from_ptr(state) }.to_bytes();
+        (bytes.len() == 5
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+        .then_some(bytes)
+    }
+
+    #[track_caller]
+    fn failure(&self) -> Error {
+        match self.sqlstate() {
+            Some(state) => error(&format!(
+                "PostgreSQL command failed (SQLSTATE {})",
+                std::str::from_utf8(state).unwrap()
+            )),
+            None => error("PostgreSQL command failed; server details redacted"),
+        }
     }
 
     fn copy_count(&self) -> Result<u64> {
@@ -2509,6 +2539,136 @@ mod tests {
         );
         assert!(connection.raw.is_some());
         assert!(connection.phase == Phase::Idle);
+    }
+
+    /// Serves one replication session: `reply` answers its CREATE_REPLICATION_SLOT, then the peer
+    /// closes at once when `close` is set, or else waits for the client to end the session.
+    fn slot_create_peer(reply: Vec<u8>, close: bool) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut size = [0; 4];
+            stream.read_exact(&mut size).unwrap();
+            let mut startup = vec![0; u32::from_be_bytes(size) as usize - 4];
+            stream.read_exact(&mut startup).unwrap();
+            assert!(startup.windows(21).any(|w| w == b"replication\0database\0"));
+            stream
+                .write_all(
+                    &[
+                        peer_message(b'R', &[0; 4]),
+                        peer_message(b'S', b"server_version\x0018.7\0"),
+                        peer_message(b'Z', b"I"),
+                    ]
+                    .concat(),
+                )
+                .unwrap();
+            let mut tag = [0; 1];
+            stream.read_exact(&mut tag).unwrap();
+            stream.read_exact(&mut size).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(size) as usize - 4];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(tag[0], b'Q');
+            assert_eq!(
+                body,
+                b"CREATE_REPLICATION_SLOT \"e12\" LOGICAL \"pgoutput\"\0"
+            );
+            stream.write_all(&reply).unwrap();
+            if !close {
+                let _ = stream.read(&mut [0; 64]);
+            }
+        });
+        (port, peer)
+    }
+
+    fn peer_message(tag: u8, body: &[u8]) -> Vec<u8> {
+        [&[tag][..], &(body.len() as u32 + 4).to_be_bytes(), body].concat()
+    }
+
+    #[test]
+    fn only_a_lone_name_check_error_before_ready_for_query_proves_nothing_was_created() {
+        let error = |state: &str| {
+            peer_message(
+                b'E',
+                format!("SERROR\0VERROR\0C{state}\0Mslot refused\0\0").as_bytes(),
+            )
+        };
+        let ready = |status: &[u8]| peer_message(b'Z', status);
+        let row = [
+            peer_message(
+                b'T',
+                b"\0\x01slot_name\0\0\0\0\0\0\0\0\0\0\x19\xff\xff\xff\xff\xff\xff\0\0",
+            ),
+            peer_message(b'D', b"\0\x01\0\0\0\x03e12"),
+            peer_message(b'C', b"CREATE_REPLICATION_SLOT\0"),
+        ]
+        .concat();
+        for (case, reply, close, taken) in [
+            (
+                "42710 then ready",
+                [error("42710"), ready(b"I")].concat(),
+                false,
+                true,
+            ),
+            ("42710 then close", error("42710"), true, false),
+            (
+                "42710 then failed ready",
+                [error("42710"), ready(b"E")].concat(),
+                false,
+                false,
+            ),
+            (
+                "persist error then ready",
+                [error("58P02"), ready(b"I")].concat(),
+                false,
+                false,
+            ),
+            (
+                "row then 42710",
+                [row.clone(), error("42710"), ready(b"I")].concat(),
+                false,
+                false,
+            ),
+            (
+                "two 42710",
+                [error("42710"), error("42710"), ready(b"I")].concat(),
+                false,
+                false,
+            ),
+        ] {
+            let (port, peer) = slot_create_peer(reply, close);
+            let conninfo = format!(
+                "host=127.0.0.1 port={port} dbname=x user=x sslmode=disable gssencmode=disable connect_timeout=2"
+            );
+            let mut connection = PgConnection::connect_replication(
+                &Conninfo::new(conninfo.into()).unwrap(),
+                &control(),
+            )
+            .unwrap();
+            let outcome = connection
+                .create_logical_slot_export("e12", "pgoutput", &control())
+                .unwrap();
+            match outcome {
+                SlotCreateOutcome::NameTaken => {
+                    assert!(taken, "{case}");
+                    assert!(
+                        connection.raw.is_some() && connection.phase == Phase::Idle,
+                        "{case}"
+                    );
+                }
+                SlotCreateOutcome::Unknown(_) => {
+                    assert!(!taken, "{case}");
+                    assert!(
+                        connection.raw.is_none() && connection.phase == Phase::Idle,
+                        "{case}"
+                    );
+                }
+                SlotCreateOutcome::Created(_) => panic!("{case}: a refusal created a slot"),
+            }
+            drop(connection);
+            peer.join().unwrap();
+        }
     }
 
     #[test]

@@ -807,6 +807,81 @@ pub(crate) fn remove_follow_slot(
     confirm_cleanup_absence(outcome, cleanup_slot_present(source, binding, false, io))
 }
 
+/// Drops the publication `receipt` records in one durable transaction; false means none held the name.
+/// DROP resolves the name again under its own lock, so that lock names what it removed: any other
+/// publication is refused and its DROP rolled back.
+pub(crate) fn drop_recorded_publication(
+    source: &mut PgConnection,
+    receipt: &PublicationReceipt,
+    context: &str,
+    unknown: &str,
+    io: &IoControl,
+) -> Result<bool> {
+    let name = &receipt.name;
+    let literal = source.quote_literal(name)?;
+    let identifier = source.quote_identifier(name)?;
+    let required = configure_durability(source, io)?;
+    command(source, "BEGIN", "BEGIN", io)?;
+    let refuse = |source: &mut PgConnection, message: String| -> Result<bool> {
+        command(source, "ROLLBACK", "ROLLBACK", io)?;
+        Err(refusal(&message))
+    };
+    let present = source.query(
+        &format!("SELECT oid,pubowner FROM pg_catalog.pg_publication WHERE pubname={literal}"),
+        io,
+    )?;
+    if present.columns()? != 2 || present.rows() > 1 {
+        return refuse(
+            source,
+            format!("{context}: publication {name} inventory is invalid"),
+        );
+    }
+    if present.rows() == 0 {
+        command(source, "ROLLBACK", "ROLLBACK", io)?;
+        return Ok(false);
+    }
+    let (oid, owner) = (text(&present, 0, 0)?, text(&present, 0, 1)?);
+    if oid != receipt.oid.to_string() || owner != receipt.owner_oid.to_string() {
+        let message = format!(
+            "{context}: publication {name} (OID {oid}, owner {owner}) is not the recorded one (OID {}, owner {}); it is never adopted or dropped",
+            receipt.oid, receipt.owner_oid
+        );
+        return refuse(source, message);
+    }
+    command(
+        source,
+        &format!("DROP PUBLICATION {identifier}"),
+        "DROP PUBLICATION",
+        io,
+    )?;
+    let dropped = source.query("SELECT objid FROM pg_catalog.pg_locks WHERE pid=pg_catalog.pg_backend_pid() AND locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND mode='AccessExclusiveLock' AND granted", io)?;
+    if dropped.columns()? != 1
+        || dropped.rows() != 1
+        || dropped.cell(0, 0)? != Some(receipt.oid.to_string().as_bytes())
+    {
+        return refuse(
+            source,
+            format!(
+                "{context}: publication {name} changed identity during its removal; it is never adopted or dropped"
+            ),
+        );
+    }
+    command(
+        source,
+        "SET CONSTRAINTS ALL IMMEDIATE",
+        "SET CONSTRAINTS",
+        io,
+    )?;
+    confirm_durability(source, required, io)?;
+    if !matches!(
+        source.commit_observed(io),
+        Ok(crate::pg::CommitObservation::Committed)
+    ) {
+        return Err(refusal(unknown));
+    }
+    Ok(true)
+}
+
 pub(crate) fn remove_follow_publication(
     source: &mut PgConnection,
     plan: &ClonePlan,
@@ -818,32 +893,14 @@ pub(crate) fn remove_follow_publication(
     if !cleanup_publication_present(source, plan, binding, removed, io)? {
         return Ok(());
     }
-    let required = configure_durability(source, io)?;
-    command(source, "BEGIN", "BEGIN", io)?;
-    let outcome = (|| {
-        let name = source.quote_identifier(&binding.publication.name)?;
-        command(
-            source,
-            &format!("DROP PUBLICATION {name}"),
-            "DROP PUBLICATION",
-            io,
-        )?;
-        command(
-            source,
-            "SET CONSTRAINTS ALL IMMEDIATE",
-            "SET CONSTRAINTS",
-            io,
-        )?;
-        confirm_durability(source, required, io)?;
-        match source.commit_observed(io)? {
-            crate::pg::CommitObservation::Committed => Ok(()),
-            crate::pg::CommitObservation::Unknown | crate::pg::CommitObservation::RolledBack => {
-                Err(refusal(
-                    "cleanup-source: publication removal outcome is unknown",
-                ))
-            }
-        }
-    })();
+    let outcome = drop_recorded_publication(
+        source,
+        &binding.publication,
+        "cleanup-source",
+        "cleanup-source: publication removal outcome is unknown",
+        io,
+    )
+    .map(|_| ());
     if source.transaction_status()? != TransactionStatus::Idle {
         return Err(refusal(
             "cleanup-source: publication removal transaction is unresolved; preserve cleanup intent",

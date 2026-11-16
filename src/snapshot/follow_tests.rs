@@ -4,6 +4,7 @@ use crate::contracts::{
     RestorePolicy, SnapshotTicket, StateAction, StateRequest,
 };
 use crate::pg::CommitObservation;
+use crate::state::SourceSlotProvenance;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -133,47 +134,8 @@ struct PendingFixture {
 
 impl PendingFixture {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!(
-            "rpgmigrate-pending-source-{}-{}",
-            std::process::id(),
-            CASE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut native = crate::state::open_follow(
-            &StateRequest {
-                path: root.join("state"),
-                action: StateAction::Create,
-            },
-            None,
-            None,
-            &IoControl::unbounded(Arc::new(AtomicBool::new(false))),
-        )
-        .unwrap();
-        let mut plan = ClonePlan {
-            source: crate::contracts::CloneSource {
-                identity: SourceId {
-                    system_identifier: 7,
-                    database_oid: 23,
-                },
-                timeline: 1,
-                major: 16,
-            },
-            target: CloneTarget {
-                identity: SourceId {
-                    system_identifier: 8,
-                    database_oid: 24,
-                },
-                major: 18,
-            },
-            generation: CopyGeneration(1),
-            tables: Vec::new(),
-            sequences: Vec::new(),
-            policy: RestorePolicy::default(),
-            copy_policy: crate::contracts::CloneCopyPolicy::default(),
-            copy_tables: Vec::new(),
-        };
+        let (root, mut native) = Self::open();
+        let mut plan = Self::plan();
         let binding = Self::resources(&mut native, &plan, 10);
         let ticket = SnapshotTicket {
             token: binding.slot.snapshot_token.clone(),
@@ -200,36 +162,95 @@ impl PendingFixture {
         }
     }
 
-    fn resources(
-        native: &mut NativeState,
-        plan: &ClonePlan,
-        point: u64,
-    ) -> crate::contracts::FollowBinding {
-        native.prepare_follow_source(plan).unwrap();
+    fn open() -> (PathBuf, NativeState) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "rpgmigrate-pending-source-{}-{}",
+            std::process::id(),
+            CASE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let native = Self::reopen(&root, StateAction::Create);
+        (root, native)
+    }
+
+    fn reopen(root: &std::path::Path, action: StateAction) -> NativeState {
+        crate::state::open_follow(
+            &StateRequest {
+                path: root.join("state"),
+                action,
+            },
+            None,
+            None,
+            &IoControl::unbounded(Arc::new(AtomicBool::new(false))),
+        )
+        .unwrap()
+    }
+
+    fn plan() -> ClonePlan {
+        ClonePlan {
+            source: crate::contracts::CloneSource {
+                identity: SourceId {
+                    system_identifier: 7,
+                    database_oid: 23,
+                },
+                timeline: 1,
+                major: 16,
+            },
+            target: CloneTarget {
+                identity: SourceId {
+                    system_identifier: 8,
+                    database_oid: 24,
+                },
+                major: 18,
+            },
+            generation: CopyGeneration(1),
+            tables: Vec::new(),
+            sequences: Vec::new(),
+            policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
+            copy_tables: Vec::new(),
+        }
+    }
+
+    fn slot_binding(native: &NativeState, plan: &ClonePlan) -> SourceSlotBinding {
+        SourceSlotBinding::new(
+            crate::identity::StreamId {
+                run: native.identity().run,
+                source: plan.source.identity,
+                generation: 1,
+            },
+            "pending_source".into(),
+            crate::cdc::contracts::Plugin::Pgoutput,
+            plan.generation.0,
+        )
+        .unwrap()
+    }
+
+    fn publication(native: &mut NativeState, oid: u32) -> crate::contracts::PublicationReceipt {
         let intent = native.begin_publication("pending_source").unwrap();
         let publication = crate::contracts::PublicationReceipt {
             name: intent.name.clone(),
-            oid: point as u32,
+            oid,
             owner_oid: 7,
         };
         native
             .record_publication_created(&intent, &publication)
             .unwrap();
         native.confirm_publication(&intent, &publication).unwrap();
+        publication
+    }
+
+    fn resources(
+        native: &mut NativeState,
+        plan: &ClonePlan,
+        point: u64,
+    ) -> crate::contracts::FollowBinding {
+        native.prepare_follow_source(plan).unwrap();
+        let publication = Self::publication(native, point as u32);
         let slot_intent = native
-            .begin_source_slot(
-                &SourceSlotBinding::new(
-                    crate::identity::StreamId {
-                        run: native.identity().run,
-                        source: plan.source.identity,
-                        generation: 1,
-                    },
-                    "pending_source".into(),
-                    crate::cdc::contracts::Plugin::Pgoutput,
-                    plan.generation.0,
-                )
-                .unwrap(),
-            )
+            .begin_source_slot(&Self::slot_binding(native, plan))
             .unwrap();
         let slot = native
             .confirm_source_slot(
@@ -265,12 +286,16 @@ fn pending_source_retirement_rejects_foreign_stale_or_bound_proofs_without_mutat
     let mut fixture = PendingFixture::new();
     let before = fixture.manifest();
     for field in 0..4 {
+        let mut receipt = fixture.binding.slot.clone();
+        if field == 0 {
+            receipt.intent.nonce[0] ^= 1;
+        }
         let mut proof = super::follow::PendingFollowSlotAbsence {
             restart: fixture.restart.clone(),
-            receipt: fixture.binding.slot.clone(),
+            slot: SourceSlotProvenance::Confirmed(receipt),
         };
         match field {
-            0 => proof.receipt.intent.nonce[0] ^= 1,
+            0 => {}
             1 => proof.restart.next_generation.0 += 1,
             2 => proof.restart.new_bound = true,
             _ => proof.restart.slot_absent = false,
@@ -299,7 +324,7 @@ fn pending_source_retirement_rejects_foreign_stale_or_bound_proofs_without_mutat
         .native
         .confirm_pending_follow_slot_absent(&super::follow::PendingFollowSlotAbsence {
             restart: fixture.restart.clone(),
-            receipt: fixture.binding.slot.clone(),
+            slot: SourceSlotProvenance::Confirmed(fixture.binding.slot.clone()),
         })
         .unwrap();
     let before = fixture.manifest();
@@ -319,7 +344,7 @@ fn lost_unbound_snapshot_retires_receipts_without_binding_an_old_execution_profi
     let saved = fixture.native.checked_clone().unwrap().unwrap();
     let slot = super::follow::PendingFollowSlotAbsence {
         restart: fixture.restart.clone(),
-        receipt: fixture.binding.slot.clone(),
+        slot: SourceSlotProvenance::Confirmed(fixture.binding.slot.clone()),
     };
     fixture
         .native
@@ -376,6 +401,249 @@ fn lost_unbound_snapshot_retires_receipts_without_binding_an_old_execution_profi
         fixture.native.checked_clone().unwrap().unwrap().plan,
         fixture.plan
     );
+}
+
+#[test]
+fn restart_retires_its_pending_slot_intent_without_a_receipt_but_never_a_changed_one() {
+    let mut fixture = PendingFixture::new();
+    let restart = fixture.restart.clone();
+    fixture
+        .native
+        .confirm_pending_follow_slot_absent(&super::follow::PendingFollowSlotAbsence {
+            restart: restart.clone(),
+            slot: SourceSlotProvenance::Confirmed(fixture.binding.slot.clone()),
+        })
+        .unwrap();
+    fixture
+        .native
+        .confirm_pending_follow_publication_absent(
+            &super::follow::PendingFollowPublicationAbsence {
+                restart: restart.clone(),
+                receipt: fixture.binding.publication.clone(),
+            },
+        )
+        .unwrap();
+    // The next attempt dies inside CREATE_REPLICATION_SLOT, before its receipt.
+    let publication = PendingFixture::publication(&mut fixture.native, 40);
+    let pending = fixture
+        .native
+        .begin_source_slot(&PendingFixture::slot_binding(
+            &fixture.native,
+            &fixture.plan,
+        ))
+        .unwrap();
+    let before = fixture.manifest();
+    for field in 0..4 {
+        let mut intent = pending.clone();
+        let mut changed = restart.clone();
+        let slot = match field {
+            0 => {
+                intent.nonce[0] ^= 1;
+                SourceSlotProvenance::Provisioning(intent)
+            }
+            1 => SourceSlotProvenance::Confirmed(crate::state::SourceSlotReceipt {
+                intent,
+                consistent_point: crate::identity::SourceEndLsn(50),
+                snapshot_token: "snapshot-50".into(),
+            }),
+            2 => {
+                changed.next_generation.0 += 1;
+                SourceSlotProvenance::Provisioning(intent)
+            }
+            _ => {
+                changed.new_bound = true;
+                SourceSlotProvenance::Provisioning(intent)
+            }
+        };
+        let proof = super::follow::PendingFollowSlotAbsence {
+            restart: changed,
+            slot,
+        };
+        assert!(
+            fixture
+                .native
+                .confirm_pending_follow_slot_absent(&proof)
+                .is_err(),
+            "field {field}"
+        );
+        assert_eq!(fixture.manifest(), before);
+    }
+    // The first-run rule never retires a restart's intent.
+    let provisioning = SourceSlotProvenance::Provisioning(pending.clone());
+    assert!(
+        fixture
+            .native
+            .require_pending_source_slot_retirement(&provisioning)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .native
+            .confirm_pending_source_slot_absent(&provisioning)
+            .is_err()
+    );
+    assert_eq!(fixture.manifest(), before);
+    let proof = super::follow::PendingFollowSlotAbsence {
+        restart: restart.clone(),
+        slot: SourceSlotProvenance::Provisioning(pending.clone()),
+    };
+    fixture
+        .native
+        .confirm_pending_follow_slot_absent(&proof)
+        .unwrap();
+    assert!(fixture.native.checked_source_slot().unwrap().is_none());
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_slot_absent(&proof)
+            .is_err()
+    );
+    fixture
+        .native
+        .confirm_pending_follow_publication_absent(
+            &super::follow::PendingFollowPublicationAbsence {
+                restart,
+                receipt: publication,
+            },
+        )
+        .unwrap();
+    let fresh = PendingFixture::resources(&mut fixture.native, &fixture.plan, 60);
+    assert_ne!(fresh.slot.intent.nonce, pending.nonce);
+}
+
+#[test]
+fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create() {
+    let plan = PendingFixture::plan();
+    // A slot intent without a confirmed publication was never authorized by create.
+    let (unpublished, mut native) = PendingFixture::open();
+    native.prepare_follow_source(&plan).unwrap();
+    let orphan = SourceSlotProvenance::Provisioning(
+        native
+            .begin_source_slot(&PendingFixture::slot_binding(&native, &plan))
+            .unwrap(),
+    );
+    let before = std::fs::read(unpublished.join("state/manifest.json")).unwrap();
+    assert!(
+        native
+            .require_pending_source_slot_retirement(&orphan)
+            .is_err()
+    );
+    assert!(native.confirm_pending_source_slot_absent(&orphan).is_err());
+    assert_eq!(
+        std::fs::read(unpublished.join("state/manifest.json")).unwrap(),
+        before
+    );
+    drop(native);
+    std::fs::remove_dir_all(&unpublished).unwrap();
+
+    let (root, mut native) = PendingFixture::open();
+    native.prepare_follow_source(&plan).unwrap();
+    PendingFixture::publication(&mut native, 30);
+    let pending = native
+        .begin_source_slot(&PendingFixture::slot_binding(&native, &plan))
+        .unwrap();
+    drop(native);
+    let mut native = PendingFixture::reopen(&root, StateAction::Restart);
+    let manifest = || std::fs::read(root.join("state/manifest.json")).unwrap();
+    let before = manifest();
+    let mut changed = pending.clone();
+    changed.nonce[0] ^= 1;
+    let (changed, pending_intent) = (SourceSlotProvenance::Provisioning(changed), pending.clone());
+    let pending = SourceSlotProvenance::Provisioning(pending);
+    assert!(
+        native
+            .require_pending_source_slot_retirement(&changed)
+            .is_err()
+    );
+    assert!(native.confirm_pending_source_slot_absent(&changed).is_err());
+    assert_eq!(manifest(), before);
+    native
+        .require_pending_source_slot_retirement(&pending)
+        .unwrap();
+    assert_eq!(manifest(), before);
+    native.confirm_pending_source_slot_absent(&pending).unwrap();
+    assert!(native.checked_source_slot().unwrap().is_none());
+    assert!(native.confirm_pending_source_slot_absent(&pending).is_err());
+    let binding = PendingFixture::slot_binding(&native, &plan);
+    let replacement = native.begin_source_slot(&binding).unwrap();
+    assert_ne!(replacement.nonce, pending_intent.nonce);
+    assert!(native.begin_source_slot(&binding).is_err());
+    let receipt = native
+        .confirm_source_slot(
+            &replacement,
+            CreatedSlotData {
+                consistent_point: crate::identity::SourceEndLsn(70),
+                snapshot_name: "snapshot-70".into(),
+            },
+        )
+        .unwrap();
+    // An unbound receipt is retired only in its exact confirmed form, never as its intent.
+    let before = manifest();
+    for wrong in [
+        SourceSlotProvenance::Provisioning(receipt.intent.clone()),
+        SourceSlotProvenance::Confirmed(crate::state::SourceSlotReceipt {
+            consistent_point: crate::identity::SourceEndLsn(71),
+            ..receipt.clone()
+        }),
+    ] {
+        assert!(
+            native
+                .require_pending_source_slot_retirement(&wrong)
+                .is_err()
+        );
+        assert!(native.confirm_pending_source_slot_absent(&wrong).is_err());
+        assert_eq!(manifest(), before);
+    }
+    let confirmed = SourceSlotProvenance::Confirmed(receipt);
+    native
+        .confirm_pending_source_slot_absent(&confirmed)
+        .unwrap();
+    assert!(native.checked_source_slot().unwrap().is_none());
+    let again = native.begin_source_slot(&binding).unwrap();
+    assert_ne!(again.nonce, replacement.nonce);
+    assert!(native.begin_source_slot(&binding).is_err());
+    drop(native);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_uncreated_slot_intent_is_retired_only_in_its_exact_pending_form() {
+    let plan = PendingFixture::plan();
+    let (root, mut native) = PendingFixture::open();
+    let manifest = || std::fs::read(root.join("state/manifest.json")).unwrap();
+    native.prepare_follow_source(&plan).unwrap();
+    PendingFixture::publication(&mut native, 30);
+    let binding = PendingFixture::slot_binding(&native, &plan);
+    let pending = native.begin_source_slot(&binding).unwrap();
+    let before = manifest();
+    let mut changed = pending.clone();
+    changed.nonce[0] ^= 1;
+    assert!(native.retire_uncreated_source_slot(&changed).is_err());
+    assert_eq!(manifest(), before);
+    native.retire_uncreated_source_slot(&pending).unwrap();
+    drop(native);
+    let mut native = PendingFixture::reopen(&root, StateAction::Resume);
+    assert!(native.checked_source_slot().unwrap().is_none());
+    assert!(native.retire_uncreated_source_slot(&pending).is_err());
+    let replacement = native.begin_source_slot(&binding).unwrap();
+    let receipt = native
+        .confirm_source_slot(
+            &replacement,
+            CreatedSlotData {
+                consistent_point: crate::identity::SourceEndLsn(70),
+                snapshot_name: "snapshot-70".into(),
+            },
+        )
+        .unwrap();
+    let before = manifest();
+    assert!(
+        native
+            .retire_uncreated_source_slot(&receipt.intent)
+            .is_err()
+    );
+    assert_eq!(manifest(), before);
+    drop(native);
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 struct Fixture {
@@ -1496,15 +1764,2034 @@ fn live_follow_positive_publication_retry_requires_the_persisted_source_plan() {
             assert_eq!(snapshot.binding().publication, receipt);
             snapshot.finish(&fixture.io).unwrap();
         } else {
-            assert!(
-                snapshot
-                    .err()
-                    .expect("unconfirmed candidate must refuse")
-                    .message
-                    .contains("unconfirmed")
-            );
-            let slots=fixture.source.query("SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())",&fixture.io).unwrap();
-            assert_eq!(slots.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+            // A committed but unconfirmed candidate is dropped by its recorded OID, never adopted.
+            let snapshot = snapshot.unwrap();
+            assert_eq!(snapshot.binding().publication.name, receipt.name);
+            assert_ne!(snapshot.binding().publication.oid, receipt.oid);
+            let slot = snapshot.receipt().intent.binding.slot_name().to_owned();
+            snapshot.finish(&fixture.io).unwrap();
+            fixture
+                .source
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot('{slot}')"),
+                    &fixture.io,
+                )
+                .unwrap();
         }
+    }
+}
+
+fn harness_context() -> serde_json::Value {
+    let context =
+        std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned follow harness required");
+    serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap()
+}
+
+/// Relays the engine's sessions to the owned server. A held pattern pauses the first client chunk
+/// that contains it until opened or another pattern is held. Frozen, nothing passes either way and every
+/// server session stays open until release, which is how a stopped or killed engine loses a reply.
+struct Relay {
+    direct: Conninfo,
+    directory: PathBuf,
+    state: Arc<RelayState>,
+    acceptor: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct RelayState {
+    stop: AtomicBool,
+    frozen: AtomicBool,
+    hold: std::sync::Mutex<Option<&'static [u8]>>,
+    hits: AtomicU64,
+    creates: AtomicU64,
+    pumps: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl Relay {
+    fn start(fixture: &mut Fixture) -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let context = harness_context();
+        let socket_dir = PathBuf::from(context["socket_dir"].as_str().unwrap());
+        let port = context["port"].as_u64().unwrap();
+        let directory = socket_dir.join(format!(
+            "relay-{}-{}",
+            std::process::id(),
+            CASE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let listener = UnixListener::bind(directory.join(format!(".s.PGSQL.{port}"))).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = socket_dir.join(format!(".s.PGSQL.{port}"));
+        let state = Arc::new(RelayState::default());
+        let shared = Arc::clone(&state);
+        let acceptor = std::thread::spawn(move || {
+            while !shared.stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        client.set_nonblocking(false).unwrap();
+                        let server = UnixStream::connect(&server).unwrap();
+                        let mut pumps = shared.pumps.lock().unwrap();
+                        for (from, to, upstream) in [
+                            (
+                                client.try_clone().unwrap(),
+                                server.try_clone().unwrap(),
+                                true,
+                            ),
+                            (server, client, false),
+                        ] {
+                            let shared = Arc::clone(&shared);
+                            pumps.push(std::thread::spawn(move || {
+                                relay_pump(from, to, upstream, &shared)
+                            }));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("relay accept failed: {error}"),
+                }
+            }
+        });
+        let direct = fixture.options.clone.source.clone();
+        let host = fixture
+            .source
+            .quote_literal(directory.to_str().unwrap())
+            .unwrap();
+        fixture.options.clone.source = Conninfo::new(
+            format!(
+                "{} host={host}",
+                std::str::from_utf8(direct.as_c_str().to_bytes()).unwrap()
+            )
+            .into(),
+        )
+        .unwrap();
+        Self {
+            direct,
+            directory,
+            state,
+            acceptor: Some(acceptor),
+        }
+    }
+
+    fn hold(&self, pattern: &'static [u8]) {
+        *self.state.hold.lock().unwrap() = Some(pattern);
+    }
+
+    fn open(&self) {
+        *self.state.hold.lock().unwrap() = None;
+    }
+
+    fn freeze(&self) {
+        self.state.frozen.store(true, Ordering::Release);
+    }
+
+    fn hits(&self) -> u64 {
+        self.state.hits.load(Ordering::Acquire)
+    }
+
+    fn creates(&self) -> u64 {
+        self.state.creates.load(Ordering::Acquire)
+    }
+
+    /// Closes every relayed session and points the fixture at the server again.
+    fn release(self, fixture: &mut Fixture) {
+        fixture.options.clone.source = self.direct.clone();
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.state.stop.store(true, Ordering::Release);
+        let acceptor = self.acceptor.take().unwrap().join();
+        for pump in std::mem::take(&mut *self.state.pumps.lock().unwrap()) {
+            let _ = pump.join();
+        }
+        let _ = std::fs::remove_dir_all(&self.directory);
+        if let Err(panic) = acceptor {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+fn relay_pump(
+    mut from: std::os::unix::net::UnixStream,
+    mut to: std::os::unix::net::UnixStream,
+    upstream: bool,
+    state: &RelayState,
+) {
+    use std::io::{Read, Write};
+    let contains = |seen: &[u8], pattern: &[u8]| seen.windows(pattern.len()).any(|w| w == pattern);
+    from.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+        .unwrap();
+    let (mut buffer, mut seen) = ([0; 16384], Vec::new());
+    while !state.stop.load(Ordering::Acquire) {
+        let size = match from.read(&mut buffer) {
+            Ok(0) => {
+                if !state.frozen.load(Ordering::Acquire) {
+                    let _ = to.shutdown(std::net::Shutdown::Write);
+                }
+                return;
+            }
+            Ok(size) => size,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return,
+        };
+        if upstream {
+            seen.extend_from_slice(&buffer[..size]);
+            let create = contains(&seen, b"CREATE_REPLICATION_SLOT");
+            let held = (*state.hold.lock().unwrap()).filter(|pattern| contains(&seen, pattern));
+            if create {
+                state.creates.fetch_add(1, Ordering::AcqRel);
+            }
+            if held.is_some() {
+                state.hits.fetch_add(1, Ordering::AcqRel);
+                while *state.hold.lock().unwrap() == held && !state.stop.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            // A tail shorter than either pattern still finds one split across two reads.
+            let keep = if create || held.is_some() { 0 } else { 31 };
+            seen.drain(..seen.len().saturating_sub(keep));
+        }
+        if !state.frozen.load(Ordering::Acquire) && to.write_all(&buffer[..size]).is_err() {
+            return;
+        }
+    }
+}
+
+/// Binds a first generation and records its copy-phase restart; returns the next generation's
+/// plan and the bound slot's name.
+fn record_restart(fixture: &mut Fixture) -> (ClonePlan, String) {
+    let mut plan = fixture.plan.clone();
+    let mut snapshot = fixture.create();
+    let binding = snapshot.binding().clone();
+    let ticket = snapshot.snapshot_mut().ticket().clone();
+    snapshot.finish(&fixture.io).unwrap();
+    let native = fixture.native.as_mut().unwrap();
+    native.bind_follow(&plan, &ticket, &binding).unwrap();
+    native.begin_pre_data().unwrap();
+    let (objects, tables) = synthetic_handoff(&plan);
+    native.confirm_pre_data(&plan, objects, tables).unwrap();
+    let recorded = native.begin_follow_restart(&binding, &plan).unwrap();
+    plan.generation = recorded.next_generation;
+    (plan, binding.slot.intent.binding.slot_name().to_owned())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Window {
+    /// A slot takes the name after the first collision check, before the publication exists.
+    BeforeRecheck,
+    /// A slot takes the name after the repeated check, before this run's CREATE reaches the server.
+    BeforeCreate,
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept() {
+    for restart in [false, true] {
+        for window in [Window::BeforeRecheck, Window::BeforeCreate] {
+            let case = format!("restart={restart} window={window:?}");
+            let mut fixture = Fixture::new(
+                "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+            );
+            // The operator passes one stable --slot-name across runs and generations.
+            fixture.options.slot_name = format!("{}_slot", fixture.database);
+            let name = fixture.options.slot_name.clone();
+            let literal = fixture.source.quote_literal(&name).unwrap();
+            let identity = format!(
+                "SELECT coalesce((SELECT plugin||' '||datoid||' '||restart_lsn||' '||confirmed_flush_lsn||' '||catalog_xmin FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+            );
+            let next = if restart {
+                record_restart(&mut fixture).0
+            } else {
+                fixture.plan.clone()
+            };
+            let relay = Relay::start(&mut fixture);
+            relay.hold(match window {
+                Window::BeforeRecheck => b"CREATE PUBLICATION",
+                Window::BeforeCreate => b"CREATE_REPLICATION_SLOT",
+            });
+            let options = fixture.options.clone();
+            let io = fixture.io.clone();
+            let native = fixture.native.as_mut().unwrap();
+            let (error, foreign) = std::thread::scope(|scope| {
+                let controller = scope.spawn(|| {
+                    let mut session =
+                        PgConnection::connect(&relay.direct, crate::pg::Role::Copy, &control())
+                            .unwrap();
+                    wait_until("the creation window was never reached", || {
+                        relay.hits() == 1
+                    });
+                    scalar(
+                        &mut session,
+                        &format!(
+                            "SELECT (pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')).slot_name::text"
+                        ),
+                    );
+                    let foreign = scalar(&mut session, &identity);
+                    relay.open();
+                    foreign
+                });
+                let outcome = if restart {
+                    FollowSnapshot::restart(&options, &next, native, &io)
+                } else {
+                    FollowSnapshot::create(&options, &next, native, &io)
+                };
+                let foreign = controller.join().unwrap();
+                (outcome.err().expect(&case), foreign)
+            });
+            let (refusal, creates) = match window {
+                Window::BeforeRecheck => (
+                    "follow-source: existing slot or publication is never adopted".to_owned(),
+                    0,
+                ),
+                Window::BeforeCreate => (
+                    format!(
+                        "follow-source: slot {name} already exists, so this run's CREATE created nothing; it is never adopted or dropped"
+                    ),
+                    1,
+                ),
+            };
+            assert_eq!(error.message, refusal, "{case}");
+            assert_eq!(relay.creates(), creates, "{case}");
+            relay.release(&mut fixture);
+            assert!(
+                fixture
+                    .native
+                    .as_ref()
+                    .unwrap()
+                    .checked_source_slot()
+                    .unwrap()
+                    .is_none(),
+                "{case}"
+            );
+            assert_eq!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+            let retry = |fixture: &mut Fixture| {
+                let native = fixture.native.as_mut().unwrap();
+                if restart {
+                    FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io)?;
+                    FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io)
+                } else {
+                    FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+                }
+            };
+            let error = retry(&mut fixture).err().expect(&case);
+            assert_eq!(
+                error.message,
+                if restart {
+                    "follow-restart: a slot reappeared after recorded absence"
+                } else {
+                    "follow-source: existing slot or publication is never adopted"
+                },
+                "{case}"
+            );
+            assert_eq!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+            // Once the other run's slot is gone, the next start creates this run's own.
+            scalar(
+                &mut fixture.source,
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+            );
+            let snapshot =
+                retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+            assert_eq!(
+                snapshot.receipt().intent.binding.slot_name(),
+                name,
+                "{case}"
+            );
+            assert_ne!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+            snapshot.finish(&fixture.io).unwrap();
+            scalar(
+                &mut fixture.source,
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SlotKill {
+    /// The creating walsender ended and dropped its unfinished slot.
+    Absent,
+    /// The creating walsender still waits, so the slot is active.
+    Active,
+    /// This run's own CREATE persisted the slot while a frozen relay lost its reply.
+    Persisted,
+    /// This run's own CREATE persisted the slot, then failed in SaveSlotToPath with SQLSTATE 58P02.
+    PersistFailed,
+    ForeignPlugin,
+    Physical,
+    /// Foreign pgoutput slots with an option, or in a database, that this run's CREATE never uses.
+    TwoPhase,
+    Failover,
+    OtherDatabase,
+}
+
+fn scalar(connection: &mut PgConnection, sql: &str) -> String {
+    let result = connection.query(sql, &control()).unwrap();
+    assert_eq!(result.rows(), 1, "{sql}");
+    String::from_utf8(result.cell(0, 0).unwrap().unwrap_or_default().to_vec()).unwrap()
+}
+
+fn control() -> IoControl {
+    IoControl::unbounded(Arc::new(AtomicBool::new(false)))
+}
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !ready() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn pending_slot(fixture: &Fixture) -> (String, serde_json::Value) {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.options.clone.state.path.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["source_slot"]["phase"], "provisioning");
+    let intent = &manifest["source_slot"]["record"];
+    (
+        intent["binding"]["slot_name"].as_str().unwrap().to_owned(),
+        intent["nonce"].clone(),
+    )
+}
+
+/// Runs `engine` while a source transaction holds an xid, so CREATE_REPLICATION_SLOT waits, then
+/// cancels it there as a process kill would; the hold is returned still open.
+fn kill_inside_slot_creation(
+    fixture: &mut Fixture,
+    engine: impl FnOnce(&FollowOptions, &mut NativeState, &IoControl) -> Result<FollowSnapshot>,
+) -> PgConnection {
+    let mut hold = PgConnection::connect(
+        &fixture.options.clone.source,
+        crate::pg::Role::Copy,
+        &control(),
+    )
+    .unwrap();
+    hold.query("BEGIN", &control()).unwrap();
+    hold.query("SELECT pg_catalog.pg_current_xact_id()", &control())
+        .unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let io = IoControl::unbounded(Arc::clone(&cancelled));
+    let options = fixture.options.clone();
+    let info = fixture.options.clone.source.clone();
+    let native = fixture.native.as_mut().unwrap();
+    let outcome = std::thread::scope(|scope| {
+        let controller = scope.spawn(move || {
+            let mut observer = PgConnection::connect(&info, crate::pg::Role::Copy, &control()).unwrap();
+            wait_until("slot creation never waited on the held xid", || {
+                scalar(&mut observer, "SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_stat_activity a USING (pid) WHERE l.locktype='transactionid' AND NOT l.granted AND a.backend_type='walsender' AND a.datname=pg_catalog.current_database()") == "1"
+            });
+            cancelled.store(true, Ordering::Release);
+        });
+        let outcome = engine(&options, native, &io);
+        if let Err(panic) = controller.join() {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+    });
+    let error = outcome
+        .err()
+        .expect("the killed slot creation returned a snapshot");
+    assert!(
+        error.message.starts_with("source-slot-create-unknown:"),
+        "{}",
+        error.message
+    );
+    hold
+}
+
+/// Runs `engine` while a held transaction ID makes CREATE_REPLICATION_SLOT wait, and runs `act` on
+/// the controller's own session once that walsender waits; the hold ends when `act` returns.
+fn during_slot_creation<T>(
+    info: &Conninfo,
+    act: impl FnOnce(&mut PgConnection) + Send,
+    engine: impl FnOnce() -> T,
+) -> T {
+    let mut hold = PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap();
+    hold.query("BEGIN", &control()).unwrap();
+    hold.query("SELECT pg_catalog.pg_current_xact_id()", &control())
+        .unwrap();
+    let pid = hold.backend_pid().unwrap();
+    std::thread::scope(|scope| {
+        let controller = scope.spawn(move || {
+            let mut session = PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap();
+            wait_until("slot creation never waited on the held xid", || {
+                scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_stat_activity a USING (pid) WHERE l.locktype='transactionid' AND NOT l.granted AND a.backend_type='walsender' AND a.datname=pg_catalog.current_database()") == "1"
+            });
+            act(&mut session);
+            scalar(
+                &mut session,
+                &format!("SELECT pg_catalog.pg_terminate_backend({pid})::text"),
+            );
+        });
+        let outcome = engine();
+        if let Err(panic) = controller.join() {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+    })
+}
+
+fn slot_present(session: &mut PgConnection, name: &str) -> bool {
+    let literal = session.quote_literal(name).unwrap();
+    scalar(
+        session,
+        &format!("SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"),
+    ) == "1"
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_it() {
+    let extra = |session: &mut PgConnection| {
+        session
+            .query(
+                "CREATE TABLE public.extra(id integer PRIMARY KEY)",
+                &control(),
+            )
+            .unwrap();
+    };
+    let changed = "follow-source: slot snapshot table plan differs from preliminary admission";
+    // A restart's receipt stays unbound when the snapshot refuses; its retry finds the pending publication replaced.
+    let mut fixture = Fixture::new(
+        "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+    );
+    let (next, _) = record_restart(&mut fixture);
+    let info = fixture.options.clone.source.clone();
+    let (options, io) = (fixture.options.clone(), fixture.io.clone());
+    let native = fixture.native.as_mut().unwrap();
+    let error = during_slot_creation(&info, extra, || {
+        FollowSnapshot::restart(&options, &next, native, &io)
+    })
+    .err()
+    .expect("a changed snapshot inventory was admitted");
+    assert_eq!(error.message, changed);
+    let manifest = || -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(fixture.options.clone.state.path.join("manifest.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let state = manifest();
+    assert_eq!(state["source_slot"]["phase"], "confirmed");
+    let name = state["source_slot"]["record"]["intent"]["binding"]["slot_name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let publication = fixture
+        .source
+        .quote_identifier(
+            state["follow_state"]["publication"]["receipt"]["name"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(slot_present(&mut fixture.source, &name));
+    for sql in [
+        format!("DROP PUBLICATION {publication}"),
+        format!("CREATE PUBLICATION {publication} FOR TABLE ONLY public.items"),
+    ] {
+        fixture.source.query(&sql, &fixture.io).unwrap();
+    }
+    let error = FollowSnapshot::retire_unbound(
+        &fixture.options,
+        &next,
+        fixture.native.as_mut().unwrap(),
+        &fixture.io,
+    )
+    .expect_err("a replaced pending publication was accepted");
+    assert_eq!(
+        error.message,
+        "follow-restart: pending publication was replaced"
+    );
+    assert!(!slot_present(&mut fixture.source, &name));
+    assert_eq!(manifest()["source_slot"], serde_json::Value::Null);
+
+    // A first run's receipt stays unbound the same way; its retry plans the changed inventory in fresh().
+    let pair = FreshPair::new(FRESH_SEED);
+    let mut options = pair.options();
+    options.slot_name = format!("{}_slot", pair.names[0]);
+    let error = during_slot_creation(&pair.endpoints.source, extra, || {
+        crate::follow::run(options.clone(), &control())
+    })
+    .expect_err("a changed snapshot inventory was admitted");
+    assert_eq!(error.message, changed);
+    assert_eq!(fresh_state(&options)["source_slot"]["phase"], "confirmed");
+    let mut source =
+        PgConnection::connect(&pair.endpoints.source, crate::pg::Role::Copy, &control()).unwrap();
+    assert!(slot_present(&mut source, &options.slot_name));
+    options.clone.state.action = StateAction::Resume;
+    let error =
+        crate::follow::run(options.clone(), &control()).expect_err("a changed plan was admitted");
+    assert_eq!(
+        error.message,
+        "follow: preliminary plan differs from its native source intent"
+    );
+    assert!(!slot_present(&mut source, &options.slot_name));
+    assert_eq!(
+        fresh_state(&options)["source_slot"],
+        serde_json::Value::Null
+    );
+}
+
+/// The owned cluster's data directory, required to be the harness's own.
+fn owned_data_directory(source: &mut PgConnection) -> PathBuf {
+    let context = harness_context();
+    let root = PathBuf::from(context["root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+        context["token"].as_str().unwrap()
+    );
+    let expected = root.join("data").canonicalize().unwrap();
+    let actual = PathBuf::from(scalar(
+        source,
+        "SELECT pg_catalog.current_setting('data_directory')",
+    ))
+    .canonicalize()
+    .unwrap();
+    assert_eq!(
+        actual, expected,
+        "the slot file belongs to the exact owned cluster"
+    );
+    expected
+}
+
+/// Lets this run's own CREATE_REPLICATION_SLOT persist its slot while the engine loses the outcome:
+/// through a frozen relay, as a stopped process would, or by a server error after the persist.
+/// Returns the persisted slot's confirmed_flush_lsn.
+fn lose_own_create(
+    fixture: &mut Fixture,
+    kill: SlotKill,
+    engine: impl FnOnce(&FollowOptions, &mut NativeState, &IoControl) -> Result<FollowSnapshot>,
+) -> String {
+    let relay = (kill == SlotKill::Persisted).then(|| Relay::start(fixture));
+    let data = owned_data_directory(&mut fixture.source);
+    let path = fixture.options.clone.state.path.join("manifest.json");
+    let info = relay.as_ref().map_or_else(
+        || fixture.options.clone.source.clone(),
+        |r| r.direct.clone(),
+    );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let io = IoControl::unbounded(Arc::clone(&cancelled));
+    let options = fixture.options.clone();
+    let native = fixture.native.as_mut().unwrap();
+    let outcome = during_slot_creation(
+        &info,
+        |_| match &relay {
+            Some(relay) => {
+                relay.freeze();
+                cancelled.store(true, Ordering::Release);
+            }
+            None => {
+                let manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let name = manifest["source_slot"]["record"]["binding"]["slot_name"]
+                    .as_str()
+                    .unwrap();
+                // SaveSlotToPath opens state.tmp with O_EXCL after the slot became persistent.
+                std::fs::File::create(data.join("pg_replslot").join(name).join("state.tmp"))
+                    .unwrap();
+            }
+        },
+        || engine(&options, native, &io),
+    );
+    let error = outcome
+        .err()
+        .expect("a lost CREATE outcome returned a snapshot");
+    assert!(
+        error.message.starts_with("source-slot-create-unknown:"),
+        "{}",
+        error.message
+    );
+    let (name, _) = pending_slot(fixture);
+    let literal = fixture.source.quote_literal(&name).unwrap();
+    let state = format!(
+        "SELECT coalesce((SELECT temporary||' '||active FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+    );
+    wait_until("this run's CREATE never persisted its slot", || {
+        scalar(&mut fixture.source, &state) == "false false"
+    });
+    if let Some(relay) = relay {
+        relay.release(fixture);
+    }
+    scalar(
+        &mut fixture.source,
+        &format!(
+            "SELECT confirmed_flush_lsn::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+        ),
+    )
+}
+
+/// Leaves the recorded slot in the state `kill` names and returns the hold, if still open.
+fn shape_pending_slot(
+    fixture: &mut Fixture,
+    name: &str,
+    kill: SlotKill,
+    hold: PgConnection,
+) -> Option<PgConnection> {
+    let literal = fixture.source.quote_literal(name).unwrap();
+    let state = format!(
+        "SELECT coalesce((SELECT CASE WHEN active THEN 'active' ELSE 'inactive' END FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+    );
+    assert_eq!(scalar(&mut fixture.source, &state), "active");
+    if kill == SlotKill::Active {
+        return Some(hold);
+    }
+    // The terminated walsender drops its unfinished slot deterministically.
+    scalar(
+        &mut fixture.source,
+        &format!(
+            "SELECT pg_catalog.pg_terminate_backend(active_pid)::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+        ),
+    );
+    wait_until("the unfinished slot outlived its walsender", || {
+        scalar(&mut fixture.source, &state) == "absent"
+    });
+    drop(hold);
+    let create = match kill {
+        SlotKill::Persisted | SlotKill::PersistFailed => {
+            unreachable!("lose_own_create persists this run's own slot")
+        }
+        SlotKill::ForeignPlugin => {
+            format!("pg_catalog.pg_create_logical_replication_slot({literal},'test_decoding')")
+        }
+        SlotKill::Physical => format!("pg_catalog.pg_create_physical_replication_slot({literal})"),
+        SlotKill::TwoPhase => {
+            format!(
+                "pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput',false,true)"
+            )
+        }
+        SlotKill::Failover => format!(
+            "pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput',false,false,true)"
+        ),
+        SlotKill::OtherDatabase => {
+            format!("pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')")
+        }
+        SlotKill::Absent | SlotKill::Active => return None,
+    };
+    let session = if kill == SlotKill::OtherDatabase {
+        &mut fixture.admin
+    } else {
+        &mut fixture.source
+    };
+    scalar(session, &format!("SELECT ({create}).slot_name::text"));
+    assert_eq!(scalar(&mut fixture.source, &state), "inactive");
+    None
+}
+
+/// Internally consistent target ownership; the source snapshot under test never reads the target.
+fn synthetic_handoff(
+    plan: &ClonePlan,
+) -> (
+    Vec<crate::contracts::OwnedObject>,
+    Vec<crate::contracts::OwnedCopyTable>,
+) {
+    plan.tables
+        .iter()
+        .zip(70_000..)
+        .map(|(table, target_oid)| {
+            (
+                crate::contracts::OwnedObject {
+                    class_oid: 1259,
+                    object_oid: target_oid,
+                    object_sub_id: 0,
+                    namespace_oid: Some(2200),
+                    namespace_name: Some(table.name.schema.clone()),
+                    name: table.name.table.clone(),
+                    kind: "r".into(),
+                    owner_oid: 10,
+                },
+                crate::contracts::OwnedCopyTable {
+                    target_oid,
+                    target_namespace_oid: 2200,
+                    target_owner_oid: 10,
+                    generation: plan.generation,
+                    table: table.clone(),
+                },
+            )
+        })
+        .unzip()
+}
+
+fn snapshot_rows_and_objects(snapshot: &mut FollowSnapshot) -> String {
+    scalar(
+        snapshot.snapshot_mut().connection().unwrap(),
+        "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+    )
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again() {
+    let kills = [
+        SlotKill::Absent,
+        SlotKill::Active,
+        SlotKill::Persisted,
+        SlotKill::PersistFailed,
+        SlotKill::ForeignPlugin,
+        SlotKill::Physical,
+        SlotKill::TwoPhase,
+        SlotKill::Failover,
+        SlotKill::OtherDatabase,
+    ];
+    // Slot failover exists from PostgreSQL 17 on.
+    let failover = live_major() >= 17;
+    for restart in [false, true] {
+        for kill in kills {
+            if kill == SlotKill::Failover && !failover {
+                continue;
+            }
+            let case = format!("restart={restart} kill={kill:?}");
+            let mut fixture = Fixture::new(
+                "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+            );
+            let expected = scalar(
+                &mut fixture.source,
+                "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+            );
+            assert!(expected.starts_with("300/300 2/"), "{expected}");
+            let mut plan = fixture.plan.clone();
+            let mut retired = Vec::new();
+            if restart {
+                let mut snapshot = fixture.create();
+                let binding = snapshot.binding().clone();
+                let ticket = snapshot.snapshot_mut().ticket().clone();
+                snapshot.finish(&fixture.io).unwrap();
+                retired.push(binding.slot.intent.binding.slot_name().to_owned());
+                let native = fixture.native.as_mut().unwrap();
+                native.bind_follow(&plan, &ticket, &binding).unwrap();
+                native.begin_pre_data().unwrap();
+                let (objects, tables) = synthetic_handoff(&plan);
+                native.confirm_pre_data(&plan, objects, tables).unwrap();
+                let recorded = native.begin_follow_restart(&binding, &plan).unwrap();
+                plan.generation = recorded.next_generation;
+            }
+            let next = plan.clone();
+            let engine = |options: &FollowOptions, native: &mut NativeState, io: &IoControl| {
+                if restart {
+                    FollowSnapshot::restart(options, &next, native, io)
+                } else {
+                    FollowSnapshot::create(options, &next, native, io)
+                }
+            };
+            let own = matches!(kill, SlotKill::Persisted | SlotKill::PersistFailed);
+            let (persisted, mut hold) = if own {
+                (Some(lose_own_create(&mut fixture, kill, engine)), None)
+            } else {
+                let hold = kill_inside_slot_creation(&mut fixture, engine);
+                let (name, _) = pending_slot(&fixture);
+                (None, shape_pending_slot(&mut fixture, &name, kill, hold))
+            };
+            let (name, nonce) = pending_slot(&fixture);
+            let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+            let manifest = || std::fs::read(&manifest_path).unwrap();
+            let literal = fixture.source.quote_literal(&name).unwrap();
+            let retry = |fixture: &mut Fixture| {
+                let native = fixture.native.as_mut().unwrap();
+                if restart {
+                    FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io)?;
+                    FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io)
+                } else {
+                    FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+                }
+            };
+            if kill != SlotKill::Absent && !own {
+                let before = manifest();
+                let slot = scalar(
+                    &mut fixture.source,
+                    &format!(
+                        "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(datoid::text,'-')||' '||two_phase||' '||coalesce(pg_catalog.to_jsonb(s)->>'failover','-')||' '||coalesce(active_pid::text,'-')||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(catalog_xmin::text,'-') FROM pg_catalog.pg_replication_slots s WHERE slot_name={literal}"
+                    ),
+                );
+                let error = retry(&mut fixture).err().expect(&case);
+                let refusal = if kill == SlotKill::Active {
+                    format!("follow-source: pending source slot {name} is active in backend ")
+                } else {
+                    format!(
+                        "follow-source: slot {name} differs from this run's unbound pgoutput creation"
+                    )
+                };
+                assert!(
+                    error.message.starts_with(&refusal),
+                    "{case}: {}",
+                    error.message
+                );
+                assert_eq!(manifest(), before, "{case}");
+                assert_eq!(
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(datoid::text,'-')||' '||two_phase||' '||coalesce(pg_catalog.to_jsonb(s)->>'failover','-')||' '||coalesce(active_pid::text,'-')||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(catalog_xmin::text,'-') FROM pg_catalog.pg_replication_slots s WHERE slot_name={literal}"
+                        )
+                    ),
+                    slot,
+                    "{case}"
+                );
+                // Clear the hazard as an operator would, by exact name, outside the engine.
+                if let Some(open) = hold.take() {
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT pg_catalog.pg_terminate_backend(active_pid)::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                        ),
+                    );
+                    drop(open);
+                } else {
+                    scalar(
+                        &mut fixture.source,
+                        &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+                    );
+                }
+                wait_until("the recorded slot remained", || {
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                        ),
+                    ) == "0"
+                });
+            }
+            let mut snapshot =
+                retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+            let receipt = snapshot.receipt().clone();
+            assert_eq!(receipt.intent.binding.slot_name(), name, "{case}");
+            assert_eq!(
+                snapshot.binding().copy_generation,
+                next.generation,
+                "{case}"
+            );
+            for sql in [
+                "INSERT INTO public.items VALUES(301,'after')",
+                "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('01','hex'))",
+            ] {
+                fixture.source.query(sql, &fixture.io).unwrap();
+            }
+            assert_eq!(snapshot_rows_and_objects(&mut snapshot), expected, "{case}");
+            let point = format!(
+                "{:X}/{:X}",
+                receipt.consistent_point.0 >> 32,
+                receipt.consistent_point.0 as u32
+            );
+            assert_eq!(
+                scalar(
+                    &mut fixture.source,
+                    "SELECT string_agg(slot_name||' '||slot_type||' '||plugin||' '||temporary||' '||confirmed_flush_lsn,',') FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())"
+                ),
+                format!("{name} logical pgoutput false {point}"),
+                "{case}"
+            );
+            for old in &retired {
+                assert_ne!(old, &name, "{case}");
+            }
+            // The slot this run's CREATE persisted is dropped, never adopted: the new one starts later.
+            if let Some(persisted) = &persisted {
+                let (high, low) = persisted.split_once('/').unwrap();
+                let old = (u64::from_str_radix(high, 16).unwrap() << 32)
+                    | u64::from_str_radix(low, 16).unwrap();
+                assert!(receipt.consistent_point.0 > old, "{case}: {persisted}");
+            }
+            let manifest: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
+            assert_eq!(manifest["source_slot"]["phase"], "confirmed", "{case}");
+            assert_ne!(
+                manifest["source_slot"]["record"]["intent"]["nonce"], nonce,
+                "{case}"
+            );
+            snapshot.finish(&fixture.io).unwrap();
+            fixture
+                .source
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})"),
+                    &fixture.io,
+                )
+                .unwrap();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PublicationKill {
+    /// The intent was recorded and its CREATE never committed.
+    IntentAbsent,
+    /// Another session created a publication under the intent's name afterwards.
+    IntentForeign,
+    /// The receipt was recorded and COMMIT never reached the server.
+    ReceiptRolledBack,
+    /// The receipt was recorded and COMMIT succeeded, but its reply was lost.
+    ReceiptCommitted,
+    /// The receipt was recorded and a publication of another OID took its name.
+    ReceiptForeign,
+    /// As `ReceiptCommitted`, but the publication's owner changed afterwards.
+    ReceiptOwner,
+    /// As `ReceiptCommitted`, but another session replaces it while the retry's DROP waits.
+    ReplacedDuringRemoval,
+    /// The engine's own COMMIT reached the server only after the engine stopped waiting for its reply.
+    OwnCommitLost,
+}
+
+/// Reopens native state as the next process does after a kill.
+fn reopen_native(fixture: &mut Fixture) {
+    drop(fixture.native.take());
+    fixture.options.clone.state.action = StateAction::Resume;
+    fixture.native = Some(
+        crate::state::open_follow(
+            &fixture.options.clone.state,
+            None,
+            fixture.options.origin_name.as_deref(),
+            &fixture.io,
+        )
+        .unwrap(),
+    );
+}
+
+/// Runs `engine` through a relay that holds its publication COMMIT, cancels the engine there as a kill
+/// would, then lets that COMMIT complete with no one left to read its reply. Returns the receipt's OID.
+fn lose_own_publication_commit(
+    fixture: &mut Fixture,
+    engine: impl FnOnce(&FollowOptions, &mut NativeState, &IoControl) -> Result<FollowSnapshot>,
+) -> Vec<String> {
+    let relay = Relay::start(fixture);
+    relay.hold(b"CREATE PUBLICATION");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let io = IoControl::unbounded(Arc::clone(&cancelled));
+    let options = fixture.options.clone();
+    let native = fixture.native.as_mut().unwrap();
+    let outcome = std::thread::scope(|scope| {
+        let controller = scope.spawn(|| {
+            wait_until("the publication CREATE was never held", || {
+                relay.hits() == 1
+            });
+            relay.hold(b"COMMIT");
+            wait_until("the publication COMMIT was never held", || {
+                relay.hits() == 2
+            });
+            cancelled.store(true, Ordering::Release);
+        });
+        let outcome = engine(&options, native, &io);
+        if let Err(panic) = controller.join() {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+    });
+    let error = outcome
+        .err()
+        .expect("a lost publication COMMIT returned a snapshot");
+    assert_eq!(
+        error.message,
+        "follow-source-create-unknown: publication COMMIT was not confirmed; the next start drops it by its recorded OID and owner, then creates it again"
+    );
+    relay.open();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.options.clone.state.path.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let publication = &manifest["follow_state"]["publication"];
+    assert_eq!(publication["phase"], "created");
+    let oid = publication["receipt"]["oid"].to_string();
+    wait_until("the held publication COMMIT never completed", || {
+        scalar(
+            &mut fixture.source,
+            &format!("SELECT count(*) FROM pg_catalog.pg_publication WHERE oid={oid}"),
+        ) == "1"
+    });
+    relay.release(fixture);
+    reopen_native(fixture);
+    vec![oid]
+}
+
+/// Leaves this run's publication CREATE where `kill` names and returns every OID it saw under `name`.
+fn interrupt_publication_create(
+    fixture: &mut Fixture,
+    name: &str,
+    kill: PublicationKill,
+) -> Vec<String> {
+    let native = fixture.native.as_mut().unwrap();
+    let intent = native.begin_publication(name).unwrap();
+    let mut seen = Vec::new();
+    let create = format!(
+        "CREATE PUBLICATION {name} FOR TABLE ONLY public.items WITH(publish_via_partition_root=false)"
+    );
+    if kill != PublicationKill::IntentAbsent && kill != PublicationKill::IntentForeign {
+        catalog::command(&mut fixture.source, "BEGIN", "BEGIN", &fixture.io).unwrap();
+        catalog::command(
+            &mut fixture.source,
+            &create,
+            "CREATE PUBLICATION",
+            &fixture.io,
+        )
+        .unwrap();
+        let receipt =
+            catalog::follow::publication_receipt(&mut fixture.source, name, &fixture.io).unwrap();
+        native
+            .record_publication_created(&intent, &receipt)
+            .unwrap();
+        seen.push(receipt.oid.to_string());
+        if matches!(
+            kill,
+            PublicationKill::ReceiptCommitted
+                | PublicationKill::ReplacedDuringRemoval
+                | PublicationKill::ReceiptOwner
+        ) {
+            assert!(matches!(
+                fixture.source.commit_observed(&fixture.io).unwrap(),
+                CommitObservation::Committed
+            ));
+        } else {
+            catalog::command(&mut fixture.source, "ROLLBACK", "ROLLBACK", &fixture.io).unwrap();
+        }
+    }
+    if kill == PublicationKill::ReceiptOwner {
+        fixture
+            .source
+            .query(
+                &format!("ALTER PUBLICATION {name} OWNER TO e1_source"),
+                &fixture.io,
+            )
+            .unwrap();
+    }
+    if matches!(
+        kill,
+        PublicationKill::IntentForeign | PublicationKill::ReceiptForeign
+    ) {
+        fixture.source.query(&create, &fixture.io).unwrap();
+        seen.push(scalar(
+            &mut fixture.source,
+            &format!("SELECT oid::text FROM pg_catalog.pg_publication WHERE pubname='{name}'"),
+        ));
+    }
+    reopen_native(fixture);
+    seen
+}
+
+/// Runs `engine` while another session holds the lock of publication `name`; once the engine's DROP
+/// waits on it, that session replaces the publication under the same name and commits. Returns the
+/// engine's outcome and the replacement's OID.
+fn replace_publication_during_drop<T>(
+    info: &Conninfo,
+    name: &str,
+    engine: impl FnOnce() -> T,
+) -> (T, String) {
+    let (ready, held) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let controller = scope.spawn(move || {
+            let connect = || PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap();
+            let (mut holder, mut observer) = (connect(), connect());
+            holder.query("BEGIN", &control()).unwrap();
+            // A comment holds the publication's object lock and no table lock, so only the engine's DROP waits.
+            holder.query(&format!("COMMENT ON PUBLICATION {name} IS 'held'"), &control()).unwrap();
+            ready.send(()).unwrap();
+            wait_until("the engine's DROP never waited on the publication lock", || {
+                scalar(&mut observer, "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND NOT granted") == "1"
+            });
+            holder.query(&format!("DROP PUBLICATION {name}"), &control()).unwrap();
+            holder.query(&format!("CREATE PUBLICATION {name} FOR TABLE ONLY public.items"), &control()).unwrap();
+            let replaced = scalar(&mut holder, &format!("SELECT oid::text FROM pg_catalog.pg_publication WHERE pubname='{name}'"));
+            holder.query("COMMIT", &control()).unwrap();
+            replaced
+        });
+        if held.recv().is_err() {
+            std::panic::resume_unwind(controller.join().unwrap_err());
+        }
+        let outcome = engine();
+        let replaced = controller
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (outcome, replaced)
+    })
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted() {
+    let kills = [
+        PublicationKill::IntentAbsent,
+        PublicationKill::IntentForeign,
+        PublicationKill::ReceiptRolledBack,
+        PublicationKill::ReceiptCommitted,
+        PublicationKill::ReceiptForeign,
+        PublicationKill::ReceiptOwner,
+        PublicationKill::ReplacedDuringRemoval,
+        PublicationKill::OwnCommitLost,
+    ];
+    for restart in [false, true] {
+        for kill in kills {
+            let case = format!("restart={restart} kill={kill:?}");
+            let mut fixture = Fixture::new(
+                "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+            );
+            let expected = scalar(
+                &mut fixture.source,
+                "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+            );
+            let mut next = fixture.plan.clone();
+            if restart {
+                let mut snapshot = fixture.create();
+                let binding = snapshot.binding().clone();
+                let ticket = snapshot.snapshot_mut().ticket().clone();
+                snapshot.finish(&fixture.io).unwrap();
+                let native = fixture.native.as_mut().unwrap();
+                native.bind_follow(&next, &ticket, &binding).unwrap();
+                native.begin_pre_data().unwrap();
+                let (objects, tables) = synthetic_handoff(&next);
+                native.confirm_pre_data(&next, objects, tables).unwrap();
+                let recorded = native.begin_follow_restart(&binding, &next).unwrap();
+                next.generation = recorded.next_generation;
+                // The restart removes both old resources by their receipts before its own CREATE.
+                let slot = fixture
+                    .source
+                    .quote_literal(binding.slot.intent.binding.slot_name())
+                    .unwrap();
+                scalar(
+                    &mut fixture.source,
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})::text"),
+                );
+                native.confirm_follow_slot_absent(&recorded).unwrap();
+                fixture
+                    .source
+                    .query(
+                        &format!("DROP PUBLICATION {}", binding.publication.name),
+                        &fixture.io,
+                    )
+                    .unwrap();
+                native.confirm_follow_publication_absent(&recorded).unwrap();
+            } else {
+                fixture
+                    .native
+                    .as_mut()
+                    .unwrap()
+                    .prepare_follow_source(&next)
+                    .unwrap();
+            }
+            let run = fixture.native.as_ref().unwrap().identity().run;
+            let name = catalog::follow::resource_name("publication", run, next.generation).unwrap();
+            let seen = if kill == PublicationKill::OwnCommitLost {
+                lose_own_publication_commit(&mut fixture, |options, native, io| {
+                    if restart {
+                        FollowSnapshot::restart(options, &next, native, io)
+                    } else {
+                        FollowSnapshot::create(options, &next, native, io)
+                    }
+                })
+            } else {
+                interrupt_publication_create(&mut fixture, &name, kill)
+            };
+            let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+            let manifest = || std::fs::read(&manifest_path).unwrap();
+            let before: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
+            let pending = before["follow_state"]["publication"].clone();
+            assert_ne!(pending["phase"], "confirmed", "{case}");
+            let retry = |fixture: &mut Fixture| {
+                let native = fixture.native.as_mut().unwrap();
+                if restart {
+                    FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io)?;
+                    FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io)
+                } else {
+                    FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+                }
+            };
+            let publications = |fixture: &mut Fixture| {
+                scalar(
+                    &mut fixture.source,
+                    "SELECT coalesce(string_agg(pubname||' '||oid,',' ORDER BY pubname),'none') FROM pg_catalog.pg_publication",
+                )
+            };
+            if kill == PublicationKill::ReplacedDuringRemoval {
+                let bytes = manifest();
+                let info = fixture.options.clone.source.clone();
+                let (outcome, replaced) =
+                    replace_publication_during_drop(&info, &name, || retry(&mut fixture));
+                let error = outcome.err().expect(&case);
+                assert!(
+                    error.message.starts_with(&format!(
+                        "follow-source: publication {name} changed identity during its removal"
+                    )),
+                    "{case}: {}",
+                    error.message
+                );
+                assert_ne!(replaced, seen[0], "{case}");
+                assert_eq!(manifest(), bytes, "{case}");
+                assert_eq!(
+                    publications(&mut fixture),
+                    format!("{name} {replaced}"),
+                    "{case}"
+                );
+                fixture
+                    .source
+                    .query(&format!("DROP PUBLICATION {name}"), &fixture.io)
+                    .unwrap();
+                reopen_native(&mut fixture);
+            }
+            if matches!(
+                kill,
+                PublicationKill::IntentForeign
+                    | PublicationKill::ReceiptForeign
+                    | PublicationKill::ReceiptOwner
+            ) {
+                let foreign = publications(&mut fixture);
+                let bytes = manifest();
+                let error = retry(&mut fixture).err().expect(&case);
+                let refusal = if kill == PublicationKill::IntentForeign {
+                    format!(
+                        "follow-source: publication {name} (OID {}) exists, but this run's CREATE under that name never committed; it is not proven this run's and is never adopted or dropped",
+                        seen[0]
+                    )
+                } else {
+                    let owner = scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT pubowner::text FROM pg_catalog.pg_publication WHERE pubname='{name}'"
+                        ),
+                    );
+                    format!(
+                        "follow-source: publication {name} (OID {}, owner {owner}) is not this run's unconfirmed creation (OID {}, owner {})",
+                        seen.last().unwrap(),
+                        seen[0],
+                        pending["receipt"]["owner_oid"]
+                    )
+                };
+                assert!(
+                    error.message.starts_with(&refusal),
+                    "{case}: {}",
+                    error.message
+                );
+                assert_eq!(manifest(), bytes, "{case}");
+                assert_eq!(publications(&mut fixture), foreign, "{case}");
+                assert_eq!(
+                    source_resources(&mut fixture).1.as_deref(),
+                    Some(b"0".as_slice())
+                );
+                // Clear the hazard as an operator would, by exact name, outside the engine.
+                fixture
+                    .source
+                    .query(&format!("DROP PUBLICATION {name}"), &fixture.io)
+                    .unwrap();
+                reopen_native(&mut fixture);
+            }
+            let snapshot =
+                retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+            let mut snapshot = snapshot;
+            let publication = snapshot.binding().publication.clone();
+            assert_eq!(publication.name, name, "{case}");
+            for old in &seen {
+                assert_ne!(&publication.oid.to_string(), old, "{case}: adopted");
+            }
+            assert_eq!(
+                publications(&mut fixture),
+                format!("{name} {}", publication.oid),
+                "{case}"
+            );
+            for sql in [
+                "INSERT INTO public.items VALUES(301,'after')",
+                "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('01','hex'))",
+            ] {
+                fixture.source.query(sql, &fixture.io).unwrap();
+            }
+            assert_eq!(snapshot_rows_and_objects(&mut snapshot), expected, "{case}");
+            let after: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
+            assert_eq!(after["follow_state"]["publication"]["phase"], "confirmed");
+            assert_ne!(
+                after["follow_state"]["publication"]["intent"]["nonce"], pending["intent"]["nonce"],
+                "{case}"
+            );
+            assert_eq!(
+                source_resources(&mut fixture).1.as_deref(),
+                Some(b"1".as_slice())
+            );
+            let slot = fixture
+                .source
+                .quote_literal(snapshot.receipt().intent.binding.slot_name())
+                .unwrap();
+            snapshot.finish(&fixture.io).unwrap();
+            fixture
+                .source
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})"),
+                    &fixture.io,
+                )
+                .unwrap();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RecordedPublication {
+    /// A restart removes the bound generation's publication by its receipt.
+    Restart,
+    /// A restart retires the next generation's confirmed publication before its slot existed.
+    Retire,
+    /// Cleanup removes the bound publication.
+    Cleanup,
+    /// The shared removal itself, given a receipt.
+    Removal,
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_recorded_publication_replaced_during_its_removal_is_refused_and_kept() {
+    use RecordedPublication::*;
+    for site in [Restart, Retire, Cleanup, Removal] {
+        let case = format!("{site:?}");
+        let mut fixture = Fixture::new(
+            "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+        );
+        let info = fixture.options.clone.source.clone();
+        let (options, io) = (fixture.options.clone(), fixture.io.clone());
+        let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+        let manifest = || std::fs::read(&manifest_path).unwrap();
+        let publications = |fixture: &mut Fixture| {
+            scalar(
+                &mut fixture.source,
+                "SELECT coalesce(string_agg(pubname||' '||oid,',' ORDER BY pubname),'none') FROM pg_catalog.pg_publication",
+            )
+        };
+        let refusal = |context: &str, name: &str| {
+            format!(
+                "{context}: publication {name} changed identity during its removal; it is never adopted or dropped"
+            )
+        };
+        let (error, expected, recorded, replaced) = match site {
+            Restart => {
+                let (next, _) = record_restart(&mut fixture);
+                let native = fixture.native.as_mut().unwrap();
+                let recorded = native
+                    .checked_follow_restart()
+                    .unwrap()
+                    .unwrap()
+                    .previous
+                    .publication;
+                let (outcome, replaced) =
+                    replace_publication_during_drop(&info, &recorded.name, || {
+                        FollowSnapshot::restart(&options, &next, native, &io)
+                    });
+                let restart = native.checked_follow_restart().unwrap().unwrap();
+                assert!(restart.slot_absent && !restart.publication_absent, "{case}");
+                let expected = refusal("follow-restart", &recorded.name);
+                (outcome.err().expect(&case), expected, recorded, replaced)
+            }
+            Retire => {
+                let (next, slot) = record_restart(&mut fixture);
+                let native = fixture.native.as_mut().unwrap();
+                let restart = native.checked_follow_restart().unwrap().unwrap();
+                // The restart removed both old resources by their receipts, then confirmed its own publication.
+                let slot = fixture.source.quote_literal(&slot).unwrap();
+                scalar(
+                    &mut fixture.source,
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})::text"),
+                );
+                native.confirm_follow_slot_absent(&restart).unwrap();
+                fixture
+                    .source
+                    .query(
+                        &format!("DROP PUBLICATION {}", restart.previous.publication.name),
+                        &io,
+                    )
+                    .unwrap();
+                native.confirm_follow_publication_absent(&restart).unwrap();
+                let name = catalog::follow::resource_name(
+                    "publication",
+                    native.identity().run,
+                    next.generation,
+                )
+                .unwrap();
+                let intent = native.begin_publication(&name).unwrap();
+                fixture
+                    .source
+                    .query(
+                        &format!("CREATE PUBLICATION {name} FOR TABLE ONLY public.items"),
+                        &io,
+                    )
+                    .unwrap();
+                let recorded =
+                    catalog::follow::publication_receipt(&mut fixture.source, &name, &io).unwrap();
+                native
+                    .record_publication_created(&intent, &recorded)
+                    .unwrap();
+                native.confirm_publication(&intent, &recorded).unwrap();
+                let bytes = manifest();
+                let (outcome, replaced) = replace_publication_during_drop(&info, &name, || {
+                    FollowSnapshot::retire_unbound(&options, &next, native, &io)
+                });
+                assert_eq!(manifest(), bytes, "{case}");
+                let expected = refusal("follow-restart", &name);
+                (outcome.expect_err(&case), expected, recorded, replaced)
+            }
+            Cleanup => {
+                let snapshot = fixture.create();
+                let binding = snapshot.binding().clone();
+                snapshot.finish(&fixture.io).unwrap();
+                let plan = fixture.plan.clone();
+                let source = &mut fixture.source;
+                let (outcome, replaced) =
+                    replace_publication_during_drop(&info, &binding.publication.name, || {
+                        catalog::follow::remove_follow_publication(
+                            source, &plan, &binding, false, &io,
+                        )
+                    });
+                let expected =
+                    "cleanup-source: publication was replaced; preserve it for manual inspection"
+                        .to_owned();
+                (
+                    outcome.expect_err(&case),
+                    expected,
+                    binding.publication,
+                    replaced,
+                )
+            }
+            Removal => {
+                let name = format!("{}_removal", fixture.database);
+                fixture
+                    .source
+                    .query(
+                        &format!("CREATE PUBLICATION {name} FOR TABLE ONLY public.items"),
+                        &io,
+                    )
+                    .unwrap();
+                let recorded =
+                    catalog::follow::publication_receipt(&mut fixture.source, &name, &io).unwrap();
+                let present = publications(&mut fixture);
+                let (oid, owner) = (recorded.oid, recorded.owner_oid);
+                for other in [
+                    crate::contracts::PublicationReceipt {
+                        owner_oid: owner + 1,
+                        ..recorded.clone()
+                    },
+                    crate::contracts::PublicationReceipt {
+                        oid: oid + 1,
+                        ..recorded.clone()
+                    },
+                ] {
+                    let error = catalog::follow::drop_recorded_publication(
+                        &mut fixture.source,
+                        &other,
+                        "removal",
+                        "unknown",
+                        &io,
+                    )
+                    .expect_err("a publication of another identity was dropped");
+                    assert_eq!(
+                        error.message,
+                        format!(
+                            "removal: publication {name} (OID {oid}, owner {owner}) is not the recorded one (OID {}, owner {}); it is never adopted or dropped",
+                            other.oid, other.owner_oid
+                        )
+                    );
+                    assert_eq!(
+                        fixture.source.transaction_status().unwrap(),
+                        TransactionStatus::Idle
+                    );
+                    assert_eq!(publications(&mut fixture), present);
+                }
+                let source = &mut fixture.source;
+                let (outcome, replaced) = replace_publication_during_drop(&info, &name, || {
+                    catalog::follow::drop_recorded_publication(
+                        source, &recorded, "removal", "unknown", &io,
+                    )
+                });
+                assert_eq!(
+                    fixture.source.transaction_status().unwrap(),
+                    TransactionStatus::Idle
+                );
+                (
+                    outcome.expect_err(&case),
+                    refusal("removal", &name),
+                    recorded,
+                    replaced,
+                )
+            }
+        };
+        assert_eq!(error.message, expected, "{case}");
+        assert_ne!(replaced, recorded.oid.to_string(), "{case}");
+        assert_eq!(
+            publications(&mut fixture),
+            format!("{} {replaced}", recorded.name),
+            "{case}"
+        );
+        if let Removal = site {
+            let replacement =
+                catalog::follow::publication_receipt(&mut fixture.source, &recorded.name, &io)
+                    .unwrap();
+            for dropped in [true, false] {
+                assert_eq!(
+                    catalog::follow::drop_recorded_publication(
+                        &mut fixture.source,
+                        &replacement,
+                        "removal",
+                        "unknown",
+                        &io
+                    )
+                    .unwrap(),
+                    dropped
+                );
+                assert_eq!(
+                    fixture.source.transaction_status().unwrap(),
+                    TransactionStatus::Idle
+                );
+                assert_eq!(publications(&mut fixture), "none");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReceiptKill {
+    /// The slot persisted at its recorded consistent point after the exporter ended.
+    Persisted,
+    /// Someone removed the slot after the receipt.
+    Absent,
+    /// A pgoutput slot under the name sits at another consistent point.
+    Moved,
+    /// A slot of another plugin took the name.
+    ForeignPlugin,
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adopted() {
+    for kill in [
+        ReceiptKill::Persisted,
+        ReceiptKill::Absent,
+        ReceiptKill::Moved,
+        ReceiptKill::ForeignPlugin,
+    ] {
+        let case = format!("kill={kill:?}");
+        let mut fixture = Fixture::new(
+            "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+        );
+        let expected = scalar(
+            &mut fixture.source,
+            "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+        );
+        // The first run records its slot receipt and dies before it binds the snapshot.
+        let snapshot = fixture.create();
+        let old = snapshot.receipt().clone();
+        drop(snapshot);
+        let name = old.intent.binding.slot_name().to_owned();
+        let literal = fixture.source.quote_literal(&name).unwrap();
+        let shape = format!(
+            "SELECT coalesce((SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(confirmed_flush_lsn::text,'-')||' '||active FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+        );
+        let point = format!(
+            "{:X}/{:X}",
+            old.consistent_point.0 >> 32,
+            old.consistent_point.0 as u32
+        );
+        wait_until("the exporter kept the recorded slot active", || {
+            scalar(&mut fixture.source, &shape) == format!("logical pgoutput {point} false")
+        });
+        match kill {
+            ReceiptKill::Persisted => {}
+            ReceiptKill::Absent | ReceiptKill::Moved | ReceiptKill::ForeignPlugin => {
+                scalar(
+                    &mut fixture.source,
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+                );
+                if kill != ReceiptKill::Absent {
+                    // WAL moves on, so a recreated slot cannot sit at the recorded point.
+                    fixture
+                        .source
+                        .query("INSERT INTO public.items VALUES(0,'moved')", &fixture.io)
+                        .unwrap();
+                    fixture
+                        .source
+                        .query("DELETE FROM public.items WHERE id=0", &fixture.io)
+                        .unwrap();
+                    let plugin = if kill == ReceiptKill::Moved {
+                        "pgoutput"
+                    } else {
+                        "test_decoding"
+                    };
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT (pg_catalog.pg_create_logical_replication_slot({literal},'{plugin}')).slot_name::text"
+                        ),
+                    );
+                }
+            }
+        }
+        reopen_native(&mut fixture);
+        let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+        let manifest = || std::fs::read(&manifest_path).unwrap();
+        let retry = |fixture: &mut Fixture| {
+            FollowSnapshot::create(
+                &fixture.options,
+                &fixture.plan,
+                fixture.native.as_mut().unwrap(),
+                &fixture.io,
+            )
+        };
+        if matches!(kill, ReceiptKill::Moved | ReceiptKill::ForeignPlugin) {
+            let (bytes, slot) = (manifest(), scalar(&mut fixture.source, &shape));
+            let error = retry(&mut fixture).err().expect(&case);
+            assert!(
+                error.message.starts_with(&format!(
+                    "follow-source: slot {name} differs from this run's unbound pgoutput creation"
+                )),
+                "{case}: {}",
+                error.message
+            );
+            assert_eq!(manifest(), bytes, "{case}");
+            assert_eq!(scalar(&mut fixture.source, &shape), slot, "{case}");
+            scalar(
+                &mut fixture.source,
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+            );
+            reopen_native(&mut fixture);
+        }
+        let mut snapshot =
+            retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+        let receipt = snapshot.receipt().clone();
+        assert_eq!(receipt.intent.binding.slot_name(), name, "{case}");
+        assert_ne!(receipt.intent.nonce, old.intent.nonce, "{case}");
+        assert!(
+            receipt.consistent_point.0 > old.consistent_point.0,
+            "{case}: adopted"
+        );
+        assert_ne!(receipt.snapshot_token, old.snapshot_token, "{case}");
+        for sql in [
+            "INSERT INTO public.items VALUES(301,'after')",
+            "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('01','hex'))",
+        ] {
+            fixture.source.query(sql, &fixture.io).unwrap();
+        }
+        assert_eq!(snapshot_rows_and_objects(&mut snapshot), expected, "{case}");
+        let point = format!(
+            "{:X}/{:X}",
+            receipt.consistent_point.0 >> 32,
+            receipt.consistent_point.0 as u32
+        );
+        assert_eq!(
+            scalar(
+                &mut fixture.source,
+                "SELECT string_agg(slot_name||' '||plugin||' '||confirmed_flush_lsn,',') FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())"
+            ),
+            format!("{name} pgoutput {point}"),
+            "{case}"
+        );
+        snapshot.finish(&fixture.io).unwrap();
+        scalar(
+            &mut fixture.source,
+            &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+        );
+    }
+}
+
+/// A source and a target database on the follow harness cluster, dropped with the case.
+struct FreshPair {
+    admin: PgConnection,
+    names: [String; 2],
+    endpoints: super::fresh_kill::Endpoints,
+    root: PathBuf,
+}
+
+impl FreshPair {
+    fn new(seed: &str) -> Self {
+        let context: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned follow harness required"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let root = PathBuf::from(context["root"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+            context["token"].as_str().unwrap()
+        );
+        let admin_info = std::env::var("RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN")
+            .expect("owned follow source required");
+        let mut admin = PgConnection::connect(
+            &Conninfo::new(admin_info.clone().into()).unwrap(),
+            crate::pg::Role::Copy,
+            &control(),
+        )
+        .unwrap();
+        let case = CASE.fetch_add(1, Ordering::Relaxed);
+        let names = ["s", "t"].map(|side| format!("m8_fresh_{side}_{}_{case}", std::process::id()));
+        for name in &names {
+            admin
+                .query(&format!("CREATE DATABASE {name}"), &control())
+                .unwrap();
+        }
+        let info =
+            |name: &str| Conninfo::new(format!("{admin_info} dbname={name}").into()).unwrap();
+        let endpoints = super::fresh_kill::Endpoints {
+            source: info(&names[0]),
+            target: info(&names[1]),
+        };
+        let mut source =
+            PgConnection::connect(&endpoints.source, crate::pg::Role::Copy, &control()).unwrap();
+        for statement in seed.split(';').filter(|s| !s.trim().is_empty()) {
+            source.query(statement, &control()).unwrap();
+        }
+        Self {
+            admin,
+            names,
+            endpoints,
+            root,
+        }
+    }
+
+    fn options(&self) -> FollowOptions {
+        FollowOptions {
+            clone: CloneOptions {
+                source: self.endpoints.source.clone(),
+                target: self.endpoints.target.clone(),
+                state: StateRequest {
+                    path: self.root.join(format!("{}-state", self.names[0])),
+                    action: StateAction::Create,
+                },
+                operator: None,
+                table_jobs: 2,
+                post_data_jobs: 2,
+                policy: RestorePolicy::default(),
+                not_consistent: false,
+                use_copy_binary: true,
+                split_tables_larger_than: 0,
+                split_max_parts: 8,
+                skip_large_objects: false,
+                large_objects_jobs: 2,
+            },
+            slot_name: String::new(),
+            publication_name: String::new(),
+            origin_name: None,
+            apply_group_txns: 100,
+            limits: FollowLimits::default(),
+        }
+    }
+
+    fn data(&self, info: &Conninfo) -> String {
+        scalar(
+            &mut PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap(),
+            "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+        )
+    }
+}
+
+impl Drop for FreshPair {
+    fn drop(&mut self) {
+        // The case owns both fresh databases and every slot in them; nothing else is selected.
+        let _ = self.admin.query(
+            &format!("SELECT pg_catalog.pg_drop_replication_slot(slot_name) FROM pg_catalog.pg_replication_slots WHERE database IN ('{}','{}') AND NOT active", self.names[0], self.names[1]),
+            &control(),
+        );
+        for name in &self.names {
+            let _ = self.admin.query(
+                &format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
+                &control(),
+            );
+        }
+    }
+}
+
+const FRESH_SEED: &str = "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))";
+
+/// The native manifest's copy phase, generation and target provenance phase.
+fn fresh_state(options: &FollowOptions) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(options.clone.state.path.join("manifest.json")).unwrap())
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once() {
+    use super::fresh_kill::{FreshKill, follow_until_analyzing, kill_at, kill_in_publish};
+    for (kill, publish) in [
+        (FreshKill::Fence, false),
+        (FreshKill::TargetIntent, false),
+        (FreshKill::TargetCommitted, false),
+        (FreshKill::Confirmed, false),
+        (FreshKill::Confirmed, true),
+    ] {
+        let case = format!("kill={kill:?} publish={publish}");
+        let pair = FreshPair::new(FRESH_SEED);
+        let expected = pair.data(&pair.endpoints.source);
+        assert!(expected.starts_with("300/300 2/"), "{expected}");
+        let mut options = pair.options();
+        let run = crate::state::open_follow(&options.clone.state, None, None, &control())
+            .unwrap()
+            .identity()
+            .run;
+        // The operator's first attempt restarts, and every later attempt resumes without consistency.
+        options.clone.state.action = StateAction::Restart;
+        kill_at(kill, &pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        });
+        let killed = fresh_state(&options);
+        assert_eq!(killed["clone_state"]["phase"], "fresh", "{case}");
+        assert_eq!(killed["clone_state"]["plan"]["generation"], 1, "{case}");
+        let target = killed["target_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["phase"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let schema = super::fresh_kill::metadata_schema(run);
+        let mut observer =
+            PgConnection::connect(&pair.endpoints.target, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let metadata =
+            format!("SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname='{schema}'");
+        match kill {
+            FreshKill::Fence => assert!(target.is_empty(), "{case}"),
+            FreshKill::TargetIntent => {
+                assert_eq!(target, ["provisioning"], "{case}");
+                assert_eq!(scalar(&mut observer, &metadata), "0", "{case}");
+            }
+            FreshKill::TargetCommitted => {
+                assert_eq!(target, ["provisioning"], "{case}");
+                wait_until("the held metadata COMMIT never landed", || {
+                    scalar(&mut observer, &metadata) == "1"
+                });
+            }
+            FreshKill::Confirmed => assert_eq!(target, ["confirmed"], "{case}"),
+        }
+        options.clone.state.action = StateAction::Resume;
+        options.clone.not_consistent = true;
+        let mut generation = 2;
+        if publish {
+            kill_in_publish(&pair.endpoints, run, |io| {
+                crate::follow::run(options.clone(), io)
+            });
+            let interrupted = fresh_state(&options);
+            assert_eq!(interrupted["clone_state"]["phase"], "fresh", "{case}");
+            assert_eq!(
+                interrupted["clone_state"]["plan"]["generation"], 2,
+                "{case}"
+            );
+            assert_eq!(
+                interrupted["follow_state"]["restart"]["new_bound"], true,
+                "{case}"
+            );
+            generation = 3;
+        }
+        let _ = follow_until_analyzing(&pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        });
+        let finished = fresh_state(&options);
+        assert_eq!(finished["clone_state"]["phase"], "analyzing", "{case}");
+        assert_eq!(
+            finished["clone_state"]["plan"]["generation"], generation,
+            "{case}"
+        );
+        assert!(finished["follow_state"]["restart"].is_null(), "{case}");
+        assert_eq!(pair.data(&pair.endpoints.target), expected, "{case}");
+        let mut source =
+            PgConnection::connect(&pair.endpoints.source, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let resource =
+            |kind| catalog::follow::resource_name(kind, run, CopyGeneration(generation)).unwrap();
+        assert_eq!(
+            scalar(
+                &mut source,
+                "SELECT coalesce(string_agg(slot_name,',' ORDER BY slot_name),'none') FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())"
+            ),
+            resource("slot"),
+            "{case}"
+        );
+        assert_eq!(
+            scalar(
+                &mut source,
+                "SELECT coalesce(string_agg(pubname,',' ORDER BY pubname),'none') FROM pg_catalog.pg_publication"
+            ),
+            resource("publication"),
+            "{case}"
+        );
+    }
+    // Anything the run did not create refuses and stays: a foreign target table in phase Fresh,
+    // and source pre-data drift once tables were created and copying began.
+    for drift in [false, true] {
+        let case = format!("drift={drift}");
+        let pair = FreshPair::new(FRESH_SEED);
+        let expected = pair.data(&pair.endpoints.source);
+        let mut options = pair.options();
+        let run = crate::state::open_follow(&options.clone.state, None, None, &control())
+            .unwrap()
+            .identity()
+            .run;
+        options.clone.state.action = StateAction::Restart;
+        let mut source =
+            PgConnection::connect(&pair.endpoints.source, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let mut target =
+            PgConnection::connect(&pair.endpoints.target, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let (change, undo, refusal) = if drift {
+            let object = scalar(
+                &mut source,
+                "SELECT min(oid)::text FROM pg_catalog.pg_largeobject_metadata",
+            );
+            super::fresh_kill::kill_in_large_object(
+                &pair.endpoints,
+                object.parse().unwrap(),
+                |io| crate::follow::run(options.clone(), io),
+            );
+            assert_eq!(fresh_state(&options)["clone_state"]["phase"], "copying");
+            (
+                "ALTER TABLE public.items ADD CONSTRAINT drift CHECK (id > 0)",
+                "ALTER TABLE public.items DROP CONSTRAINT drift",
+                "clone-recovery: pre-data schema drift prevents restart",
+            )
+        } else {
+            super::fresh_kill::kill_at(
+                super::fresh_kill::FreshKill::Fence,
+                &pair.endpoints,
+                run,
+                |io| crate::follow::run(options.clone(), io),
+            );
+            (
+                "CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES(7)",
+                "DROP TABLE public.items",
+                "clone requires a collision-free target; existing objects are never adopted",
+            )
+        };
+        let side = if drift { &mut source } else { &mut target };
+        for statement in change.split("; ") {
+            side.query(statement, &control()).unwrap();
+        }
+        let before = fresh_state(&options);
+        options.clone.state.action = StateAction::Resume;
+        options.clone.not_consistent = true;
+        // A start that wrongly proceeds is cancelled once it streams, so it fails here instead of hanging.
+        let error = super::fresh_kill::follow_until_analyzing(&pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        })
+        .expect_err(&case);
+        assert!(error.message.contains(refusal), "{case}: {}", error.message);
+        let after = fresh_state(&options);
+        assert_eq!(after["clone_state"], before["clone_state"], "{case}");
+        assert_eq!(after["follow_state"], before["follow_state"], "{case}");
+        if !drift {
+            assert_eq!(
+                scalar(
+                    &mut target,
+                    "SELECT string_agg(id::text,',') FROM public.items"
+                ),
+                "7"
+            );
+        }
+        let side = if drift { &mut source } else { &mut target };
+        side.query(undo, &control()).unwrap();
+        let _ = super::fresh_kill::follow_until_analyzing(&pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        });
+        let finished = fresh_state(&options);
+        assert_eq!(finished["clone_state"]["phase"], "analyzing", "{case}");
+        assert_eq!(finished["clone_state"]["plan"]["generation"], 2, "{case}");
+        assert_eq!(pair.data(&pair.endpoints.target), expected, "{case}");
     }
 }

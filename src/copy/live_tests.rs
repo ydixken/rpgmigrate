@@ -2044,3 +2044,238 @@ fn relay_session(
     }
     let _ = server.shutdown(Shutdown::Write);
 }
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_clone_fresh_bound_run_restarts_with_every_row_and_object_once() {
+    use crate::snapshot::fresh_kill::{Endpoints, FreshKill, kill_at, kill_in_publish};
+    let data = "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)";
+    for (kill, publish) in [
+        (FreshKill::Fence, false),
+        (FreshKill::TargetIntent, false),
+        (FreshKill::TargetCommitted, false),
+        (FreshKill::Confirmed, false),
+        (FreshKill::Confirmed, true),
+    ] {
+        let case = format!("kill={kill:?} publish={publish}");
+        let databases = FreshDatabases::create();
+        let mut source = connect(&databases.source);
+        for sql in [
+            "CREATE TABLE public.items(id integer PRIMARY KEY,payload text)",
+            "INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g",
+            "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex'))",
+            "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+        ] {
+            source.query(sql, &control()).unwrap();
+        }
+        let expected = value(&mut source, data);
+        drop(source);
+        let mut options = CloneOptions {
+            source: databases.source.clone(),
+            target: databases.target.clone(),
+            state: StateRequest {
+                path: harness_root().join(format!("{}-state", databases.names[0])),
+                action: StateAction::Create,
+            },
+            operator: None,
+            table_jobs: 2,
+            post_data_jobs: 2,
+            policy: RestorePolicy::default(),
+            not_consistent: false,
+            use_copy_binary: true,
+            split_tables_larger_than: 0,
+            split_max_parts: 8,
+            skip_large_objects: false,
+            large_objects_jobs: 2,
+        };
+        let run = state::open_clone(&options.state, None, &control())
+            .unwrap()
+            .identity()
+            .run;
+        let endpoints = Endpoints {
+            source: databases.source.clone(),
+            target: databases.target.clone(),
+        };
+        let manifest = |options: &CloneOptions| -> serde_json::Value {
+            serde_json::from_slice(
+                &std::fs::read(options.state.path.join("manifest.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        // The operator's first attempt restarts, and every later attempt resumes without consistency.
+        options.state.action = StateAction::Restart;
+        kill_at(kill, &endpoints, run, |io| {
+            crate::clone::run(options.clone(), io)
+        });
+        let killed = manifest(&options);
+        assert_eq!(killed["clone_state"]["phase"], "fresh", "{case}");
+        let target = killed["target_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["phase"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let schema = crate::snapshot::fresh_kill::metadata_schema(run);
+        let metadata =
+            format!("SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname='{schema}'");
+        let mut observer = connect(&databases.target);
+        match kill {
+            FreshKill::Fence => assert!(target.is_empty(), "{case}"),
+            FreshKill::TargetIntent => {
+                assert_eq!(target, ["provisioning"], "{case}");
+                assert_eq!(value(&mut observer, &metadata), "0", "{case}");
+            }
+            FreshKill::TargetCommitted => {
+                assert_eq!(target, ["provisioning"], "{case}");
+                wait_until("the held metadata COMMIT never landed", || {
+                    value(&mut observer, &metadata) == "1"
+                });
+            }
+            FreshKill::Confirmed => assert_eq!(target, ["confirmed"], "{case}"),
+        }
+        options.state.action = StateAction::Resume;
+        options.not_consistent = true;
+        let mut generation = 2;
+        if publish {
+            kill_in_publish(&endpoints, run, |io| crate::clone::run(options.clone(), io));
+            let interrupted = manifest(&options);
+            assert_eq!(interrupted["clone_state"]["phase"], "fresh", "{case}");
+            assert_eq!(
+                interrupted["clone_state"]["plan"]["generation"], 2,
+                "{case}"
+            );
+            assert_eq!(
+                interrupted["clone_state"]["recopy"]["generation"], 1,
+                "{case}"
+            );
+            generation = 3;
+        }
+        crate::clone::run(options.clone(), &control())
+            .unwrap_or_else(|error| panic!("{case}: {}", error.message));
+        let finished = manifest(&options);
+        assert_eq!(finished["clone_state"]["phase"], "complete", "{case}");
+        assert_eq!(
+            finished["clone_state"]["plan"]["generation"], generation,
+            "{case}"
+        );
+        assert!(finished["clone_state"]["recopy"].is_null(), "{case}");
+        assert_eq!(value(&mut observer, data), expected, "{case}");
+        assert_eq!(
+            value(
+                &mut observer,
+                &format!(
+                    "SELECT (SELECT count(*) FROM ONLY {schema}.copy_done WHERE copy_generation={generation})||'/'||(SELECT count(*) FROM ONLY {schema}.large_object_done WHERE copy_generation={generation})||' '||(SELECT count(*) FROM ONLY {schema}.copy_done)"
+                )
+            ),
+            "1/2 1",
+            "{case}"
+        );
+    }
+    // Anything the run did not create refuses and stays: a foreign target table in phase Fresh,
+    // and source pre-data drift once tables were created and copying began.
+    for drift in [false, true] {
+        let case = format!("drift={drift}");
+        let databases = FreshDatabases::create();
+        let mut source = connect(&databases.source);
+        for sql in [
+            "CREATE TABLE public.items(id integer PRIMARY KEY,payload text)",
+            "INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g",
+            "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex'))",
+            "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+        ] {
+            source.query(sql, &control()).unwrap();
+        }
+        let expected = value(&mut source, data);
+        let mut options = CloneOptions {
+            source: databases.source.clone(),
+            target: databases.target.clone(),
+            state: StateRequest {
+                path: harness_root().join(format!("{}-state", databases.names[0])),
+                action: StateAction::Create,
+            },
+            operator: None,
+            table_jobs: 2,
+            post_data_jobs: 2,
+            policy: RestorePolicy::default(),
+            not_consistent: false,
+            use_copy_binary: true,
+            split_tables_larger_than: 0,
+            split_max_parts: 8,
+            skip_large_objects: false,
+            large_objects_jobs: 2,
+        };
+        let run = state::open_clone(&options.state, None, &control())
+            .unwrap()
+            .identity()
+            .run;
+        let endpoints = Endpoints {
+            source: databases.source.clone(),
+            target: databases.target.clone(),
+        };
+        let manifest = |options: &CloneOptions| -> serde_json::Value {
+            serde_json::from_slice(
+                &std::fs::read(options.state.path.join("manifest.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        options.state.action = StateAction::Restart;
+        let mut target = connect(&databases.target);
+        let (change, undo, refusal) = if drift {
+            let object = value(
+                &mut source,
+                "SELECT min(oid)::text FROM pg_catalog.pg_largeobject_metadata",
+            );
+            crate::snapshot::fresh_kill::kill_in_large_object(
+                &endpoints,
+                object.parse().unwrap(),
+                |io| crate::clone::run(options.clone(), io),
+            );
+            assert_eq!(manifest(&options)["clone_state"]["phase"], "copying");
+            (
+                "ALTER TABLE public.items ADD CONSTRAINT drift CHECK (id > 0)",
+                "ALTER TABLE public.items DROP CONSTRAINT drift",
+                "clone-recovery: pre-data schema drift prevents restart",
+            )
+        } else {
+            kill_at(FreshKill::Fence, &endpoints, run, |io| {
+                crate::clone::run(options.clone(), io)
+            });
+            (
+                "CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES(7)",
+                "DROP TABLE public.items",
+                "clone requires a collision-free target; existing objects are never adopted",
+            )
+        };
+        let side = if drift { &mut source } else { &mut target };
+        for statement in change.split("; ") {
+            side.query(statement, &control()).unwrap();
+        }
+        let before = manifest(&options);
+        options.state.action = StateAction::Resume;
+        options.not_consistent = true;
+        let error = crate::clone::run(options.clone(), &control()).expect_err(&case);
+        assert!(error.message.contains(refusal), "{case}: {}", error.message);
+        assert_eq!(
+            manifest(&options)["clone_state"],
+            before["clone_state"],
+            "{case}"
+        );
+        if !drift {
+            assert_eq!(
+                value(
+                    &mut target,
+                    "SELECT string_agg(id::text,',') FROM public.items"
+                ),
+                "7"
+            );
+        }
+        let side = if drift { &mut source } else { &mut target };
+        side.query(undo, &control()).unwrap();
+        crate::clone::run(options.clone(), &control())
+            .unwrap_or_else(|error| panic!("{case}: {}", error.message));
+        let finished = manifest(&options);
+        assert_eq!(finished["clone_state"]["phase"], "complete", "{case}");
+        assert_eq!(finished["clone_state"]["plan"]["generation"], 2, "{case}");
+        assert_eq!(value(&mut target, data), expected, "{case}");
+    }
+}

@@ -193,7 +193,7 @@ It does not claim a pause inside the blocked table's COPY stream.
 
 ### M8 component profile
 
-`task test-clone`, also called by `task test-db`, requires exactly sixteen named component tests and a matching libtest summary with no ignored or failed cases.
+`task test-clone`, also called by `task test-db`, requires exactly seventeen named component tests and a matching libtest summary with no ignored or failed cases.
 The profile retains the seven clone snapshot, COPY, and marker cases.
 The new cases check actual binary COPY row counts for empty, single-row, and multiple-row streams and row preservation across split parts.
 They also check initial copying of empty, binary, multi-chunk, and sparse large objects.
@@ -216,6 +216,34 @@ A restart killed again while it resumes the intent leaves the same intent, and a
 The next drain must reconcile, refuse after source drift, and report completion only once the target matches the source.
 A second case stops a follow restart after its new binding and before the publish that resets the previous generation, then adds a foreign large object.
 The restart must refuse naming only that object and leave the target row and objects unchanged, then publish and unlink only owned objects once it is gone.
+A third case replaces an owned table of a copying follow, before its restart and again after the restart's new binding.
+The workset reconciliation must refuse the restart before source replacement, and the generation advance before its publish, each with the target row and the native restart record unchanged and the replaced table intact.
+`task test-follow-source` adds one case that stops slot creation while a source transaction holds a transaction ID, on a first run and on a restart.
+It then leaves the recorded slot absent, active, or persisted by the engine's own CREATE, or replaced under that name by a `test_decoding` or physical slot, a two-phase or (on 18) failover `pgoutput` slot, or a `pgoutput` slot in another database.
+The persisted slot comes from the engine's CREATE in two ways: a relay freezes every engine session as a stopped process would, so the server completes the CREATE and its reply is lost, or a file under the slot's directory makes `SaveSlotToPath` fail with 58P02 after the slot became persistent.
+The second shows that a complete error reply other than 42710 still takes the shape-checked drop.
+An active or foreign slot must refuse with the native state and the slot unchanged.
+Every other start must drop the slot and create it again under a new intent, whose snapshot holds each source row and large object exactly once.
+A second case stops publication creation, on a first run and on a restart, after its intent alone or after its receipt with the `COMMIT` rolled back or committed.
+In one variant the engine's own `COMMIT` is held in a relay until the engine gives up on its reply, then completes, and the engine must report that the next start drops the publication and creates it again.
+It also places a foreign publication under the recorded name, gives the committed one another owner, and replaces the committed one while the retry's `DROP` waits on its lock.
+A foreign or replacing publication must refuse naming it, with the native state and that publication unchanged.
+Every other start must create a publication of a new OID under a new intent, never adopt the old one, and export a snapshot that holds each source row and large object exactly once.
+A third case ends a first run after its slot receipt and before its binding, then leaves the slot at its recorded point, removes it, or replaces it with a later `pgoutput` or a `test_decoding` slot.
+A replaced slot must refuse with the native state and that slot unchanged; every other start must drop the slot and create a later one under a new intent, whose snapshot holds each source row and large object exactly once.
+Another case lets a foreign slot take the name inside the creation window, on a first run and on a restart, through a relay that holds one engine message.
+Held at `CREATE PUBLICATION`, the repeated check must find the slot and refuse before any `CREATE_REPLICATION_SLOT` is sent.
+Held at `CREATE_REPLICATION_SLOT`, the server's 42710 must refuse it.
+Both must retire the intent, keep the slot unchanged and refuse again on the next start, then create this run's own slot once the foreign one is gone.
+A further case commits a source table while slot creation waits, so the snapshot refuses after the slot's receipt, on a restart and on a first run through the CLI path.
+The next start must drop that slot before it refuses on a replaced pending publication or on the changed plan, leaving no slot and no slot record.
+Another case replaces the recorded publication while the engine's `DROP` waits on its lock: in a restart that removes the bound one, in a restart that retires its next generation's confirmed one, in cleanup, and in the shared removal itself.
+Each must refuse with the replacement intact, and the shared removal must refuse a receipt of another OID or owner before any `DROP`.
+Another case kills a first follow run in phase `fresh`: waiting on the target fence, inside its bookkeeping CREATE after the intent, after that CREATE committed without its reply, and after it was confirmed.
+After the last point a second variant also kills the restart inside its generation publish.
+Each restart must reach `analyzing` at copy generation two, or three after the publish kill, with every row and large object exactly once and only that generation's slot and publication left on the source.
+A foreign target table after the fence kill, and a source CHECK added after a kill during the copy, must each refuse with the native state unchanged and the foreign table intact, then complete once removed.
+`task test-clone` adds the same case for clone, which must complete with one marker and two large-object receipts of the final generation.
 Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]
@@ -363,7 +391,10 @@ The current snapshot profile requires nine exact passed cases plus five independ
 The CREATE-tail receipt contains three required subphases.
 Its owned Unix relay binds the actual source publication, slot, stream, an explicit native format 8 or 9 intent, and importer/exporter process identities.
 Missing fields or phases, an unhit post-import PID mutation, or a late fault fail that receipt check.
-A live backend, unreaped helper, or ambiguous creation retry also fails.
+A live backend or unreaped helper also fails.
+Each CREATE-loss case then retries through the relay.
+The retry must drop the pending slot, mint one new intent, and confirm a later slot under the same name, so its receipt records two CREATE dispatches.
+A retry that reuses the pending intent or adopts its slot fails that receipt.
 An explicit child `PGAPPNAME` supports the application-name case without changing the Rust process environment.
 Direct unknown source-finish evidence proves no target anchor absence.
 The coordinator call-order and process-level qualification remain separate evidence.

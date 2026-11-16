@@ -368,8 +368,8 @@ fn update_values(
                 .as_ref()
                 .zip(next.clone.as_ref())
                 .is_some_and(|(a, b)| {
-                    a.phase == crate::state::ClonePhase::Copying
-                        && b.phase == crate::state::ClonePhase::Copying
+                    a.phase.restarts_copy()
+                        && b.phase == a.phase
                         && a.generation.0.checked_add(1) == Some(b.generation.0)
                         && a.source_timeline == b.source_timeline
                         && a.table_count == b.table_count

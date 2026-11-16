@@ -662,6 +662,36 @@ fn generation_advance_keeps_the_previous_ticket_until_the_target_publishes_it() 
 }
 
 #[test]
+fn a_fresh_clone_advances_its_generation_but_pending_predata_never_does() {
+    let (tmp, mut state, plan) = start();
+    let next = ClonePlan {
+        generation: CopyGeneration(2),
+        ..plan.clone()
+    };
+    let mut next_ticket = ticket(&next);
+    next_ticket.token = "snapshot-2".into();
+    state.advance_copy_generation(&next, &next_ticket).unwrap();
+    let fresh = state.checked_clone().unwrap().unwrap();
+    assert_eq!(fresh.phase, ClonePhase::Fresh);
+    assert_eq!(fresh.recopy, Some(ticket(&plan)));
+    assert!(fresh.owned_tables.is_empty() && fresh.owned_objects.is_empty());
+    state.finish_recopy().unwrap();
+    state.begin_pre_data().unwrap();
+    let manifest = tmp.path().join("manifest.json");
+    let pending = fs::read(&manifest).unwrap();
+    let third = ClonePlan {
+        generation: CopyGeneration(3),
+        ..plan.clone()
+    };
+    assert!(
+        state
+            .advance_copy_generation(&third, &ticket(&third))
+            .is_err()
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), pending);
+}
+
+#[test]
 fn recopy_intent_must_be_the_previous_generation_of_a_copying_clone() {
     let mut next = plan();
     next.generation = CopyGeneration(2);
@@ -680,7 +710,7 @@ fn recopy_intent_must_be_the_previous_generation_of_a_copying_clone() {
         let mut changed = valid.clone();
         let previous = changed.recopy.as_mut().unwrap();
         match case {
-            0 => changed.phase = ClonePhase::PostDataPending,
+            0 => changed.phase = ClonePhase::PreDataPending,
             1 => previous.generation = CopyGeneration(2),
             2 => previous.generation = CopyGeneration(0),
             3 => previous.source.timeline += 1,

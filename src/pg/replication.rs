@@ -12,6 +12,8 @@ pub(crate) struct CreatedLogicalSlot {
 
 pub(crate) enum SlotCreateOutcome {
     Created(CreatedLogicalSlot),
+    /// The server refused the name before allocating a slot, so this CREATE created nothing.
+    NameTaken,
     Unknown(Error),
 }
 

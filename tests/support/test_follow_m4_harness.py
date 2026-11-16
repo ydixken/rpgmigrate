@@ -55,6 +55,7 @@ AUTHORITY_ADDITIONS = tuple("apply::checkpoint::live_tests::" + name for name in
 AUTHORITY_M8 = tuple("apply::checkpoint::live_tests::" + name for name in (
     "follow_final_large_object_resync_kill_reconciles_or_refuses_and_never_completes_early",
     "follow_bound_restart_refuses_a_foreign_large_object_before_its_publish",
+    "follow_copying_restart_refuses_a_replaced_owned_table_before_replacement_and_advance",
 ))
 
 SOURCE_BASELINE = (
@@ -77,6 +78,15 @@ SOURCE_ADMISSION = tuple("snapshot::follow_tests::" + name for name in (
     "live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses",
     "live_follow_extension_opclasses_require_the_source_version_or_an_update_path_on_the_target",
     "live_follow_generated_columns_publish_only_writable_columns",
+))
+SOURCE_M8 = tuple("snapshot::follow_tests::" + name for name in (
+    "live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again",
+    "live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted",
+    "live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adopted",
+    "live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once",
+    "live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept",
+    "live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_it",
+    "live_follow_recorded_publication_replaced_during_its_removal_is_refused_and_kept",
 ))
 
 
@@ -137,11 +147,11 @@ class FollowM4HarnessTests(unittest.TestCase):
                 with self.subTest(case=case), self.assertRaises(AssertionError):
                     validate("FollowAuthority", cases, output.replace(f"test {case} ... ok\n", ""), context)
 
-    def test_authority_inventory_preserves_eleven_and_requires_six_cutover_and_two_m8_cases(self):
+    def test_authority_inventory_preserves_eleven_and_requires_six_cutover_and_three_m8_cases(self):
         self.assertEqual(module_cases({}, "FollowAuthority"), [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS, *AUTHORITY_M8])
 
-    def test_source_inventory_preserves_seven_and_requires_five_cleanup_and_two_admission_cases(self):
-        self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS, *SOURCE_ADMISSION])
+    def test_source_inventory_preserves_seven_and_requires_five_cleanup_three_admission_and_seven_m8_cases(self):
+        self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS, *SOURCE_ADMISSION, *SOURCE_M8])
 
     def test_receive_inventory_preserves_four_cases_and_requires_seven_cutover_cases(self):
         self.assertEqual(module_cases({}, "FollowReceive"), [*RECEIVE_BASELINE, *RECEIVE_ADDITIONS])

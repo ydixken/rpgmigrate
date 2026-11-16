@@ -291,6 +291,10 @@ mod clone_tests {
 }
 
 #[cfg(test)]
+#[path = "snapshot/fresh_kill.rs"]
+pub(crate) mod fresh_kill;
+
+#[cfg(test)]
 #[path = "snapshot/follow_tests.rs"]
 mod follow_tests;
 
@@ -304,9 +308,19 @@ fn created_data(
 ) -> Result<CreatedSlotData> {
     let created = match outcome {
         SlotCreateOutcome::Created(created) => created,
+        // The caller retires its intent first; the server's name check proves nothing was created.
+        SlotCreateOutcome::NameTaken => {
+            return Err(Error::new(
+                ErrorKind::BadState,
+                format!(
+                    "follow-source: slot {} already exists, so this run's CREATE created nothing; it is never adopted or dropped",
+                    binding.slot_name()
+                ),
+            ));
+        }
         SlotCreateOutcome::Unknown(failure) => {
             return Err(refusal(&format!(
-                "source-slot-create-unknown: slot may retain WAL; retain native intent for manual review (failure category {:?})",
+                "source-slot-create-unknown: slot may retain WAL; the next start drops it by its recorded intent and creation shape, then creates it again (failure category {:?})",
                 failure.kind
             )));
         }
@@ -318,7 +332,7 @@ fn created_data(
         || created.snapshot_token.contains('\0')
     {
         return Err(refusal(
-            "source-slot-create-unknown: invalid creation receipt; retain native intent for manual review",
+            "source-slot-create-unknown: invalid creation receipt; the next start drops the slot by its recorded intent and creation shape, then creates it again",
         ));
     }
     Ok(CreatedSlotData {

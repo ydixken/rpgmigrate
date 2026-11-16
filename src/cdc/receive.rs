@@ -1141,6 +1141,7 @@ mod tests {
             crate::pg::SlotCreateOutcome::Unknown(failure) => {
                 panic!("owned slot creation failed: {failure:?}")
             }
+            crate::pg::SlotCreateOutcome::NameTaken => panic!("owned slot name was taken"),
         };
         assert_eq!(created.slot_name, slot);
         assert!(
@@ -1234,6 +1235,7 @@ mod tests {
             crate::pg::SlotCreateOutcome::Unknown(failure) => {
                 panic!("owned slot creation failed: {failure:?}")
             }
+            crate::pg::SlotCreateOutcome::NameTaken => panic!("owned slot name was taken"),
         };
         let captured = created.consistent_point;
         let binding = FollowBinding {

@@ -3212,6 +3212,50 @@ fn follow_reset_resources(
 
 // Source receipts are synthetic here; every target ownership receipt comes from actual fixture DDL.
 fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAuthority, String) {
+    let (mut native, mut authority, schema, mut plan) = follow_copying_fixture(io, empty);
+    let source = plan.source.clone();
+    let restart = authority
+        .begin_follow_restart(&mut native, &plan, io)
+        .unwrap();
+    native.confirm_follow_slot_absent(&restart).unwrap();
+    native.confirm_follow_publication_absent(&restart).unwrap();
+    plan.generation = crate::contracts::CopyGeneration(2);
+    let binding = follow_reset_resources(&mut native, &plan, 20);
+    native
+        .bind_follow(
+            &plan,
+            &crate::contracts::SnapshotTicket {
+                token: binding.slot.snapshot_token.clone(),
+                source,
+                generation: plan.generation,
+            },
+            &binding,
+        )
+        .unwrap();
+    authority.advance_generation(&mut native, io).unwrap();
+    native.finish_follow_restart().unwrap();
+    assert!(
+        metadata::read_markers(
+            authority.authority.session.connection().unwrap(),
+            &authority.authority.provenance,
+            io
+        )
+        .unwrap()
+        .is_empty()
+    );
+    (native, authority, schema)
+}
+
+/// A bound follow in phase Copying whose owned tables, created by fixture DDL, each hold one row.
+fn follow_copying_fixture(
+    io: &IoControl,
+    empty: bool,
+) -> (
+    NativeState,
+    CloneAuthority,
+    String,
+    crate::contracts::ClonePlan,
+) {
     let initial = state();
     let path = initial.identity().canonical_path.clone();
     drop(initial);
@@ -3354,36 +3398,76 @@ fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAutho
         authority.copy_report(io).unwrap().tables,
         tables.len() as u64
     );
-    let restart = authority
-        .begin_follow_restart(&mut native, &plan, io)
-        .unwrap();
-    native.confirm_follow_slot_absent(&restart).unwrap();
-    native.confirm_follow_publication_absent(&restart).unwrap();
-    plan.generation = crate::contracts::CopyGeneration(2);
-    let binding = follow_reset_resources(&mut native, &plan, 20);
-    native
-        .bind_follow(
-            &plan,
-            &crate::contracts::SnapshotTicket {
+    (native, authority, schema, plan)
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_copying_restart_refuses_a_replaced_owned_table_before_replacement_and_advance() {
+    let io = control();
+    for advance in [false, true] {
+        let (mut native, mut authority, schema, mut plan) = follow_copying_fixture(&io, false);
+        let ticket = |plan: &crate::contracts::ClonePlan, binding: &FollowBinding| {
+            crate::contracts::SnapshotTicket {
                 token: binding.slot.snapshot_token.clone(),
-                source,
+                source: plan.source.clone(),
                 generation: plan.generation,
-            },
-            &binding,
-        )
-        .unwrap();
-    authority.advance_generation(&mut native, io).unwrap();
-    native.finish_follow_restart().unwrap();
-    assert!(
-        metadata::read_markers(
-            authority.authority.session.connection().unwrap(),
-            &authority.authority.provenance,
-            io
-        )
-        .unwrap()
-        .is_empty()
-    );
-    (native, authority, schema)
+            }
+        };
+        if advance {
+            let restart = authority
+                .begin_follow_restart(&mut native, &plan, &io)
+                .unwrap();
+            native.confirm_follow_slot_absent(&restart).unwrap();
+            native.confirm_follow_publication_absent(&restart).unwrap();
+            plan.generation = crate::contracts::CopyGeneration(2);
+            let binding = follow_reset_resources(&mut native, &plan, 20);
+            native
+                .bind_follow(&plan, &ticket(&plan, &binding), &binding)
+                .unwrap();
+        }
+        let mut observer = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+        for sql in [
+            format!("ALTER TABLE {schema}.a RENAME TO original_a"),
+            format!("CREATE TABLE {schema}.a(id integer PRIMARY KEY)"),
+        ] {
+            observer.query(&sql, &io).unwrap();
+        }
+        let row = format!(
+            "SELECT t.xmin::pg_catalog.text||' '||pg_catalog.row_to_json(t)::pg_catalog.text FROM {} t",
+            qualified(&mut observer, &authority.authority.provenance)
+        );
+        let before = (
+            scalar_text(&mut observer, &row),
+            native.checked_follow_restart().unwrap(),
+        );
+        let refusal = if advance {
+            authority.advance_generation(&mut native, &io).unwrap_err()
+        } else {
+            authority
+                .begin_follow_restart(&mut native, &plan, &io)
+                .unwrap_err()
+        };
+        // The workset reconciliation itself refuses: the renamed owned table lost its recorded identity.
+        assert_eq!(
+            refusal.message,
+            "clone bookkeeping exclusion lacks exact current object provenance"
+        );
+        assert_eq!(
+            (
+                scalar_text(&mut observer, &row),
+                native.checked_follow_restart().unwrap()
+            ),
+            before
+        );
+        assert_eq!(
+            scalar_text(
+                &mut observer,
+                &format!("SELECT count(*)::pg_catalog.text FROM {schema}.original_a")
+            ),
+            "1"
+        );
+    }
 }
 
 #[test]

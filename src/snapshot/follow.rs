@@ -2,6 +2,7 @@ use super::*;
 use crate::contracts::{ClonePlan, FollowBinding, FollowOptions, SnapshotTicket};
 use crate::identity::StreamId;
 use crate::pg::CommitObservation;
+use crate::state::{PublicationProvenance, SourceSlotProvenance};
 
 pub(crate) struct FollowSnapshot {
     snapshot: CloneSnapshot,
@@ -12,7 +13,7 @@ pub(crate) struct FollowSnapshot {
 
 pub(crate) struct PendingFollowSlotAbsence {
     pub(super) restart: crate::state::FollowRestart,
-    pub(super) receipt: SourceSlotReceipt,
+    pub(super) slot: SourceSlotProvenance,
 }
 
 impl PendingFollowSlotAbsence {
@@ -20,8 +21,8 @@ impl PendingFollowSlotAbsence {
         &self.restart
     }
 
-    pub(crate) fn receipt(&self) -> &SourceSlotReceipt {
-        &self.receipt
+    pub(crate) fn slot(&self) -> &SourceSlotProvenance {
+        &self.slot
     }
 }
 
@@ -59,19 +60,16 @@ impl FollowSnapshot {
                 "follow-restart: only an unbound replacement after old-resource absence can retire",
             ));
         }
+        // Only a confirmed publication is retired here; `create` resolves an unconfirmed CREATE.
         let publication = native
             .checked_publication()?
-            .map(|p| {
-                p.confirmed().cloned().ok_or_else(|| {
-                    follow_refusal("follow-restart: pending publication creation is unproven")
-                })
-            })
-            .transpose()?;
+            .and_then(|p| p.confirmed().cloned());
         let slot = match native.checked_source_slot()? {
-            Some(crate::state::SourceSlotProvenance::Confirmed(slot))
-                if slot.intent.binding.stream() == restart.previous.stream()
-                    && slot.intent.binding.catalog_epoch() == restart.next_generation.0
-                    && slot.intent.binding.plugin() == crate::cdc::contracts::Plugin::Pgoutput
+            Some(slot)
+                if slot.intent().binding.stream() == restart.previous.stream()
+                    && slot.intent().binding.catalog_epoch() == restart.next_generation.0
+                    && slot.intent().binding.plugin()
+                        == crate::cdc::contracts::Plugin::Pgoutput
                     && publication.is_some() =>
             {
                 Some(slot)
@@ -79,94 +77,32 @@ impl FollowSnapshot {
             None => None,
             _ => {
                 return Err(follow_refusal(
-                    "follow-restart: pending source slot lacks its exact new-generation receipt",
+                    "follow-restart: pending source slot lacks its exact new-generation intent",
                 ));
             }
         };
         let mut source =
             PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         catalog::configure_session(&mut source, io)?;
-        catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
-        if let Some(publication) = &publication {
-            pending_publication_present(&mut source, publication, plan, io)?;
-        }
-        if let Some(receipt) = slot {
-            let name = source.quote_literal(receipt.intent.binding.slot_name())?;
-            let present = source.query(&format!(
-                "SELECT plugin,datoid,temporary,active_pid,confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"
-            ), io)?;
-            if present.columns()? != 5 || present.rows() > 1 {
-                return Err(follow_refusal(
-                    "follow-restart: pending slot inventory is invalid",
-                ));
-            }
-            if present.rows() == 1 {
-                let point = format!(
-                    "{:X}/{:X}",
-                    receipt.consistent_point.0 >> 32,
-                    receipt.consistent_point.0 as u32
-                );
-                if present.cell(0, 0)? != Some(b"pgoutput")
-                    || present.cell(0, 1)?
-                        != Some(plan.source.identity.database_oid.to_string().as_bytes())
-                    || present.cell(0, 2)? != Some(b"f")
-                    || present.cell(0, 3)?.is_some()
-                    || present.cell(0, 4)? != Some(point.as_bytes())
-                {
-                    return Err(follow_refusal(
-                        "follow-restart: pending slot differs from its inactive creation receipt",
-                    ));
-                }
-                let dropped = source.query(
-                    &format!("SELECT pg_catalog.pg_drop_replication_slot({name})"),
-                    io,
-                )?;
-                if dropped.rows() != 1
-                    || dropped.columns()? != 1
-                    || dropped.command_tag()? != "SELECT 1"
-                {
-                    return Err(follow_refusal(
-                        "follow-restart: pending slot removal is unconfirmed",
-                    ));
-                }
-            }
-            let absent = source.query(
-                &format!("SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"),
-                io,
-            )?;
-            if absent.columns()? != 1 || absent.rows() != 0 {
-                return Err(follow_refusal(
-                    "follow-restart: pending slot remains after removal",
-                ));
-            }
+        // This run's slot goes first, so no later refusal leaves it retaining WAL.
+        if let Some(slot) = slot {
+            require_plan_source(&mut source, plan, io)?;
+            drop_unbound_slot(&mut source, &slot, plan, io)?;
             native.confirm_pending_follow_slot_absent(&PendingFollowSlotAbsence {
                 restart: restart.clone(),
-                receipt,
+                slot,
             })?;
         }
+        catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
         if let Some(receipt) = publication {
             if pending_publication_present(&mut source, &receipt, plan, io)? {
-                let required = catalog::configure_durability(&mut source, io)?;
-                catalog::command(&mut source, "BEGIN", "BEGIN", io)?;
-                let name = source.quote_identifier(&receipt.name)?;
-                catalog::command(
+                catalog::follow::drop_recorded_publication(
                     &mut source,
-                    &format!("DROP PUBLICATION {name}"),
-                    "DROP PUBLICATION",
+                    &receipt,
+                    "follow-restart",
+                    "follow-restart: pending publication removal outcome is unknown",
                     io,
                 )?;
-                catalog::command(
-                    &mut source,
-                    "SET CONSTRAINTS ALL IMMEDIATE",
-                    "SET CONSTRAINTS",
-                    io,
-                )?;
-                catalog::confirm_durability(&mut source, required, io)?;
-                if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
-                    return Err(follow_refusal(
-                        "follow-restart: pending publication removal outcome is unknown",
-                    ));
-                }
             }
             let name = source.quote_literal(&receipt.name)?;
             let absent = source.query(
@@ -352,27 +288,13 @@ impl FollowSnapshot {
                     &plan.tables,
                     io,
                 )?;
-                let required = catalog::configure_durability(&mut source, io)?;
-                catalog::command(&mut source, "BEGIN", "BEGIN", io)?;
-                let name = source.quote_identifier(&restart.previous.publication.name)?;
-                catalog::command(
+                catalog::follow::drop_recorded_publication(
                     &mut source,
-                    &format!("DROP PUBLICATION {name}"),
-                    "DROP PUBLICATION",
+                    &restart.previous.publication,
+                    "follow-restart",
+                    "follow-restart: publication removal outcome is unknown; preserve durable restart intent",
                     io,
                 )?;
-                catalog::command(
-                    &mut source,
-                    "SET CONSTRAINTS ALL IMMEDIATE",
-                    "SET CONSTRAINTS",
-                    io,
-                )?;
-                catalog::confirm_durability(&mut source, required, io)?;
-                if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
-                    return Err(follow_refusal(
-                        "follow-restart: publication removal outcome is unknown; preserve durable restart intent",
-                    ));
-                }
                 let absent = source.query(
                     &format!("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname={publication_literal}"),
                     io,
@@ -388,6 +310,22 @@ impl FollowSnapshot {
         Self::create(options, plan, native, io)
     }
 
+    /// Drops a first run's unbound slot, proven this run's by its intent or receipt, before any check
+    /// that does not concern it, so no refusal leaves the slot retaining WAL.
+    pub(crate) fn retire_first_run_slot(
+        options: &FollowOptions,
+        native: &mut NativeState,
+        io: &IoControl,
+    ) -> Result<()> {
+        if native.checked_source_slot()?.is_none() {
+            return Ok(());
+        }
+        let mut source =
+            PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
+        catalog::configure_session(&mut source, io)?;
+        retire_pending_first_run_slot(&mut source, native, io)
+    }
+
     pub(crate) fn create(
         options: &FollowOptions,
         plan: &ClonePlan,
@@ -399,6 +337,7 @@ impl FollowSnapshot {
             PgConnection::connect(&options.clone.source, crate::pg::Role::Receive, io)?;
         require_clone_idle(&source)?;
         catalog::configure_session(&mut source, io)?;
+        retire_pending_first_run_slot(&mut source, native, io)?;
         catalog::follow::preflight_follow(&mut source, plan, io)?;
         catalog::command(
             &mut source,
@@ -438,6 +377,14 @@ impl FollowSnapshot {
             plan.generation.0,
         )?;
         native.prepare_follow_source(plan)?;
+        if let Some(pending) = native
+            .checked_publication()?
+            .filter(|p| p.confirmed().is_none())
+        {
+            native.require_unconfirmed_publication_retirement(&pending)?;
+            drop_unconfirmed_publication(&mut source, &pending, io)?;
+            native.retire_unconfirmed_publication(&pending)?;
+        }
         let reusable_publication = match native.checked_publication()? {
             None => None,
             Some(provenance) => {
@@ -540,20 +487,38 @@ impl FollowSnapshot {
                 }
                 Ok(CommitObservation::RolledBack) => {
                     return Err(follow_refusal(
-                        "follow-source: publication CREATE rolled back; retain the creation intent for inspection",
+                        "follow-source: publication CREATE rolled back; the next start creates it again under a new intent",
                     ));
                 }
                 _ => {
                     return Err(follow_refusal(
-                        "follow-source-create-unknown: publication COMMIT was not confirmed; retain exact candidate ownership for manual inspection",
+                        "follow-source-create-unknown: publication COMMIT was not confirmed; the next start drops it by its recorded OID and owner, then creates it again",
                     ));
                 }
             }
             publication
         };
         let slot_intent = native.begin_source_slot(&slot_binding)?;
+        // CREATE has not been sent, so a slot that took the name since the first check is not ours.
+        let free = source
+            .query(
+                &format!("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={slot})"),
+                io,
+            )
+            .and_then(|taken| {
+                Ok(taken.rows() == 1 && taken.columns()? == 1 && taken.cell(0, 0)? == Some(b"f"))
+            });
+        if !matches!(free, Ok(true)) {
+            native.retire_uncreated_source_slot(&slot_intent)?;
+            return Err(free.err().unwrap_or_else(|| {
+                follow_refusal("follow-source: existing slot or publication is never adopted")
+            }));
+        }
         let outcome =
             exporter.create_logical_slot_export(slot_binding.slot_name(), "pgoutput", io)?;
+        if matches!(outcome, SlotCreateOutcome::NameTaken) {
+            native.retire_uncreated_source_slot(&slot_intent)?;
+        }
         let receipt =
             native.confirm_source_slot(&slot_intent, created_data(&slot_binding, outcome)?)?;
         let ticket = SnapshotTicket {
@@ -637,6 +602,168 @@ pub(super) fn require_restart_plan(
         return Err(follow_refusal(
             "follow-restart: source/target plan, ownership, or copy generation changed",
         ));
+    }
+    Ok(())
+}
+
+fn retire_pending_first_run_slot(
+    source: &mut PgConnection,
+    native: &mut NativeState,
+    io: &IoControl,
+) -> Result<()> {
+    let Some(slot) = native.checked_source_slot()? else {
+        return Ok(());
+    };
+    native.require_pending_source_slot_retirement(&slot)?;
+    let plan = native.checked_follow_source()?.ok_or_else(|| {
+        follow_refusal("follow-source: pending slot retirement lacks its preliminary plan")
+    })?;
+    require_plan_source(source, &plan, io)?;
+    drop_unbound_slot(source, &slot, &plan, io)?;
+    native.confirm_pending_source_slot_absent(&slot)
+}
+
+/// A slot is dropped only on the source its plan recorded; the rest of the preflight may follow the drop.
+fn require_plan_source(source: &mut PgConnection, plan: &ClonePlan, io: &IoControl) -> Result<()> {
+    if catalog::read_clone_source(source, io)? != plan.source {
+        return Err(follow_refusal(
+            "follow-source: connected source differs from the recorded plan; its pending slot is never dropped there",
+        ));
+    }
+    Ok(())
+}
+
+/// Drops this run's unbound slot by its recorded name and creation shape, and by its receipt's
+/// consistent point when it has one, in one statement. It is never adopted: its export ended with its
+/// creating session.
+fn drop_unbound_slot(
+    source: &mut PgConnection,
+    slot: &SourceSlotProvenance,
+    plan: &ClonePlan,
+    io: &IoControl,
+) -> Result<()> {
+    let slot_name = slot.intent().binding.slot_name();
+    let name = source.quote_literal(slot_name)?;
+    let point = match slot {
+        SourceSlotProvenance::Confirmed(receipt) => format!(
+            " AND s.confirmed_flush_lsn='{:X}/{:X}'::pg_catalog.pg_lsn",
+            receipt.consistent_point.0 >> 32,
+            receipt.consistent_point.0 as u32
+        ),
+        SourceSlotProvenance::Provisioning(_) => String::new(),
+    };
+    // Our CREATE sets none of these options, matching cleanup_slot_present. Untested because none fires
+    // alone: slot_type (a physical slot has no plugin), temporary (always active) and synced (standby only).
+    let shape = format!(
+        "s.slot_type='logical' AND s.plugin='pgoutput' AND s.datoid={} AND NOT s.temporary AND NOT s.two_phase AND COALESCE(pg_catalog.to_jsonb(s)->>'failover','false')='false' AND COALESCE(pg_catalog.to_jsonb(s)->>'synced','false')='false'{point}",
+        plan.source.identity.database_oid
+    );
+    let dropped = source.query(&format!(
+        "SELECT pg_catalog.pg_drop_replication_slot(s.slot_name) FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={name} AND {shape} AND s.active_pid IS NULL"
+    ), io)?;
+    if dropped.columns()? != 1
+        || dropped.rows() > 1
+        || dropped.command_tag()? != format!("SELECT {}", dropped.rows())
+    {
+        return Err(follow_refusal(
+            "follow-source: pending slot removal is unconfirmed",
+        ));
+    }
+    if dropped.rows() == 0 {
+        let present = source.query(&format!(
+            "SELECT COALESCE({shape},false),s.active_pid FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={name}"
+        ), io)?;
+        if present.columns()? != 2 || present.rows() > 1 {
+            return Err(follow_refusal(
+                "follow-source: pending slot inventory is invalid",
+            ));
+        }
+        if present.rows() == 1 {
+            if present.cell(0, 0)? != Some(b"t") {
+                return Err(follow_refusal(&format!(
+                    "follow-source: slot {slot_name} differs from this run's unbound pgoutput creation; it is never adopted or dropped"
+                )));
+            }
+            if let Some(pid) = present.cell(0, 1)? {
+                return Err(follow_refusal(&format!(
+                    "follow-source: pending source slot {slot_name} is active in backend {}; it is never adopted, so retry once that session has ended",
+                    String::from_utf8_lossy(pid)
+                )));
+            }
+            return Err(follow_refusal(
+                "follow-source: pending slot removal is unconfirmed",
+            ));
+        }
+    }
+    let absent = source.query(
+        &format!("SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"),
+        io,
+    )?;
+    if absent.columns()? != 1 || absent.rows() != 0 {
+        return Err(follow_refusal(
+            "follow-source: pending slot remains after removal",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves a publication CREATE whose COMMIT this run never confirmed. Its receipt is fsynced before
+/// COMMIT is sent, so an intent alone never committed; a receipt is ours only at its recorded OID and owner,
+/// and is then dropped, never adopted.
+fn drop_unconfirmed_publication(
+    source: &mut PgConnection,
+    pending: &PublicationProvenance,
+    io: &IoControl,
+) -> Result<()> {
+    let name = &pending.intent().name;
+    let literal = source.quote_literal(name)?;
+    let inventory =
+        format!("SELECT oid,pubowner FROM pg_catalog.pg_publication WHERE pubname={literal}");
+    let owned = |present: &crate::pg::PgResult| -> Result<bool> {
+        if present.columns()? != 2 || present.rows() > 1 {
+            return Err(follow_refusal(
+                "follow-source: unconfirmed publication inventory is invalid",
+            ));
+        }
+        if present.rows() == 0 {
+            return Ok(false);
+        }
+        let cell = |column| -> Result<String> {
+            Ok(String::from_utf8_lossy(present.cell(0, column)?.unwrap_or_default()).into_owned())
+        };
+        let (oid, owner) = (cell(0)?, cell(1)?);
+        match pending {
+            PublicationProvenance::Created { receipt, .. }
+                if oid == receipt.oid.to_string() && owner == receipt.owner_oid.to_string() =>
+            {
+                Ok(true)
+            }
+            PublicationProvenance::Created { receipt, .. } => Err(follow_refusal(&format!(
+                "follow-source: publication {name} (OID {oid}, owner {owner}) is not this run's unconfirmed creation (OID {}, owner {}); it is never adopted or dropped",
+                receipt.oid, receipt.owner_oid
+            ))),
+            _ => Err(follow_refusal(&format!(
+                "follow-source: publication {name} (OID {oid}) exists, but this run's CREATE under that name never committed; it is not proven this run's and is never adopted or dropped"
+            ))),
+        }
+    };
+    if !owned(&source.query(&inventory, io)?)? {
+        return Ok(());
+    }
+    let PublicationProvenance::Created { receipt, .. } = pending else {
+        unreachable!("only a recorded receipt is owned")
+    };
+    let unknown = format!(
+        "follow-source: unconfirmed publication {name} removal outcome is unknown; retry to resolve it by its recorded OID"
+    );
+    if !catalog::follow::drop_recorded_publication(source, receipt, "follow-source", &unknown, io)?
+    {
+        return Ok(());
+    }
+    if owned(&source.query(&inventory, io)?)? {
+        return Err(follow_refusal(&format!(
+            "follow-source: unconfirmed publication {name} remains after removal"
+        )));
     }
     Ok(())
 }

@@ -340,6 +340,74 @@ Each publication member must match the plan exactly on both majors:
 3. `rowfilter` is null and the member's `pg_publication_rel.prattrs` is null, so a column list that names every writable column still refuses.
 4. The publication's `pubgencols` is `n` on 18; 16 has no such column.
 
+### Slot creation recovery
+
+Follow records a slot intent (the run's stream, slot name, plugin, copy generation and a nonce) before `CREATE_REPLICATION_SLOT`, and its receipt (consistent point and snapshot name) after the command returns.
+One intent authorizes one CREATE.
+Follow checks that no slot holds the name before it creates the publication, and again after it records the intent, immediately before the CREATE.
+A slot that the repeated check finds is not this run's, because the CREATE was never sent: follow retires the intent durably and refuses with exit 3, `follow-source: existing slot or publication is never adopted`.
+A complete `ErrorResponse` with SQLSTATE 42710, as the command's only result and followed by `ReadyForQuery`, proves that the server's name check refused the CREATE before it allocated a slot.
+PostgreSQL raises 42710 there only (16.15 `slot.c:312-314`, 18.7 `slot.c:412-414`).
+Follow retires that intent durably without any drop and refuses with exit 3, `follow-source: slot <name> already exists, so this run's CREATE created nothing; it is never adopted or dropped`.
+Every other error, and a lost or incomplete reply, keeps the intent, because the server can fail after it persisted the slot.
+For example, `ReplicationSlotPersist` marks the slot persistent before `SaveSlotToPath` can raise an error, and that error leaves the slot in place.
+A start that finds an intent without its receipt, on a first run's retry or on a restart, drops the slot of exactly that name, records its absence, and creates the slot again under a new intent.
+It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, has `two_phase`, `failover` and `synced` off as this run's CREATE leaves them, and has no active backend.
+That check and the drop are one statement, which must drop exactly one slot or none; when none, the start reads the slot again to name the refusal.
+It never adopts the slot, because the exported snapshot ended with the session that created it.
+A slot of another kind under that name refuses with exit 3 and stays, and so does an active slot of this run's shape, naming the slot and its backend.
+A start drops an unbound slot that has a receipt the same way, on a first run's retry or on a restart, and only at its exact consistent point, so a slot from a run killed before its binding does not stay behind retaining WAL.
+A start retires this run's pending slot, proven by its intent or its unbound receipt, before the checks that do not concern it, so their refusals do not leave the slot retaining WAL.
+Only the source identity that the plan recorded is checked first.
+A first run then retires the slot before its plan and inventory comparisons.
+A restart retires it once it holds the target authority, before the rest of its source preflight and its pending publication checks; a refusal while it acquires that authority still leaves the slot for the next start.
+
+> [!important]
+> Two migrations must never share a slot name on one source.
+> The operator passes one stable `--slot-name` across runs and generations, so the engine's default per-run name does not separate them.
+> A pending intent has no receipt, so the start identifies its slot only by the recorded name and the shape check above.
+> A foreign slot of this run's shape is therefore dropped when it takes the name after this run's last completed collision check and this run ends without the outcome of its CREATE.
+> That covers a CREATE never sent, a lost reply, and an unfinished slot that ended with its session, after which the name stays free until the next start.
+> While this run's CREATE holds the name, from the server's name check until its session ends, any concurrent CREATE under the name fails with 42710.
+
+### Publication creation recovery
+
+Follow records a publication intent (name and nonce) before `BEGIN`, and its receipt (name, OID and owner, read inside the creating transaction) before it sends `COMMIT`.
+The receipt reaches the native manifest through a file fsync, a rename and a directory fsync, so an intent without a receipt never sent `COMMIT` and never committed.
+A start that finds an unconfirmed publication, on a first run's retry or on an unbound restart, resolves it before any slot intent:
+
+1. With only an intent, no publication under the recorded name means the CREATE rolled back; the start retires the intent and creates the publication again under a new one.
+2. With a receipt, no publication under the name means its `COMMIT` failed or is still waiting, and the start does the same.
+3. A publication with exactly the recorded OID and owner committed without its reply reaching the engine.
+   The start drops it and creates it again; it never adopts it.
+4. Any other publication under the name is not proven this run's: the start refuses with exit 3, naming the publication with its OID and owner, and leaves it and the native state unchanged.
+
+> [!caution]
+> A `COMMIT` still waiting on an unanswering synchronous standby stays invisible to other sessions, so a start in that window finds no publication and retires the receipt.
+> Its new `CREATE PUBLICATION` waits on that transaction for as long as the standby does not answer, then fails with SQLSTATE 23505 once the old `COMMIT` completes.
+> Each later start finds that publication with only the new intent recorded and refuses, because no receipt proves it is this run's.
+> We record no transaction ID that could prove it, so remove that publication by hand once you confirm nothing else uses it.
+
+Every publication drop works the same way: this one, a restart's drop of the bound publication or of its next generation's unbound one, and `stream cleanup`.
+The dropping transaction reads the publication's OID and owner again and requires the recorded ones.
+After `DROP PUBLICATION` it requires that the object lock the drop took names the recorded OID, because PostgreSQL resolves the name again once it holds that lock.
+A publication that replaced the recorded one under its name, even while the drop waited on its lock, therefore rolls the drop back, refuses with exit 3 and stays.
+
+### Restart before the pre-data restore
+
+A clone or follow killed after it bound its snapshot and before it recorded the pre-data handoff is in phase `fresh`.
+We restart it through the copy restart (roadmap decision 8), because the target holds nothing of it but the run's bookkeeping schema:
+
+1. The target bookkeeping intent is resolved first.
+   The intent's nonce is written inside the creating transaction, so a schema whose row carries it is this run's and is used; an absent one is created again under the same intent.
+2. The restart takes a new snapshot under the next copy generation.
+   A follow drops its slot and publication by their bound receipts before it creates new ones.
+3. No table creation is recorded in phase `fresh`, so the restart truncates and reconciles no table and skips the pre-data comparison.
+4. It then restores pre-data from the new snapshot and records the handoff as a first run does.
+
+A clone accepts this restart from `--restart` or `--resume --not-consistent`, and a follow from `--restart` or `--resume`.
+Phase `pre_data_pending` still refuses, because the utility's outcome on the target is unknown.
+
 ## Replication, endpos, and drain
 
 Every replication payload MUST explicitly measure `certified_lsn`, including an endpos acknowledgment.

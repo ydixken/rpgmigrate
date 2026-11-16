@@ -54,9 +54,59 @@ The target must still hold exactly the recorded previous generation and snapshot
 An uncertain pre-data ownership handoff or post-data utility outcome refuses recovery.
 Preserve uncertain objects for manual review or use a fresh positively established migration.
 
+## Killed before the pre-data restore
+
+A clone or follow that bound its snapshot and died before it recorded the pre-data handoff (native phase `fresh`) has restored nothing on the target.
+The next `--resume --not-consistent` (the operator's retry), or `--restart` for clone, restarts it under the next copy generation the way a copy restart does.
+A follow first drops its slot and publication by their bound receipts and creates new ones, and both then restore pre-data from the new snapshot as a first run would.
+A target bookkeeping intent left by the kill is resolved first: the schema whose row carries the intent's nonce is this run's, and an absent one is created again.
+A plain `--resume` of such a clone refuses with exit 3, `clone-recovery: COPY snapshot was lost; use --restart or --resume --not-consistent before post-data`.
+
 After a durable anchor, resume still requires the exact source identity, slot/publication provenance, target authority, and retained WAL.
 Missing WAL or a replaced source resource is a recovery gap.
 Do not recreate a same-name slot, silently start from a later position, or turn absent evidence into success.
+
+## Interrupted follow slot creation
+
+`CREATE_REPLICATION_SLOT` waits until every source transaction that holds a transaction ID ends, so a long source transaction can hold a follow at slot creation.
+A kill there, such as a node drain or a timeout, leaves a pending slot intent without its receipt.
+A lost reply leaves the same state and exits with `source-slot-create-unknown: slot may retain WAL; the next start drops it by its recorded intent and creation shape, then creates it again`.
+The next start, a first-run retry or `--restart`, drops exactly the recorded slot if it exists and then creates it again under a new intent.
+It never adopts that slot, because the snapshot it exported ended with the session that created it.
+It drops only a logical `pgoutput` slot on the source database that is not temporary and has `two_phase`, `failover` and `synced` off; any other slot under that name refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
+
+> [!note]
+> While the creating session still waits, the slot is active and the start refuses with exit 3, naming the slot and its backend.
+> End the blocking source transaction or wait for that session to end, then retry.
+
+A slot that another session created under the name before this run's CREATE is not this run's.
+The run refuses with exit 3, `follow-source: existing slot or publication is never adopted`, or `follow-source: slot <name> already exists, so this run's CREATE created nothing; it is never adopted or dropped`, and records no slot intent.
+Later starts refuse while that slot exists, with the first text on a first run or `follow-restart: a slot reappeared after recorded absence` on a restart, and leave it in place.
+
+> [!caution]
+> Two migrations must never share a slot name on one source; with the operator, that means two Migrations with the same slot name.
+> Give each its own name, remove the other slot only after you confirm nothing uses it, then retry.
+
+A first run killed after the slot was created but before it bound the snapshot leaves the slot's receipt.
+The next start drops that slot only at its recorded consistent point and creates it again, so it does not keep retaining WAL.
+It drops this run's slot before its other checks, so a later refusal, such as a source table list that changed meanwhile, does not leave the slot behind.
+A slot under that name at another position or of another plugin refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
+
+## Interrupted follow publication creation
+
+`CREATE PUBLICATION` waits for a `SHARE UPDATE EXCLUSIVE` lock on every member table, and its `COMMIT` can wait for a synchronous standby.
+A kill there leaves a publication intent, or its receipt, without the confirmed outcome.
+A lost reply leaves the same state and exits with `follow-source-create-unknown: publication COMMIT was not confirmed; the next start drops it by its recorded OID and owner, then creates it again`.
+The next start, a first-run retry or a restart, resolves it before it creates a slot.
+It retires the intent when no publication has the recorded name, and drops the publication with exactly the recorded OID and owner, so it creates the publication again under a new intent and never adopts the old one.
+
+> [!caution]
+> A publication of any other identity under the recorded name refuses with exit 3: `follow-source: publication <name> (OID <oid>) exists, but this run's CREATE under that name never committed`, or `follow-source: publication <name> (OID <oid>, owner <owner>) is not this run's unconfirmed creation (OID <recorded>, owner <recorded>)` when its OID or its owner differs from the receipt.
+> The engine never drops it; remove it only after you confirm nothing else uses it, then retry.
+
+A start while the killed run's `COMMIT` still waits on a synchronous standby cannot see that publication.
+It waits behind that `COMMIT` and fails with SQLSTATE 23505 once it completes, and later starts refuse with the first text above.
+That publication is the killed run's, but nothing recorded proves it, so remove it the same way.
 
 ## Unknown COMMIT or target fence conflict
 
@@ -86,6 +136,8 @@ Packaging smoke alone does not qualify authentication, TLS, resolver, PVC, or he
 
 Stop if caller identity, checkpoint generation, object OIDs, slot continuity, or ownership disagrees.
 Preserve the conflicting resource and receipts for review.
+A restart or `stream cleanup` drops a publication only at its recorded OID and owner.
+One that replaced it under the name, even while the `DROP` waited on its lock, refuses with exit 3 and stays.
 Never broaden cleanup by name prefix, delete authority files, or delete a whole PVC to repair a refusal.
 An empty cleanup inventory cannot prove completion.
 

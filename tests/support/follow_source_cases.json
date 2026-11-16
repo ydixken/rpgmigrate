@@ -13,5 +13,12 @@
   "catalog::follow::tests::live_cleanup_source_binding_mismatch_preserves_resources",
   "snapshot::follow_tests::live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses",
   "snapshot::follow_tests::live_follow_extension_opclasses_require_the_source_version_or_an_update_path_on_the_target",
-  "snapshot::follow_tests::live_follow_generated_columns_publish_only_writable_columns"
+  "snapshot::follow_tests::live_follow_generated_columns_publish_only_writable_columns",
+  "snapshot::follow_tests::live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again",
+  "snapshot::follow_tests::live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted",
+  "snapshot::follow_tests::live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adopted",
+  "snapshot::follow_tests::live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once",
+  "snapshot::follow_tests::live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept",
+  "snapshot::follow_tests::live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_it",
+  "snapshot::follow_tests::live_follow_recorded_publication_replaced_during_its_removal_is_refused_and_kept"
 ]
