@@ -159,6 +159,7 @@ fn fresh(
         ));
     }
     catalog::follow::reject_generated(&plan.tables)?;
+    catalog::follow::require_follow_extensions(&mut source, &mut target_sql, &plan.tables, io)?;
     crate::schema::preflight(&source, &target_sql, &plan, io)?;
     let mut snapshot = FollowSnapshot::create(options, &plan, native, io)?;
     let binding = snapshot.binding().clone();
@@ -247,6 +248,12 @@ fn restart_plan(
         io,
     )?;
     crate::clone::require_same_catalog(&saved.plan, &checked)?;
+    catalog::follow::require_follow_extensions(
+        snapshot.connection()?,
+        target,
+        &checked.tables,
+        io,
+    )?;
     crate::clone::require_pre_data_match(crate::schema::compare_pre_data(
         &options.clone,
         snapshot.ticket(),

@@ -964,30 +964,45 @@ fn live_follow_relation_uses_target_type_oids_and_exact_owned_identity() {
 #[test]
 #[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
 fn live_follow_executed_expressions_refuse_before_resource_creation() {
-    for ddl in [
-        "CREATE TABLE public.items(id integer PRIMARY KEY CHECK(id>0))",
-        "CREATE DOMAIN public.positive AS integer CHECK(VALUE>0); CREATE TABLE public.items(id integer PRIMARY KEY,value public.positive)",
-        "CREATE DOMAIN public.positive AS integer CHECK(VALUE>0); CREATE TYPE public.pair AS(value public.positive); CREATE TABLE public.items(id integer PRIMARY KEY,value public.pair[])",
-        "CREATE TABLE public.items(id integer PRIMARY KEY,value text); CREATE INDEX expression_idx ON public.items((lower(value)))",
-        "CREATE TABLE public.items(id integer PRIMARY KEY,value text); CREATE INDEX partial_idx ON public.items(value) WHERE id>0",
-        "CREATE TABLE public.root(id integer) PARTITION BY RANGE((id+1)); CREATE TABLE public.leaf PARTITION OF public.root FOR VALUES FROM(0) TO(100); ALTER TABLE public.leaf REPLICA IDENTITY FULL",
-        "CREATE COLLATION public.casefold(provider=icu,locale='und-u-ks-level2',deterministic=false); CREATE TABLE public.items(id text COLLATE public.casefold PRIMARY KEY)",
-        "CREATE TABLE public.root(id text) PARTITION BY RANGE(id); CREATE TABLE public.leaf PARTITION OF public.root FOR VALUES FROM('a') TO('z'); ALTER TABLE public.leaf REPLICA IDENTITY FULL",
+    const CHECK: &str = "follow-execution: table/domain CHECK";
+    const INDEX: &str = "follow-execution: require indexes";
+    const PARTITION: &str = "follow-execution: partition keys";
+    const POSITIVE: &str = "CREATE FUNCTION public.positive(integer) RETURNS boolean IMMUTABLE LANGUAGE sql AS 'SELECT $1>0'";
+    let mut wrong = Vec::new();
+    for (ddl, refusal) in [
+        (format!("{POSITIVE}; CREATE TABLE public.items(id integer PRIMARY KEY CHECK(public.positive(id)))"), CHECK),
+        ("CREATE DOMAIN public.positive AS integer; ALTER DOMAIN public.positive ADD CONSTRAINT checked CHECK(VALUE>0) NOT VALID; CREATE TABLE public.items(id integer PRIMARY KEY,value public.positive)".into(), CHECK),
+        (format!("{POSITIVE}; CREATE DOMAIN public.checked AS integer CHECK(public.positive(VALUE)); CREATE TYPE public.pair AS(value public.checked); CREATE TABLE public.items(id integer PRIMARY KEY,value public.pair[])"), CHECK),
+        ("CREATE TABLE public.items(id integer PRIMARY KEY,at timestamptz CHECK(at<=now()))".into(), CHECK),
+        ("CREATE TABLE public.items(id integer PRIMARY KEY,at timestamptz CHECK(at::text<>''))".into(), CHECK),
+        ("CREATE OPERATOR public.=== (FUNCTION=int4eq,LEFTARG=integer,RIGHTARG=integer); CREATE TABLE public.items(id integer PRIMARY KEY CHECK(id OPERATOR(public.===) id))".into(), CHECK),
+        ("CREATE COLLATION public.casefold(provider=icu,locale='und-u-ks-level2',deterministic=false); CREATE TABLE public.items(id integer PRIMARY KEY,value text CHECK(value COLLATE public.casefold<>'x'))".into(), CHECK),
+        ("CREATE TABLE public.items(id integer PRIMARY KEY,value integer,EXCLUDE USING btree(value WITH =))".into(), CHECK),
+        ("CREATE FUNCTION public.twice(integer) RETURNS integer IMMUTABLE LANGUAGE sql AS 'SELECT $1*2'; CREATE TABLE public.items(id integer PRIMARY KEY,value integer); CREATE INDEX expression_idx ON public.items((public.twice(value)))".into(), INDEX),
+        (format!("{POSITIVE}; CREATE TABLE public.items(id integer PRIMARY KEY,value integer); CREATE INDEX partial_idx ON public.items(value) WHERE public.positive(value)"), INDEX),
+        ("CREATE OPERATOR CLASS public.int4_local FOR TYPE integer USING btree AS OPERATOR 1 <,OPERATOR 2 <=,OPERATOR 3 =,OPERATOR 4 >=,OPERATOR 5 >,FUNCTION 1 btint4cmp(integer,integer); CREATE TABLE public.items(id integer PRIMARY KEY,value integer); CREATE INDEX local_idx ON public.items(value public.int4_local)".into(), INDEX),
+        ("CREATE COLLATION public.casefold(provider=icu,locale='und-u-ks-level2',deterministic=false); CREATE TABLE public.items(id text COLLATE public.casefold PRIMARY KEY)".into(), INDEX),
+        ("CREATE TABLE public.root(id integer) PARTITION BY RANGE((id+1)); CREATE TABLE public.leaf PARTITION OF public.root FOR VALUES FROM(0) TO(100); ALTER TABLE public.leaf REPLICA IDENTITY FULL".into(), PARTITION),
+        ("CREATE TABLE public.root(id text) PARTITION BY RANGE(id); CREATE TABLE public.leaf PARTITION OF public.root FOR VALUES FROM('a') TO('z'); ALTER TABLE public.leaf REPLICA IDENTITY FULL".into(), PARTITION),
     ] {
-        let mut fixture = Fixture::new(ddl);
-        let error = FollowSnapshot::create(
+        let mut fixture = Fixture::new(&ddl);
+        // Collect every case, so one run shows each refusal a mutation opens.
+        match FollowSnapshot::create(
             &fixture.options,
             &fixture.plan,
             fixture.native.as_mut().unwrap(),
             &fixture.io,
-        )
-        .err()
-        .expect("executed expression must refuse before resources");
-        assert!(
-            error.message.contains("follow-execution"),
-            "wrong refusal class: {}",
-            error.message
-        );
+        ) {
+            Ok(_) => {
+                wrong.push(format!("admitted: {ddl}"));
+                continue;
+            }
+            Err(error) if !error.message.contains(refusal) => {
+                wrong.push(format!("{}: {ddl}", error.message));
+                continue;
+            }
+            Err(_) => {}
+        }
         assert!(
             fixture
                 .native
@@ -1001,6 +1016,82 @@ fn live_follow_executed_expressions_refuse_before_resource_creation() {
         assert_eq!(resources.cell(0, 0).unwrap(), Some(b"0".as_slice()));
         assert_eq!(resources.cell(0, 1).unwrap(), Some(b"0".as_slice()));
     }
+    assert!(wrong.is_empty(), "unexpected follow admission: {wrong:#?}");
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses() {
+    // The objects of the operator's legacy.sql fixture, plus one CHECK over every admitted node shape.
+    let mut fixture = Fixture::new(concat!(
+        "CREATE EXTENSION citext; ",
+        "CREATE DOMAIN public.e2e_percent AS numeric CHECK (VALUE >= 0 AND VALUE <= 100); ",
+        "CREATE TABLE public.app_users(id integer PRIMARY KEY,email citext,display_name text,quota_percent public.e2e_percent,",
+        "CHECK (CASE WHEN id IN (1,2) THEN coalesce(display_name,'x') COLLATE \"C\" <> '' ELSE id IS NOT NULL END),",
+        "CHECK (ARRAY[id,1] IS NOT NULL AND display_name::varchar IN ('a','b') IS NOT TRUE AND (id > 0) IS NOT FALSE)); ",
+        "ALTER TABLE public.app_users ADD CONSTRAINT app_users_email_key UNIQUE (email); ",
+        "CREATE TABLE public.readings(id integer PRIMARY KEY,captured_at timestamptz,quantity integer); ",
+        "CREATE TABLE public.documents(id integer PRIMARY KEY,title text); ",
+        "CREATE INDEX app_users_name_lower_idx ON public.app_users (lower(display_name)); ",
+        "CREATE INDEX readings_recent_partial_idx ON public.readings (captured_at) WHERE quantity > 5; ",
+        "CREATE INDEX documents_title_lower_idx ON public.documents (lower(title))",
+    ));
+    assert_eq!(fixture.plan.tables.len(), 3);
+    catalog::follow::preflight_follow(&mut fixture.source, &fixture.plan, &fixture.io).unwrap();
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_extension_opclasses_require_the_source_extension_version_on_the_target() {
+    let mut fixture = Fixture::new(
+        "CREATE EXTENSION citext; CREATE TABLE public.items(id integer PRIMARY KEY,email citext UNIQUE)",
+    );
+    let io = fixture.io.clone();
+    let database = format!("{}_target", fixture.database);
+    fixture
+        .admin
+        .query(&format!("CREATE DATABASE {database}"), &io)
+        .unwrap();
+    let admin = std::env::var("RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN").unwrap();
+    let info = Conninfo::new(format!("{admin} dbname={database}").into()).unwrap();
+    let mut target = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
+    let tables = fixture.plan.tables.clone();
+    let check = |source: &mut PgConnection, target: &mut PgConnection| {
+        catalog::follow::require_follow_extensions(source, target, &tables, &io)
+    };
+    // Absent from the target but available: pre-data installs the same default version.
+    check(&mut fixture.source, &mut target).unwrap();
+    target.query("CREATE EXTENSION citext", &io).unwrap();
+    check(&mut fixture.source, &mut target).unwrap();
+    catalog::command(&mut target, "BEGIN", "BEGIN", &io).unwrap();
+    target
+        .query(
+            "UPDATE pg_catalog.pg_extension SET extversion='0.0' WHERE extname='citext'",
+            &io,
+        )
+        .unwrap();
+    let error = check(&mut fixture.source, &mut target).unwrap_err();
+    assert!(
+        error.message.contains("source extension version"),
+        "{error:?}"
+    );
+    catalog::command(&mut target, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    catalog::command(&mut fixture.source, "BEGIN", "BEGIN", &io).unwrap();
+    fixture
+        .source
+        .query("UPDATE pg_catalog.pg_extension SET extname='rpgmigrate_absent_extension' WHERE extname='citext'", &io)
+        .unwrap();
+    let error = check(&mut fixture.source, &mut target).unwrap_err();
+    assert!(
+        error.message.contains("source extension version"),
+        "{error:?}"
+    );
+    catalog::command(&mut fixture.source, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    drop(target);
+    fixture
+        .admin
+        .query(&format!("DROP DATABASE {database} WITH (FORCE)"), &io)
+        .unwrap();
 }
 
 #[test]

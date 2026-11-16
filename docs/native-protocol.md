@@ -265,6 +265,27 @@ The engine adds `-c idle_session_timeout=0` to their `PGOPTIONS` as well, becaus
 With `--follow` the source snapshot session runs as `receive`, because it is a replication-resource session: it creates the publication, imports the slot's snapshot and checks the copy plan, its publication membership and its type map under that snapshot.
 A plain clone names the same session `copy`.
 
+## Follow admission
+
+Follow checks the constraints and indexes on each published table, and on its partition ancestors, before it creates a slot or publication.
+It checks the target table again before applying the first change to it.
+It admits table and domain CHECK constraints, expression indexes and partial indexes when each stored expression meets all of these rules:
+
+1. Every function and operator is an immutable built-in in `pg_catalog`.
+2. Every node is an operator, function, boolean, `CASE`, `COALESCE`, `NULL` test, array, relabel, `COLLATE`, column or constant node, so an I/O cast such as `ts::text` refuses.
+3. Every collation it uses is deterministic and its recorded version matches the server's.
+
+A `NOT VALID` CHECK, an exclusion constraint and an expression that calls a user or extension function still refuse.
+An index operator class must be built in or belong to an extension.
+For an extension operator class, the target must already hold the source's extension version, or offer it as the default version that pre-data installs.
+We compare versions because the operator class carries the extension's semantics.
+
+> [!important]
+> `citext` defaults to 1.6 on PostgreSQL 16 and 1.8 on PostgreSQL 18, so an index with a `citext` operator class refuses from 16 to 18.
+
+The replica identity index keeps its stricter rule: one valid immediate built-in btree unique index, without expressions or predicates.
+Partition keys still need plain columns and built-in operator classes, and follow still refuses generated columns.
+
 ## Replication, endpos, and drain
 
 Every replication payload MUST explicitly measure `certified_lsn`, including an endpos acknowledgment.

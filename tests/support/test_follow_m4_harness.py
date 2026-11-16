@@ -70,6 +70,10 @@ SOURCE_ADDITIONS = tuple("catalog::follow::tests::" + name for name in (
     "live_cleanup_recorded_removal_reappearance_survives",
     "live_cleanup_source_binding_mismatch_preserves_resources",
 ))
+SOURCE_ADMISSION = tuple("snapshot::follow_tests::" + name for name in (
+    "live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses",
+    "live_follow_extension_opclasses_require_the_source_extension_version_on_the_target",
+))
 
 
 class FollowM4HarnessTests(unittest.TestCase):
@@ -132,8 +136,8 @@ class FollowM4HarnessTests(unittest.TestCase):
     def test_authority_inventory_preserves_eleven_and_requires_six_cutover_and_one_m8_case(self):
         self.assertEqual(module_cases({}, "FollowAuthority"), [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS, *AUTHORITY_M8])
 
-    def test_source_inventory_preserves_seven_and_requires_five_cleanup_cases(self):
-        self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS])
+    def test_source_inventory_preserves_seven_and_requires_five_cleanup_and_two_admission_cases(self):
+        self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS, *SOURCE_ADMISSION])
 
     def test_receive_inventory_preserves_four_cases_and_requires_seven_cutover_cases(self):
         self.assertEqual(module_cases({}, "FollowReceive"), [*RECEIVE_BASELINE, *RECEIVE_ADDITIONS])

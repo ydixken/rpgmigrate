@@ -32,6 +32,9 @@ CASES = ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_o
          "confirmed_flush_gap", "source_wal_loss", "active_foreign_slot", "copy_restart", "predata_handoff_refusal",
          "postdata_refusal", "backpressure", "generated_refusal", "check_refusal", "domain_check_refusal",
          "expression_index_refusal", "partial_index_refusal")
+# Follow admits built-in immutable CHECK and index expressions, so the refusal cases call user functions.
+USER_FUNCTIONS = ("""CREATE FUNCTION "M2 space".positive_id(bigint) RETURNS boolean IMMUTABLE LANGUAGE sql AS 'SELECT $1>0';"""
+                  """CREATE FUNCTION "M2 space".next_id(bigint) RETURNS bigint IMMUTABLE LANGUAGE sql AS 'SELECT $1+1';""")
 
 
 INITIAL_DML = '''INSERT INTO "M2 space".rows(id,value,feeling,positive) OVERRIDING SYSTEM VALUE VALUES(2001,'insert','busy',4);
@@ -1212,10 +1215,10 @@ def inner(args):
             return
         for name, ddl, reason in (
                 ("generated_refusal", '''ALTER TABLE "M2 space".rows ADD COLUMN computed text GENERATED ALWAYS AS (value || 'generated') STORED;''', "follow-preflight: generated columns are unsupported"),
-                ("check_refusal", 'ALTER TABLE "M2 space".rows ADD CONSTRAINT checked CHECK (id>0);', "follow-execution: table/domain CHECK"),
-                ("domain_check_refusal", 'ALTER DOMAIN "M2 space".positive ADD CONSTRAINT checked CHECK (VALUE>0);', "follow-execution: table/domain CHECK"),
-                ("expression_index_refusal", 'CREATE INDEX expression_idx ON "M2 space".rows ((id+1));', "follow-execution: require plain indexes"),
-                ("partial_index_refusal", 'CREATE INDEX partial_idx ON "M2 space".rows (id) WHERE id>0;', "follow-execution: require plain indexes")):
+                ("check_refusal", USER_FUNCTIONS + 'ALTER TABLE "M2 space".rows ADD CONSTRAINT checked CHECK ("M2 space".positive_id(id));', "follow-execution: table/domain CHECK"),
+                ("domain_check_refusal", 'ALTER DOMAIN "M2 space".positive ADD CONSTRAINT checked CHECK (VALUE>0) NOT VALID;', "follow-execution: table/domain CHECK"),
+                ("expression_index_refusal", USER_FUNCTIONS + 'CREATE INDEX expression_idx ON "M2 space".rows (("M2 space".next_id(id)));', "follow-execution: require indexes"),
+                ("partial_index_refusal", USER_FUNCTIONS + 'CREATE INDEX partial_idx ON "M2 space".rows (id) WHERE "M2 space".positive_id(id);', "follow-execution: require indexes")):
             srcname, dstname, src, dst, state = case(name)
             source.sql(srcname, ddl)
             before = target.catalog_signature(dstname)
