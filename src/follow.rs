@@ -159,7 +159,6 @@ fn fresh(
             "follow: preliminary plan differs from its native source intent",
         ));
     }
-    catalog::follow::reject_generated(&plan.tables)?;
     catalog::follow::require_follow_extensions(&mut source, &mut target_sql, &plan.tables, io)?;
     crate::schema::preflight(&source, &target_sql, &plan, io)?;
     let mut snapshot = FollowSnapshot::create(options, &plan, native, io)?;

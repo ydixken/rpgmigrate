@@ -298,7 +298,27 @@ An update path stands in for equal semantics, the same assumption `ALTER EXTENSI
 > An `ALTER EXTENSION UPDATE` on either side during streaming is not re-checked.
 
 The replica identity index keeps its stricter rule: one valid immediate built-in btree unique index, without expressions or predicates.
-Partition keys still need plain columns and built-in operator classes, and follow still refuses generated columns.
+Partition keys still need plain columns and built-in operator classes.
+
+### Generated columns
+
+pgoutput leaves generated columns out of every Relation message and tuple on PostgreSQL 16, and on 18 while the publication keeps `publish_generated_columns=none`.
+Follow therefore applies only the published columns, and the target computes its generated columns from its own expressions.
+Follow admits stored generated columns on 16 and 18, and virtual generated columns on 18, when each generation expression meets the expression rules above.
+It still refuses:
+
+1. a generation expression that calls a user or extension function, or uses a nondeterministic or stale collation;
+2. a replica identity index that contains a generated column, because 16 then sends an empty key and 18 refuses UPDATE and DELETE on the source;
+3. a `REPLICA IDENTITY FULL` table with any generated column on an 18 source, because 18 refuses UPDATE and DELETE on it once the publication omits that column.
+
+The target table must hold the same columns in the same order, with a generated column wherever the plan has one, and each target generation expression must meet the same rules.
+
+Each publication member must match the plan exactly on both majors:
+
+1. `pg_publication_tables.attnames` lists the table's non-dropped columns whose `attgenerated` is empty, in `attnum` order.
+2. The table's non-dropped columns, in `attnum` order, are the plan's full column list, so an added generated column still differs.
+3. `rowfilter` is null and the member's `pg_publication_rel.prattrs` is null, so a column list that names every writable column still refuses.
+4. The publication's `pubgencols` is `n` on 18; 16 has no such column.
 
 ## Replication, endpos, and drain
 

@@ -7,7 +7,7 @@ The decoder tests consume the retained bytes directly.
 
 We preserve full positional K tuples, NULL and empty text, unchanged TOAST, RI FULL rows, domain type metadata, origin metadata, identity columns, and multi-relation TRUNCATE with both option flags.
 PostgreSQL omits the generated column from these default-publication wire tuples.
-Native follow refuses all generated columns during source preflight; this wire example does not qualify generated-column follow.
+Native follow relies on that omission and lets the target compute generated columns; the follow admission rules in `docs/native-protocol.md` list the generated columns it still refuses.
 The corpus records source spill statistics, server versions, source type bindings, packet LSNs and xids, and the exact capture SQL hash.
 The unit tests assert the expected event inventory and tuple values independently of the decoder.
 

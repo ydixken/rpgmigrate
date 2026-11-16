@@ -1173,3 +1173,366 @@ fn live_identity_missing_row_refuses_result_and_failed_insert_rolls_back() {
     assert!(super::super::serial::require_result(&plan, result).is_err());
     db.query("ROLLBACK", &io).unwrap();
 }
+
+fn live_generated_binding() -> crate::contracts::FollowBinding {
+    let source = crate::identity::SourceId {
+        system_identifier: 7,
+        database_oid: 7,
+    };
+    crate::contracts::FollowBinding {
+        slot: crate::state::SourceSlotReceipt {
+            intent: crate::state::SourceSlotIntent {
+                binding: crate::state::SourceSlotBinding::new(
+                    crate::identity::StreamId {
+                        run: crate::identity::RunId([3; 16]),
+                        source,
+                        generation: 1,
+                    },
+                    "generated_apply_slot".into(),
+                    crate::cdc::contracts::Plugin::Pgoutput,
+                    1,
+                )
+                .unwrap(),
+                nonce: [4; 16],
+            },
+            consistent_point: crate::identity::SourceEndLsn(1),
+            snapshot_token: "generated-apply".into(),
+        },
+        publication: crate::contracts::PublicationReceipt {
+            name: "generated_apply_publication".into(),
+            oid: 42,
+            owner_oid: 43,
+        },
+        source_timeline: 1,
+        copy_generation: crate::contracts::CopyGeneration(1),
+        source_types: vec![],
+    }
+}
+
+#[test]
+#[ignore = "requires owned PostgreSQL harness"]
+fn live_generated_columns_apply_only_published_values_and_target_recomputes() {
+    use crate::contracts::{CloneTable, CopyGeneration, OwnedCopyTable, QualifiedTable};
+    let io = live_control();
+    let mut db = live_connection(&io);
+    crate::catalog::configure_session(&mut db, &io).unwrap();
+    let version = db.query("SHOW server_version_num", &io).unwrap();
+    let major = std::str::from_utf8(version.cell(0, 0).unwrap().unwrap())
+        .unwrap()
+        .parse::<u32>()
+        .unwrap()
+        / 10_000;
+    let schema = format!("generated_apply_{}", std::process::id());
+    // A 16 or 18 source sends what the probe recorded: the writable columns only.
+    let virtual_column = if major == 18 {
+        ",v integer GENERATED ALWAYS AS (a*3) VIRTUAL"
+    } else {
+        ""
+    };
+    for sql in [
+        format!("CREATE SCHEMA {schema}"),
+        format!(
+            "CREATE TABLE {schema}.items(id integer PRIMARY KEY,a integer,g integer GENERATED ALWAYS AS (a*2) STORED{virtual_column},b text)"
+        ),
+        format!(
+            "CREATE TABLE {schema}.full_items(id integer,a integer,g integer GENERATED ALWAYS AS (a*2) STORED,b text)"
+        ),
+        format!("ALTER TABLE {schema}.full_items REPLICA IDENTITY FULL"),
+    ] {
+        db.query(&sql, &io).unwrap();
+    }
+    let binding = live_generated_binding();
+    let owned = |db: &mut crate::pg::PgConnection, table: &str, all: &[&str]| {
+        let row = db.query(&format!("SELECT c.oid,c.relnamespace,c.relowner FROM pg_catalog.pg_class c WHERE c.oid='{schema}.{table}'::pg_catalog.regclass"), &io).unwrap();
+        let number = |column| {
+            std::str::from_utf8(row.cell(0, column).unwrap().unwrap())
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        };
+        OwnedCopyTable {
+            table: CloneTable {
+                source_oid: number(0),
+                name: QualifiedTable {
+                    schema: schema.clone(),
+                    table: table.into(),
+                },
+                writable_columns: all
+                    .iter()
+                    .filter(|name| !matches!(**name, "g" | "v"))
+                    .map(|name| (*name).into())
+                    .collect(),
+                all_columns: all.iter().map(|name| (*name).into()).collect(),
+                identity_modes: vec![0; all.len()],
+                partition_identity_modes: None,
+            },
+            target_oid: number(0),
+            target_namespace_oid: number(1),
+            target_owner_oid: number(2),
+            generation: CopyGeneration(1),
+        }
+    };
+    let items = owned(
+        &mut db,
+        "items",
+        if major == 18 {
+            &["id", "a", "g", "v", "b"]
+        } else {
+            &["id", "a", "g", "b"]
+        },
+    );
+    let full = owned(&mut db, "full_items", &["id", "a", "g", "b"]);
+    let relation = |owned: &OwnedCopyTable, identity: u8| Event::Relation {
+        key: RelationKey {
+            oid: owned.table.source_oid,
+            generation: 1,
+        },
+        schema: schema.clone(),
+        name: owned.table.name.table.clone(),
+        columns: owned
+            .table
+            .writable_columns
+            .iter()
+            .map(|name| Column {
+                name: name.clone(),
+                type_oid: if name == "b" { 25 } else { 23 },
+                type_mod: -1,
+                key: identity == b'f' || name == "id",
+            })
+            .collect(),
+        replica_identity: identity,
+    };
+    db.query("SET session_replication_role=replica", &io)
+        .unwrap();
+    let mut checked = Vec::new();
+    for (owned, identity) in [(&items, b'd'), (&full, b'f')] {
+        db.query("BEGIN", &io).unwrap();
+        let metadata = crate::catalog::preflight_follow_relation(
+            &mut db,
+            &relation(owned, identity),
+            &binding,
+            owned,
+            &io,
+        )
+        .unwrap();
+        assert_eq!(metadata.target_type_oids, [23, 23, 25]);
+        assert_eq!(metadata.identity_modes, [0, 0, 0]);
+        // With publish_generated_columns=stored the relation would carry `g`.
+        let mut sent = relation(owned, identity);
+        if let Event::Relation { columns, .. } = &mut sent {
+            columns.insert(
+                2,
+                Column {
+                    name: "g".into(),
+                    type_oid: 23,
+                    type_mod: -1,
+                    key: identity == b'f',
+                },
+            );
+        }
+        assert!(
+            crate::catalog::preflight_follow_relation(&mut db, &sent, &binding, owned, &io)
+                .unwrap_err()
+                .message
+                .contains("owned table plan")
+        );
+        db.query("ROLLBACK", &io).unwrap();
+        checked.push(metadata);
+    }
+    let row = |values: &[&[u8]]| {
+        values
+            .iter()
+            .map(|value| match *value {
+                b"" => Value::Null,
+                b"~" => Value::UnchangedToast,
+                value => text(value),
+            })
+            .collect::<Vec<_>>()
+    };
+    let key_of = |metadata: &FollowRelation| match &metadata.relation {
+        Event::Relation { key, .. } => *key,
+        _ => unreachable!(),
+    };
+    let items_key = key_of(&checked[0]);
+    let full_key = key_of(&checked[1]);
+    let full_old = |values: &[&[u8]]| OldTuple {
+        kind: OldTupleKind::Full,
+        values: row(values),
+    };
+    let item_events = [
+        Event::Insert {
+            relation: items_key,
+            values: row(&[b"1", b"10", b"x"]),
+        },
+        Event::Insert {
+            relation: items_key,
+            values: row(&[b"2", b"20", b"y"]),
+        },
+        Event::Update {
+            relation: items_key,
+            old: None,
+            new: row(&[b"1", b"11", b"x"]),
+        },
+        Event::Update {
+            relation: items_key,
+            old: None,
+            new: row(&[b"1", b"12", b"~"]),
+        },
+        Event::Delete {
+            relation: items_key,
+            old: OldTuple {
+                kind: OldTupleKind::Key,
+                values: row(&[b"2", b"", b""]),
+            },
+        },
+    ];
+    let full_events = [
+        Event::Insert {
+            relation: full_key,
+            values: row(&[b"1", b"10", b"x"]),
+        },
+        Event::Insert {
+            relation: full_key,
+            values: row(&[b"1", b"10", b"x"]),
+        },
+        Event::Update {
+            relation: full_key,
+            old: Some(full_old(&[b"1", b"10", b"x"])),
+            new: row(&[b"1", b"11", b"y"]),
+        },
+        Event::Delete {
+            relation: full_key,
+            old: full_old(&[b"1", b"11", b"y"]),
+        },
+        Event::Update {
+            relation: full_key,
+            old: Some(full_old(&[b"1", b"10", b"x"])),
+            new: row(&[b"1", b"13", b"x"]),
+        },
+    ];
+    assert_eq!(
+        live_cached_replay(
+            &mut db,
+            &checked[0],
+            &item_events,
+            "generated_items",
+            false,
+            &io
+        ),
+        [
+            "INSERT 0 1",
+            "INSERT 0 1",
+            "UPDATE 1",
+            "UPDATE 1",
+            "DELETE 1"
+        ]
+    );
+    assert_eq!(
+        live_cached_replay(
+            &mut db,
+            &checked[1],
+            &full_events,
+            "generated_full",
+            true,
+            &io
+        ),
+        [
+            "INSERT 0 1",
+            "INSERT 0 1",
+            "UPDATE 1",
+            "DELETE 1",
+            "UPDATE 1"
+        ]
+    );
+    let virtual_value = if major == 18 { ",v" } else { "" };
+    let result = db
+        .query(
+            &format!("SELECT pg_catalog.concat_ws('|',id,a,g{virtual_value},b) FROM {schema}.items UNION ALL SELECT pg_catalog.concat_ws('|',id,a,g,b) FROM {schema}.full_items"),
+            &io,
+        )
+        .unwrap();
+    let rows = (0..result.rows())
+        .map(|row| result.cell(row, 0).unwrap().unwrap().to_vec())
+        .collect::<Vec<_>>();
+    let expected_item: &[u8] = if major == 18 {
+        b"1|12|24|36|x"
+    } else {
+        b"1|12|24|x"
+    };
+    assert_eq!(rows, [expected_item.to_vec(), b"1|13|26|x".to_vec()]);
+    // Bypassing the layout check sends `g` to apply, and PostgreSQL refuses the write.
+    let mut sent = FollowRelation {
+        relation: checked[0].relation.clone(),
+        target_type_oids: vec![23, 23, 23, 25],
+        identity_modes: vec![0; 4],
+    };
+    if let Event::Relation { columns, .. } = &mut sent.relation {
+        columns.insert(
+            2,
+            Column {
+                name: "g".into(),
+                type_oid: 23,
+                type_mod: -1,
+                key: false,
+            },
+        );
+    }
+    let insert = Event::Insert {
+        relation: items_key,
+        values: vec![text(b"3"), text(b"30"), text(b"60"), text(b"z")],
+    };
+    let plan = DmlPlan::new(&sent, &insert).unwrap();
+    let error = db
+        .prepare("generated_sent", plan.sql(), plan.param_types(), &io)
+        .unwrap_err();
+    assert!(error.message.contains("428C9"), "{error:?}");
+    // The target must recompute each planned generated column with an admitted expression.
+    for sql in [
+        format!(
+            "CREATE TABLE {schema}.plain_items(id integer PRIMARY KEY,a integer,g integer,b text)"
+        ),
+        format!(
+            "CREATE FUNCTION {schema}.twice(integer) RETURNS integer IMMUTABLE LANGUAGE sql AS 'SELECT $1*2'"
+        ),
+        format!(
+            "CREATE TABLE {schema}.unsafe_items(id integer PRIMARY KEY,a integer,g integer GENERATED ALWAYS AS ({schema}.twice(a)) STORED,b text)"
+        ),
+        format!(
+            "CREATE TABLE {schema}.key_items(a integer,g integer GENERATED ALWAYS AS (a+1) STORED PRIMARY KEY,b text)"
+        ),
+    ] {
+        db.query(&sql, &io).unwrap();
+    }
+    for (table, all, refusal) in [
+        (
+            "plain_items",
+            &["id", "a", "g", "b"][..],
+            "generated column differs",
+        ),
+        (
+            "unsafe_items",
+            &["id", "a", "g", "b"][..],
+            "generated column differs",
+        ),
+        (
+            "key_items",
+            &["a", "g", "b"][..],
+            "do not cover the target layout and identity",
+        ),
+    ] {
+        let owned = owned(&mut db, table, all);
+        db.query("BEGIN", &io).unwrap();
+        let error = crate::catalog::preflight_follow_relation(
+            &mut db,
+            &relation(&owned, b'd'),
+            &binding,
+            &owned,
+            &io,
+        )
+        .unwrap_err();
+        assert!(error.message.contains(refusal), "{table}: {error:?}");
+        db.query("ROLLBACK", &io).unwrap();
+    }
+    db.query(&format!("DROP SCHEMA {schema} CASCADE"), &io)
+        .unwrap();
+}

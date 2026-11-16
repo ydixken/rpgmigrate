@@ -739,33 +739,323 @@ fn live_follow_slot_snapshot_preserves_initial_boundary_and_exporter_lifetime() 
     assert_eq!(origin.cell(0, 0).unwrap(), Some(b"0".as_slice()));
 }
 
+fn live_major() -> u32 {
+    Fixture::new("").plan.source.major
+}
+
+fn source_resources(fixture: &mut Fixture) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let resources=fixture.source.query("SELECT (SELECT count(*) FROM pg_catalog.pg_publication),(SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()))",&fixture.io).unwrap();
+    (
+        resources.cell(0, 0).unwrap().map(<[u8]>::to_vec),
+        resources.cell(0, 1).unwrap().map(<[u8]>::to_vec),
+    )
+}
+
 #[test]
 #[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
 fn live_follow_generated_columns_refuse_before_resource_creation() {
-    let mut fixture = Fixture::new(
-        "CREATE TABLE public.items(id integer PRIMARY KEY,value integer GENERATED ALWAYS AS(id+1) STORED)",
-    );
-    let error = FollowSnapshot::create(
-        &fixture.options,
+    const EXPRESSION: &str =
+        "follow-preflight: generated columns require built-in immutable expressions";
+    const KEY: &str = "follow-preflight: replica identity keys must not contain generated columns";
+    const FULL: &str = "follow-preflight: PostgreSQL 18 refuses UPDATE and DELETE";
+    let mut cases = vec![
+        (
+            "CREATE FUNCTION public.twice(integer) RETURNS integer IMMUTABLE LANGUAGE sql AS 'SELECT $1*2'; CREATE TABLE public.items(id integer PRIMARY KEY,value integer,twice integer GENERATED ALWAYS AS (public.twice(value)) STORED)",
+            EXPRESSION,
+        ),
+        (
+            "CREATE COLLATION public.casefold(provider=icu,locale='und-u-ks-level2',deterministic=false); CREATE TABLE public.items(id integer PRIMARY KEY,value text,folded boolean GENERATED ALWAYS AS (value COLLATE public.casefold='x') STORED)",
+            EXPRESSION,
+        ),
+        (
+            "CREATE TABLE public.items(value integer,id integer GENERATED ALWAYS AS (value+1) STORED PRIMARY KEY)",
+            KEY,
+        ),
+        (
+            "CREATE TABLE public.items(id integer PRIMARY KEY,value integer NOT NULL,twice integer GENERATED ALWAYS AS (value*2) STORED NOT NULL); CREATE UNIQUE INDEX items_twice ON public.items(twice); ALTER TABLE public.items REPLICA IDENTITY USING INDEX items_twice",
+            KEY,
+        ),
+    ];
+    // PostgreSQL 16 publishes FULL tables with generated columns; the admission test covers it.
+    if live_major() == 18 {
+        cases.extend([
+            ("CREATE TABLE public.items(id integer,value integer,twice integer GENERATED ALWAYS AS (value*2) STORED); ALTER TABLE public.items REPLICA IDENTITY FULL", FULL),
+            ("CREATE TABLE public.items(id integer,value integer,twice integer GENERATED ALWAYS AS (value*2) VIRTUAL); ALTER TABLE public.items REPLICA IDENTITY FULL", FULL),
+        ]);
+    }
+    let mut wrong = Vec::new();
+    for (ddl, refusal) in cases {
+        let mut fixture = Fixture::new(ddl);
+        match FollowSnapshot::create(
+            &fixture.options,
+            &fixture.plan,
+            fixture.native.as_mut().unwrap(),
+            &fixture.io,
+        ) {
+            Ok(_) => {
+                wrong.push(format!("admitted: {ddl}"));
+                continue;
+            }
+            Err(error) if !error.message.contains(refusal) => {
+                wrong.push(format!("{ddl}: {}", error.message));
+            }
+            Err(_) => {}
+        }
+        if source_resources(&mut fixture) != (Some(b"0".to_vec()), Some(b"0".to_vec()))
+            || fixture
+                .native
+                .as_ref()
+                .unwrap()
+                .checked_publication()
+                .unwrap()
+                .is_some()
+        {
+            wrong.push(format!("resources created: {ddl}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_generated_columns_publish_only_writable_columns() {
+    use crate::cdc::contracts::{Column, Event, FollowMessage, OldTupleKind};
+    use crate::contracts::OwnedCopyTable;
+    let major = live_major();
+    // Generated columns sit between writable ones, so a positional mapping would shift `b`.
+    let mut ddl = String::from(if major == 18 {
+        "CREATE TABLE public.items(id integer PRIMARY KEY,a integer,g integer GENERATED ALWAYS AS (a*2) STORED,v integer GENERATED ALWAYS AS (a*3) VIRTUAL,b text)"
+    } else {
+        "CREATE TABLE public.items(id integer PRIMARY KEY,a integer,g integer GENERATED ALWAYS AS (a*2) STORED,b text)"
+    });
+    if major == 16 {
+        ddl.push_str("; CREATE TABLE public.full_items(id integer,a integer,g integer GENERATED ALWAYS AS (a*2) STORED,b text); ALTER TABLE public.full_items REPLICA IDENTITY FULL");
+    }
+    let mut fixture = Fixture::new(&ddl);
+    let io = fixture.io.clone();
+    assert_eq!(fixture.plan.tables.len(), if major == 16 { 2 } else { 1 });
+    for table in &fixture.plan.tables {
+        assert_eq!(table.writable_columns, ["id", "a", "b"]);
+        assert_eq!(
+            table.all_columns,
+            if table.name.table == "items" && major == 18 {
+                &["id", "a", "g", "v", "b"][..]
+            } else {
+                &["id", "a", "g", "b"][..]
+            }
+        );
+    }
+    let snapshot = fixture.create();
+    let binding = snapshot.binding().clone();
+    catalog::check_follow_health(
+        &mut fixture.source,
         &fixture.plan,
-        fixture.native.as_mut().unwrap(),
-        &fixture.io,
+        &binding,
+        Some(snapshot.exporter_pid()),
+        &io,
     )
-    .err()
-    .expect("generated follow must refuse");
-    assert!(error.message.contains("generated"));
-    let resources=fixture.source.query("SELECT (SELECT count(*) FROM pg_catalog.pg_publication),(SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()))",&fixture.io).unwrap();
-    assert_eq!(resources.cell(0, 0).unwrap(), Some(b"0".as_slice()));
-    assert_eq!(resources.cell(0, 1).unwrap(), Some(b"0".as_slice()));
-    assert!(
+    .unwrap();
+    snapshot.finish(&io).unwrap();
+    let mut dml = vec![
+        "INSERT INTO public.items(id,a,b) VALUES (1,10,'x'),(2,20,'y')",
+        "UPDATE public.items SET a=11 WHERE id=1",
+        "DELETE FROM public.items WHERE id=2",
+    ];
+    if major == 16 {
+        dml.extend([
+            "INSERT INTO public.full_items(id,a,b) VALUES (1,10,'x'),(1,10,'x')",
+            "UPDATE public.full_items SET b='y' WHERE ctid=(SELECT ctid FROM public.full_items LIMIT 1)",
+            "DELETE FROM public.full_items WHERE b='y'",
+        ]);
+    }
+    for statement in dml {
+        fixture.source.query(statement, &io).unwrap();
+    }
+    let slot = fixture
+        .source
+        .quote_literal(binding.slot.intent.binding.slot_name())
+        .unwrap();
+    let publication = fixture
+        .source
+        .quote_literal(&binding.publication.name)
+        .unwrap();
+    let changes = fixture.source.query(&format!("SELECT pg_catalog.encode(data,'hex') FROM pg_catalog.pg_logical_slot_peek_binary_changes({slot},NULL,NULL,'proto_version','1','publication_names',{publication})"), &io).unwrap();
+    let mut decoder = crate::cdc::pgoutput::Decoder::new(
+        binding.stream(),
+        &binding,
+        crate::contracts::FollowLimits::default(),
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    for row in 0..changes.rows() {
+        let hex = changes.cell(row, 0).unwrap().unwrap();
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| {
+                u8::from_str_radix(std::str::from_utf8(&hex[at..at + 2]).unwrap(), 16).unwrap()
+            })
+            .collect::<Vec<_>>();
+        decoder
+            .feed(&bytes, &mut |message| {
+                if let FollowMessage::Event(event) = message {
+                    events.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    assert!(decoder.is_idle());
+    let mut relations = Vec::new();
+    let (mut rows, mut full_old) = (0, 0);
+    for event in &events {
+        match event {
+            Event::Relation { columns, .. } => {
+                let names = columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
+                assert_eq!(names, ["id", "a", "b"]);
+                relations.push(event.clone());
+            }
+            Event::Insert { values, .. } => {
+                assert_eq!(values.len(), 3);
+                rows += 1;
+            }
+            Event::Update { old, new, .. } => {
+                assert_eq!(new.len(), 3);
+                if let Some(old) = old {
+                    assert_eq!((old.kind, old.values.len()), (OldTupleKind::Full, 3));
+                    full_old += 1;
+                }
+                rows += 1;
+            }
+            Event::Delete { old, .. } => {
+                assert_eq!(old.values.len(), 3);
+                full_old += usize::from(old.kind == OldTupleKind::Full);
+                rows += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(relations.len(), fixture.plan.tables.len());
+    assert_eq!((rows, full_old), if major == 16 { (8, 2) } else { (4, 0) });
+    catalog::command(
+        &mut fixture.source,
+        "SET session_replication_role=replica",
+        "SET",
+        &io,
+    )
+    .unwrap();
+    for relation in &relations {
+        let Event::Relation {
+            key,
+            replica_identity,
+            ..
+        } = relation
+        else {
+            unreachable!()
+        };
+        let table = fixture
+            .plan
+            .tables
+            .iter()
+            .find(|table| table.source_oid == key.oid)
+            .unwrap()
+            .clone();
+        let owner = fixture
+            .source
+            .query(
+                &format!(
+                    "SELECT relnamespace,relowner FROM pg_catalog.pg_class WHERE oid={}",
+                    table.source_oid
+                ),
+                &io,
+            )
+            .unwrap();
+        let number = |column| {
+            std::str::from_utf8(owner.cell(0, column).unwrap().unwrap())
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        };
+        let owned = OwnedCopyTable {
+            target_oid: table.source_oid,
+            target_namespace_oid: number(0),
+            target_owner_oid: number(1),
+            generation: fixture.plan.generation,
+            table,
+        };
+        catalog::command(&mut fixture.source, "BEGIN", "BEGIN", &io).unwrap();
+        let checked = catalog::preflight_follow_relation(
+            &mut fixture.source,
+            relation,
+            &binding,
+            &owned,
+            &io,
+        )
+        .unwrap();
+        assert_eq!(checked.target_type_oids, [23, 23, 25]);
+        assert_eq!(checked.identity_modes, [0, 0, 0]);
+        // publish_generated_columns=stored would send `g` here; apply must never receive it.
+        let mut sent = relation.clone();
+        if let Event::Relation { columns: sent, .. } = &mut sent {
+            sent.insert(
+                2,
+                Column {
+                    name: "g".into(),
+                    type_oid: 23,
+                    type_mod: -1,
+                    key: *replica_identity == b'f',
+                },
+            );
+        }
+        let error =
+            catalog::preflight_follow_relation(&mut fixture.source, &sent, &binding, &owned, &io)
+                .unwrap_err();
+        assert!(error.message.contains("owned table plan"), "{error:?}");
+        catalog::command(&mut fixture.source, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    }
+    let quoted = fixture
+        .source
+        .quote_identifier(&binding.publication.name)
+        .unwrap();
+    let health = |fixture: &mut Fixture| {
+        catalog::check_follow_health(&mut fixture.source, &fixture.plan, &binding, None, &io)
+    };
+    health(&mut fixture).unwrap();
+    if major == 18 {
         fixture
-            .native
-            .as_ref()
-            .unwrap()
-            .checked_publication()
-            .unwrap()
-            .is_none()
-    );
+            .source
+            .query(
+                &format!("ALTER PUBLICATION {quoted} SET (publish_generated_columns=stored)"),
+                &io,
+            )
+            .unwrap();
+        let error = health(&mut fixture).unwrap_err();
+        assert!(error.message.contains("options"), "{error:?}");
+        fixture
+            .source
+            .query(
+                &format!("ALTER PUBLICATION {quoted} SET (publish_generated_columns=none)"),
+                &io,
+            )
+            .unwrap();
+        health(&mut fixture).unwrap();
+    }
+    // A column list naming every writable column publishes the same attnames; it still refuses.
+    fixture
+        .source
+        .query(
+            &format!("ALTER PUBLICATION {quoted} DROP TABLE public.items"),
+            &io,
+        )
+        .unwrap();
+    fixture
+        .source
+        .query(
+            &format!("ALTER PUBLICATION {quoted} ADD TABLE ONLY public.items (id,a,b)"),
+            &io,
+        )
+        .unwrap();
+    let error = health(&mut fixture).unwrap_err();
+    assert!(error.message.contains("column lists"), "{error:?}");
 }
 
 #[test]

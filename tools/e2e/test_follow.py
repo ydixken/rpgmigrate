@@ -539,13 +539,15 @@ class FollowHarnessTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     harness.load_manifest(path)
 
-    def test_fixture_has_no_generated_check_expression_partial_or_callback_obligation(self):
+    def test_fixture_has_generated_columns_and_no_check_expression_partial_or_callback_obligation(self):
         sql = (harness.FIXTURES / "schema.sql").read_text()
         self.assertIn("REPLICA IDENTITY FULL", sql)
         self.assertIn("REPLICA IDENTITY USING INDEX", sql)
         self.assertIn("GENERATED ALWAYS AS IDENTITY", sql)
+        self.assertEqual(sql.count("GENERATED ALWAYS AS ("), 2)
+        self.assertIn("value text,\n    computed text GENERATED ALWAYS AS (value || ':generated') STORED,\n    nullable text,", sql)
+        self.assertIn("current_setting('server_version_num')::integer >= 180000 THEN EXECUTE 'ALTER TABLE \"M2 space\".rows ADD COLUMN echoed text GENERATED ALWAYS AS (nullable || '':virtual'') VIRTUAL'", sql)
         self.assertNotIn("CHECK", sql)
-        self.assertNotIn("STORED", sql)
         self.assertNotIn("CREATE FUNCTION", sql)
         self.assertNotIn("CREATE TRIGGER", sql)
 
@@ -1474,7 +1476,7 @@ class FollowHarnessTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         context = {"root": directory.name, "token": "owned"}
         authority_fault_receipts(context["root"], context["token"])
-        for profile, count in (("FollowSource", 14), ("FollowAuthority", 18), ("FollowReceive", 11), ("FollowApply", 11)):
+        for profile, count in (("FollowSource", 15), ("FollowAuthority", 18), ("FollowReceive", 11), ("FollowApply", 12)):
             cases = module_cases({}, profile)
             self.assertEqual(len(cases), count)
             records = "".join(f"test {name} ... ok\n" for name in cases)
