@@ -19,6 +19,8 @@ MAX_OBJECTS = 16
 MAX_LOGICAL_BYTES = 16777216
 DEFAULT_THRESHOLD = 536870912
 MAX_HEAP_BYTES = 671088640
+# tools/e2e/Containerfile installs the current PGDG clients, so a PGDG minor release moves these; read off hosted run 43820325798.
+CLIENT_MINORS, LINKED_LIBPQ = {"16": "16.16", "18": "18.7"}, 180007
 CASES = ("binary_safe", "binary_fallback", "split_default", "large_objects", "lo_only", "mixed")
 
 
@@ -179,24 +181,24 @@ def validate_artifact_binding(binding):
 
 
 def validate_build_smoke(smoke, binding, pair):
-    expected_client = {"16": "16.15", "18": "18.6"}[pair.split("-")[1]]
+    expected_client = CLIENT_MINORS[pair.split("-")[1]]
     discovery = smoke.get("version_json", {})
     if (set(smoke) != {"binary_sha256", "source_tree_sha256", "runner_image_id", "architecture", "client_versions", "linked_libpq", "library_path", "library_sha256", "packages", "version_json", "version_text"}
             or [server["version"] for server in binding["servers"]] != [{"16": "16.15", "18": "18.6"}[major] for major in pair.split("-")]
             or any(smoke.get(key) != binding[key] for key in ("binary_sha256", "source_tree_sha256", "runner_image_id"))
-            or smoke.get("architecture") not in ("arm64", "amd64") or smoke.get("linked_libpq") != 180006
+            or smoke.get("architecture") not in ("arm64", "amd64") or smoke.get("linked_libpq") != LINKED_LIBPQ
             or smoke.get("client_versions") != {tool: expected_client for tool in ("psql", "pg_dump", "pg_restore")}
             or not isinstance(smoke.get("library_path"), str) or not smoke["library_path"].startswith("/usr/lib/")
             or not re.fullmatch(r"[a-f0-9]{64}", smoke.get("library_sha256", ""))
             or set(discovery) != {"protocol_version", "engine_version", "capabilities"} or type(discovery.get("protocol_version")) is not int or discovery["protocol_version"] != 1
             or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.\-]+)?", discovery.get("engine_version", ""))
-            or discovery.get("capabilities") != ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
-            or smoke.get("version_text") != "rpgmigrate " + discovery["engine_version"] + "\nlibpq 180006\n"):
+            or discovery.get("capabilities") != ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]
+            or smoke.get("version_text") != "rpgmigrate " + discovery["engine_version"] + "\nlibpq " + str(LINKED_LIBPQ) + "\n"):
         raise RuntimeError("candidate source-bound debug version, tools, or library smoke differs")
     packages = smoke.get("packages", {})
     if set(packages) != {"libpq5", "postgresql-client-16", "postgresql-client-18"}:
         raise RuntimeError("candidate measured client package inventory is absent")
-    for name, version in (("libpq5", "18.6"), ("postgresql-client-16", "16.15"), ("postgresql-client-18", "18.6")):
+    for name, version in (("libpq5", CLIENT_MINORS["18"]), ("postgresql-client-16", CLIENT_MINORS["16"]), ("postgresql-client-18", CLIENT_MINORS["18"])):
         if (set(packages[name]) != {"version", "architecture"} or packages[name].get("version", "").split("-")[0] != version or packages[name].get("architecture") != smoke["architecture"]):
             raise RuntimeError("candidate measured client package minor or architecture differs")
 

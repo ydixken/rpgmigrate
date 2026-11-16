@@ -22,7 +22,7 @@ from unittest.mock import Mock, patch
 
 PATH = Path(__file__).with_name("smoke.py")
 QUALIFIED_CAPABILITIES = [
-    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
+    "clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
 ]
 
 
@@ -489,11 +489,14 @@ class SmokeTests(unittest.TestCase):
             self.smoke.probe(image, "podman")
         self.assertEqual(self.calls[0][0], ["podman", "image", "inspect", image])
 
-    def test_historical_six_capability_image_is_refused(self):
+    def test_portable_and_pre_activation_images_are_refused(self):
         path = PATH.parents[2] / "tests/fixtures/native/v1/payloads/version-qualified-profile.json"
-        self.observed["version"] = path.read_text()
-        with self.assertRaises(RuntimeError):
-            self.probe()
+        pre_activation = [name for name in QUALIFIED_CAPABILITIES if not name.startswith("copy.")]
+        for version in [path.read_text(), json.dumps({**json.loads(path.read_text()), "capabilities": pre_activation})]:
+            with self.subTest(version=version):
+                self.observed["version"] = version
+                with self.assertRaises(RuntimeError):
+                    self.probe()
 
     def test_version_contract_requires_exact_qualified_capabilities(self):
         self.assertEqual(self.probe()["version"], {
@@ -506,8 +509,7 @@ class SmokeTests(unittest.TestCase):
                 QUALIFIED_CAPABILITIES[:-1] + ["unknown"],
                 *[QUALIFIED_CAPABILITIES[:index] + QUALIFIED_CAPABILITIES[index + 1:]
                   for index in range(len(QUALIFIED_CAPABILITIES))],
-                *[QUALIFIED_CAPABILITIES + [extra] for extra in
-                  ("copy.binary_fallback", "copy.split", "copy.large_objects", "unknown")]]
+                QUALIFIED_CAPABILITIES + ["unknown"]]
         versions = [{**valid, "capabilities": capabilities} for capabilities in sets]
         versions += [{**valid, "protocol_version": True}, {**valid, "protocol_version": 1.0},
                      {**valid, "engine_version": None}, {**valid, "engine_version": "0.2.0"},

@@ -29,24 +29,25 @@ Its exact required fields are `protocol_version`, `engine_version`, and `capabil
 Linux producers emit this fixed ordered capability array:
 
 ```json
-["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1","verify.sealed_files.v1"]
+["clone.single_db","copy.large_objects","copy.binary_fallback","copy.split","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1","verify.sealed_files.v1"]
 ```
 
-Non-Linux producers retain the original ordered six:
+Non-Linux producers emit the same array without `verify.sealed_files.v1`:
 
 ```json
-["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1"]
+["clone.single_db","copy.large_objects","copy.binary_fallback","copy.split","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1"]
 ```
 
-The profile covers single-database clone with unsplit text COPY, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
-It admits PostgreSQL 16 to 16, 18 to 18, and 16 to 18, with explicit large-object skipping for follow and `durable` commits.
-Binary COPY, splitting, large objects, replay-safe cadence, and relaxed mode remain outside this advertisement.
+The order is the reserved order of `contract.json`.
+The activated M8 profile covers single-database clone with binary COPY and its per-table text fallback, split table parts, large objects, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
+It admits PostgreSQL 16 to 16, 18 to 18, and 16 to 18, with `durable` commits.
+We activated the three copy capabilities on the hosted M8 copy profile and follow-widening receipts for all three pairs.
+Replay-safe cadence and relaxed mode remain outside this advertisement.
 Operational reports retain their command-specific capability arrays.
-The accepted `version-empty-capabilities` and original six-name `version-qualified-profile` fixtures preserve historical discovery syntax.
-Both still parse, but the six-name profile lacks the mandatory native M6 sealed-file prerequisite and refuses before credential projection.
-The empty array also cannot satisfy native clone admission.
-The new accepted `version-qualified-linux-profile` fixture records Linux seven-name discovery.
-The shared 134-file fixture trees retain the portable historical six as fixture-only `qualified_capabilities`, add fixture-only `qualified_linux_capabilities` for Linux seven, preserve `m1_capabilities: []`, and reserve all ten names in `capabilities`.
+The accepted `version-empty-capabilities` fixture preserves historical discovery syntax and cannot satisfy native clone admission.
+The accepted `version-qualified-profile` fixture records non-Linux discovery; it still parses, but it lacks the mandatory native M6 sealed-file prerequisite and refuses before credential projection.
+The accepted `version-qualified-linux-profile` fixture records Linux discovery.
+The shared 134-file fixture trees hold the non-Linux array as fixture-only `qualified_capabilities`, the Linux array as fixture-only `qualified_linux_capabilities`, preserve `m1_capabilities: []`, and reserve all ten names in `capabilities`.
 These metadata fields do not extend the three-field discovery document.
 Discovery MUST NOT contain operational identity or report fields.
 Plain `version` retains text identity and libpq version output.
@@ -56,7 +57,7 @@ The reserved capability names are `clone.single_db`, `copy.large_objects`, `copy
 `verify.sealed_files.v1` identifies compiled support for the private comparison file interface, not universal kernel/NSS/TLS availability or independent database authority.
 Runtime descriptor, kernel, file, image, and connection checks remain mandatory.
 Unknown or duplicate capabilities MUST fail validation.
-A reserved name does not mean that the runtime implements that capability.
+A reserved name alone does not mean that the runtime implements that capability; discovery does.
 Discovery supplies configuration-assessment input.
 Production `UnsupportedEngine`, resolver refusal, helper/PVC/file/SQL qualification, and M6 lifecycle gates remain closed.
 Fresh ARM image packaging and exact-image three-pair M6 runtime checks remain required.
@@ -64,7 +65,7 @@ AMD64 packaging evidence alone cannot qualify native database runtime.
 M10 retains that architecture gate.
 
 M8 candidate execution uses fresh native format 9 / metadata 7 while preserving protocol v1 and the existing output DTOs.
-Its binary COPY, split, and large-object implementations do not activate their reserved capabilities before the corresponding runtime qualification receipts pass.
+Discovery advertises its binary COPY, split, and large-object implementations, and the operator requires those capabilities for its defaults.
 The existing format 8 / metadata 6 workflow retains its own artifacts and receipts.
 The candidate refuses conversion or adoption.
 
@@ -275,11 +276,13 @@ On PostgreSQL 17 and later it also adds `-c transaction_timeout=0`, because `pg_
 That switch follows the server the child connects to: `pg_dump` reading a 16 source for an 18 target gets none.
 
 > [!warning]
-> The source snapshot session stays in one `REPEATABLE READ READ ONLY` transaction from snapshot import to the end of the table copy.
+> The source snapshot session stays in one `REPEATABLE READ READ ONLY` transaction from snapshot import to the end of the table copy and the initial large-object copy.
 > It holds an `ACCESS SHARE` lock on every copied table, its indexes and its sequences, and its snapshot holds back the source's removal horizon.
 > A source `ALTER TABLE`, `TRUNCATE`, `DROP` or `VACUUM FULL` on a copied table waits for the whole copy, and queries queued behind that DDL wait with it.
 > Source sessions keep `lock_timeout` at `0`, as `pg_dump` does without `--lock-wait-timeout`, so an engine session that meets such DDL waits for it instead of failing.
 > Run source DDL on copied tables before the clone starts or after it ends.
+> With large objects selected, the initial large-object copy runs inside that transaction after the tables, so it extends how long the session holds these locks and the removal horizon.
+> Many or large source large objects lengthen that window; `--skip-large-objects` removes it.
 
 With `--follow` the source snapshot session runs as `receive`, because it is a replication-resource session: it creates the publication, imports the slot's snapshot and checks the copy plan, its publication membership and its type map under that snapshot.
 A plain clone names the same session `copy`.
@@ -322,6 +325,11 @@ It still refuses:
 
 Follow refuses the third case before it creates any slot or publication, and keeps `publish_generated_columns=none`.
 To follow such a table from an 18 source, give it a primary key with `REPLICA IDENTITY DEFAULT`, or `REPLICA IDENTITY USING INDEX`, on columns that are not generated.
+
+> [!caution]
+> Admission runs before streaming, so it does not see a later `ALTER TABLE ... REPLICA IDENTITY FULL`.
+> On an 18 source, switching a published table with a generated column to `REPLICA IDENTITY FULL` during follow makes every source `UPDATE` and `DELETE` on that table fail until the replica identity changes back.
+> Change replica identity on such a table only before follow starts or after cleanup removes the publication.
 
 The target table must hold the same columns in the same order, with a generated column wherever the plan has one, and each target generation expression must meet the same rules.
 

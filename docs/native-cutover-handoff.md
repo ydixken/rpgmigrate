@@ -4,7 +4,7 @@ This document freezes the M4 producer layout and the M6 independent-reader requi
 The [native protocol](native-protocol.md) defines report validation.
 The [operator contract](operator-compatibility.md) defines caller duties.
 The [roadmap](roadmap.md) and [task ledger](../tasks/todo.md) own qualification status.
-Current discovery advertises seven capabilities on Linux and six elsewhere, as specified in the [discovery contract](native-protocol.md#discovery).
+Discovery advertises ten capabilities on Linux and nine elsewhere, as specified in the [discovery contract](native-protocol.md#discovery).
 Discovery does not qualify operator activation, exact-image runtime, or durability gates.
 
 ## Format and authority

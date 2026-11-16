@@ -194,11 +194,16 @@ jobs:
           name: clone-${{ matrix.pair }}
           path: target/e2e/${{ matrix.pair }}.json
           if-no-files-found: error
+      - name: Qualify the M8 copy profile
+        run: task test-e2e-clone-${{ matrix.pair }} PROFILE=m8
       - name: Qualify the follow smoke
         run: task test-e2e-follow-smoke-${{ matrix.pair }}
+      - name: Qualify the follow widening objects
+        run: task test-e2e-follow-widening-${{ matrix.pair }}
       - name: Qualify the cutover producer
         run: task test-e2e-cutover-${{ matrix.pair }}
       - name: Qualify the engine session names
+        id: census
         run: task test-e2e-sessions-${{ matrix.pair }}
       - name: Qualify the engine under server session timeouts
         run: task test-e2e-timeouts-${{ matrix.pair }}
@@ -243,21 +248,56 @@ jobs:
           PYLEDGER
           podman image ls --all --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}} {{.CreatedAt}} {{index .Labels "io.rpgmigrate.e2e"}}'
           sudo dmesg | grep -E 'apparmor="(DENIED|ALLOWED)"' | tail -n 20 || true
-      - name: Revalidate the follow smoke and cutover receipts
+      - name: Scan the failure diagnostics for credentials
+        if: failure()
+        env:
+          CENSUS_FAILED: ${{ steps.census.outcome == 'failure' }}
+        run: |
+          python3 - <<'PYSCAN'
+          import os
+          import re
+          import shutil
+          from pathlib import Path
+          # The harness already refused a census log holding the run's password; this also catches any credential shape.
+          credential = re.compile(rb"(?i)pgpassword|postgres_password|\bpassword\s*[=:]|postgres(?:ql)?://[^/\s@]*:[^/\s@]*@|fixture-sensitive-row-")
+          ledgers = sorted(Path("target/e2e").glob("*.runtime.json"))
+          census = sorted(path for path in Path("target/e2e/failures").glob("*/census-logs/*/*") if path.is_file()) if os.environ["CENSUS_FAILED"] == "true" else []
+          hits = [str(path) for path in ledgers + census if credential.search(path.read_bytes())]
+          if hits:
+              raise SystemExit("credential-shaped text found; nothing is uploaded: " + " ".join(hits))
+          for path in ledgers + census:
+              destination = Path("target/e2e-upload") / path.relative_to("target/e2e")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(path, destination)
+          print(len(ledgers), "runtime ledgers and", len(census), "census log files staged")
+          PYSCAN
+      - name: Retain the scanned runtime ledgers and census logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: engine-e2e-diagnostics-${{ matrix.pair }}
+          path: target/e2e-upload/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Revalidate the follow, cutover and M8 receipts
         run: |
           test -s "target/e2e/follow-smoke-${{ matrix.pair }}.json"
           test -s "target/e2e/follow-cutover-${{ matrix.pair }}.json"
           test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"
           test -s "target/e2e/follow-timeouts-${{ matrix.pair }}.json"
+          test -s "target/e2e/follow-widening-${{ matrix.pair }}.json"
+          test -s "target/e2e/clone-m8-${{ matrix.pair }}.json"
           python3 - <<'PYFOLLOW'
           import json
           import sys
           from pathlib import Path
           sys.path.insert(0, "tools/e2e")
+          import copy_features
           import cutover
           import follow
           import sessions
           import timeouts
+          import widening
           smoke = json.loads(Path("target/e2e/follow-smoke-${{ matrix.pair }}.json").read_text())
           producer = json.loads(Path("target/e2e/follow-cutover-${{ matrix.pair }}.json").read_text())
           if smoke.get("pair") != "${{ matrix.pair }}" or producer.get("pair") != "${{ matrix.pair }}":
@@ -272,8 +312,16 @@ jobs:
           if limits.get("pair") != "${{ matrix.pair }}":
               raise SystemExit("session timeout receipt does not match the selected pair")
           timeouts.validate_receipt(limits)
+          widened = json.loads(Path("target/e2e/follow-widening-${{ matrix.pair }}.json").read_text())
+          if widened.get("pair") != "${{ matrix.pair }}":
+              raise SystemExit("widening receipt does not match the selected pair")
+          widening.validate_receipt(widened)
+          copied = json.loads(Path("target/e2e/clone-m8-${{ matrix.pair }}.json").read_text())
+          if copied.get("pair") != "${{ matrix.pair }}":
+              raise SystemExit("M8 copy receipt does not match the selected pair")
+          copy_features.validate_receipt(copied, copy_features.load_manifest(), binding=copied.get("binding"))
           PYFOLLOW
-      - name: Retain sanitized follow smoke and cutover qualification
+      - name: Retain sanitized follow, cutover and M8 qualification
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: follow-${{ matrix.pair }}
@@ -282,6 +330,8 @@ jobs:
             target/e2e/follow-cutover-${{ matrix.pair }}.json
             target/e2e/follow-sessions-${{ matrix.pair }}.json
             target/e2e/follow-timeouts-${{ matrix.pair }}.json
+            target/e2e/follow-widening-${{ matrix.pair }}.json
+            target/e2e/clone-m8-${{ matrix.pair }}.json
           if-no-files-found: error
 
   runner-image:

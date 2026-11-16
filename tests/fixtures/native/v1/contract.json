@@ -18,6 +18,9 @@
   "m1_capabilities": [],
   "qualified_capabilities": [
     "clone.single_db",
+    "copy.large_objects",
+    "copy.binary_fallback",
+    "copy.split",
     "cdc.pgoutput",
     "progress.v1",
     "cutover.v1",
@@ -725,6 +728,9 @@
   },
   "qualified_linux_capabilities": [
     "clone.single_db",
+    "copy.large_objects",
+    "copy.binary_fallback",
+    "copy.split",
     "cdc.pgoutput",
     "progress.v1",
     "cutover.v1",

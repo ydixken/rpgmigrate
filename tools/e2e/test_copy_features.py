@@ -46,12 +46,12 @@ def artifact_binding():
 
 def build_smoke(binding):
     return {"binary_sha256": binding["binary_sha256"], "source_tree_sha256": binding["source_tree_sha256"], "runner_image_id": binding["runner_image_id"],
-            "architecture": "arm64", "client_versions": {tool: "18.6" for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": 180006,
+            "architecture": "arm64", "client_versions": {tool: "18.7" for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": 180007,
             "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18", "library_sha256": "7"*64,
-            "packages": {"libpq5": {"version": "18.6-1.pgdg13+1", "architecture": "arm64"}, "postgresql-client-16": {"version": "16.15-1.pgdg13+1", "architecture": "arm64"},
-                         "postgresql-client-18": {"version": "18.6-1.pgdg13+1", "architecture": "arm64"}},
-            "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
-            "version_text": "rpgmigrate 0.1.0\nlibpq 180006\n"}
+            "packages": {"libpq5": {"version": "18.7-1.pgdg13+1", "architecture": "arm64"}, "postgresql-client-16": {"version": "16.16-1.pgdg13+1", "architecture": "arm64"},
+                         "postgresql-client-18": {"version": "18.7-1.pgdg13+1", "architecture": "arm64"}},
+            "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
+            "version_text": "rpgmigrate 0.1.0\nlibpq 180007\n"}
 
 
 def progress_driver():
@@ -281,8 +281,10 @@ class CopyFeatureTests(unittest.TestCase):
         self.assertTrue(callable(getattr(harness, "validate_build_smoke", None)), "missing source-bound debug smoke")
         binding = artifact_binding(); smoke = build_smoke(binding)
         harness.validate_build_smoke(smoke, binding, "16-18")
-        for change in ({"binary_sha256": "0"*64}, {"runner_image_id": "sha256:" + "0"*64}, {"client_versions": {}}, {"linked_libpq": 180005},
-                       {"version_text": "rpgmigrate 0.1.0\nlibpq 180005\n"}, {"version_json": {}}, {"packages": {}}, {"library_sha256": ""}, {"architecture": "unknown"}):
+        previous = {"packages": {**smoke["packages"], "libpq5": {"version": "18.6-1.pgdg13+1", "architecture": "arm64"}}}
+        for change in ({"binary_sha256": "0"*64}, {"runner_image_id": "sha256:" + "0"*64}, {"client_versions": {}}, {"linked_libpq": 180006},
+                       {"client_versions": {tool: "18.6" for tool in ("psql", "pg_dump", "pg_restore")}}, previous,
+                       {"version_text": "rpgmigrate 0.1.0\nlibpq 180006\n"}, {"version_json": {}}, {"packages": {}}, {"library_sha256": ""}, {"architecture": "unknown"}):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 harness.validate_build_smoke({**smoke, **change}, binding, "16-18")
 

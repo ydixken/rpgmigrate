@@ -47,7 +47,11 @@ def validate(source):
                        "cutover.validate_receipt(producer, cutover.load_manifest(), require_images=True)",
                        "sessions.validate_receipt(names)", "timeouts.validate_receipt(limits)",
                        'test -s "target/e2e/follow-smoke-${{ matrix.pair }}.json"', 'test -s "target/e2e/follow-cutover-${{ matrix.pair }}.json"',
-                       'test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"', 'test -s "target/e2e/follow-timeouts-${{ matrix.pair }}.json"'),
+                       'test -s "target/e2e/follow-sessions-${{ matrix.pair }}.json"', 'test -s "target/e2e/follow-timeouts-${{ matrix.pair }}.json"',
+                       "task test-e2e-clone-${{ matrix.pair }} PROFILE=m8", "task test-e2e-follow-widening-${{ matrix.pair }}",
+                       'test -s "target/e2e/follow-widening-${{ matrix.pair }}.json"', 'test -s "target/e2e/clone-m8-${{ matrix.pair }}.json"',
+                       "widening.validate_receipt(widened)",
+                       'copy_features.validate_receipt(copied, copy_features.load_manifest(), binding=copied.get("binding"))'),
         "runner-image": ("CONTAINER_RUNTIME: podman", "podman --version", "task image:build", "task --silent image:smoke",
                          "test -s target/image/smoke.json"),
     }
@@ -88,14 +92,35 @@ def validate(source):
     if "path: target/e2e/${{ matrix.pair }}.json" not in sections["engine-e2e"]:
         raise ValueError("clone artifacts must contain only the sanitized receipt")
     if ("            target/e2e/follow-smoke-${{ matrix.pair }}.json\n            target/e2e/follow-cutover-${{ matrix.pair }}.json\n"
-            "            target/e2e/follow-sessions-${{ matrix.pair }}.json\n            target/e2e/follow-timeouts-${{ matrix.pair }}.json\n") not in sections["engine-e2e"]:
-        raise ValueError("follow artifacts must contain only the sanitized smoke, cutover, session census and timeout receipts")
-    steps = re.findall(r"^      - name: [^\n]+\n        run: (task test-e2e-[a-z-]+-\$\{\{ matrix\.pair \}\})\n(?=      - )", sections["engine-e2e"], re.MULTILINE)
-    if steps != ["task test-e2e-clone-${{ matrix.pair }}", "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
+            "            target/e2e/follow-sessions-${{ matrix.pair }}.json\n            target/e2e/follow-timeouts-${{ matrix.pair }}.json\n"
+            "            target/e2e/follow-widening-${{ matrix.pair }}.json\n            target/e2e/clone-m8-${{ matrix.pair }}.json\n") not in sections["engine-e2e"]:
+        raise ValueError("follow artifacts must contain only the sanitized smoke, cutover, session census, timeout, widening and M8 receipts")
+    steps = re.findall(r"^      - name: [^\n]+\n(?:        id: [a-z]+\n)?        run: (task test-e2e-[a-z-]+-\$\{\{ matrix\.pair \}\}(?: PROFILE=m8)?)\n(?=      - )",
+                       sections["engine-e2e"], re.MULTILINE)
+    if steps != ["task test-e2e-clone-${{ matrix.pair }}", "task test-e2e-clone-${{ matrix.pair }} PROFILE=m8", "task test-e2e-follow-smoke-${{ matrix.pair }}",
+                 "task test-e2e-follow-widening-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
                  "task test-e2e-sessions-${{ matrix.pair }}", "task test-e2e-timeouts-${{ matrix.pair }}"]:
-        raise ValueError("every pair must run clone, follow smoke, cutover, session census and session timeouts once, unconditionally, in that order")
+        raise ValueError("every pair must run clone, the M8 copy profile, follow smoke, widening, cutover, session census and session timeouts once, unconditionally, in that order")
+    validate_failure_upload(sections["engine-e2e"])
     if "path: target/image/smoke.json" not in sections["runner-image"]:
         raise ValueError("image artifact must bind the smoke receipt")
+
+
+def validate_failure_upload(section):
+    """Decisions (cd) and (cw): scanned ledgers on any failure, scanned census logs only when the census failed, kept 7 days."""
+    scan = re.search(r"^      - name: Scan the failure diagnostics for credentials\n        if: failure\(\)\n(.*?)^          PYSCAN$", section, re.MULTILINE | re.DOTALL)
+    upload = re.search(r"^      - name: Retain the scanned runtime ledgers and census logs on failure\n        if: failure\(\)\n(.*?)(?=^      - |\Z)", section, re.MULTILINE | re.DOTALL)
+    if not scan or not upload or scan.start() > upload.start():
+        raise ValueError("failure diagnostics must be scanned before their upload, and both only on failure")
+    for fragment in ("CENSUS_FAILED: ${{ steps.census.outcome == 'failure' }}", 'glob("*.runtime.json")', "census-logs",
+                     'os.environ["CENSUS_FAILED"] == "true"', "credential.search(path.read_bytes())", "raise SystemExit(", 'Path("target/e2e-upload")'):
+        if fragment not in scan[1]:
+            raise ValueError(f"failure diagnostics scan lacks: {fragment}")
+    for fragment in ("path: target/e2e-upload/", "retention-days: 7\n", "if-no-files-found: error"):
+        if fragment not in upload[1]:
+            raise ValueError(f"failure diagnostics upload lacks: {fragment}")
+    if "        id: census\n        run: task test-e2e-sessions-${{ matrix.pair }}\n" not in section:
+        raise ValueError("the census step needs the id the census-log rule reads")
 
 
 KEY_BUILDS = (ROOT / "Dockerfile", ROOT / "tools/e2e/Containerfile")
@@ -166,7 +191,9 @@ class WorkflowTests(unittest.TestCase):
                         "task test-e2e-follow-smoke-${{ matrix.pair }}", "task test-e2e-cutover-${{ matrix.pair }}",
                         "task test-e2e-sessions-${{ matrix.pair }}", "sessions.validate_receipt(names)",
                         "task test-e2e-timeouts-${{ matrix.pair }}", "timeouts.validate_receipt(limits)",
-                        "follow.validate_receipt(smoke, follow.load_manifest())"):
+                        "follow.validate_receipt(smoke, follow.load_manifest())", "task test-e2e-clone-${{ matrix.pair }} PROFILE=m8",
+                        "task test-e2e-follow-widening-${{ matrix.pair }}", "widening.validate_receipt(widened)",
+                        "credential.search(path.read_bytes())", "retention-days: 7", "if: failure()\n        env:"):
             for replacement in ("", "true"):
                 with self.subTest(command=command, replacement=replacement), self.assertRaises(ValueError):
                     validate(self.source.replace(command, replacement, 1))
@@ -189,6 +216,30 @@ class WorkflowTests(unittest.TestCase):
                                         capture_output=True, text=True, timeout=10)
                 with self.subTest(packages=packages, root=root):
                     self.assertEqual(result.returncode == 0, success, result.stderr)
+
+    def test_failure_diagnostics_scan_stages_only_clean_files_and_census_logs_only_after_a_census_failure(self):
+        body = re.search(r"python3 - <<'PYSCAN'\n(.*?)^          PYSCAN$", self.source, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(body, "failure diagnostics need an executable scan")
+        script = "\n".join(line[10:] for line in body[1].splitlines())
+        clean, census = '{"podman_query_stalls": ["0123"], "containers": [{"cgroup_exec_stalls": []}]}', '{"message": "connection authorized: user=postgres"}'
+        for ledger, log, failed, staged in ((clean, census, "false", ["ledger.runtime.json"]),
+                                            (clean, census, "true", ["failures/run/census-logs/source/log.json", "ledger.runtime.json"]),
+                                            ("PGPASSWORD=0123", census, "false", None),
+                                            (clean, "password=0123", "true", None),
+                                            (clean, "postgresql://postgres:0123@source/db", "true", None),
+                                            (clean, "fixture-sensitive-row-1", "true", None),
+                                            (clean, "password=0123", "false", ["ledger.runtime.json"])):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(ledger=ledger, log=log, failed=failed):
+                root = Path(temporary)
+                (root / "target/e2e/failures/run/census-logs/source").mkdir(parents=True)
+                (root / "target/e2e/ledger.runtime.json").write_text(ledger)
+                (root / "target/e2e/failures/run/census-logs/source/log.json").write_text(log)
+                result = subprocess.run([sys.executable, "-c", script], cwd=temporary, env={"CENSUS_FAILED": failed},
+                                        capture_output=True, text=True, timeout=10)
+                upload = root / "target/e2e-upload"
+                found = sorted(str(path.relative_to(upload)) for path in upload.rglob("*") if path.is_file()) if upload.exists() else []
+                self.assertEqual(result.returncode == 0, staged is not None, result.stderr)
+                self.assertEqual(found, staged or [])
 
     def test_dependency_policy_covers_both_targets_and_all_dependency_kinds(self):
         policy = tomllib.loads((ROOT / "deny.toml").read_text())
