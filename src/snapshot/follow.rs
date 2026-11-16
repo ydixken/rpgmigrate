@@ -60,7 +60,7 @@ impl FollowSnapshot {
                 "follow-restart: only an unbound replacement after old-resource absence can retire",
             ));
         }
-        // An unconfirmed publication CREATE is resolved by `create`, which every restart reaches.
+        // Only a confirmed publication is retired here; `create` resolves an unconfirmed CREATE.
         let publication = native
             .checked_publication()?
             .and_then(|p| p.confirmed().cloned());
@@ -487,12 +487,12 @@ impl FollowSnapshot {
                 }
                 Ok(CommitObservation::RolledBack) => {
                     return Err(follow_refusal(
-                        "follow-source: publication CREATE rolled back; retain the creation intent for inspection",
+                        "follow-source: publication CREATE rolled back; the next start creates it again under a new intent",
                     ));
                 }
                 _ => {
                     return Err(follow_refusal(
-                        "follow-source-create-unknown: publication COMMIT was not confirmed; retain exact candidate ownership for manual inspection",
+                        "follow-source-create-unknown: publication COMMIT was not confirmed; the next start drops it by its recorded OID and owner, then creates it again",
                     ));
                 }
             }

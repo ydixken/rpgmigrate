@@ -1788,8 +1788,8 @@ fn harness_context() -> serde_json::Value {
 }
 
 /// Relays the engine's sessions to the owned server. A held pattern pauses the first client chunk
-/// that contains it until opened. Frozen, nothing passes either way and every server session stays
-/// open until release, which is how a stopped or killed engine loses a reply the server completes.
+/// that contains it until opened or another pattern is held. Frozen, nothing passes either way and every
+/// server session stays open until release, which is how a stopped or killed engine loses a reply.
 struct Relay {
     direct: Conninfo,
     directory: PathBuf,
@@ -1958,7 +1958,7 @@ fn relay_pump(
             }
             if held.is_some() {
                 state.hits.fetch_add(1, Ordering::AcqRel);
-                while state.hold.lock().unwrap().is_some() && !state.stop.load(Ordering::Acquire) {
+                while *state.hold.lock().unwrap() == held && !state.stop.load(Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
             }
@@ -2739,6 +2739,8 @@ enum PublicationKill {
     ReceiptOwner,
     /// As `ReceiptCommitted`, but another session replaces it while the retry's DROP waits.
     ReplacedDuringRemoval,
+    /// The engine's own COMMIT reached the server only after the engine stopped waiting for its reply.
+    OwnCommitLost,
 }
 
 /// Reopens native state as the next process does after a kill.
@@ -2754,6 +2756,61 @@ fn reopen_native(fixture: &mut Fixture) {
         )
         .unwrap(),
     );
+}
+
+/// Runs `engine` through a relay that holds its publication COMMIT, cancels the engine there as a kill
+/// would, then lets that COMMIT complete with no one left to read its reply. Returns the receipt's OID.
+fn lose_own_publication_commit(
+    fixture: &mut Fixture,
+    engine: impl FnOnce(&FollowOptions, &mut NativeState, &IoControl) -> Result<FollowSnapshot>,
+) -> Vec<String> {
+    let relay = Relay::start(fixture);
+    relay.hold(b"CREATE PUBLICATION");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let io = IoControl::unbounded(Arc::clone(&cancelled));
+    let options = fixture.options.clone();
+    let native = fixture.native.as_mut().unwrap();
+    let outcome = std::thread::scope(|scope| {
+        let controller = scope.spawn(|| {
+            wait_until("the publication CREATE was never held", || {
+                relay.hits() == 1
+            });
+            relay.hold(b"COMMIT");
+            wait_until("the publication COMMIT was never held", || {
+                relay.hits() == 2
+            });
+            cancelled.store(true, Ordering::Release);
+        });
+        let outcome = engine(&options, native, &io);
+        if let Err(panic) = controller.join() {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+    });
+    let error = outcome
+        .err()
+        .expect("a lost publication COMMIT returned a snapshot");
+    assert_eq!(
+        error.message,
+        "follow-source-create-unknown: publication COMMIT was not confirmed; the next start drops it by its recorded OID and owner, then creates it again"
+    );
+    relay.open();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.options.clone.state.path.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let publication = &manifest["follow_state"]["publication"];
+    assert_eq!(publication["phase"], "created");
+    let oid = publication["receipt"]["oid"].to_string();
+    wait_until("the held publication COMMIT never completed", || {
+        scalar(
+            &mut fixture.source,
+            &format!("SELECT count(*) FROM pg_catalog.pg_publication WHERE oid={oid}"),
+        ) == "1"
+    });
+    relay.release(fixture);
+    reopen_native(fixture);
+    vec![oid]
 }
 
 /// Leaves this run's publication CREATE where `kill` names and returns every OID it saw under `name`.
@@ -2868,6 +2925,7 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
         PublicationKill::ReceiptForeign,
         PublicationKill::ReceiptOwner,
         PublicationKill::ReplacedDuringRemoval,
+        PublicationKill::OwnCommitLost,
     ];
     for restart in [false, true] {
         for kill in kills {
@@ -2920,7 +2978,17 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
             }
             let run = fixture.native.as_ref().unwrap().identity().run;
             let name = catalog::follow::resource_name("publication", run, next.generation).unwrap();
-            let seen = interrupt_publication_create(&mut fixture, &name, kill);
+            let seen = if kill == PublicationKill::OwnCommitLost {
+                lose_own_publication_commit(&mut fixture, |options, native, io| {
+                    if restart {
+                        FollowSnapshot::restart(options, &next, native, io)
+                    } else {
+                        FollowSnapshot::create(options, &next, native, io)
+                    }
+                })
+            } else {
+                interrupt_publication_create(&mut fixture, &name, kill)
+            };
             let manifest_path = fixture.options.clone.state.path.join("manifest.json");
             let manifest = || std::fs::read(&manifest_path).unwrap();
             let before: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();

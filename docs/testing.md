@@ -219,6 +219,7 @@ The second shows that a complete error reply other than 42710 still takes the sh
 An active or foreign slot must refuse with the native state and the slot unchanged.
 Every other start must drop the slot and create it again under a new intent, whose snapshot holds each source row and large object exactly once.
 A second case stops publication creation, on a first run and on a restart, after its intent alone or after its receipt with the `COMMIT` rolled back or committed.
+In one variant the engine's own `COMMIT` is held in a relay until the engine gives up on its reply, then completes, and the engine must report that the next start drops the publication and creates it again.
 It also places a foreign publication under the recorded name, gives the committed one another owner, and replaces the committed one while the retry's `DROP` waits on its lock.
 A foreign or replacing publication must refuse naming it, with the native state and that publication unchanged.
 Every other start must create a publication of a new OID under a new intent, never adopt the old one, and export a snapshot that holds each source row and large object exactly once.

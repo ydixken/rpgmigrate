@@ -96,6 +96,7 @@ A slot under that name at another position or of another plugin refuses with exi
 
 `CREATE PUBLICATION` waits for a `SHARE UPDATE EXCLUSIVE` lock on every member table, and its `COMMIT` can wait for a synchronous standby.
 A kill there leaves a publication intent, or its receipt, without the confirmed outcome.
+A lost reply leaves the same state and exits with `follow-source-create-unknown: publication COMMIT was not confirmed; the next start drops it by its recorded OID and owner, then creates it again`.
 The next start, a first-run retry or a restart, resolves it before it creates a slot.
 It retires the intent when no publication has the recorded name, and drops the publication with exactly the recorded OID and owner, so it creates the publication again under a new intent and never adopts the old one.
 
