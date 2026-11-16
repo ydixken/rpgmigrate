@@ -573,14 +573,14 @@ impl NativeState {
     ) -> Result<()> {
         let mut next = self.checked_manifest()?;
         require_pending_resource_retirement(&next, proof.restart())?;
-        let receipt = proof.receipt();
-        if receipt.intent.binding.stream() != proof.restart().previous.stream()
-            || receipt.intent.binding.catalog_epoch() != proof.restart().next_generation.0
-            || receipt.intent.binding.plugin() != Plugin::Pgoutput
-            || next.source_slot != Some(SourceSlotProvenance::Confirmed(receipt.clone()))
+        let binding = &proof.slot().intent().binding;
+        if binding.stream() != proof.restart().previous.stream()
+            || binding.catalog_epoch() != proof.restart().next_generation.0
+            || binding.plugin() != Plugin::Pgoutput
+            || next.source_slot.as_ref() != Some(proof.slot())
         {
             return Err(bad_state(
-                "state-follow: pending slot absence has a different exact receipt",
+                "state-follow: pending slot absence has a different exact intent or receipt",
             ));
         }
         next.source_slot = None;

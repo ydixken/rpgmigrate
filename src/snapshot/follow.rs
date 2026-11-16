@@ -2,6 +2,7 @@ use super::*;
 use crate::contracts::{ClonePlan, FollowBinding, FollowOptions, SnapshotTicket};
 use crate::identity::StreamId;
 use crate::pg::CommitObservation;
+use crate::state::SourceSlotProvenance;
 
 pub(crate) struct FollowSnapshot {
     snapshot: CloneSnapshot,
@@ -12,7 +13,7 @@ pub(crate) struct FollowSnapshot {
 
 pub(crate) struct PendingFollowSlotAbsence {
     pub(super) restart: crate::state::FollowRestart,
-    pub(super) receipt: SourceSlotReceipt,
+    pub(super) slot: SourceSlotProvenance,
 }
 
 impl PendingFollowSlotAbsence {
@@ -20,8 +21,8 @@ impl PendingFollowSlotAbsence {
         &self.restart
     }
 
-    pub(crate) fn receipt(&self) -> &SourceSlotReceipt {
-        &self.receipt
+    pub(crate) fn slot(&self) -> &SourceSlotProvenance {
+        &self.slot
     }
 }
 
@@ -68,10 +69,11 @@ impl FollowSnapshot {
             })
             .transpose()?;
         let slot = match native.checked_source_slot()? {
-            Some(crate::state::SourceSlotProvenance::Confirmed(slot))
-                if slot.intent.binding.stream() == restart.previous.stream()
-                    && slot.intent.binding.catalog_epoch() == restart.next_generation.0
-                    && slot.intent.binding.plugin() == crate::cdc::contracts::Plugin::Pgoutput
+            Some(slot)
+                if slot.intent().binding.stream() == restart.previous.stream()
+                    && slot.intent().binding.catalog_epoch() == restart.next_generation.0
+                    && slot.intent().binding.plugin()
+                        == crate::cdc::contracts::Plugin::Pgoutput
                     && publication.is_some() =>
             {
                 Some(slot)
@@ -79,7 +81,7 @@ impl FollowSnapshot {
             None => None,
             _ => {
                 return Err(follow_refusal(
-                    "follow-restart: pending source slot lacks its exact new-generation receipt",
+                    "follow-restart: pending source slot lacks its exact new-generation intent",
                 ));
             }
         };
@@ -90,58 +92,11 @@ impl FollowSnapshot {
         if let Some(publication) = &publication {
             pending_publication_present(&mut source, publication, plan, io)?;
         }
-        if let Some(receipt) = slot {
-            let name = source.quote_literal(receipt.intent.binding.slot_name())?;
-            let present = source.query(&format!(
-                "SELECT plugin,datoid,temporary,active_pid,confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"
-            ), io)?;
-            if present.columns()? != 5 || present.rows() > 1 {
-                return Err(follow_refusal(
-                    "follow-restart: pending slot inventory is invalid",
-                ));
-            }
-            if present.rows() == 1 {
-                let point = format!(
-                    "{:X}/{:X}",
-                    receipt.consistent_point.0 >> 32,
-                    receipt.consistent_point.0 as u32
-                );
-                if present.cell(0, 0)? != Some(b"pgoutput")
-                    || present.cell(0, 1)?
-                        != Some(plan.source.identity.database_oid.to_string().as_bytes())
-                    || present.cell(0, 2)? != Some(b"f")
-                    || present.cell(0, 3)?.is_some()
-                    || present.cell(0, 4)? != Some(point.as_bytes())
-                {
-                    return Err(follow_refusal(
-                        "follow-restart: pending slot differs from its inactive creation receipt",
-                    ));
-                }
-                let dropped = source.query(
-                    &format!("SELECT pg_catalog.pg_drop_replication_slot({name})"),
-                    io,
-                )?;
-                if dropped.rows() != 1
-                    || dropped.columns()? != 1
-                    || dropped.command_tag()? != "SELECT 1"
-                {
-                    return Err(follow_refusal(
-                        "follow-restart: pending slot removal is unconfirmed",
-                    ));
-                }
-            }
-            let absent = source.query(
-                &format!("SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"),
-                io,
-            )?;
-            if absent.columns()? != 1 || absent.rows() != 0 {
-                return Err(follow_refusal(
-                    "follow-restart: pending slot remains after removal",
-                ));
-            }
+        if let Some(slot) = slot {
+            drop_unbound_slot(&mut source, &slot, plan, io)?;
             native.confirm_pending_follow_slot_absent(&PendingFollowSlotAbsence {
                 restart: restart.clone(),
-                receipt,
+                slot,
             })?;
         }
         if let Some(receipt) = publication {
@@ -636,6 +591,71 @@ pub(super) fn require_restart_plan(
     {
         return Err(follow_refusal(
             "follow-restart: source/target plan, ownership, or copy generation changed",
+        ));
+    }
+    Ok(())
+}
+
+/// Drops this run's unbound slot by its recorded name and creation shape, and by its receipt's
+/// consistent point when it has one. It is never adopted: its export ended with its creating session.
+fn drop_unbound_slot(
+    source: &mut PgConnection,
+    slot: &SourceSlotProvenance,
+    plan: &ClonePlan,
+    io: &IoControl,
+) -> Result<()> {
+    let slot_name = slot.intent().binding.slot_name();
+    let name = source.quote_literal(slot_name)?;
+    let present = source.query(&format!(
+        "SELECT slot_type,plugin,datoid,temporary,active_pid,confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"
+    ), io)?;
+    if present.columns()? != 6 || present.rows() > 1 {
+        return Err(follow_refusal(
+            "follow-source: pending slot inventory is invalid",
+        ));
+    }
+    if present.rows() == 1 {
+        if let Some(pid) = present.cell(0, 4)? {
+            return Err(follow_refusal(&format!(
+                "follow-source: pending source slot {slot_name} is active in backend {}; it is never adopted, so retry once that session has ended",
+                String::from_utf8_lossy(pid)
+            )));
+        }
+        let point = match slot {
+            SourceSlotProvenance::Confirmed(receipt) => Some(format!(
+                "{:X}/{:X}",
+                receipt.consistent_point.0 >> 32,
+                receipt.consistent_point.0 as u32
+            )),
+            SourceSlotProvenance::Provisioning(_) => None,
+        };
+        if present.cell(0, 0)? != Some(b"logical")
+            || present.cell(0, 1)? != Some(b"pgoutput")
+            || present.cell(0, 2)? != Some(plan.source.identity.database_oid.to_string().as_bytes())
+            || present.cell(0, 3)? != Some(b"f")
+            || point.is_some() && present.cell(0, 5)? != point.as_deref().map(str::as_bytes)
+        {
+            return Err(follow_refusal(&format!(
+                "follow-source: slot {slot_name} differs from this run's unbound pgoutput creation; it is never adopted or dropped"
+            )));
+        }
+        let dropped = source.query(
+            &format!("SELECT pg_catalog.pg_drop_replication_slot({name})"),
+            io,
+        )?;
+        if dropped.rows() != 1 || dropped.columns()? != 1 || dropped.command_tag()? != "SELECT 1" {
+            return Err(follow_refusal(
+                "follow-source: pending slot removal is unconfirmed",
+            ));
+        }
+    }
+    let absent = source.query(
+        &format!("SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"),
+        io,
+    )?;
+    if absent.columns()? != 1 || absent.rows() != 0 {
+        return Err(follow_refusal(
+            "follow-source: pending slot remains after removal",
         ));
     }
     Ok(())

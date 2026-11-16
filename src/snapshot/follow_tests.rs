@@ -4,6 +4,7 @@ use crate::contracts::{
     RestorePolicy, SnapshotTicket, StateAction, StateRequest,
 };
 use crate::pg::CommitObservation;
+use crate::state::SourceSlotProvenance;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -133,47 +134,8 @@ struct PendingFixture {
 
 impl PendingFixture {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!(
-            "rpgmigrate-pending-source-{}-{}",
-            std::process::id(),
-            CASE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut native = crate::state::open_follow(
-            &StateRequest {
-                path: root.join("state"),
-                action: StateAction::Create,
-            },
-            None,
-            None,
-            &IoControl::unbounded(Arc::new(AtomicBool::new(false))),
-        )
-        .unwrap();
-        let mut plan = ClonePlan {
-            source: crate::contracts::CloneSource {
-                identity: SourceId {
-                    system_identifier: 7,
-                    database_oid: 23,
-                },
-                timeline: 1,
-                major: 16,
-            },
-            target: CloneTarget {
-                identity: SourceId {
-                    system_identifier: 8,
-                    database_oid: 24,
-                },
-                major: 18,
-            },
-            generation: CopyGeneration(1),
-            tables: Vec::new(),
-            sequences: Vec::new(),
-            policy: RestorePolicy::default(),
-            copy_policy: crate::contracts::CloneCopyPolicy::default(),
-            copy_tables: Vec::new(),
-        };
+        let (root, mut native) = Self::open();
+        let mut plan = Self::plan();
         let binding = Self::resources(&mut native, &plan, 10);
         let ticket = SnapshotTicket {
             token: binding.slot.snapshot_token.clone(),
@@ -200,36 +162,95 @@ impl PendingFixture {
         }
     }
 
-    fn resources(
-        native: &mut NativeState,
-        plan: &ClonePlan,
-        point: u64,
-    ) -> crate::contracts::FollowBinding {
-        native.prepare_follow_source(plan).unwrap();
+    fn open() -> (PathBuf, NativeState) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "rpgmigrate-pending-source-{}-{}",
+            std::process::id(),
+            CASE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let native = Self::reopen(&root, StateAction::Create);
+        (root, native)
+    }
+
+    fn reopen(root: &std::path::Path, action: StateAction) -> NativeState {
+        crate::state::open_follow(
+            &StateRequest {
+                path: root.join("state"),
+                action,
+            },
+            None,
+            None,
+            &IoControl::unbounded(Arc::new(AtomicBool::new(false))),
+        )
+        .unwrap()
+    }
+
+    fn plan() -> ClonePlan {
+        ClonePlan {
+            source: crate::contracts::CloneSource {
+                identity: SourceId {
+                    system_identifier: 7,
+                    database_oid: 23,
+                },
+                timeline: 1,
+                major: 16,
+            },
+            target: CloneTarget {
+                identity: SourceId {
+                    system_identifier: 8,
+                    database_oid: 24,
+                },
+                major: 18,
+            },
+            generation: CopyGeneration(1),
+            tables: Vec::new(),
+            sequences: Vec::new(),
+            policy: RestorePolicy::default(),
+            copy_policy: crate::contracts::CloneCopyPolicy::default(),
+            copy_tables: Vec::new(),
+        }
+    }
+
+    fn slot_binding(native: &NativeState, plan: &ClonePlan) -> SourceSlotBinding {
+        SourceSlotBinding::new(
+            crate::identity::StreamId {
+                run: native.identity().run,
+                source: plan.source.identity,
+                generation: 1,
+            },
+            "pending_source".into(),
+            crate::cdc::contracts::Plugin::Pgoutput,
+            plan.generation.0,
+        )
+        .unwrap()
+    }
+
+    fn publication(native: &mut NativeState, oid: u32) -> crate::contracts::PublicationReceipt {
         let intent = native.begin_publication("pending_source").unwrap();
         let publication = crate::contracts::PublicationReceipt {
             name: intent.name.clone(),
-            oid: point as u32,
+            oid,
             owner_oid: 7,
         };
         native
             .record_publication_created(&intent, &publication)
             .unwrap();
         native.confirm_publication(&intent, &publication).unwrap();
+        publication
+    }
+
+    fn resources(
+        native: &mut NativeState,
+        plan: &ClonePlan,
+        point: u64,
+    ) -> crate::contracts::FollowBinding {
+        native.prepare_follow_source(plan).unwrap();
+        let publication = Self::publication(native, point as u32);
         let slot_intent = native
-            .begin_source_slot(
-                &SourceSlotBinding::new(
-                    crate::identity::StreamId {
-                        run: native.identity().run,
-                        source: plan.source.identity,
-                        generation: 1,
-                    },
-                    "pending_source".into(),
-                    crate::cdc::contracts::Plugin::Pgoutput,
-                    plan.generation.0,
-                )
-                .unwrap(),
-            )
+            .begin_source_slot(&Self::slot_binding(native, plan))
             .unwrap();
         let slot = native
             .confirm_source_slot(
@@ -265,12 +286,16 @@ fn pending_source_retirement_rejects_foreign_stale_or_bound_proofs_without_mutat
     let mut fixture = PendingFixture::new();
     let before = fixture.manifest();
     for field in 0..4 {
+        let mut receipt = fixture.binding.slot.clone();
+        if field == 0 {
+            receipt.intent.nonce[0] ^= 1;
+        }
         let mut proof = super::follow::PendingFollowSlotAbsence {
             restart: fixture.restart.clone(),
-            receipt: fixture.binding.slot.clone(),
+            slot: SourceSlotProvenance::Confirmed(receipt),
         };
         match field {
-            0 => proof.receipt.intent.nonce[0] ^= 1,
+            0 => {}
             1 => proof.restart.next_generation.0 += 1,
             2 => proof.restart.new_bound = true,
             _ => proof.restart.slot_absent = false,
@@ -299,7 +324,7 @@ fn pending_source_retirement_rejects_foreign_stale_or_bound_proofs_without_mutat
         .native
         .confirm_pending_follow_slot_absent(&super::follow::PendingFollowSlotAbsence {
             restart: fixture.restart.clone(),
-            receipt: fixture.binding.slot.clone(),
+            slot: SourceSlotProvenance::Confirmed(fixture.binding.slot.clone()),
         })
         .unwrap();
     let before = fixture.manifest();
@@ -319,7 +344,7 @@ fn lost_unbound_snapshot_retires_receipts_without_binding_an_old_execution_profi
     let saved = fixture.native.checked_clone().unwrap().unwrap();
     let slot = super::follow::PendingFollowSlotAbsence {
         restart: fixture.restart.clone(),
-        receipt: fixture.binding.slot.clone(),
+        slot: SourceSlotProvenance::Confirmed(fixture.binding.slot.clone()),
     };
     fixture
         .native
@@ -376,6 +401,99 @@ fn lost_unbound_snapshot_retires_receipts_without_binding_an_old_execution_profi
         fixture.native.checked_clone().unwrap().unwrap().plan,
         fixture.plan
     );
+}
+
+#[test]
+fn restart_retires_its_pending_slot_intent_without_a_receipt_but_never_a_changed_one() {
+    let mut fixture = PendingFixture::new();
+    let restart = fixture.restart.clone();
+    fixture
+        .native
+        .confirm_pending_follow_slot_absent(&super::follow::PendingFollowSlotAbsence {
+            restart: restart.clone(),
+            slot: SourceSlotProvenance::Confirmed(fixture.binding.slot.clone()),
+        })
+        .unwrap();
+    fixture
+        .native
+        .confirm_pending_follow_publication_absent(
+            &super::follow::PendingFollowPublicationAbsence {
+                restart: restart.clone(),
+                receipt: fixture.binding.publication.clone(),
+            },
+        )
+        .unwrap();
+    // The next attempt dies inside CREATE_REPLICATION_SLOT, before its receipt.
+    let publication = PendingFixture::publication(&mut fixture.native, 40);
+    let pending = fixture
+        .native
+        .begin_source_slot(&PendingFixture::slot_binding(
+            &fixture.native,
+            &fixture.plan,
+        ))
+        .unwrap();
+    let before = fixture.manifest();
+    for field in 0..4 {
+        let mut intent = pending.clone();
+        let mut changed = restart.clone();
+        let slot = match field {
+            0 => {
+                intent.nonce[0] ^= 1;
+                SourceSlotProvenance::Provisioning(intent)
+            }
+            1 => SourceSlotProvenance::Confirmed(crate::state::SourceSlotReceipt {
+                intent,
+                consistent_point: crate::identity::SourceEndLsn(50),
+                snapshot_token: "snapshot-50".into(),
+            }),
+            2 => {
+                changed.next_generation.0 += 1;
+                SourceSlotProvenance::Provisioning(intent)
+            }
+            _ => {
+                changed.new_bound = true;
+                SourceSlotProvenance::Provisioning(intent)
+            }
+        };
+        let proof = super::follow::PendingFollowSlotAbsence {
+            restart: changed,
+            slot,
+        };
+        assert!(
+            fixture
+                .native
+                .confirm_pending_follow_slot_absent(&proof)
+                .is_err(),
+            "field {field}"
+        );
+        assert_eq!(fixture.manifest(), before);
+    }
+    let proof = super::follow::PendingFollowSlotAbsence {
+        restart: restart.clone(),
+        slot: SourceSlotProvenance::Provisioning(pending.clone()),
+    };
+    fixture
+        .native
+        .confirm_pending_follow_slot_absent(&proof)
+        .unwrap();
+    assert!(fixture.native.checked_source_slot().unwrap().is_none());
+    assert!(
+        fixture
+            .native
+            .confirm_pending_follow_slot_absent(&proof)
+            .is_err()
+    );
+    fixture
+        .native
+        .confirm_pending_follow_publication_absent(
+            &super::follow::PendingFollowPublicationAbsence {
+                restart,
+                receipt: publication,
+            },
+        )
+        .unwrap();
+    let fresh = PendingFixture::resources(&mut fixture.native, &fixture.plan, 60);
+    assert_ne!(fresh.slot.intent.nonce, pending.nonce);
 }
 
 struct Fixture {
@@ -1505,6 +1623,344 @@ fn live_follow_positive_publication_retry_requires_the_persisted_source_plan() {
             );
             let slots=fixture.source.query("SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())",&fixture.io).unwrap();
             assert_eq!(slots.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SlotKill {
+    /// The creating walsender ended and dropped its unfinished slot.
+    Absent,
+    /// The creating walsender still waits, so the slot is active.
+    Active,
+    /// The slot was persisted after the reply was lost.
+    Persisted,
+    ForeignPlugin,
+    Physical,
+}
+
+fn scalar(connection: &mut PgConnection, sql: &str) -> String {
+    let result = connection.query(sql, &control()).unwrap();
+    assert_eq!(result.rows(), 1, "{sql}");
+    String::from_utf8(result.cell(0, 0).unwrap().unwrap_or_default().to_vec()).unwrap()
+}
+
+fn control() -> IoControl {
+    IoControl::unbounded(Arc::new(AtomicBool::new(false)))
+}
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !ready() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn pending_slot(fixture: &Fixture) -> (String, serde_json::Value) {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.options.clone.state.path.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["source_slot"]["phase"], "provisioning");
+    let intent = &manifest["source_slot"]["record"];
+    (
+        intent["binding"]["slot_name"].as_str().unwrap().to_owned(),
+        intent["nonce"].clone(),
+    )
+}
+
+/// Runs `engine` while a source transaction holds an xid, so CREATE_REPLICATION_SLOT waits, then
+/// cancels it there as a process kill would; the hold is returned still open.
+fn kill_inside_slot_creation(
+    fixture: &mut Fixture,
+    engine: impl FnOnce(&FollowOptions, &mut NativeState, &IoControl) -> Result<FollowSnapshot>,
+) -> PgConnection {
+    let mut hold = PgConnection::connect(
+        &fixture.options.clone.source,
+        crate::pg::Role::Copy,
+        &control(),
+    )
+    .unwrap();
+    hold.query("BEGIN", &control()).unwrap();
+    hold.query("SELECT pg_catalog.pg_current_xact_id()", &control())
+        .unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let io = IoControl::unbounded(Arc::clone(&cancelled));
+    let options = fixture.options.clone();
+    let info = fixture.options.clone.source.clone();
+    let native = fixture.native.as_mut().unwrap();
+    let outcome = std::thread::scope(|scope| {
+        let controller = scope.spawn(move || {
+            let mut observer = PgConnection::connect(&info, crate::pg::Role::Copy, &control()).unwrap();
+            wait_until("slot creation never waited on the held xid", || {
+                scalar(&mut observer, "SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_stat_activity a USING (pid) WHERE l.locktype='transactionid' AND NOT l.granted AND a.backend_type='walsender' AND a.datname=pg_catalog.current_database()") == "1"
+            });
+            cancelled.store(true, Ordering::Release);
+        });
+        let outcome = engine(&options, native, &io);
+        if let Err(panic) = controller.join() {
+            std::panic::resume_unwind(panic);
+        }
+        outcome
+    });
+    let error = outcome
+        .err()
+        .expect("the killed slot creation returned a snapshot");
+    assert!(
+        error.message.starts_with("source-slot-create-unknown:"),
+        "{}",
+        error.message
+    );
+    hold
+}
+
+/// Leaves the recorded slot in the state `kill` names and returns the hold, if still open.
+fn shape_pending_slot(
+    fixture: &mut Fixture,
+    name: &str,
+    kill: SlotKill,
+    hold: PgConnection,
+) -> Option<PgConnection> {
+    let literal = fixture.source.quote_literal(name).unwrap();
+    let state = format!(
+        "SELECT coalesce((SELECT CASE WHEN active THEN 'active' ELSE 'inactive' END FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+    );
+    assert_eq!(scalar(&mut fixture.source, &state), "active");
+    if kill == SlotKill::Active {
+        return Some(hold);
+    }
+    // The terminated walsender drops its unfinished slot deterministically.
+    scalar(
+        &mut fixture.source,
+        &format!(
+            "SELECT pg_catalog.pg_terminate_backend(active_pid)::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+        ),
+    );
+    wait_until("the unfinished slot outlived its walsender", || {
+        scalar(&mut fixture.source, &state) == "absent"
+    });
+    drop(hold);
+    let create = match kill {
+        SlotKill::Persisted => {
+            format!("pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')")
+        }
+        SlotKill::ForeignPlugin => {
+            format!("pg_catalog.pg_create_logical_replication_slot({literal},'test_decoding')")
+        }
+        SlotKill::Physical => format!("pg_catalog.pg_create_physical_replication_slot({literal})"),
+        SlotKill::Absent | SlotKill::Active => return None,
+    };
+    scalar(
+        &mut fixture.source,
+        &format!("SELECT ({create}).slot_name::text"),
+    );
+    assert_eq!(scalar(&mut fixture.source, &state), "inactive");
+    None
+}
+
+/// Internally consistent target ownership; the source snapshot under test never reads the target.
+fn synthetic_handoff(
+    plan: &ClonePlan,
+) -> (
+    Vec<crate::contracts::OwnedObject>,
+    Vec<crate::contracts::OwnedCopyTable>,
+) {
+    plan.tables
+        .iter()
+        .zip(70_000..)
+        .map(|(table, target_oid)| {
+            (
+                crate::contracts::OwnedObject {
+                    class_oid: 1259,
+                    object_oid: target_oid,
+                    object_sub_id: 0,
+                    namespace_oid: Some(2200),
+                    namespace_name: Some(table.name.schema.clone()),
+                    name: table.name.table.clone(),
+                    kind: "r".into(),
+                    owner_oid: 10,
+                },
+                crate::contracts::OwnedCopyTable {
+                    target_oid,
+                    target_namespace_oid: 2200,
+                    target_owner_oid: 10,
+                    generation: plan.generation,
+                    table: table.clone(),
+                },
+            )
+        })
+        .unzip()
+}
+
+fn snapshot_rows_and_objects(snapshot: &mut FollowSnapshot) -> String {
+    scalar(
+        snapshot.snapshot_mut().connection().unwrap(),
+        "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+    )
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again() {
+    let kills = [
+        SlotKill::Absent,
+        SlotKill::Active,
+        SlotKill::Persisted,
+        SlotKill::ForeignPlugin,
+        SlotKill::Physical,
+    ];
+    for restart in [true] {
+        for kill in kills {
+            let case = format!("restart={restart} kill={kill:?}");
+            let mut fixture = Fixture::new(
+                "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+            );
+            let expected = scalar(
+                &mut fixture.source,
+                "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+            );
+            assert!(expected.starts_with("300/300 2/"), "{expected}");
+            let mut plan = fixture.plan.clone();
+            let mut retired = Vec::new();
+            if restart {
+                let mut snapshot = fixture.create();
+                let binding = snapshot.binding().clone();
+                let ticket = snapshot.snapshot_mut().ticket().clone();
+                snapshot.finish(&fixture.io).unwrap();
+                retired.push(binding.slot.intent.binding.slot_name().to_owned());
+                let native = fixture.native.as_mut().unwrap();
+                native.bind_follow(&plan, &ticket, &binding).unwrap();
+                native.begin_pre_data().unwrap();
+                let (objects, tables) = synthetic_handoff(&plan);
+                native.confirm_pre_data(&plan, objects, tables).unwrap();
+                let recorded = native.begin_follow_restart(&binding, &plan).unwrap();
+                plan.generation = recorded.next_generation;
+            }
+            let next = plan.clone();
+            let hold = kill_inside_slot_creation(&mut fixture, |options, native, io| {
+                if restart {
+                    FollowSnapshot::restart(options, &next, native, io)
+                } else {
+                    FollowSnapshot::create(options, &next, native, io)
+                }
+            });
+            let (name, nonce) = pending_slot(&fixture);
+            let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+            let manifest = || std::fs::read(&manifest_path).unwrap();
+            let mut hold = shape_pending_slot(&mut fixture, &name, kill, hold);
+            let literal = fixture.source.quote_literal(&name).unwrap();
+            let retry = |fixture: &mut Fixture| {
+                let native = fixture.native.as_mut().unwrap();
+                if restart {
+                    FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io)?;
+                    FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io)
+                } else {
+                    FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+                }
+            };
+            if kill != SlotKill::Absent && kill != SlotKill::Persisted {
+                let before = manifest();
+                let slot = scalar(
+                    &mut fixture.source,
+                    &format!(
+                        "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(active_pid::text,'-') FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                    ),
+                );
+                let error = retry(&mut fixture).err().expect(&case);
+                let refusal = if kill == SlotKill::Active {
+                    format!("follow-source: pending source slot {name} is active in backend ")
+                } else {
+                    format!(
+                        "follow-source: slot {name} differs from this run's unbound pgoutput creation"
+                    )
+                };
+                assert!(
+                    error.message.starts_with(&refusal),
+                    "{case}: {}",
+                    error.message
+                );
+                assert_eq!(manifest(), before, "{case}");
+                assert_eq!(
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(active_pid::text,'-') FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                        )
+                    ),
+                    slot,
+                    "{case}"
+                );
+                // Clear the hazard as an operator would, by exact name, outside the engine.
+                if let Some(open) = hold.take() {
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT pg_catalog.pg_terminate_backend(active_pid)::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                        ),
+                    );
+                    drop(open);
+                } else {
+                    scalar(
+                        &mut fixture.source,
+                        &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+                    );
+                }
+                wait_until("the recorded slot remained", || {
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                        ),
+                    ) == "0"
+                });
+            }
+            let mut snapshot =
+                retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+            let receipt = snapshot.receipt().clone();
+            assert_eq!(receipt.intent.binding.slot_name(), name, "{case}");
+            assert_eq!(
+                snapshot.binding().copy_generation,
+                next.generation,
+                "{case}"
+            );
+            for sql in [
+                "INSERT INTO public.items VALUES(301,'after')",
+                "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('01','hex'))",
+            ] {
+                fixture.source.query(sql, &fixture.io).unwrap();
+            }
+            assert_eq!(snapshot_rows_and_objects(&mut snapshot), expected, "{case}");
+            let point = format!(
+                "{:X}/{:X}",
+                receipt.consistent_point.0 >> 32,
+                receipt.consistent_point.0 as u32
+            );
+            assert_eq!(
+                scalar(
+                    &mut fixture.source,
+                    "SELECT string_agg(slot_name||' '||slot_type||' '||plugin||' '||temporary||' '||confirmed_flush_lsn,',') FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())"
+                ),
+                format!("{name} logical pgoutput false {point}"),
+                "{case}"
+            );
+            for old in &retired {
+                assert_ne!(old, &name, "{case}");
+            }
+            let manifest: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
+            assert_eq!(manifest["source_slot"]["phase"], "confirmed", "{case}");
+            assert_ne!(
+                manifest["source_slot"]["record"]["intent"]["nonce"], nonce,
+                "{case}"
+            );
+            snapshot.finish(&fixture.io).unwrap();
+            fixture
+                .source
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})"),
+                    &fixture.io,
+                )
+                .unwrap();
         }
     }
 }

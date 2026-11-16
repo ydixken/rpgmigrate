@@ -324,6 +324,17 @@ Each publication member must match the plan exactly on both majors:
 3. `rowfilter` is null and the member's `pg_publication_rel.prattrs` is null, so a column list that names every writable column still refuses.
 4. The publication's `pubgencols` is `n` on 18; 16 has no such column.
 
+### Slot creation recovery
+
+Follow records a slot intent (the run's stream, slot name, plugin, copy generation and a nonce) before `CREATE_REPLICATION_SLOT`, and its receipt (consistent point and snapshot name) after the command returns.
+One intent authorizes one CREATE.
+A restart that finds an intent without its receipt drops the slot of exactly that name, records its absence, and creates the slot again under a new intent.
+It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, and has no active backend.
+It never adopts the slot, because the exported snapshot ended with the session that created it.
+An active slot refuses with exit 3, naming the slot and its backend, and a slot of another kind under that name refuses and stays.
+A restart drops an unbound slot that has a receipt the same way, and only at its exact consistent point.
+A first run's retry with such an intent still refuses, and so does a publication intent without its confirmed receipt.
+
 ## Replication, endpos, and drain
 
 Every replication payload MUST explicitly measure `certified_lsn`, including an endpos acknowledgment.

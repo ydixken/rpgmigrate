@@ -626,7 +626,7 @@ impl NativeState {
 }
 
 impl SourceSlotProvenance {
-    fn intent(&self) -> &SourceSlotIntent {
+    pub(crate) fn intent(&self) -> &SourceSlotIntent {
         match self {
             Self::Provisioning(intent) => intent,
             Self::Confirmed(receipt) => &receipt.intent,

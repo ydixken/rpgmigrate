@@ -210,6 +210,10 @@ A restart killed again while it resumes the intent leaves the same intent, and a
 The next drain must reconcile, refuse after source drift, and report completion only once the target matches the source.
 A second case stops a follow restart after its new binding and before the publish that resets the previous generation, then adds a foreign large object.
 The restart must refuse naming only that object and leave the target row and objects unchanged, then publish and unlink only owned objects once it is gone.
+`task test-follow-source` adds one case that stops a restart's slot creation while a source transaction holds a transaction ID.
+It then leaves the recorded slot absent, active, persisted, or replaced by a `test_decoding` or physical slot under that name.
+An active or foreign slot must refuse with the native state and the slot unchanged.
+Every other start must drop the slot and create it again under a new intent, whose snapshot holds each source row and large object exactly once.
 Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]
