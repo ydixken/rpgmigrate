@@ -2121,6 +2121,98 @@ fn live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept() {
     }
 }
 
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_restart_keeps_a_surviving_bound_slot_of_another_shape() {
+    let major = live_major();
+    // ALTER_REPLICATION_SLOT takes FAILOVER from PostgreSQL 17 on and TWO_PHASE from 18 on.
+    for variant in ["plugin", "database", "two_phase", "failover"] {
+        if (variant == "two_phase" && major < 18) || (variant == "failover" && major < 17) {
+            continue;
+        }
+        let mut fixture = Fixture::new("CREATE TABLE public.items(id integer PRIMARY KEY)");
+        let (next, name) = record_restart(&mut fixture);
+        let literal = fixture.source.quote_literal(&name).unwrap();
+        let copy = fixture
+            .source
+            .quote_literal(&format!("{name}_copy"))
+            .unwrap();
+        let shape = format!(
+            "SELECT slot_type||' '||plugin||' '||datoid||' '||two_phase||' '||coalesce(pg_catalog.to_jsonb(s)->>'failover','-')||' '||coalesce(active_pid::text,'-') FROM pg_catalog.pg_replication_slots s WHERE slot_name={literal}"
+        );
+        let point = format!(
+            "SELECT confirmed_flush_lsn::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+        );
+        let (recorded, at) = (
+            scalar(&mut fixture.source, &shape),
+            scalar(&mut fixture.source, &point),
+        );
+        // Each variant keeps the bound slot's confirmed_flush_lsn, so only its shape differs.
+        if let Some(plugin) = match variant {
+            "plugin" => Some("test_decoding"),
+            "database" => Some("pgoutput"),
+            _ => None,
+        } {
+            // A copy keeps confirmed_flush_lsn and lives in the copying session's database.
+            let session = if variant == "database" {
+                &mut fixture.admin
+            } else {
+                &mut fixture.source
+            };
+            for sql in [
+                format!(
+                    "SELECT pg_catalog.pg_copy_logical_replication_slot({literal},{copy},false,'{plugin}')::text"
+                ),
+                format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+                format!(
+                    "SELECT pg_catalog.pg_copy_logical_replication_slot({copy},{literal})::text"
+                ),
+                format!("SELECT pg_catalog.pg_drop_replication_slot({copy})::text"),
+            ] {
+                scalar(session, &sql);
+            }
+        } else {
+            let mut walsender =
+                PgConnection::connect_replication(&fixture.options.clone.source, &control())
+                    .unwrap();
+            walsender
+                .logical_query(
+                    &format!(
+                        "ALTER_REPLICATION_SLOT \"{name}\" ({} true)",
+                        variant.to_uppercase()
+                    ),
+                    &control(),
+                )
+                .unwrap();
+        }
+        let changed = scalar(&mut fixture.source, &shape);
+        assert_ne!(changed, recorded, "{variant}");
+        assert_eq!(scalar(&mut fixture.source, &point), at, "{variant}");
+        let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+        let before = std::fs::read(&manifest_path).unwrap();
+        let error = FollowSnapshot::restart(
+            &fixture.options,
+            &next,
+            fixture.native.as_mut().unwrap(),
+            &fixture.io,
+        )
+        .err()
+        .expect(variant);
+        assert_eq!(
+            error.message,
+            "follow-restart: surviving source slot does not match the inactive owned creation receipt",
+            "{variant}"
+        );
+        assert_eq!(scalar(&mut fixture.source, &shape), changed, "{variant}");
+        assert_eq!(scalar(&mut fixture.source, &point), at, "{variant}");
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), before, "{variant}");
+        scalar(
+            &mut fixture.source,
+            &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SlotKill {
     /// The creating walsender ended and dropped its unfinished slot.

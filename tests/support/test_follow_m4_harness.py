@@ -87,6 +87,7 @@ SOURCE_M8 = tuple("snapshot::follow_tests::" + name for name in (
     "live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept",
     "live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_it",
     "live_follow_recorded_publication_replaced_during_its_removal_is_refused_and_kept",
+    "live_follow_restart_keeps_a_surviving_bound_slot_of_another_shape",
 ))
 
 

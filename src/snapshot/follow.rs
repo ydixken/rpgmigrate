@@ -200,8 +200,12 @@ impl FollowSnapshot {
             )?;
         }
         let slot = source.quote_literal(restart.previous.slot.intent.binding.slot_name())?;
-        let present=source.query(&format!("SELECT plugin,datoid,temporary,active_pid,confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={slot}"),io)?;
-        if present.columns()? != 5 || present.rows() > 1 {
+        let shape = catalog::follow::owned_slot_shape(plan.source.identity.database_oid);
+        let present = source.query(
+            &format!("SELECT {shape},s.active_pid,s.confirmed_flush_lsn FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={slot}"),
+            io,
+        )?;
+        if present.columns()? != 3 || present.rows() > 1 {
             return Err(follow_refusal(
                 "follow-restart: source slot evidence is invalid",
             ));
@@ -218,12 +222,9 @@ impl FollowSnapshot {
                     restart.previous.slot.consistent_point.0 >> 32,
                     restart.previous.slot.consistent_point.0 as u32
                 );
-                if present.cell(0, 0)? != Some(b"pgoutput")
-                    || present.cell(0, 1)?
-                        != Some(plan.source.identity.database_oid.to_string().as_bytes())
-                    || present.cell(0, 2)? != Some(b"f")
-                    || present.cell(0, 3)?.is_some()
-                    || present.cell(0, 4)? != Some(point.as_bytes())
+                if present.cell(0, 0)? != Some(b"t")
+                    || present.cell(0, 1)?.is_some()
+                    || present.cell(0, 2)? != Some(point.as_bytes())
                 {
                     return Err(follow_refusal(
                         "follow-restart: surviving source slot does not match the inactive owned creation receipt",
@@ -652,11 +653,9 @@ fn drop_unbound_slot(
         ),
         SourceSlotProvenance::Provisioning(_) => String::new(),
     };
-    // Our CREATE sets none of these options, matching cleanup_slot_present. Untested because none fires
-    // alone: slot_type (a physical slot has no plugin), temporary (always active) and synced (standby only).
     let shape = format!(
-        "s.slot_type='logical' AND s.plugin='pgoutput' AND s.datoid={} AND NOT s.temporary AND NOT s.two_phase AND COALESCE(pg_catalog.to_jsonb(s)->>'failover','false')='false' AND COALESCE(pg_catalog.to_jsonb(s)->>'synced','false')='false'{point}",
-        plan.source.identity.database_oid
+        "{}{point}",
+        catalog::follow::owned_slot_shape(plan.source.identity.database_oid)
     );
     let dropped = source.query(&format!(
         "SELECT pg_catalog.pg_drop_replication_slot(s.slot_name) FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={name} AND {shape} AND s.active_pid IS NULL"

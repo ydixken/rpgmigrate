@@ -611,6 +611,15 @@ fn follow_health(
     Ok(confirmed)
 }
 
+/// True for a `pg_replication_slots s` row of this run's CREATE_REPLICATION_SLOT shape, which sets no
+/// option. Untested because none fires alone: slot_type (a physical slot has no plugin), temporary
+/// (always active) and synced (standby only).
+pub(crate) fn owned_slot_shape(database_oid: u32) -> String {
+    format!(
+        "COALESCE(s.slot_type='logical' AND s.plugin='pgoutput' AND s.datoid={database_oid} AND NOT s.temporary AND NOT s.two_phase AND COALESCE(pg_catalog.to_jsonb(s)->>'failover','false')='false' AND COALESCE(pg_catalog.to_jsonb(s)->>'synced','false')='false',false)"
+    )
+}
+
 fn read_follow_slot(
     source: &mut PgConnection,
     binding: &FollowBinding,
@@ -622,27 +631,23 @@ fn read_follow_slot(
         ));
     }
     let slot = source.quote_literal(binding.slot.intent.binding.slot_name())?;
-    let result=source.query(&format!("SELECT s.plugin,s.slot_type,s.datoid,s.temporary,s.wal_status,s.restart_lsn,s.confirmed_flush_lsn,COALESCE(s.conflicting,false),COALESCE(pg_catalog.to_jsonb(s)->>'invalidation_reason',''),COALESCE(pg_catalog.to_jsonb(s)->>'failover','false'),COALESCE(pg_catalog.to_jsonb(s)->>'synced','false'),s.active_pid FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={slot}"),io)?;
+    let shape = owned_slot_shape(binding.stream().source.database_oid);
+    let result=source.query(&format!("SELECT {shape},s.wal_status,s.restart_lsn,s.confirmed_flush_lsn,COALESCE(s.conflicting,false),COALESCE(pg_catalog.to_jsonb(s)->>'invalidation_reason',''),s.active_pid FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={slot}"),io)?;
     if result.rows() != 1
-        || result.columns()? != 12
-        || text(&result, 0, 0)? != "pgoutput"
-        || text(&result, 0, 1)? != "logical"
-        || text(&result, 0, 2)? != binding.stream().source.database_oid.to_string()
-        || result.cell(0, 3)? != Some(b"f")
-        || !matches!(text(&result, 0, 4)?, "reserved" | "extended")
-        || result.cell(0, 7)? != Some(b"f")
-        || !text(&result, 0, 8)?.is_empty()
-        || text(&result, 0, 9)? != "false"
-        || text(&result, 0, 10)? != "false"
+        || result.columns()? != 7
+        || result.cell(0, 0)? != Some(b"t")
+        || !matches!(text(&result, 0, 1)?, "reserved" | "extended")
+        || result.cell(0, 4)? != Some(b"f")
+        || !text(&result, 0, 5)?.is_empty()
     {
         return Err(refusal(
             "follow-gap: source slot is missing, foreign, invalidated, or has unsafe WAL retention",
         ));
     }
-    let restart = slot_lsn(text(&result, 0, 5)?)?;
-    let confirmed = slot_lsn(text(&result, 0, 6)?)?;
+    let restart = slot_lsn(text(&result, 0, 2)?)?;
+    let confirmed = slot_lsn(text(&result, 0, 3)?)?;
     let active_pid = result
-        .cell(0, 11)?
+        .cell(0, 6)?
         .map(|value| {
             std::str::from_utf8(value)
                 .ok()
@@ -716,22 +721,21 @@ fn cleanup_slot_present(
     io: &IoControl,
 ) -> Result<bool> {
     let slot = source.quote_literal(binding.slot.intent.binding.slot_name())?;
-    let result=source.query(&format!("SELECT s.plugin,s.slot_type,s.datoid,s.temporary,s.active,s.active_pid,COALESCE(pg_catalog.to_jsonb(s)->>'failover','false'),COALESCE(pg_catalog.to_jsonb(s)->>'synced','false') FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={slot}"),io)?;
-    if result.columns()? != 8 || result.rows() > 1 {
+    let shape = owned_slot_shape(binding.stream().source.database_oid);
+    let result = source.query(
+        &format!("SELECT {shape},s.active,s.active_pid FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={slot}"),
+        io,
+    )?;
+    if result.columns()? != 3 || result.rows() > 1 {
         return Err(refusal("cleanup-source: source slot evidence is invalid"));
     }
     if !cleanup_presence(removed, result.rows() == 1)? {
         return Ok(false);
     }
     // Slots have no incarnation OID; exact receipts require uninterrupted exclusive administration.
-    if result.cell(0, 0)? != Some(b"pgoutput")
-        || result.cell(0, 1)? != Some(b"logical")
-        || result.cell(0, 2)? != Some(binding.stream().source.database_oid.to_string().as_bytes())
-        || result.cell(0, 3)? != Some(b"f")
-        || result.cell(0, 4)? != Some(b"f")
-        || result.cell(0, 5)?.is_some()
-        || result.cell(0, 6)? != Some(b"false")
-        || result.cell(0, 7)? != Some(b"false")
+    if result.cell(0, 0)? != Some(b"t")
+        || result.cell(0, 1)? != Some(b"f")
+        || result.cell(0, 2)?.is_some()
     {
         return Err(refusal(
             "cleanup-source: slot identity or inactive ownership disagrees; preserve it for manual inspection",
@@ -1454,6 +1458,97 @@ mod tests {
         );
         assert!(fixture.slot_present());
         assert!(fixture.publication_present());
+        // Each foreign pgoutput slot differs from this run's creation in one column; the plain one in none.
+        let admin = std::env::var("RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN").unwrap();
+        let other = format!("cleanup_other_{}", std::process::id());
+        fixture
+            .connection
+            .query(&format!("CREATE DATABASE {other}"), &fixture.io)
+            .unwrap();
+        let mut elsewhere = PgConnection::connect(
+            &crate::contracts::Conninfo::new(format!("{admin} dbname={other}").into()).unwrap(),
+            crate::pg::Role::Copy,
+            &fixture.io,
+        )
+        .unwrap();
+        let identity = format!(
+            "SELECT slot_type||' '||plugin||' '||datoid||' '||two_phase||' '||coalesce(pg_catalog.to_jsonb(s)->>'failover','-')||' '||restart_lsn||' '||catalog_xmin FROM pg_catalog.pg_replication_slots s WHERE slot_name={slot}"
+        );
+        let major = fixture.plan.source.major;
+        for (variant, options) in [
+            ("plain", "'pgoutput'"),
+            ("plugin", "'test_decoding'"),
+            ("two_phase", "'pgoutput',false,true"),
+            ("failover", "'pgoutput',false,false,true"),
+            ("database", "'pgoutput'"),
+        ] {
+            // Slot failover exists from PostgreSQL 17 on.
+            if variant == "failover" && major < 17 {
+                continue;
+            }
+            fixture
+                .connection
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})"),
+                    &fixture.io,
+                )
+                .unwrap();
+            let session = if variant == "database" {
+                &mut elsewhere
+            } else {
+                &mut fixture.connection
+            };
+            session
+                .query(
+                    &format!(
+                        "SELECT pg_catalog.pg_create_logical_replication_slot({slot},{options})"
+                    ),
+                    &fixture.io,
+                )
+                .unwrap();
+            let before = fixture.connection.query(&identity, &fixture.io).unwrap();
+            let before = text(&before, 0, 0).unwrap().to_owned();
+            let gap = read_follow_slot(&mut fixture.connection, &fixture.binding, &fixture.io);
+            let inspected = fixture.inspect(false, false);
+            if variant == "plain" {
+                gap.expect(variant);
+                inspected.expect(variant);
+                continue;
+            }
+            assert_eq!(
+                gap.expect_err(variant).message,
+                "follow-gap: source slot is missing, foreign, invalidated, or has unsafe WAL retention",
+                "{variant}"
+            );
+            let disagrees = "cleanup-source: slot identity or inactive ownership disagrees; preserve it for manual inspection";
+            assert_eq!(
+                inspected.expect_err(variant).message,
+                disagrees,
+                "{variant}"
+            );
+            let removed = remove_follow_slot(
+                &mut fixture.connection,
+                &fixture.plan,
+                &fixture.binding,
+                false,
+                &fixture.io,
+            );
+            assert_eq!(removed.expect_err(variant).message, disagrees, "{variant}");
+            let after = fixture.connection.query(&identity, &fixture.io).unwrap();
+            assert_eq!(text(&after, 0, 0).unwrap(), before, "{variant}");
+        }
+        fixture
+            .connection
+            .query(
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})"),
+                &fixture.io,
+            )
+            .unwrap();
+        drop(elsewhere);
+        fixture
+            .connection
+            .query(&format!("DROP DATABASE {other} WITH (FORCE)"), &fixture.io)
+            .unwrap();
     }
 
     #[test]
