@@ -406,7 +406,7 @@ The harness takes the native format and target metadata it expects from `NATIVE_
 A portable test pins both to the constants in `src/state.rs`, so a format bump fails `task test` until someone reviews the harness.
 It starts logical decoding only inside its disposable source container and checks the executable's actual linked libpq version.
 Follow checks every domain CHECK that any column reaches through domains, arrays, or composite members, under the [follow admission](native-protocol.md#follow-admission) rules.
-The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
+The separate positive fixture contains one stored generated column, `rows.computed`, between writable columns, and no CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
 Its DEFAULT, INDEX, and keyless FULL identities cover changed keys, duplicate rows, NULLs, unchanged TOAST, TRUNCATE, explicit identity values, and differing source/target custom type OIDs.
 The smoke DML inserts, updates, and deletes `citext`, domain, composite, and array values, including case-only changes.
 A FULL-identity update picks one of two rows whose composite values differ only in numeric scale and `citext` case, which record equality treats as equal, so only an exact text match changes the right row.

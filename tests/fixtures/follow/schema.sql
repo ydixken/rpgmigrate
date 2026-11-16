@@ -8,6 +8,7 @@ CREATE TABLE "M2 space".empty (id integer PRIMARY KEY, value text);
 CREATE TABLE "M2 space".rows (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     value text,
+    computed text GENERATED ALWAYS AS (value || ':generated') STORED,
     nullable text,
     data bytea,
     feeling "M2 space".mood,
