@@ -753,6 +753,7 @@ Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03e
 The cross-major 16-to-18 attempt failed before PostgreSQL at a Created-container receipt/adoption race, with zero executed pair profiles/reports; its exact owned empty container/network were retired and release proved while the original RED remains immutable.
 The pending-creation fix is signed as private workflow checkpoint `1d8e5f750df2dcfde7178acaca6d30966357d76b`, with clone 48/follow 60/cutover 36 focused checks passing and primary unchanged.
 A later 16-18 M8 profile receipt from a checkout at `1d8e5f7` (6 cases, exit 0) exists; the three receipts are bound to `8ad` or `1d8e5f7`, more than 70 commits behind the line, without operator or full M8 acceptance.
+The three fresh hosted M8 receipts of run 43822503840, bound to `6690521`, supersede them, also without operator or full M8 acceptance.
 
 The approved [M8 implementation plan](superpowers/plans/2026-11-09-m8-feature-widening.md) targets fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative whole-table binary fallback, and exact mandatory large-object comparison with the unchanged array contract plus a proven-empty inventory guard.
 These are implementation decisions, without format/runtime qualification or capability activation.
@@ -764,7 +765,7 @@ At the earlier joined-source checkpoint, compare/progress wiring had source test
 The earlier seven-file harness/docs slice passed 348 portable tests and discovered exactly ten ignored Rust tests; authority faults, operator metadata-7 helper interoperability, and the full matrix remain open.
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 The line writes native format 9 and target metadata 7, and runner `db50bc9` ran M7 on it, so no format 8 profile is active.
-The M8 copy source reached the line at `908ada6`; later M8 work accumulates on `integration/engine-m8-20261116`, E8 lands it, and no capability is activated.
+The M8 copy source reached the line at `908ada6`; E8 landed the rest at `23513bc`, where E7 advertises `copy.large_objects`, `copy.binary_fallback` and `copy.split`, and no runner is qualified on it.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
@@ -780,21 +781,28 @@ E1 verified two defects: a kill inside the clone recopy's generation window wedg
 E2 added the fault matrix for parts and large objects as live cases on 16 and 18 (`6d6da40`), with no production defect.
 E3 admits built-in CHECK, expression and partial indexes and extension opclasses in follow (`8386f3b`).
 E5 refreshes populated materialized views after post-data in dependency order (`c0f1f2d`).
-These branches are not on the line yet, so no box below is ticked.
+These branches were not on the line at wave A.
 The [ledger](../tasks/todo.md#wave-16-2026-11-16) binds the evidence.
 
-- [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
-- [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
-- [ ] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
+#### Status after the M8 engine landing, 2026-11-16
+
+E1 to E8 landed at `23513bc`, and the E10 to E13 intent recovery is merged in `77678f7`.
+The engine boxes below rest on hosted ci.yml runs 43827618223 and 43829565149 on `23513bc`, whose engine-e2e jobs ran `PROFILE=m8` and the follow widening run on 16-16, 16-18 and 18-18.
+The operator matrix rerun and the O3 runner pin remain.
+The [ledger](../tasks/todo.md#wave-19-m8-intent-recovery-landing-2026-11-16) binds the evidence and the leader decisions.
+
+- [x] Binary COPY with the per-table built-in-type predicate and text fallback.
+- [x] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
+- [x] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
 We widen follow and clone for the objects the native M7 fixture leaves to pgcopydb, in this order:
 
-1. [ ] Expression and partial indexes over immutable built-in functions.
-1. [ ] Generated columns.
-1. [ ] Materialized views, refreshed in post-data.
-1. [ ] Domain CHECK in follow.
-1. [ ] Indexes with extension operator classes.
+1. [x] Expression and partial indexes over immutable built-in functions.
+1. [x] Generated columns, except FULL replica identity with a generated column on an 18 source, which refuses.
+1. [x] Materialized views, refreshed in post-data.
+1. [x] Domain CHECK in follow.
+1. [x] Indexes with extension operator classes.
 
 ### M9: Durability modes and measured performance
 

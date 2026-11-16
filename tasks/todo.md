@@ -1403,7 +1403,7 @@ PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases
 TOC proof: `/tmp/rpgmigrate-m8-catalog-toc-20261110/0942b349889341e7/final-proof.json` (lost 2026-11-12), SHA-256 `79a302da68f236c733b23f8061f3f065e2097576c614d056b58327f87946c9e2`.
 The line writes native format 9 and target metadata 7 (`src/state.rs:174-176`), and runner `db50bc9` ran M7 on it, so no format 8 profile is active.
 The M8 copy source reached the line at `908ada6`, and E8 landed the rest at `23513bc` (ch), where E7 advertises `copy.large_objects`, `copy.binary_fallback` and `copy.split`; no runner is qualified on it.
-The [ENGINE-M8-PLAN](#wave-15b-to-15d-2026-11-16) engine tasks E1 to E8 are done; E10 and E11 intent recovery, then the O3 runner pin and the operator matrix rerun, remain.
+The [ENGINE-M8-PLAN](#wave-15b-to-15d-2026-11-16) engine tasks E1 to E8 are done, and the E10 to E13 intent recovery is merged in `77678f7`; the O3 runner pin and the operator matrix rerun remain.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
@@ -1415,8 +1415,8 @@ The regenerated file quotes the code and is not byte-identical to the lost file.
 - [x] Binary COPY with the per-table built-in-type predicate and text fallback.
 - [x] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
 - [x] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
-- [ ] E10 and E11 intent recovery on the line, decisions (cz) to (df).
-- [ ] O3 pins the runner image built after E10 and E11.
+- [x] E10 to E13 intent recovery on the line, merged in `77678f7`, decisions (cz) to (dy).
+- [ ] O3 pins the runner image built after E10 to E13.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
 We widen follow and clone for the objects the native M7 fixture leaves to pgcopydb, in this order:
@@ -1428,6 +1428,7 @@ We widen follow and clone for the objects the native M7 fixture leaves to pgcopy
 1. [x] Indexes with extension operator classes.
 
 The ticked engine boxes rest on hosted ci.yml runs 43827618223 and 43829565149 on `23513bc`, whose engine-e2e jobs ran `PROFILE=m8` and the follow widening run on 16-16, 16-18 and 18-18, and on the three M8 receipts of run 43822503840.
+The intent recovery box rests on ENGINE-M8-FIX-REVIEW of `9880960` and hosted ci.yml run 43862963142.
 
 ## M9: Durability modes and measured performance
 
@@ -2565,7 +2566,7 @@ Results, wave 18 engine:
   Both images advertise ten capabilities, and neither is qualified.
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E8-20261116/SHA256SUMS`, SHA-256 `77597257b1b7adfb434640da59c58040159214f4fcb8ea6f34d0501dfa23e639`.
 
-Results after the landing, on branches that are not on the line:
+Results after the landing, on branches that ENGINE-LAND12 merged later:
 
 - [x] ENGINE-M8-E10 (engine): `fix/follow-slot-intent-recovery-20261116` at `8d682fc`, from `84c6eb3`, implements (cz) for a restart in `025dd16` and for a first run in `8d682fc`.
   Before, every retry after a kill inside `CREATE_REPLICATION_SLOT` exited 3 and the slot kept retaining WAL; after, the next start drops the recorded slot, creates it again and copies on 18-18 and 16-18.
@@ -2575,10 +2576,10 @@ Results after the landing, on branches that are not on the line:
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E10-20261116/SHA256SUMS`, SHA-256 `aca8276cec7d7dde0953fe6293c5ca7acdfd512b70b4c128a759c2015c9256ec`.
 - [x] ENGINE-HARNESS-PINS (engine): `fix/harness-image-client-versions-20261116` at `24db730`, from `23513bc`, implements (dd) in `726fb10` and (dg) in `24db730`.
   The M8 build smoke reads the client and libpq versions from the image's `dpkg-query` inventory, and the last timed-out Podman probe now enters the stall ledger with its diagnostic.
-  7 of 7 mutations failed the tests, and hosted ci.yml run 43832554921 passed 8 of 8 on the head; `726fb10` has no hosted run of its own.
+  7 of 7 mutations failed the tests, and hosted ci.yml run 43832554921 passed 8 of 8 on the head, and run 43870520905 later passed 8 of 8 on `726fb10` alone.
   Evidence: `/private/var/tmp/rpgmigrate-ENGINE-HARNESS-PINS-20261116/SHA256SUMS`, SHA-256 `c48ce6c9f4436954c5dfa001c02be8e02c5e6201827580be9f783e7a6302f0fa`.
 
-Decisions (cj) to (dg), 2026-11-16:
+Leader decisions (cj) to (dg), 2026-11-16:
 
 - (cj) `FORMAT_VERSION` stays 9 with the required `clone_state.recopy`; state from earlier M8 dev builds refuses before database access.
 - (ck) The foreign large-object refusal is exit 2 `BadConfig` and not retryable.
@@ -2600,7 +2601,7 @@ Decisions (cj) to (dg), 2026-11-16:
 - (da) A publication intent without its receipt never committed: if no publication exists under the recorded name the intent is retired and created again; any publication under that name refuses.
 - (db) E6's red commit `acd54ea` lands squashed with its fix `6690521`.
 - (db2) A publication receipt with an unknown COMMIT outcome is resolved by exact OID, name and owner: ours is dropped and created again, absence retires it, anything else refuses; it is never adopted.
-- (dc) A foreign slot created under a pending intent's recorded name inside the creation window would be dropped; this is accepted as a documented limit, because the name is per run and per generation and the shape check stays.
+- (dc) A foreign slot created under a pending intent's recorded name inside the creation window would be dropped; this is accepted as a documented limit, because the name is per run and per generation and the shape check stays; the revised (dc) under wave 19 supersedes it.
 - (dd) The M8 build smoke derives the expected client and libpq versions from the image's installed packages, keeping exact equality and the 16, 18 and 18 majors.
 - (de) A confirmed slot not yet bound on a first run is dropped by its receipt with the same shape check and recreated.
 - (df) A run killed in phase Fresh restarts through roadmap decision 8's data-phase restart or the clone restart, touching only objects this run's records prove it created.
@@ -2613,6 +2614,65 @@ Known exceptions to "every commit green on its own", kept because the line is ne
 The M8 engine items are done on the line at `23513bc`.
 E10 and E11 intent recovery, the O3 runner pin after them, and the M7 native matrix rerun with operator defaults remain open.
 M0–M5 are closed, M7 is closed on arm64 kind, M6 and M8 stay open until the operator lifecycle and the M8 matrix rerun, and M9 and M10 are open; benchmark execution stays on HOLD.
+
+### Wave 19: M8 intent recovery landing, 2026-11-16
+
+Results, wave 19 engine:
+
+- [x] ENGINE-M8-E10-REVIEW (engine): reviewed `8d682fc` and reproduced one Medium defect, a regression from `84c6eb3`.
+  The server's definite "already exists" reply to CREATE was treated as unknown, so the next start dropped another run's slot under the recorded name (F1).
+  The Low findings were a shape check weaker than cleanup's (F2), tests that proved less than reported (F3), two round trips between the check and the drop (F4) and stale messages (F5); (dq) to (du) decide them.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E10-REVIEW-20261116/SHA256SUMS`, SHA-256 `e6fe0c84c2713c870e9a1306eb84b93d07510f1b096046a2f027dcbd135ef3b2`.
+- [x] ENGINE-M8-E11 (engine): `fix/follow-intent-windows-20261116` at `4acceba`, from `8d682fc`, recovers windows 3 to 6, 8, 9 and 14 on 18-18 and 16-18 in `1994b51`, `a832b8e`, `af0d406` and `4acceba`.
+  An unconfirmed publication CREATE is resolved by exact OID and owner (da, db2), a first run's unbound slot receipt is dropped at its consistent point (de), and a run killed before its pre-data restore restarts (df, dv, dw).
+  `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43840717442 passed 8 of 8 on attempt 1.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E11-20261116/SHA256SUMS`, SHA-256 `91220c33259f2fc461474f9fb3696585db9bafe357e88623f5dea68904efa668`.
+- [x] ENGINE-M8-E11-REVIEW (engine): reviewed `4acceba` and found no regression in E11's own code.
+  It reproduced on both pairs, and on `8d682fc`, that three publication drops removed whichever publication held the name when DROP got its lock (F1, Medium).
+  The Low findings were a false docs claim and refusal text for an in-flight COMMIT (F2, the (dx) case), an owner refusal that named no owner (F3) and two texts E11 made false (F4).
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E11-REVIEW-20261116/SHA256SUMS`, SHA-256 `f7f618869e57c4281444e61292ac71d2f2f5fd367d930de6e9a44ac3e89da0d4`.
+- [x] ENGINE-M8-E12 (engine): `fix/follow-slot-ownership-20261116` at `887efbc`, from `4acceba`, implements (dq-A), the (dc) docs, (dr), (ds), (dt), (du) and (dy) in `a8370b8`, `d9b5973`, `63a66d6`, `7187017`, `8b832b8`, `1de28c3` and `887efbc`.
+  It stopped on (dq), because a 58P02 from `SaveSlotToPath` after `ReplicationSlotPersist` leaves the slot on 16.15 and 18.7, and (dq-A) replaced it.
+  The E10 review's foreign-slot script dropped the slot in 10 of 10 runs on `4acceba` and kept it in 10 of 10 after the fix.
+  `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43852509470 passed 8 of 8 on attempt 1.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E12-20261116/SHA256SUMS`, SHA-256 `7d5d1831d63279326f628045956f9e36a656233e9774b634ea5ec73c64e79d9c`.
+- [x] ENGINE-M8-E13 (engine): `fix/follow-intent-review-20261116` at `9880960`, from `887efbc`, fixes the four E11-REVIEW findings in `2a912c8`, `a2cd77c`, `b0103b1` and `9880960`.
+  One helper now drops every recorded publication: it rereads the OID and owner inside the dropping transaction and requires the drop's lock to name that OID.
+  The E11 review's replacement script dropped the replacement in 6 of 6 runs on `887efbc` and kept it in 6 of 6 after the fix.
+  12 of 12 mutations failed the tests, `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43862963142 passed 8 of 8 on attempt 1.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E13-20261116/SHA256SUMS`, SHA-256 `bbea3ae87d19efe7ee6b6ae53afc5ba74ec3ec3ac547f6fc2931a5b9221cb838`.
+- [x] ENGINE-M8-FIX-REVIEW (engine): reviewed `9880960` with the verdict land: two Low findings and one informational note, none blocking.
+  It confirmed the (dq-A) citation in the 16.15, 16.16 and 18.7 sources and reran both reviews' scripts in both directions; a relay that holds CREATE opens only the documented (dc) window.
+  Low finding 1: an error before CREATE is dispatched keeps the slot intent (`src/pg/ffi.rs:1028-1033`), inside the documented window.
+  Low finding 2, older than E10: `stream cleanup` drops a foreign two_phase slot under the bound name, because `cleanup_slot_present` lacks the `two_phase` predicate.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-FIX-REVIEW-20261116/SHA256SUMS`, SHA-256 `ea7b601350d22255b36181cb5bb349a6a3de04228de4701afa4dfdf5dfdce734`.
+- [x] ENGINE-LAND12 (engine): `integration/engine-land12-20261116`, from `23513bc`, merges `9880960` in `77678f7`, `24db730` in `13513e4` and `44490d9` in `3933591`.
+  The only conflicts were the `tools/test-db.py` help counts and `tests/support/follow_source_cases.json`; we kept the line's renamed extension case and Schema four, and the fix head's FollowSource twenty-two and Clone seventeen.
+  Before the harness merge, `ci/harness-pins-726fb10-20261116` gave `726fb10` its own hosted ci.yml run 43870520905, which passed 8 of 8 on attempt 1.
+
+Leader decisions (dq) to (dy), 2026-11-16:
+
+- (dq) A fully received ErrorResponse to `CREATE_REPLICATION_SLOT` proves that command persisted no slot; superseded by (dq-A), because the PostgreSQL source does not support it.
+- (dq-A) Only an ErrorResponse with SQLSTATE 42710 that is the command's only result and is followed by ReadyForQuery retires the slot intent durably without any DROP, because 42710 comes only from the name check before any slot exists (16.15 `slot.c:312-314`, 18.7 `:412-414`).
+  Every other error and any lost or incomplete reply stays Unknown and takes (cz)'s drop; the collision check repeats after the intent is persisted, immediately before CREATE.
+- (dc), revised: the remaining limit is a foreign slot created between that repeated check and this run's CREATE while this process dies before it reads the reply.
+  `docs/native-protocol.md` states it exactly, and states that two migrations must never share a slot name on one source, because the operator passes a stable `--slot-name` across runs and generations.
+- (dr) The pending-slot shape check also requires `two_phase` false and, where the columns exist, `failover` and `synced` false.
+- (ds) The drop is one statement that selects the slot by exact name, full shape and `active_pid IS NULL` and requires exactly one row; zero rows reread the slot for the precise refusal.
+- (dt) The shape check runs before the active check, and a slot proven this run's is retired before any refusal that does not concern it, on a restart and on a first run, so no refusal leaves this run's slot retaining WAL.
+- (du) The persisted kill point comes from the engine's own CREATE with its reply lost; live cases create a foreign slot inside the window, and each shape predicate that can fire alone has a test that fails when only it is removed.
+- (dv) Window 14 keeps its rule: the target bookkeeping schema found by the nonce written inside its creating transaction is adopted, and an absent one is created again.
+- (dw) The phase Fresh restart is roadmap decision 8 plus first-run continuation; PreDataPending still refuses.
+- (dx) A publication COMMIT still waiting on an unanswering synchronous standby makes a later start refuse safely; this is a documented limit and no xid field is added.
+- (dy) Skipping table reconciliation on a Copying restart must fail a test (E11's surviving mutant mc6).
+
+Open after wave 19:
+
+- E12's two questions wait for a leader decision: whether to accept the (dc) window as `docs/native-protocol.md` states it, and whether a restart keeps acquiring the target authority before `retire_unbound`; ENGINE-M8-FIX-REVIEW recommends both.
+- ENGINE-M8-FIX-REVIEW's two Low findings are not fixed.
+
+The M8 engine items, intent recovery included, are on the line from this landing.
+The O3 runner pin and the M7 native matrix rerun with operator defaults remain open.
 
 ## Capacity and parallel execution, user update 2026-11-08
 
