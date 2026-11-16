@@ -80,6 +80,11 @@ def module_cases(manifest, profile):
             "copy::live_tests::live_binary_copy_counts_empty_single_and_multiple_rows_from_command_results",
             "copy::live_tests::live_split_copy_retains_every_part_without_freeze_or_worker_truncate",
             "copy::live_tests::live_large_object_initial_copy_preserves_empty_binary_multichunk_and_sparse_objects",
+            "copy::live_tests::live_split_kills_after_reset_mid_part_and_after_last_part_restart_with_every_row_once",
+            "copy::live_tests::live_split_lost_part_marker_commit_resolves_through_fence_barrier_or_restarts_generation",
+            "copy::live_tests::live_binary_source_error_mid_relay_leaves_no_marker_and_counts_no_partial_rows",
+            "copy::live_tests::live_large_object_kills_mid_object_and_after_commit_restart_without_duplicate_or_missing_object",
+            "copy::live_tests::live_large_object_restart_unlinks_only_owned_objects_and_keeps_foreign_ones",
         ]
     if profile == "Transport":
         return manifest["transport_cases"]

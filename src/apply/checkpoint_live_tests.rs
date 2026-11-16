@@ -3522,6 +3522,15 @@ struct CutoverFixture {
 }
 
 fn cutover_fixture(io: &IoControl) -> CutoverFixture {
+    cutover_fixture_with(io, &cutover_options(), &[])
+}
+
+/// `seed` runs on the source before the initial copy; a large-object policy also runs that initial phase.
+fn cutover_fixture_with(
+    io: &IoControl,
+    options: &crate::contracts::CloneOptions,
+    seed: &[&str],
+) -> CutoverFixture {
     let initial = state();
     let path = initial.identity().canonical_path.clone();
     drop(initial);
@@ -3548,15 +3557,15 @@ fn cutover_fixture(io: &IoControl) -> CutoverFixture {
             .collect::<String>()
     );
     let sequence = format!("{schema}.final_sequence");
+    for sql in seed {
+        source.query(sql, io).unwrap();
+    }
     let plan = ClonePlan {
         source: crate::catalog::read_clone_source(&mut source, io).unwrap(),
         target: crate::catalog::read_clone_target(&mut target, io).unwrap(),
         generation: CopyGeneration(1),
         tables: Vec::new(),
-        copy_policy: crate::contracts::CloneCopyPolicy {
-            skip_large_objects: true,
-            ..Default::default()
-        },
+        copy_policy: options.copy_policy(),
         copy_tables: Vec::new(),
         sequences: vec![crate::contracts::QualifiedTable {
             schema: schema.clone(),
@@ -3621,6 +3630,16 @@ fn cutover_fixture(io: &IoControl) -> CutoverFixture {
         .collect();
     native.confirm_pre_data(&plan, objects, Vec::new()).unwrap();
     copy.bind_tables(&native, io).unwrap();
+    if !options.skip_large_objects {
+        let mut snapshot = crate::snapshot::CloneSnapshot::export(
+            named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", io),
+            plan.generation,
+            io,
+        )
+        .unwrap();
+        crate::large_objects::run_initial(options, &plan, &mut snapshot, &mut copy, io).unwrap();
+        snapshot.finish(io).unwrap();
+    }
     for phase in [
         ClonePhase::PostDataPending,
         ClonePhase::PostDataComplete,
@@ -4150,4 +4169,331 @@ fn follow_cancelled_sync_wait_never_proves_drain_completion_or_observation() {
             fixture.authority.observe_completed(&request, &io).unwrap();
         }
     }
+}
+
+fn large_object_cutover_options() -> crate::contracts::CloneOptions {
+    crate::contracts::CloneOptions {
+        skip_large_objects: false,
+        ..cutover_options()
+    }
+}
+
+/// Large objects are database-wide, so this case unlinks its own objects on both shared databases.
+struct CaseObjects(&'static [u32]);
+
+impl Drop for CaseObjects {
+    fn drop(&mut self) {
+        let io = control();
+        for variable in [
+            "RPGMIGRATE_TEST_AUTHORITY_SOURCE",
+            "RPGMIGRATE_TEST_AUTHORITY_ADMIN",
+        ] {
+            let info = Conninfo::new(std::env::var_os(variable).unwrap()).unwrap();
+            let Ok(mut connection) = PgConnection::connect(&info, crate::pg::Role::Copy, &io)
+            else {
+                continue;
+            };
+            for oid in self.0 {
+                let _ = connection.query(
+                    &format!("SELECT pg_catalog.lo_unlink(oid) FROM pg_catalog.pg_largeobject_metadata WHERE oid={oid}"),
+                    &io,
+                );
+            }
+        }
+    }
+}
+
+fn scalar_text(connection: &mut PgConnection, sql: &str) -> String {
+    let result = connection.query(sql, &control()).unwrap();
+    assert_eq!(result.rows(), 1, "{sql}");
+    String::from_utf8(result.cell(0, 0).unwrap().unwrap().to_vec()).unwrap()
+}
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Terminates every other client session on each observer's database, as a process kill closes its sockets.
+fn kill_sessions(observers: &mut [&mut PgConnection]) {
+    let mut keep = Vec::new();
+    for observer in observers.iter_mut() {
+        keep.push(scalar_text(observer, "SELECT pg_catalog.pg_backend_pid()"));
+    }
+    let others = format!(
+        "FROM pg_catalog.pg_stat_activity WHERE datname=pg_catalog.current_database() AND backend_type='client backend' AND pid <> ALL('{{{}}}'::int4[])",
+        keep.join(",")
+    );
+    // An observer inside a transaction keeps its first activity snapshot unless it clears it.
+    let fresh = |observer: &mut PgConnection| {
+        scalar_text(observer, "SELECT pg_catalog.pg_stat_clear_snapshot()::text");
+    };
+    for observer in observers.iter_mut() {
+        fresh(observer);
+        observer
+            .query(
+                &format!("SELECT pg_catalog.pg_terminate_backend(pid) {others}"),
+                &control(),
+            )
+            .unwrap();
+    }
+    for observer in observers.iter_mut() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while {
+            fresh(observer);
+            scalar_text(observer, &format!("SELECT count(*) {others}")) != "0"
+        } {
+            assert!(
+                Instant::now() < deadline,
+                "killed sessions did not end: {}",
+                scalar_text(
+                    observer,
+                    &format!(
+                        "SELECT string_agg(concat_ws(' ',pid,state,wait_event_type,wait_event,left(query,60)),'; ') {others}"
+                    )
+                )
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Runs `engine` here while `controller` injects faults from its own sessions; `ready` starts the engine.
+fn controlled<T>(engine: impl FnOnce() -> T, controller: impl FnOnce(&dyn Fn()) + Send) -> T {
+    let (sender, started) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let control = scope.spawn(move || {
+            controller(&|| {
+                let _ = sender.send(());
+            })
+        });
+        if started.recv().is_err() {
+            std::panic::resume_unwind(control.join().unwrap_err());
+        }
+        let result = engine();
+        if let Err(panic) = control.join() {
+            std::panic::resume_unwind(panic);
+        }
+        result
+    })
+}
+
+fn large_object_rows(connection: &mut PgConnection) -> Vec<String> {
+    let result = connection
+        .query(
+            "SELECT m.oid::pg_catalog.text||':'||pg_catalog.length(pg_catalog.lo_get(m.oid))||':'||pg_catalog.md5(pg_catalog.lo_get(m.oid)) FROM pg_catalog.pg_largeobject_metadata m WHERE m.oid BETWEEN 93001 AND 93004 ORDER BY m.oid",
+            &control(),
+        )
+        .unwrap();
+    (0..result.rows())
+        .map(|row| String::from_utf8(result.cell(row, 0).unwrap().unwrap().to_vec()).unwrap())
+        .collect()
+}
+
+/// A follow process started after a kill: fresh target authority, source session and sealed request.
+fn restarted_follow(fixture: &mut CutoverFixture, io: &IoControl) -> SealedEndpos {
+    fixture.authority.session.close();
+    let binding = fixture.native.follow_control().unwrap().unwrap().binding;
+    fixture.authority = TargetAuthority::acquire_follow(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", io),
+        &mut fixture.native,
+        &binding,
+        io,
+    )
+    .unwrap();
+    fixture.source = named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", io);
+    let control = ControlHandle::for_worker(&fixture.native, io).unwrap();
+    let request = control.read(io).unwrap().unwrap();
+    let sealed = control.seal(&request, io).unwrap();
+    fixture
+        .authority
+        .record_drain(&sealed, DrainWitness::LaterBegin(CommitLsn(0x30)), io)
+        .unwrap();
+    sealed
+}
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_final_large_object_resync_kill_reconciles_or_refuses_and_never_completes_early() {
+    let io = control();
+    let _objects = CaseObjects(&[93001, 93002, 93003, 93004]);
+    let options = large_object_cutover_options();
+    let mut fixture = cutover_fixture_with(
+        &io,
+        &options,
+        &[
+            "SELECT pg_catalog.lo_from_bytea(93001,pg_catalog.decode('0a0b0c','hex'))",
+            "SELECT pg_catalog.lo_from_bytea(93002,pg_catalog.decode('dead','hex'))",
+            "SELECT pg_catalog.lo_from_bytea(93003,pg_catalog.decode(repeat('33',70000),'hex'))",
+        ],
+    );
+    let initial = fixture
+        .authority
+        .large_object_completion(LargeObjectPhase::Initial)
+        .unwrap();
+    assert_eq!(initial.objects, 3);
+    let source_info =
+        Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_SOURCE").unwrap()).unwrap();
+    let target_info =
+        Conninfo::new(std::env::var_os("RPGMIGRATE_TEST_AUTHORITY_ADMIN").unwrap()).unwrap();
+    let copied = large_object_rows(&mut named_connection(
+        "RPGMIGRATE_TEST_AUTHORITY_ADMIN",
+        &io,
+    ));
+    assert_eq!(copied, large_object_rows(&mut fixture.source));
+    for sql in [
+        "SELECT pg_catalog.lo_unlink(93002)",
+        "SELECT pg_catalog.lo_put(93003,0,pg_catalog.decode('ff','hex'))",
+        "SELECT pg_catalog.lo_from_bytea(93004,pg_catalog.decode('04','hex'))",
+    ] {
+        fixture.source.query(sql, &io).unwrap();
+    }
+    let expected = large_object_rows(&mut fixture.source);
+    let request = sealed_cutover(&fixture, &io);
+    fixture
+        .authority
+        .record_drain(&request, DrainWitness::LaterBegin(CommitLsn(0x30)), &io)
+        .unwrap();
+    let class = LARGE_OBJECT_LOCK_CLASS;
+
+    // Kill mid re-sync: 93001 and 93003 take final receipts while 93004 waits for its object lock.
+    let failure = controlled(
+        || {
+            fixture.authority.complete_follow(
+                &options,
+                &mut fixture.source,
+                &fixture.native,
+                &fixture.plan,
+                &request,
+                &io,
+            )
+        },
+        |ready| {
+            let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &control()).unwrap();
+            let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &control()).unwrap();
+            scalar_text(&mut target, &format!("SELECT pg_catalog.pg_advisory_lock({class},93004)::text"));
+            ready();
+            wait_until("93004 did not wait for its object lock", || {
+                scalar_text(&mut target, &format!("SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='advisory' AND classid={class}::oid AND objid=93004 AND objsubid=2 AND NOT granted")) == "1"
+            });
+            kill_sessions(&mut [&mut source, &mut target]);
+        },
+    )
+    .unwrap_err();
+    assert!(!failure.message.is_empty());
+    // The failed worker cancelled the killed process; its successor starts with fresh control state.
+    let io = control();
+    let mut target = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    assert_eq!(
+        large_object_rows(&mut target),
+        [expected[0].clone(), copied[1].clone(), expected[1].clone()]
+    );
+
+    // The next drain re-syncs every object and reconciles the deleted one; a kill at the sequence sync
+    // leaves the final receipt durable and the follow incomplete.
+    let request = restarted_follow(&mut fixture, &io);
+    assert!(!fixture.authority.row.follow_completed);
+    assert_eq!(
+        fixture
+            .authority
+            .large_object_completion(LargeObjectPhase::Final),
+        None
+    );
+    let sequence = fixture.sequence.clone();
+    let failure = controlled(
+        || {
+            fixture.authority.complete_follow(
+                &options,
+                &mut fixture.source,
+                &fixture.native,
+                &fixture.plan,
+                &request,
+                &io,
+            )
+        },
+        |ready| {
+            let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &control()).unwrap();
+            let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &control()).unwrap();
+            target.query("BEGIN", &control()).unwrap();
+            // LOCK TABLE refuses sequences; this uncommitted ALTER holds the lock that setval waits for.
+            target
+                .query(&format!("ALTER SEQUENCE {sequence} INCREMENT BY 1"), &control())
+                .unwrap();
+            ready();
+            wait_until("completion did not wait at its sequence sync", || {
+                scalar_text(&mut target, &format!("SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='relation' AND relation='{sequence}'::pg_catalog.regclass AND NOT granted")) == "1"
+            });
+            kill_sessions(&mut [&mut source, &mut target]);
+        },
+    )
+    .unwrap_err();
+    assert!(!failure.message.is_empty());
+    let io = control();
+    let mut target = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    assert_eq!(large_object_rows(&mut target), expected);
+
+    // Source drift after the durable final receipt: the next drain refuses instead of completing.
+    let mut source = named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", &io);
+    source
+        .query(
+            "SELECT pg_catalog.lo_put(93001,0,pg_catalog.decode('ee','hex'))",
+            &io,
+        )
+        .unwrap();
+    let request = restarted_follow(&mut fixture, &io);
+    let recorded = fixture
+        .authority
+        .large_object_completion(LargeObjectPhase::Final)
+        .unwrap();
+    assert_eq!(recorded.objects, 3);
+    assert!(!fixture.authority.row.follow_completed);
+    let refusal = fixture
+        .authority
+        .complete_follow(
+            &options,
+            &mut fixture.source,
+            &fixture.native,
+            &fixture.plan,
+            &request,
+            &io,
+        )
+        .unwrap_err();
+    assert!(
+        refusal.message.contains("large-objects"),
+        "{}",
+        refusal.message
+    );
+
+    // With the source restored, the next drain reconciles to completion.
+    source
+        .query(
+            "SELECT pg_catalog.lo_put(93001,0,pg_catalog.decode('0a','hex'))",
+            &io,
+        )
+        .unwrap();
+    let request = restarted_follow(&mut fixture, &io);
+    assert!(!fixture.authority.row.follow_completed);
+    let completed = fixture
+        .authority
+        .complete_follow(
+            &options,
+            &mut fixture.source,
+            &fixture.native,
+            &fixture.plan,
+            &request,
+            &io,
+        )
+        .unwrap();
+    assert_eq!(completed.end(), SourceEndLsn(0x20));
+    assert!(fixture.authority.row.follow_completed);
+    assert_eq!(
+        fixture
+            .authority
+            .large_object_completion(LargeObjectPhase::Final),
+        Some(recorded)
+    );
+    assert_eq!(large_object_rows(&mut target), expected);
 }

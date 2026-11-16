@@ -4097,6 +4097,41 @@ impl CloneAuthority {
     }
 }
 
+#[cfg(test)]
+pub(crate) const LARGE_OBJECT_LOCK_CLASS: i32 = FENCE_CLASS + 1;
+
+#[cfg(test)]
+impl CloneAuthority {
+    pub(crate) fn coordinator_pid(&self) -> u32 {
+        self.authority.session.pid
+    }
+    pub(crate) fn durable_markers(&mut self, io: &IoControl) -> Result<Vec<CopyDone>> {
+        metadata::read_markers(
+            self.authority.session.connection()?,
+            &self.authority.provenance,
+            io,
+        )
+    }
+    pub(crate) fn durable_large_objects(&mut self, io: &IoControl) -> Result<Vec<LargeObjectDone>> {
+        let mut all = Vec::new();
+        loop {
+            let after = all
+                .last()
+                .map_or(0, |done: &LargeObjectDone| done.object_oid);
+            let page = metadata::large_object_page(
+                self.authority.session.connection()?,
+                &self.authority.provenance,
+                after,
+                io,
+            )?;
+            if page.is_empty() {
+                return Ok(all);
+            }
+            all.extend(page);
+        }
+    }
+}
+
 impl CopyTxn {
     pub(crate) fn begin(
         mut connection: PgConnection,
