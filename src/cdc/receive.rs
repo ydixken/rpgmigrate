@@ -880,6 +880,7 @@ mod tests {
     }
 
     fn backpressure(cancel_while_full: bool, real_timeout: bool, completed_stop: bool) {
+        let marked = !cancel_while_full && !real_timeout && !completed_stop;
         let limits = crate::contracts::FollowLimits {
             channel_messages: 2,
             ..crate::contracts::FollowLimits::default()
@@ -900,6 +901,8 @@ mod tests {
             let (peer, mut source) = crate::pg::follow_receive_tests::Peer::start(
                 if real_timeout {
                     "follow_long"
+                } else if marked {
+                    "follow_full"
                 } else {
                     "follow"
                 },
@@ -943,6 +946,11 @@ mod tests {
         // Timer statuses can reach the peer before the receiver decodes any frame;
         // only a refused send proves the receiver is blocked on the full FIFO.
         assert!(receiver.wait_full(Duration::from_secs(2)));
+        if marked {
+            // The FIFO stays full until the peer reports a timer status after this reply bit.
+            request.store(true, Ordering::Release);
+            peer.status_while_full();
+        }
         if !cancel_while_full && !completed_stop {
             let messages: Vec<_> = (0..7)
                 .map(|_| receiver.recv_timeout(Duration::from_secs(1)).unwrap())
