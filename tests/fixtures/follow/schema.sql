@@ -20,6 +20,8 @@ CREATE TABLE "M2 space".rows (
     size "M2 space".size,
     sizes "M2 space".size[]
 );
+-- PostgreSQL 18 sources also carry a virtual generated column, which 16 cannot create.
+DO $$BEGIN IF pg_catalog.current_setting('server_version_num')::integer >= 180000 THEN EXECUTE 'ALTER TABLE "M2 space".rows ADD COLUMN echoed text GENERATED ALWAYS AS (nullable || '':virtual'') VIRTUAL'; END IF; END$$;
 INSERT INTO "M2 space".rows (value, nullable, data, feeling, positive, numbers, email, emails, address, size, sizes)
 SELECT 'fixture-sensitive-row-' || g, CASE WHEN g % 2 = 0 THEN NULL ELSE '' END,
        decode('00ff5c', 'hex'), 'calm', 1, ARRAY[g, NULL, g + 1],

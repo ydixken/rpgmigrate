@@ -539,13 +539,14 @@ class FollowHarnessTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     harness.load_manifest(path)
 
-    def test_fixture_has_one_generated_column_and_no_check_expression_partial_or_callback_obligation(self):
+    def test_fixture_has_generated_columns_and_no_check_expression_partial_or_callback_obligation(self):
         sql = (harness.FIXTURES / "schema.sql").read_text()
         self.assertIn("REPLICA IDENTITY FULL", sql)
         self.assertIn("REPLICA IDENTITY USING INDEX", sql)
         self.assertIn("GENERATED ALWAYS AS IDENTITY", sql)
-        self.assertEqual(sql.count("GENERATED ALWAYS AS ("), 1)
+        self.assertEqual(sql.count("GENERATED ALWAYS AS ("), 2)
         self.assertIn("value text,\n    computed text GENERATED ALWAYS AS (value || ':generated') STORED,\n    nullable text,", sql)
+        self.assertIn("current_setting('server_version_num')::integer >= 180000 THEN EXECUTE 'ALTER TABLE \"M2 space\".rows ADD COLUMN echoed text GENERATED ALWAYS AS (nullable || '':virtual'') VIRTUAL'", sql)
         self.assertNotIn("CHECK", sql)
         self.assertNotIn("CREATE FUNCTION", sql)
         self.assertNotIn("CREATE TRIGGER", sql)
