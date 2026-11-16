@@ -501,6 +501,7 @@ Matching `test-e2e-sessions-18-18` and `test-e2e-sessions-16-18` tasks check the
 
 The timeout run sets one setting at a time on both case databases with `ALTER DATABASE`, the way a production server may: `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `idle_session_timeout` and, on PostgreSQL 17 and later, `transaction_timeout`.
 Each value is a few milliseconds, far below any engine phase, and a fresh session must report it before the run starts.
+Under CPU contention `idle_session_timeout` can end that fresh session before its query arrives, so the check starts a new one, at most five times in all, only when the session ended with SQLSTATE `57P05`; any other failure stops the run.
 Under each setting it runs clone, follow, a two-second idle hold, an endpos drain, `compare data`, `compare schema` and `stream cleanup`, and every step must succeed.
 `pg_stat_database.sessions_fatal` must not grow on either database, so a timeout that ends a `pg_restore` worker the utility shrugs off still fails the run.
 Once a fresh session has confirmed the setting, the harness's own `psql` sessions clear it in their startup options, so every counted FATAL is an engine session's; engine commands never get those options.
