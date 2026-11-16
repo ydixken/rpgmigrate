@@ -352,7 +352,38 @@ def engine(driver, state, phase, phases, argv):
     return stdout
 
 
+LOGS = """SELECT coalesce(json_object_agg(f.name, pg_catalog.pg_read_file(pg_catalog.current_setting('log_directory') || '/' || f.name)), '{}')
+  FROM pg_catalog.pg_ls_logdir() f;"""
+
+
+def retain_logs(databases):
+    """Copies each census server's log files into the run's diagnostics, so a judged connection line can be read back."""
+    for side, database in databases.items():
+        files = json.loads(database.sql("postgres", LOGS))
+        if not any(name.endswith(".json") for name in files) or not all(re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", name) for name in files):
+            raise RuntimeError(side + " census server log files are absent or misnamed")
+        secret = database.environment.get("PGPASSWORD")
+        if secret and any(secret in text for text in files.values()):
+            raise RuntimeError(side + " census server log carries a credential")
+        directory = clone.DIAGNOSTIC_ROOT / "census-logs" / side
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for name, text in files.items():
+            (directory / name).write_text(text)
+
+
 def run(source, target, case, launch, driver):
+    try:
+        return variants(source, target, case, launch, driver)
+    finally:
+        failed = sys.exc_info()[0] is not None
+        try:
+            retain_logs({"source": source, "target": target})
+        except Exception:
+            if not failed:
+                raise
+
+
+def variants(source, target, case, launch, driver):
     import cutover
     cases = {}
     for variant in VARIANTS:

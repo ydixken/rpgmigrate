@@ -1,15 +1,18 @@
 """Portable controls for the session-name census judgement and process-port mapping."""
 
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sessions
 
 HARNESS = "rpgmigrate_m2_harness"
+ENGINE_LINE = sessions.logline("rpgmigrate[100] compare")
 
 
 def row(pid, name, port, kind="client backend", state="active", start="t0"):
@@ -84,6 +87,23 @@ class JudgeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.judge([window, gone(engine)], pinned="pinned")
         self.assertEqual(self.judge([window, gone(engine.replace("rpgmigrate[100] compare", "pinned"))], pinned="pinned")[1]["logged"], 1)
+
+    def test_census_logs_are_copied_whole_and_refused_when_absent_misnamed_or_secret(self):
+        class Server:
+            environment = {"PGPASSWORD": "fixture-secret"}
+            def __init__(self, files):
+                self.files = files
+            def sql(self, name, sql):
+                return json.dumps(self.files).encode()
+        logged = {"postgresql.json": ENGINE_LINE + "\n", "postgresql.log": ""}
+        with tempfile.TemporaryDirectory() as temporary, patch.object(sessions.clone, "DIAGNOSTIC_ROOT", Path(temporary)):
+            sessions.retain_logs({"source": Server(logged), "target": Server(logged)})
+            for side in ("source", "target"):
+                self.assertEqual({path.name: path.read_text() for path in (Path(temporary) / "census-logs" / side).iterdir()}, logged)
+            for files in ({}, {"postgresql.log": ""}, {"../postgresql.json": ""}, {".json": ""},
+                          {"postgresql.json": "password=fixture-secret"}):
+                with self.subTest(files=files), self.assertRaises(RuntimeError):
+                    sessions.retain_logs({"source": Server(files)})
 
     def test_pinned_names_must_survive_on_every_session(self):
         coverage, _ = self.judge([row(1, "pinned", 5001), row(2, "pinned", 5002)], pinned="pinned")
