@@ -2611,12 +2611,16 @@ mod tests {
             )
         };
         let ready = |status: &[u8]| peer_message(b'Z', status);
-        let row = [
+        let partial = [
             peer_message(
                 b'T',
                 b"\0\x01slot_name\0\0\0\0\0\0\0\0\0\0\x19\xff\xff\xff\xff\xff\xff\0\0",
             ),
             peer_message(b'D', b"\0\x01\0\0\0\x03e12"),
+        ]
+        .concat();
+        let row = [
+            partial.clone(),
             peer_message(b'C', b"CREATE_REPLICATION_SLOT\0"),
         ]
         .concat();
@@ -2641,10 +2645,17 @@ mod tests {
                 false,
             ),
             (
-                "row then 42710",
+                "complete row then 42710",
                 [row.clone(), error("42710"), ready(b"I")].concat(),
                 false,
                 false,
+            ),
+            // libpq discards a partial row when an error follows (fe-protocol3.c pqGetErrorNotice3), so only the cited server source rules out a row before 42710.
+            (
+                "partial row then 42710",
+                [partial, error("42710"), ready(b"I")].concat(),
+                false,
+                true,
             ),
             (
                 "two 42710",
