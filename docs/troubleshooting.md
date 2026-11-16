@@ -131,6 +131,8 @@ Packaging smoke alone does not qualify authentication, TLS, resolver, PVC, or he
 
 Stop if caller identity, checkpoint generation, object OIDs, slot continuity, or ownership disagrees.
 Preserve the conflicting resource and receipts for review.
+A restart or `stream cleanup` drops a publication only at its recorded OID and owner.
+One that replaced it under the name, even while the `DROP` waited on its lock, refuses with exit 3 and stays.
 Never broaden cleanup by name prefix, delete authority files, or delete a whole PVC to repair a refusal.
 An empty cleanup inventory cannot prove completion.
 

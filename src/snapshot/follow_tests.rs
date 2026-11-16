@@ -2807,6 +2807,43 @@ fn interrupt_publication_create(
     seen
 }
 
+/// Runs `engine` while another session holds the lock of publication `name`; once the engine's DROP
+/// waits on it, that session replaces the publication under the same name and commits. Returns the
+/// engine's outcome and the replacement's OID.
+fn replace_publication_during_drop<T>(
+    info: &Conninfo,
+    name: &str,
+    engine: impl FnOnce() -> T,
+) -> (T, String) {
+    let (ready, held) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let controller = scope.spawn(move || {
+            let connect = || PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap();
+            let (mut holder, mut observer) = (connect(), connect());
+            holder.query("BEGIN", &control()).unwrap();
+            // A comment holds the publication's object lock and no table lock, so only the engine's DROP waits.
+            holder.query(&format!("COMMENT ON PUBLICATION {name} IS 'held'"), &control()).unwrap();
+            ready.send(()).unwrap();
+            wait_until("the engine's DROP never waited on the publication lock", || {
+                scalar(&mut observer, "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND NOT granted") == "1"
+            });
+            holder.query(&format!("DROP PUBLICATION {name}"), &control()).unwrap();
+            holder.query(&format!("CREATE PUBLICATION {name} FOR TABLE ONLY public.items"), &control()).unwrap();
+            let replaced = scalar(&mut holder, &format!("SELECT oid::text FROM pg_catalog.pg_publication WHERE pubname='{name}'"));
+            holder.query("COMMIT", &control()).unwrap();
+            replaced
+        });
+        if held.recv().is_err() {
+            std::panic::resume_unwind(controller.join().unwrap_err());
+        }
+        let outcome = engine();
+        let replaced = controller
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (outcome, replaced)
+    })
+}
+
 #[test]
 #[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
 fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted() {
@@ -2892,44 +2929,17 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
             };
             if kill == PublicationKill::ReplacedDuringRemoval {
                 let bytes = manifest();
-                let (ready, held) = std::sync::mpsc::channel();
                 let info = fixture.options.clone.source.clone();
-                let (holder_name, done) = (name.clone(), Arc::new(AtomicBool::new(false)));
-                let replaced = std::thread::scope(|scope| {
-                    let finished = Arc::clone(&done);
-                    let controller = scope.spawn(move || {
-                        let connect = || {
-                            PgConnection::connect(&info, crate::pg::Role::Copy, &control()).unwrap()
-                        };
-                        let (mut holder, mut observer) = (connect(), connect());
-                        holder.query("BEGIN", &control()).unwrap();
-                        // A membership change holds the publication's object lock, so the retry's DROP waits on it.
-                        holder.query(&format!("ALTER PUBLICATION {holder_name} SET TABLE ONLY public.items"), &control()).unwrap();
-                        ready.send(()).unwrap();
-                        wait_until("the retry's DROP never waited on the publication lock", || {
-                            scalar(&mut observer, "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND NOT granted") == "1"
-                        });
-                        holder.query(&format!("DROP PUBLICATION {holder_name}"), &control()).unwrap();
-                        holder.query(&format!("CREATE PUBLICATION {holder_name} FOR TABLE ONLY public.items"), &control()).unwrap();
-                        holder.query("COMMIT", &control()).unwrap();
-                        finished.store(true, Ordering::Release);
-                        scalar(&mut observer, &format!("SELECT oid::text FROM pg_catalog.pg_publication WHERE pubname='{holder_name}'"))
-                    });
-                    held.recv().unwrap();
-                    let error = retry(&mut fixture).err().expect(&case);
-                    let oid = controller
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                    assert!(done.load(Ordering::Acquire), "{case}");
-                    assert!(
-                        error.message.starts_with(&format!(
-                            "follow-source: publication {name} changed identity during its removal"
-                        )),
-                        "{case}: {}",
-                        error.message
-                    );
-                    oid
-                });
+                let (outcome, replaced) =
+                    replace_publication_during_drop(&info, &name, || retry(&mut fixture));
+                let error = outcome.err().expect(&case);
+                assert!(
+                    error.message.starts_with(&format!(
+                        "follow-source: publication {name} changed identity during its removal"
+                    )),
+                    "{case}: {}",
+                    error.message
+                );
                 assert_ne!(replaced, seen[0], "{case}");
                 assert_eq!(manifest(), bytes, "{case}");
                 assert_eq!(
@@ -3021,6 +3031,225 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
                     &fixture.io,
                 )
                 .unwrap();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RecordedPublication {
+    /// A restart removes the bound generation's publication by its receipt.
+    Restart,
+    /// A restart retires the next generation's confirmed publication before its slot existed.
+    Retire,
+    /// Cleanup removes the bound publication.
+    Cleanup,
+    /// The shared removal itself, given a receipt.
+    Removal,
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_recorded_publication_replaced_during_its_removal_is_refused_and_kept() {
+    use RecordedPublication::*;
+    for site in [Restart, Retire, Cleanup, Removal] {
+        let case = format!("{site:?}");
+        let mut fixture = Fixture::new(
+            "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+        );
+        let info = fixture.options.clone.source.clone();
+        let (options, io) = (fixture.options.clone(), fixture.io.clone());
+        let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+        let manifest = || std::fs::read(&manifest_path).unwrap();
+        let publications = |fixture: &mut Fixture| {
+            scalar(
+                &mut fixture.source,
+                "SELECT coalesce(string_agg(pubname||' '||oid,',' ORDER BY pubname),'none') FROM pg_catalog.pg_publication",
+            )
+        };
+        let refusal = |context: &str, name: &str| {
+            format!(
+                "{context}: publication {name} changed identity during its removal; it is never adopted or dropped"
+            )
+        };
+        let (error, expected, recorded, replaced) = match site {
+            Restart => {
+                let (next, _) = record_restart(&mut fixture);
+                let native = fixture.native.as_mut().unwrap();
+                let recorded = native
+                    .checked_follow_restart()
+                    .unwrap()
+                    .unwrap()
+                    .previous
+                    .publication;
+                let (outcome, replaced) =
+                    replace_publication_during_drop(&info, &recorded.name, || {
+                        FollowSnapshot::restart(&options, &next, native, &io)
+                    });
+                let restart = native.checked_follow_restart().unwrap().unwrap();
+                assert!(restart.slot_absent && !restart.publication_absent, "{case}");
+                let expected = refusal("follow-restart", &recorded.name);
+                (outcome.err().expect(&case), expected, recorded, replaced)
+            }
+            Retire => {
+                let (next, slot) = record_restart(&mut fixture);
+                let native = fixture.native.as_mut().unwrap();
+                let restart = native.checked_follow_restart().unwrap().unwrap();
+                // The restart removed both old resources by their receipts, then confirmed its own publication.
+                let slot = fixture.source.quote_literal(&slot).unwrap();
+                scalar(
+                    &mut fixture.source,
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})::text"),
+                );
+                native.confirm_follow_slot_absent(&restart).unwrap();
+                fixture
+                    .source
+                    .query(
+                        &format!("DROP PUBLICATION {}", restart.previous.publication.name),
+                        &io,
+                    )
+                    .unwrap();
+                native.confirm_follow_publication_absent(&restart).unwrap();
+                let name = catalog::follow::resource_name(
+                    "publication",
+                    native.identity().run,
+                    next.generation,
+                )
+                .unwrap();
+                let intent = native.begin_publication(&name).unwrap();
+                fixture
+                    .source
+                    .query(
+                        &format!("CREATE PUBLICATION {name} FOR TABLE ONLY public.items"),
+                        &io,
+                    )
+                    .unwrap();
+                let recorded =
+                    catalog::follow::publication_receipt(&mut fixture.source, &name, &io).unwrap();
+                native
+                    .record_publication_created(&intent, &recorded)
+                    .unwrap();
+                native.confirm_publication(&intent, &recorded).unwrap();
+                let bytes = manifest();
+                let (outcome, replaced) = replace_publication_during_drop(&info, &name, || {
+                    FollowSnapshot::retire_unbound(&options, &next, native, &io)
+                });
+                assert_eq!(manifest(), bytes, "{case}");
+                let expected = refusal("follow-restart", &name);
+                (outcome.expect_err(&case), expected, recorded, replaced)
+            }
+            Cleanup => {
+                let snapshot = fixture.create();
+                let binding = snapshot.binding().clone();
+                snapshot.finish(&fixture.io).unwrap();
+                let plan = fixture.plan.clone();
+                let source = &mut fixture.source;
+                let (outcome, replaced) =
+                    replace_publication_during_drop(&info, &binding.publication.name, || {
+                        catalog::follow::remove_follow_publication(
+                            source, &plan, &binding, false, &io,
+                        )
+                    });
+                let expected =
+                    "cleanup-source: publication was replaced; preserve it for manual inspection"
+                        .to_owned();
+                (
+                    outcome.expect_err(&case),
+                    expected,
+                    binding.publication,
+                    replaced,
+                )
+            }
+            Removal => {
+                let name = format!("{}_removal", fixture.database);
+                fixture
+                    .source
+                    .query(
+                        &format!("CREATE PUBLICATION {name} FOR TABLE ONLY public.items"),
+                        &io,
+                    )
+                    .unwrap();
+                let recorded =
+                    catalog::follow::publication_receipt(&mut fixture.source, &name, &io).unwrap();
+                let present = publications(&mut fixture);
+                let (oid, owner) = (recorded.oid, recorded.owner_oid);
+                for other in [
+                    crate::contracts::PublicationReceipt {
+                        owner_oid: owner + 1,
+                        ..recorded.clone()
+                    },
+                    crate::contracts::PublicationReceipt {
+                        oid: oid + 1,
+                        ..recorded.clone()
+                    },
+                ] {
+                    let error = catalog::follow::drop_recorded_publication(
+                        &mut fixture.source,
+                        &other,
+                        "removal",
+                        "unknown",
+                        &io,
+                    )
+                    .expect_err("a publication of another identity was dropped");
+                    assert_eq!(
+                        error.message,
+                        format!(
+                            "removal: publication {name} (OID {oid}, owner {owner}) is not the recorded one (OID {}, owner {}); it is never adopted or dropped",
+                            other.oid, other.owner_oid
+                        )
+                    );
+                    assert_eq!(
+                        fixture.source.transaction_status().unwrap(),
+                        TransactionStatus::Idle
+                    );
+                    assert_eq!(publications(&mut fixture), present);
+                }
+                let source = &mut fixture.source;
+                let (outcome, replaced) = replace_publication_during_drop(&info, &name, || {
+                    catalog::follow::drop_recorded_publication(
+                        source, &recorded, "removal", "unknown", &io,
+                    )
+                });
+                assert_eq!(
+                    fixture.source.transaction_status().unwrap(),
+                    TransactionStatus::Idle
+                );
+                (
+                    outcome.expect_err(&case),
+                    refusal("removal", &name),
+                    recorded,
+                    replaced,
+                )
+            }
+        };
+        assert_eq!(error.message, expected, "{case}");
+        assert_ne!(replaced, recorded.oid.to_string(), "{case}");
+        assert_eq!(
+            publications(&mut fixture),
+            format!("{} {replaced}", recorded.name),
+            "{case}"
+        );
+        if let Removal = site {
+            let replacement =
+                catalog::follow::publication_receipt(&mut fixture.source, &recorded.name, &io)
+                    .unwrap();
+            for dropped in [true, false] {
+                assert_eq!(
+                    catalog::follow::drop_recorded_publication(
+                        &mut fixture.source,
+                        &replacement,
+                        "removal",
+                        "unknown",
+                        &io
+                    )
+                    .unwrap(),
+                    dropped
+                );
+                assert_eq!(
+                    fixture.source.transaction_status().unwrap(),
+                    TransactionStatus::Idle
+                );
+                assert_eq!(publications(&mut fixture), "none");
+            }
         }
     }
 }

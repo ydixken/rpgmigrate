@@ -230,6 +230,8 @@ Held at `CREATE_REPLICATION_SLOT`, the server's 42710 must refuse it.
 Both must retire the intent, keep the slot unchanged and refuse again on the next start, then create this run's own slot once the foreign one is gone.
 A further case commits a source table while slot creation waits, so the snapshot refuses after the slot's receipt, on a restart and on a first run through the CLI path.
 The next start must drop that slot before it refuses on a replaced pending publication or on the changed plan, leaving no slot and no slot record.
+Another case replaces the recorded publication while the engine's `DROP` waits on its lock: in a restart that removes the bound one, in a restart that retires its next generation's confirmed one, in cleanup, and in the shared removal itself.
+Each must refuse with the replacement intact, and the shared removal must refuse a receipt of another OID or owner before any `DROP`.
 Another case kills a first follow run in phase `fresh`: waiting on the target fence, inside its bookkeeping CREATE after the intent, after that CREATE committed without its reply, and after it was confirmed.
 After the last point a second variant also kills the restart inside its generation publish.
 Each restart must reach `analyzing` at copy generation two, or three after the publish kill, with every row and large object exactly once and only that generation's slot and publication left on the source.

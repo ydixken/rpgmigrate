@@ -137,7 +137,7 @@ def main():
     modes.add_argument("--follow-receive", action="store_true", help="require eleven exact native pgoutput receiver and checked cutover cases")
     modes.add_argument("--follow-apply", action="store_true", help="require twelve exact native pgoutput row semantics and catalog identity cases")
     modes.add_argument("--follow-snapshot", action="store_true", help="require nine exact pgoutput snapshot cases and five independent fault receipts")
-    modes.add_argument("--follow-source", action="store_true", help="require twenty-one exact native pgoutput source snapshot and owned cleanup cases")
+    modes.add_argument("--follow-source", action="store_true", help="require twenty-two exact native pgoutput source snapshot and owned cleanup cases")
     modes.add_argument("--schema", action="store_true", help="require three exact native schema utility and pre-data drift cases")
     modes.add_argument("--clone", action="store_true", help="require all seventeen exact native clone component cases")
     modes.add_argument("--self-check", action="store_true")

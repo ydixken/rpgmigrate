@@ -96,27 +96,13 @@ impl FollowSnapshot {
         catalog::follow::preflight_follow_restart(&mut source, plan, io)?;
         if let Some(receipt) = publication {
             if pending_publication_present(&mut source, &receipt, plan, io)? {
-                let required = catalog::configure_durability(&mut source, io)?;
-                catalog::command(&mut source, "BEGIN", "BEGIN", io)?;
-                let name = source.quote_identifier(&receipt.name)?;
-                catalog::command(
+                catalog::follow::drop_recorded_publication(
                     &mut source,
-                    &format!("DROP PUBLICATION {name}"),
-                    "DROP PUBLICATION",
+                    &receipt,
+                    "follow-restart",
+                    "follow-restart: pending publication removal outcome is unknown",
                     io,
                 )?;
-                catalog::command(
-                    &mut source,
-                    "SET CONSTRAINTS ALL IMMEDIATE",
-                    "SET CONSTRAINTS",
-                    io,
-                )?;
-                catalog::confirm_durability(&mut source, required, io)?;
-                if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
-                    return Err(follow_refusal(
-                        "follow-restart: pending publication removal outcome is unknown",
-                    ));
-                }
             }
             let name = source.quote_literal(&receipt.name)?;
             let absent = source.query(
@@ -302,27 +288,13 @@ impl FollowSnapshot {
                     &plan.tables,
                     io,
                 )?;
-                let required = catalog::configure_durability(&mut source, io)?;
-                catalog::command(&mut source, "BEGIN", "BEGIN", io)?;
-                let name = source.quote_identifier(&restart.previous.publication.name)?;
-                catalog::command(
+                catalog::follow::drop_recorded_publication(
                     &mut source,
-                    &format!("DROP PUBLICATION {name}"),
-                    "DROP PUBLICATION",
+                    &restart.previous.publication,
+                    "follow-restart",
+                    "follow-restart: publication removal outcome is unknown; preserve durable restart intent",
                     io,
                 )?;
-                catalog::command(
-                    &mut source,
-                    "SET CONSTRAINTS ALL IMMEDIATE",
-                    "SET CONSTRAINTS",
-                    io,
-                )?;
-                catalog::confirm_durability(&mut source, required, io)?;
-                if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
-                    return Err(follow_refusal(
-                        "follow-restart: publication removal outcome is unknown; preserve durable restart intent",
-                    ));
-                }
                 let absent = source.query(
                     &format!("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname={publication_literal}"),
                     io,
@@ -779,39 +751,12 @@ fn drop_unconfirmed_publication(
     let PublicationProvenance::Created { receipt, .. } = pending else {
         unreachable!("only a recorded receipt is owned")
     };
-    let required = catalog::configure_durability(source, io)?;
-    catalog::command(source, "BEGIN", "BEGIN", io)?;
-    if !owned(&source.query(&inventory, io)?)? {
-        return catalog::command(source, "ROLLBACK", "ROLLBACK", io);
-    }
-    let identifier = source.quote_identifier(name)?;
-    catalog::command(
-        source,
-        &format!("DROP PUBLICATION {identifier}"),
-        "DROP PUBLICATION",
-        io,
-    )?;
-    // DROP resolves the name again under its own lock; that lock names the publication it removed.
-    let dropped = source.query("SELECT objid FROM pg_catalog.pg_locks WHERE pid=pg_catalog.pg_backend_pid() AND locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND mode='AccessExclusiveLock' AND granted", io)?;
-    if dropped.columns()? != 1
-        || dropped.rows() != 1
-        || dropped.cell(0, 0)? != Some(receipt.oid.to_string().as_bytes())
+    let unknown = format!(
+        "follow-source: unconfirmed publication {name} removal outcome is unknown; retry to resolve it by its recorded OID"
+    );
+    if !catalog::follow::drop_recorded_publication(source, receipt, "follow-source", &unknown, io)?
     {
-        return Err(follow_refusal(&format!(
-            "follow-source: publication {name} changed identity during its removal; it is never adopted or dropped"
-        )));
-    }
-    catalog::command(
-        source,
-        "SET CONSTRAINTS ALL IMMEDIATE",
-        "SET CONSTRAINTS",
-        io,
-    )?;
-    catalog::confirm_durability(source, required, io)?;
-    if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
-        return Err(follow_refusal(&format!(
-            "follow-source: unconfirmed publication {name} removal outcome is unknown; retry to resolve it by its recorded OID"
-        )));
+        return Ok(());
     }
     if owned(&source.query(&inventory, io)?)? {
         return Err(follow_refusal(&format!(

@@ -215,6 +215,7 @@ Matching name/plugin/database cannot authenticate a replacement.
 If continuity is uncertain or an identity, active-owner, or generation check disagrees, preserve the object and return incomplete/nonzero for manual handling.
 Do not automatically retry deletion after administration continuity has been lost or contradicted.
 After an unknown DROP, re-observe positively instead of blindly dropping a surviving same-name object.
+A publication DROP commits only when the object lock it took names the recorded OID, so a same-name replacement made while it waited survives.
 An object reappearing after recorded removal is uncertain and must survive.
 
 Report exactly the saved owned slot/publication obligations, the canonical owned retained workdir, and any recorded unowned/unremoved origin.
