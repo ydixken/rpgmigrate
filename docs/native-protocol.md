@@ -346,10 +346,11 @@ Follow records a slot intent (the run's stream, slot name, plugin, copy generati
 One intent authorizes one CREATE.
 Follow checks that no slot holds the name before it creates the publication, and again after it records the intent, immediately before the CREATE.
 A slot that the repeated check finds is not this run's, because the CREATE was never sent: follow retires the intent durably and refuses with exit 3, `follow-source: existing slot or publication is never adopted`.
+An error before the CREATE is sent, such as a stop signal or deadline that the last check sees, a non-idle exporter or invalid arguments, also retires the intent durably without any drop, and follow fails with that error.
 A complete `ErrorResponse` with SQLSTATE 42710, as the command's only result and followed by `ReadyForQuery`, proves that the server's name check refused the CREATE before it allocated a slot.
 PostgreSQL raises 42710 there only (16.15 `slot.c:312-314`, 18.7 `slot.c:412-414`).
 Follow retires that intent durably without any drop and refuses with exit 3, `follow-source: slot <name> already exists, so this run's CREATE created nothing; it is never adopted or dropped`.
-Every other error, and a lost or incomplete reply, keeps the intent, because the server can fail after it persisted the slot.
+Every other error after the CREATE is sent, and a lost or incomplete reply, keeps the intent, because the server can fail after it persisted the slot.
 For example, `ReplicationSlotPersist` marks the slot persistent before `SaveSlotToPath` can raise an error, and that error leaves the slot in place.
 A start that finds an intent without its receipt, on a first run's retry or on a restart, drops the slot of exactly that name, records its absence, and creates the slot again under a new intent.
 It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, has `two_phase`, `failover` and `synced` off as this run's CREATE leaves them, and has no active backend.
@@ -362,12 +363,18 @@ Only the source identity that the plan recorded is checked first.
 A first run then retires the slot before its plan and inventory comparisons.
 A restart retires it once it holds the target authority, before the rest of its source preflight and its pending publication checks; a refusal while it acquires that authority still leaves the slot for the next start.
 
+Every other check of a slot under a recorded name requires the same creation shape and keeps its own rule for an active backend.
+A restart drops the bound generation's surviving slot only with that shape at its recorded consistent point and with no active backend, or refuses with exit 3, `follow-restart: surviving source slot does not match the inactive owned creation receipt`.
+The source health check refuses any other slot with `follow-gap: source slot is missing, foreign, invalidated, or has unsafe WAL retention`.
+`stream cleanup` drops the bound slot only with that shape and no active backend, or refuses with exit 3, `cleanup-source: slot identity or inactive ownership disagrees; preserve it for manual inspection`.
+Each refused slot stays.
+
 > [!important]
 > Two migrations must never share a slot name on one source.
 > The operator passes one stable `--slot-name` across runs and generations, so the engine's default per-run name does not separate them.
 > A pending intent has no receipt, so the start identifies its slot only by the recorded name and the shape check above.
 > A foreign slot of this run's shape is therefore dropped when it takes the name after this run's last completed collision check and this run ends without the outcome of its CREATE.
-> That covers a CREATE never sent, a lost reply, and an unfinished slot that ended with its session, after which the name stays free until the next start.
+> That covers a run killed before it sends the CREATE, a lost reply, and an unfinished slot that ended with its session, after which the name stays free until the next start.
 > While this run's CREATE holds the name, from the server's name check until its session ends, any concurrent CREATE under the name fails with 42710.
 
 ### Publication creation recovery

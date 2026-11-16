@@ -236,6 +236,13 @@ Another case lets a foreign slot take the name inside the creation window, on a 
 Held at `CREATE PUBLICATION`, the repeated check must find the slot and refuse before any `CREATE_REPLICATION_SLOT` is sent.
 Held at `CREATE_REPLICATION_SLOT`, the server's 42710 must refuse it.
 Both must retire the intent, keep the slot unchanged and refuse again on the next start, then create this run's own slot once the foreign one is gone.
+Another case cancels the engine at its last check before it sends `CREATE_REPLICATION_SLOT`, on a first run and on a restart, through a test-only hook.
+The relay must see no CREATE and no slot drop except the restart's bound generation, and the intent must be retired.
+A `pgoutput` slot that another session then creates under the name must make the next start refuse, and stay.
+Another case reshapes a restart's surviving bound slot at its recorded consistent point, by copying it to a `test_decoding` plugin or into another database, and on 18 by `ALTER_REPLICATION_SLOT` with `TWO_PHASE` or `FAILOVER`.
+The restart must refuse with that slot and the native state unchanged.
+The cleanup case also plants a `test_decoding` slot, a two-phase or (on 17 and later) failover `pgoutput` slot, and a `pgoutput` slot in another database under the bound name.
+`stream cleanup` and the source health check must refuse each with the slot unchanged, and must accept a plain `pgoutput` slot.
 A further case commits a source table while slot creation waits, so the snapshot refuses after the slot's receipt, on a restart and on a first run through the CLI path.
 The next start must drop that slot before it refuses on a replaced pending publication or on the changed plan, leaving no slot and no slot record.
 Another case replaces the recorded publication while the engine's `DROP` waits on its lock: in a restart that removes the bound one, in a restart that retires its next generation's confirmed one, in cleanup, and in the shared removal itself.

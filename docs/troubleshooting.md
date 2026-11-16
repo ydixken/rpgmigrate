@@ -71,6 +71,7 @@ Do not recreate a same-name slot, silently start from a later position, or turn 
 `CREATE_REPLICATION_SLOT` waits until every source transaction that holds a transaction ID ends, so a long source transaction can hold a follow at slot creation.
 A kill there, such as a node drain or a timeout, leaves a pending slot intent without its receipt.
 A lost reply leaves the same state and exits with `source-slot-create-unknown: slot may retain WAL; the next start drops it by its recorded intent and creation shape, then creates it again`.
+A stop that lands before the engine sends the CREATE leaves no slot intent, so the next start drops no slot for it.
 The next start, a first-run retry or `--restart`, drops exactly the recorded slot if it exists and then creates it again under a new intent.
 It never adopts that slot, because the snapshot it exported ended with the session that created it.
 It drops only a logical `pgoutput` slot on the source database that is not temporary and has `two_phase`, `failover` and `synced` off; any other slot under that name refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
@@ -137,6 +138,8 @@ Packaging smoke alone does not qualify authentication, TLS, resolver, PVC, or he
 Stop if caller identity, checkpoint generation, object OIDs, slot continuity, or ownership disagrees.
 Preserve the conflicting resource and receipts for review.
 A restart or `stream cleanup` drops a publication only at its recorded OID and owner.
+They drop a slot under the recorded name only when it has this run's creation shape (logical `pgoutput` on the source database, not temporary, `two_phase`, `failover` and `synced` off) and no active backend, and a restart also requires its recorded consistent point.
+Any other slot refuses with exit 3 and stays: `follow-restart: surviving source slot does not match the inactive owned creation receipt` or `cleanup-source: slot identity or inactive ownership disagrees; preserve it for manual inspection`.
 One that replaced it under the name, even while the `DROP` waited on its lock, refuses with exit 3 and stays.
 Never broaden cleanup by name prefix, delete authority files, or delete a whole PVC to repair a refusal.
 An empty cleanup inventory cannot prove completion.

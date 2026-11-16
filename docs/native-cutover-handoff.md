@@ -212,6 +212,7 @@ Check source system/database/timeline, exact publication OID/owner/options/membe
 Maintain exclusive administration of the source resources from creation through all cleanup retries.
 A slot has no immutable catalog OID or creation nonce.
 Matching name/plugin/database cannot authenticate a replacement.
+Cleanup still requires the full creation shape (logical, `pgoutput`, the source database, not temporary, `two_phase`, `failover` and `synced` off) with no active backend, and refuses any other slot under the name.
 If continuity is uncertain or an identity, active-owner, or generation check disagrees, preserve the object and return incomplete/nonzero for manual handling.
 Do not automatically retry deletion after administration continuity has been lost or contradicted.
 After an unknown DROP, re-observe positively instead of blindly dropping a surviving same-name object.
