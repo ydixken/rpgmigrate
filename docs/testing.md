@@ -302,7 +302,8 @@ The admitted profile uses logged heap tables, inheritance children, and partitio
 Generated output must match canonical source bytes under the imported snapshot before the table marker and COMMIT.
 A mismatch refuses and rolls back.
 The 16 MiB row cap applies to the complete qualification row, including generated output.
-The historical M2 profile refuses foreign tables, materialized views, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables during preflight.
+The historical M2 profile refuses foreign tables, unlogged tables, large objects, extension data/configuration obligations, unsupported textual types, and zero-writable-column tables during preflight.
+Clone and follow refresh populated materialized views after post-data, as [materialized views](native-protocol.md#materialized-views) describes.
 Its binary COPY, splitting, filters, all-database/roles variants, destructive restore, and unsupported skip-policy cases remain historical refusal checks.
 Text COPY admits built-in types, enums, domains, arrays, standalone composite types, and extension base types, checking every domain base, array element, and composite member.
 It refuses `reg*` types, `aclitem` and `pg_node_tree`, whose text is not portable, as well as table row types and base types that no extension owns.
