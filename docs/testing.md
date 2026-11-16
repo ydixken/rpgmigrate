@@ -116,6 +116,8 @@ Admission refuses a host with fewer CPUs than the source, target and runner caps
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
 The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
 A container can exit between the inspect and the `exec` that reads its limits; when a fresh inspect then shows it stopped, the read counts as not observed and polling continues, while any other `exec` failure fails the run.
+An `exec` that gives no answer within its 5 s bound is repeated for up to 30 s, because on the hosted runner another owned container's start or exit cleanup stalls every Podman call for seconds.
+Only an answered `exec` can verify the limits, and the runtime ledger keeps each stalled attempt's diagnostic id.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 For each pair, the engine-e2e job runs the clone qualification, the follow smoke and the cutover producer in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.

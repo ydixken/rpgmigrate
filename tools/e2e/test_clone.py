@@ -1271,6 +1271,70 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 self.assertEqual(script["execs"], [])
 
 
+    def test_cap_exec_stalled_behind_a_sibling_container_is_repeated_until_answered_or_its_deadline(self):
+        # A fake podman whose exec gives no answer within the 5 s bound, as on a hosted runner while another owned container exits.
+        limits = b"200000 100000\n1073741824\n"
+        exited = b"Error: can only create exec sessions on running containers: container state improper"
+        cases = (
+            # (method, execs, final Running, expected outcome, attempts, stalls recorded)
+            ("caps", ["stall", "ok"], True, "verified", 2, 1),
+            ("caps", ["stall", "stall", "ok"], True, "verified", 3, 2),
+            ("sample", ["stall", "ok"], True, "verified", 2, 1),
+            ("caps", ["stall"] * 6, True, harness.SubprocessFailure, 6, 5),
+            ("caps", ["stall"] * 6, False, "unobserved", 6, 5),
+            ("caps", ["stall", "exited"], False, "unobserved", 2, 1),
+            ("caps", ["stall", "exited"], True, harness.SubprocessFailure, 2, 1),
+            ("caps", ["missing"], True, harness.SubprocessFailure, 1, 0),
+            ("caps", ["stall", "wrong"], True, RuntimeError, 2, 1),
+        )
+        for method, execs, final, expected, attempts, stalls in cases:
+            clock = CreationClock()
+            entry = {"id": "a"*64, "name": "fresh-source", "role": "source", "image": "sha256:"+"b"*64, "memory": harness.GIB, "cpus": 2, "mounts": [],
+                     "cleanup_status": "pending", **({"ready": True} if method == "sample" else {})}
+            script = {"execs": list(execs), "attempts": 0, "inspections": 0}
+            def inspect(_):
+                script["inspections"] += 1
+                running = True if script["inspections"] == 1 else final
+                return {"Id": entry["id"], "Name": entry["name"], "Image": entry["image"], "State": {"Running": running}, "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
+                        "Mounts": [], "HostConfig": {"Memory": harness.GIB, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "bridge", "PortBindings": {}}, "NetworkSettings": {"Ports": {}}}
+            def podman(argv, *, timeout, **_):
+                if argv[1:3] == ["exec", entry["id"]] and argv[3] == "psql":
+                    return subprocess.CompletedProcess(argv, 0, stdout=b"1000|1000\n", stderr=b"")
+                if argv[1] == "ps":
+                    return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+                self.assertEqual(argv[1:4], ["exec", entry["id"], "cat"])
+                self.assertLessEqual(timeout, 5)
+                script["attempts"] += 1
+                outcome = script["execs"].pop(0)
+                if outcome == "stall":
+                    clock.now += timeout
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                if outcome == "missing":
+                    raise FileNotFoundError("podman")
+                if outcome == "exited":
+                    return subprocess.CompletedProcess(argv, 255, stdout=b"", stderr=exited)
+                return subprocess.CompletedProcess(argv, 0, stdout=limits if outcome == "ok" else b"400000 100000\n1073741824\n", stderr=b"")
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.token, guard.baseline, guard.storage = "podman", "fresh", {"containers": {}, "external": []}, "/storage"
+            guard.last_sample, guard.work_deadline, guard.deadline = clock.now, clock.now + 600, clock.now + 900
+            guard.ledger = {"processes": [], "containers": [entry], "samples": []}
+            with self.subTest(method=method, execs=execs, final=final), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), patch.object(harness.time, "monotonic", side_effect=clock.monotonic), \
+                    patch.object(harness.subprocess, "run", side_effect=podman), patch.object(guard, "inspect", side_effect=inspect), \
+                    patch.object(guard, "host", side_effect=lambda arguments, **_: {"cat": b"MemAvailable: 1 kB\n", "df": b"h\nd 1 2 3 4\n", "getconf": b"4\n"}[arguments[0]]):
+                act = guard.sample if method == "sample" else lambda: guard.observe_caps(entry)
+                if isinstance(expected, type):
+                    with self.assertRaises(expected): act()
+                    self.assertIsNone(entry.get("cgroup_verified"))
+                else:
+                    act()
+                    self.assertIs(entry.get("cgroup_verified"), True if expected == "verified" else None)
+                    self.assertEqual(len(entry.get("cgroup_exec_after_exit", [])), 0 if expected == "verified" else 1)
+                self.assertEqual((script["attempts"], len(entry.get("cgroup_exec_stalls", [])), script["execs"]), (attempts, stalls, []))
+                self.assertLessEqual(clock.now - 100, 30)
+                # Every stall is retained as its own diagnostic, so a slow runner stays visible in a passing ledger.
+                self.assertEqual(len(list(Path(temporary).glob("*.json"))), attempts - (expected == "verified") - (execs[-1] == "wrong"))
+
     def test_network_cleanup_refuses_foreign_attachment_wrong_identity_and_unavailable_absence(self):
         for fault in ("id", "label", "inspect", "foreign_map", "foreign_filter", "remove", "absence", "ok"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
