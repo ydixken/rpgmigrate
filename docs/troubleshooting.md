@@ -48,6 +48,9 @@ Keep workdirs private and preserve ownership and permissions when retaining evid
 
 A lost pre-anchor snapshot cannot be reused.
 An admitted restart must obtain a new snapshot and generation, with exact owned target cleanup and the documented boundary checks.
+A clone restart advances native state first and records the previous generation's snapshot as a recopy intent in the same write.
+If the process dies before the target commits its reset of the previous generation's markers and owned large objects, the next `--restart` or `--resume --not-consistent` publishes that pending generation first and then starts a fresh one.
+The target must still hold exactly the recorded previous generation and snapshot, or already hold the native generation with no retained receipts; any other target refuses before a write.
 An uncertain pre-data ownership handoff or post-data utility outcome refuses recovery.
 Preserve uncertain objects for manual review or use a fresh positively established migration.
 

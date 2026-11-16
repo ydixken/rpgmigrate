@@ -3416,11 +3416,17 @@ impl CloneAuthority {
         if let Some(control) = owner.authority.row.clone.as_ref() {
             control.validate()?;
             let expected = CloneControl::from_state(&owner.state);
+            // A target one generation behind must be this run's recorded previous generation.
+            let behind_by_intent = owner.state.recopy.as_ref().is_some_and(|previous| {
+                previous.generation == control.generation
+                    && previous.token == control.snapshot_token
+            });
             if control.source_timeline != expected.source_timeline
                 || control.table_count != expected.table_count
                 || !(control.generation == expected.generation
                     && control.snapshot_token == expected.snapshot_token
-                    || control.phase == ClonePhase::Copying
+                    || (behind_by_intent || pending_binding)
+                        && control.phase == ClonePhase::Copying
                         && expected.phase == ClonePhase::Copying
                         && control.generation.0.checked_add(1) == Some(expected.generation.0))
             {
@@ -3619,7 +3625,11 @@ impl CloneAuthority {
         self.publish(control, false, io)
     }
 
-    pub(crate) fn advance_generation(&mut self, state: &NativeState, io: &IoControl) -> Result<()> {
+    pub(crate) fn advance_generation(
+        &mut self,
+        state: &mut NativeState,
+        io: &IoControl,
+    ) -> Result<()> {
         let next = state
             .checked_clone()?
             .ok_or_else(|| refusal("target-clone: native clone state is absent"))?;
@@ -3656,7 +3666,7 @@ impl CloneAuthority {
                     "target-clone: uncertain reset reconciliation found retained receipts",
                 ));
             }
-            self.state = next;
+            self.state = state.finish_recopy()?;
             self.follow = follow;
             self.issued.clear();
             return Ok(());
@@ -3704,7 +3714,7 @@ impl CloneAuthority {
         }
         self.follow = follow;
         self.publish(expected, true, io)?;
-        self.state = next;
+        self.state = state.finish_recopy()?;
         self.issued.clear();
         Ok(())
     }
@@ -4604,6 +4614,7 @@ mod clone_marker_tests {
             owned_objects: vec![],
             owned_tables: vec![table],
             completion: None,
+            recopy: None,
         }
     }
     fn done() -> CopyDone {
@@ -5599,7 +5610,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
         let mut next_plan = state.checked_clone().unwrap().unwrap().plan;
         next_plan.generation = fresh.generation;
         state.advance_copy_generation(&next_plan, &fresh).unwrap();
-        authority.advance_generation(&state, &io).unwrap();
+        authority.advance_generation(&mut state, &io).unwrap();
         assert!(
             CopyTxn::begin(
                 PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap(),
@@ -5689,7 +5700,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
             &io,
         )
         .unwrap();
-        authority.advance_generation(&state, &io).unwrap();
+        authority.advance_generation(&mut state, &io).unwrap();
         let current = state.owned_copy_tables().unwrap();
         lost_marker_commit(&mut authority, &current[0], &target_info, &io);
         let pending_commit_resolved =
@@ -5711,7 +5722,7 @@ with ProtocolFault(context,'commit_unknown') as relay:
         let mut next_plan = state.checked_clone().unwrap().unwrap().plan;
         next_plan.generation = next.generation;
         state.advance_copy_generation(&next_plan, &next).unwrap();
-        authority.advance_generation(&state, &io).unwrap();
+        authority.advance_generation(&mut state, &io).unwrap();
         let latest = state.owned_copy_tables().unwrap();
         let replaced_name_refused =
             refuse_replaced_owned_name(&mut authority, &latest[1], &mut target, &target_info, &io);

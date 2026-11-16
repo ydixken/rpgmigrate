@@ -816,6 +816,7 @@ mod tests {
             owned_objects: Vec::new(),
             owned_tables: Vec::new(),
             completion: None,
+            recopy: None,
         });
         let follow = next.follow_state.as_mut().unwrap();
         follow.publication = Some(PublicationProvenance::Confirmed {

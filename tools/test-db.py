@@ -139,7 +139,7 @@ def main():
     modes.add_argument("--follow-snapshot", action="store_true", help="require nine exact pgoutput snapshot cases and five independent fault receipts")
     modes.add_argument("--follow-source", action="store_true", help="require fourteen exact native pgoutput source snapshot and owned cleanup cases")
     modes.add_argument("--schema", action="store_true", help="require three exact native schema utility and pre-data drift cases")
-    modes.add_argument("--clone", action="store_true", help="require all fifteen exact native clone component cases")
+    modes.add_argument("--clone", action="store_true", help="require all sixteen exact native clone component cases")
     modes.add_argument("--self-check", action="store_true")
     modes.add_argument("--transport", action="store_true", help="require the exact transport unit-test inventory")
     modes.add_argument("--prepared", action="store_true", help="require the exact prepared transport live-test inventory")

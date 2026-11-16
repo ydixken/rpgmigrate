@@ -187,7 +187,7 @@ It does not claim a pause inside the blocked table's COPY stream.
 
 ### M8 component profile
 
-`task test-clone`, also called by `task test-db`, requires exactly fifteen named component tests and a matching libtest summary with no ignored or failed cases.
+`task test-clone`, also called by `task test-db`, requires exactly sixteen named component tests and a matching libtest summary with no ignored or failed cases.
 The profile retains the seven clone snapshot, COPY, and marker cases.
 The new cases check actual binary COPY row counts for empty, single-row, and multiple-row streams and row preservation across split parts.
 They also check initial copying of empty, binary, multi-chunk, and sparse large objects.
@@ -196,13 +196,16 @@ The split component case checks complete row and distinct-key counts.
 The direct CLI split profile below checks simultaneous workers and the operator's 536870912-byte split threshold.
 The large-object component case checks initial content and retry.
 
-Five fault cases stop the engine at a fixed point and recover the way `clone --restart` does, in the same process.
+Six fault cases stop the engine at a fixed point and recover the way `clone --restart` does, in the same process.
 A kill drops the engine objects without cleanup and terminates every engine session on both databases, as a process kill closes its sockets.
-The fixed points come from a target CHECK that waits on a test-held advisory lock, a held large-object advisory lock, and a relay that withholds one part's COMMIT from the server.
+The fixed points come from a target CHECK that waits on a test-held advisory lock, a held large-object advisory lock, and a relay that withholds one session's COMMIT from the server.
 The split case kills mid-part, after the split reset commit and after the last part, and every restart ends with each row exactly once.
 The lost-marker case requires the coordinator to wait behind the withheld COMMIT, then either count the durable marker or refuse with `commit-outcome-unknown` and restart under a new generation.
 The relay case terminates the source session mid binary COPY and requires no rows, no marker and a refused copy report.
 The large-object cases kill mid-object and between objects, unlink only receipted objects on restart, keep a foreign object at another OID and refuse a foreign replacement of an owned OID.
+The generation-advance case kills a restart after its native advance at four points of the target publish: blocked on the marker table before the reset, blocked on the second object's deletion lock after the first unlink, with the reset COMMIT withheld and dropped, and with that COMMIT forwarded after the engine lost its reply.
+Each restart resumes the recopy intent, ends two generations later and copies every row and large object exactly once.
+A restart killed again while it resumes the intent leaves the same intent, and an intent naming another snapshot of the previous generation refuses before any write.
 `task test-follow-authority` adds one case that kills the final large-object re-sync mid-way and again after its durable receipt.
 The next drain must reconcile, refuse after source drift, and report completion only once the target matches the source.
 Metadata policies, comparison, and cleanup require separate runtime receipts.

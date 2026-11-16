@@ -591,6 +591,9 @@ fn marker_generations_cannot_reuse_snapshot_bound_owned_tables() {
             )
             .is_err()
     );
+    // Native state cannot leave COPY while the target still holds generation one.
+    assert!(state.mark_stage(ClonePhase::PostDataPending).is_err());
+    state.finish_recopy().unwrap();
     state.mark_stage(ClonePhase::PostDataPending).unwrap();
     next.generation = CopyGeneration(3);
     assert!(
@@ -605,6 +608,97 @@ fn marker_generations_cannot_reuse_snapshot_bound_owned_tables() {
             .is_err()
     );
 }
+#[test]
+fn generation_advance_keeps_the_previous_ticket_until_the_target_publishes_it() {
+    let (tmp, mut state, plan) = start();
+    state.begin_pre_data().unwrap();
+    let (objects, tables) = inventory(&plan);
+    state.confirm_pre_data(&plan, objects, tables).unwrap();
+    let advance = |state: &mut NativeState, generation: u64| {
+        let next = ClonePlan {
+            generation: CopyGeneration(generation),
+            ..plan.clone()
+        };
+        let mut next_ticket = ticket(&next);
+        next_ticket.token = format!("snapshot-{generation}");
+        state.advance_copy_generation(&next, &next_ticket)
+    };
+    advance(&mut state, 2).unwrap();
+    let current = state.checked_clone().unwrap().unwrap();
+    assert_eq!(current.recopy, Some(ticket(&plan)));
+    assert_eq!(current.ticket.token, "snapshot-2");
+    let manifest = tmp.path().join("manifest.json");
+    let pending = fs::read(&manifest).unwrap();
+    // A second advance before the target publish would leave the target two generations behind.
+    assert!(advance(&mut state, 3).is_err());
+    assert_eq!(fs::read(&manifest).unwrap(), pending);
+    drop(state);
+    let mut state = open_clone(
+        &StateRequest {
+            path: tmp.path(),
+            action: StateAction::Restart,
+        },
+        None,
+        &control(),
+    )
+    .unwrap();
+    assert_eq!(
+        state.checked_clone().unwrap().unwrap().recopy,
+        Some(ticket(&plan))
+    );
+    let finished = state.finish_recopy().unwrap();
+    assert_eq!(finished.recopy, None);
+    assert_eq!(finished, state.checked_clone().unwrap().unwrap());
+    let cleared = fs::read(&manifest).unwrap();
+    assert_ne!(cleared, pending);
+    assert_eq!(state.finish_recopy().unwrap(), finished);
+    assert_eq!(fs::read(&manifest).unwrap(), cleared);
+    advance(&mut state, 3).unwrap();
+    let previous = state.checked_clone().unwrap().unwrap().recopy.unwrap();
+    assert_eq!(
+        (previous.generation, previous.token.as_str()),
+        (CopyGeneration(2), "snapshot-2")
+    );
+}
+
+#[test]
+fn recopy_intent_must_be_the_previous_generation_of_a_copying_clone() {
+    let mut next = plan();
+    next.generation = CopyGeneration(2);
+    let (objects, tables) = inventory(&next);
+    let valid = CloneState {
+        ticket: ticket(&next),
+        plan: next.clone(),
+        phase: ClonePhase::Copying,
+        owned_objects: objects,
+        owned_tables: tables,
+        completion: None,
+        recopy: Some(ticket(&plan())),
+    };
+    valid.validate().unwrap();
+    for case in 0..7 {
+        let mut changed = valid.clone();
+        let previous = changed.recopy.as_mut().unwrap();
+        match case {
+            0 => changed.phase = ClonePhase::PostDataPending,
+            1 => previous.generation = CopyGeneration(2),
+            2 => previous.generation = CopyGeneration(0),
+            3 => previous.source.timeline += 1,
+            4 => previous.token.clear(),
+            5 => previous.token.push('\0'),
+            _ => previous.token = "x".repeat(MAX_SNAPSHOT_TOKEN_BYTES + 1),
+        }
+        let error = changed.validate().unwrap_err();
+        assert!(error.message.starts_with("state-recovery:"), "case {case}");
+    }
+    let mut value = serde_json::to_value(&valid).unwrap();
+    value.as_object_mut().unwrap().remove("recopy");
+    assert!(
+        serde_json::from_value::<CloneState>(value).is_err(),
+        "a missing recopy key must not mean no intent"
+    );
+}
+
 #[test]
 fn unknown_predata_never_adopts_objects_or_skips_handoff() {
     let (tmp, mut state, plan) = start();
@@ -721,7 +815,8 @@ fn clone_rejects_old_formats_unknown_fields_and_inventory_overflow() {
             phase: ClonePhase::Fresh,
             owned_objects: vec![],
             owned_tables: vec![],
-            completion: None
+            completion: None,
+            recopy: None,
         }
         .validate()
         .is_err()
@@ -796,6 +891,7 @@ fn serialized_exact_inventory_has_a_one_mib_hard_bound() {
         owned_objects: objects,
         owned_tables: tables,
         completion: None,
+        recopy: None,
     };
     assert!(value.validate().unwrap_err().message.contains("one MiB"));
 }
@@ -814,6 +910,7 @@ fn both_identity_vectors_count_toward_the_manifest_bound() {
         owned_objects: objects,
         owned_tables: tables,
         completion: None,
+        recopy: None,
     };
     let filler = OwnedObject {
         class_oid: 1259,
