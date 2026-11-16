@@ -1267,7 +1267,8 @@ class RuntimeGuard:
         try:
             validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
             entry["ownership_verified"] = True
-            self.raw(["rm", "--force", entry["id"]], timeout=10)
+            # The runner's Python PID 1 ignores SIGTERM, so the default 10 s stop grace would use the whole bound.
+            self.raw(["rm", "--force", "--time", "2", entry["id"]], timeout=10)
             entry["cleanup_status"] = "present" if self.exists("container", entry["id"]) else "absent"
         except Exception as error:
             entry["cleanup_status"] = "unresolved"

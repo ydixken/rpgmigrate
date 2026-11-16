@@ -120,6 +120,7 @@ On the hosted runner every Podman call waits while another owned container's exi
 So a read-only call (an `inspect`, a `ps`, a host capacity read, or that `exec`) that gives no answer within its bound is repeated for up to 30 s, and the runtime ledger keeps each stalled attempt's diagnostic id: the `exec`'s on its container entry, the others under `podman_query_stalls`.
 A call that changes something, such as `rm`, is never repeated, because one that timed out may still have acted.
 Only an answered `exec` can verify the limits.
+Cleanup removes a container with a 2 s stop grace inside its 10 s bound, because the runner's Python PID 1 ignores SIGTERM and Podman's default 10 s grace would use the whole bound.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 For each pair, the engine-e2e job runs the clone qualification, the follow smoke, the cutover producer, the session-name census and the session-timeout run in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.

@@ -1421,6 +1421,29 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 self.assertEqual((sum(call == name for call, _ in calls), status), (1, "unresolved"))
                 self.assertNotIn("podman_query_stalls", guard.ledger)
 
+    def test_container_removal_fits_its_bound_when_pid_one_ignores_sigterm(self):
+        # Modeled on podman 6.2 locally: rm --force on a Python PID 1 took 10.23 s with the default grace and 2.15 s with --time 2.
+        unmount = 3
+        for pid_one in ("python", "postgres"):
+            clock, calls, bounds = CreationClock(), [], []
+            guard, entry, podman = self.sampling_guard(clock, {}, calls)
+            def remove(argv, *, timeout, **kwargs):
+                if argv[1] == "rm":
+                    bounds.append(timeout)
+                    grace = int(argv[argv.index("--time") + 1]) if "--time" in argv else 10
+                    elapsed = (grace if pid_one == "python" else 0) + unmount
+                    if elapsed > timeout:
+                        clock.now += timeout
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    clock.now += elapsed
+                return podman(argv, timeout=timeout, **kwargs)
+            with self.subTest(pid_one=pid_one), tempfile.TemporaryDirectory() as temporary, patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), \
+                    patch.object(harness.time, "monotonic", side_effect=clock.monotonic), patch.object(harness.subprocess, "run", side_effect=remove), \
+                    patch.object(guard, "persist"), patch.object(guard, "exists", return_value=False):
+                guard.cleanup_container(entry)
+                self.assertEqual((entry["cleanup_status"], entry.get("cleanup_error_kind")), ("absent", None))
+                self.assertEqual(bounds, [10])
+
     def test_network_cleanup_refuses_foreign_attachment_wrong_identity_and_unavailable_absence(self):
         for fault in ("id", "label", "inspect", "foreign_map", "foreign_filter", "remove", "absence", "ok"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
