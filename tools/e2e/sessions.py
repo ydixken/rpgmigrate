@@ -284,7 +284,7 @@ def judge(side, rows, ports, phases, harness, pinned):
         session = sessions.setdefault((row["pid"], row["start"]), {"names": set(), "states": set(), "type": row["type"], "port": row["port"]})
         session["names"].add(row["name"] or "")
         session["states"].add(row["state"] or "")
-    coverage, counts = set(), {"sessions": 0, "pre_startup_only": 0, "logged": 0, "joined": 0}
+    coverage, counts = set(), {"sessions": 0, "logged": 0, "joined": 0}
     for key, session in sessions.items():
         names = session["names"] - {""}
         # Only a client backend seen solely before its name and gone at the re-read may take its logged name.
@@ -295,9 +295,6 @@ def judge(side, rows, ports, phases, harness, pinned):
             continue
         counts["logged"] += bool(logged and names)
         if not names:
-            if session["states"] <= {"starting"}:
-                counts["pre_startup_only"] += 1
-                continue
             raise RuntimeError(f"{side} engine session has no application name")
         if len(names) != 1:
             raise RuntimeError(f"{side} engine session changed its application name")

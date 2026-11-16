@@ -36,10 +36,10 @@ class JudgeTests(unittest.TestCase):
             row(6, "rpgmigrate[300] receive", 9002)])
         self.assertTrue({("source", "follow", "copy", "pg_dump"), ("source", "follow", "receive", "walsender"),
                          ("source", "compare-schema", "copy", "pg_dump"), ("source", "cleanup", "receive")} <= coverage)
-        self.assertEqual(counts, {"sessions": 5, "pre_startup_only": 0, "logged": 0, "joined": 4})
+        self.assertEqual(counts, {"sessions": 5, "logged": 0, "joined": 4})
 
     def test_every_misnamed_engine_session_refuses(self):
-        for rows in ([row(1, "", 5001)], [row(1, "", 9000, state="idle")],
+        for rows in ([row(1, "", 5001)], [row(1, "", 9000, state="idle")], [row(1, "", 5001, state="starting")],
                      [row(1, "rpgmigrate[100] copy", 5001), row(1, "rpgmigrate[100] apply", 5001)],
                      [row(1, "rpgmigrate[999] copy", 9000)], [row(1, "rpgmigrate[300] apply", 9000)],
                      [row(1, "rpgmigrate[100] copy", 5001, kind="walsender")],
@@ -79,7 +79,7 @@ class JudgeTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(RuntimeError):
                 self.judge(rows)
         harness = engine.replace("rpgmigrate[100] compare", HARNESS)
-        self.assertEqual(self.judge([window, gone(harness)]), (set(), {"sessions": 0, "pre_startup_only": 0, "logged": 0, "joined": 0}))
+        self.assertEqual(self.judge([window, gone(harness)]), (set(), {"sessions": 0, "logged": 0, "joined": 0}))
         for rows in ([window, gone(harness, harness)], [window, gone(harness, start="t1")], [{**window, "type": "walsender"}, gone(harness)],
                      [window, row(7, "", 9000, state="idle"), gone(harness)]):
             with self.subTest(rows=rows), self.assertRaises(RuntimeError):
