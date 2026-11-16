@@ -35,18 +35,6 @@ fn retention_policy(
     Ok(())
 }
 
-pub(crate) fn reject_generated(tables: &[CloneTable]) -> Result<()> {
-    if tables
-        .iter()
-        .any(|table| table.all_columns != table.writable_columns)
-    {
-        return Err(refusal(
-            "follow-preflight: generated columns are unsupported",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn resource_name(kind: &str, run: RunId, generation: CopyGeneration) -> Result<String> {
     if run.0 == [0; 16] || generation.0 == 0 || !matches!(kind, "slot" | "publication") {
         return Err(refusal("follow-source: invalid native resource identity"));
@@ -99,7 +87,6 @@ pub(crate) fn preflight_follow_restart(
     plan: &ClonePlan,
     io: &IoControl,
 ) -> Result<()> {
-    reject_generated(&plan.tables)?;
     if plan.tables.len() > FOLLOW_MAX_TABLES || read_clone_source(source, io)? != plan.source {
         return Err(refusal(
             "follow-preflight: source identity or table bound differs from the plan",
@@ -145,18 +132,18 @@ fn inspect_source_tables(
     )?;
     for table in &plan.tables {
         let oid = table.source_oid;
-        let evidence=source.query(&format!("SELECT c.oid,n.nspname,c.relname,pg_catalog.pg_has_role(c.relowner,'USAGE'),c.relreplident,NOT c.relrowsecurity AND NOT c.relforcerowsecurity,NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated<>''),NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND t.tgenabled IN ('A','R')) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class=c.oid AND r.ev_enabled IN ('A','R')) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid={oid} AND c.relkind='r' AND c.relpersistence='p'"),io)?;
+        let evidence=source.query(&format!("SELECT c.oid,n.nspname,c.relname,pg_catalog.pg_has_role(c.relowner,'USAGE'),c.relreplident,NOT c.relrowsecurity AND NOT c.relforcerowsecurity,NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND t.tgenabled IN ('A','R')) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class=c.oid AND r.ev_enabled IN ('A','R')) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid={oid} AND c.relkind='r' AND c.relpersistence='p'"),io)?;
         if evidence.rows() != 1
-            || evidence.columns()? != 8
+            || evidence.columns()? != 7
             || text(&evidence, 0, 0)? != oid.to_string()
             || text(&evidence, 0, 1)? != table.name.schema
             || text(&evidence, 0, 2)? != table.name.table
-            || [3, 5, 6, 7]
+            || [3, 5, 6]
                 .iter()
                 .any(|column| evidence.cell(0, *column).ok() != Some(Some(b"t")))
         {
             return Err(refusal(
-                "follow-preflight: source heap identity, ownership, generated column, RLS, or trigger policy is unsupported",
+                "follow-preflight: source heap identity, ownership, RLS, or trigger policy is unsupported",
             ));
         }
         let (local, root) =
@@ -176,6 +163,44 @@ fn inspect_source_tables(
             identity_columns(source, oid, identity, io)?;
         }
         require_follow_execution(source, oid, io)?;
+        require_generated_columns(source, oid, plan.source.major, io)?;
+    }
+    Ok(())
+}
+
+/// The owned publication sends no generated column, so the target computes each one itself.
+/// PostgreSQL 18 refuses source UPDATE and DELETE when a FULL identity or an identity key holds one.
+fn require_generated_columns(
+    source: &mut PgConnection,
+    oid: u32,
+    major: u32,
+    io: &IoControl,
+) -> Result<()> {
+    let result=source.query(&format!(r#"SELECT
+ NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated<>'' AND (ad.adbin IS NULL OR {})),
+ NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_index i ON i.indrelid=c.oid JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum=ANY(i.indkey::pg_catalog.int2[]) WHERE c.oid={oid} AND ((c.relreplident='d' AND i.indisprimary) OR (c.relreplident='i' AND i.indisreplident)) AND a.attgenerated<>''),
+ NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid WHERE c.oid={oid} AND c.relreplident='f' AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated<>'')"#,
+        unsafe_expression("ad.adbin::pg_catalog.text"),
+    ),io)?;
+    if result.rows() != 1 || result.columns()? != 3 {
+        return Err(refusal(
+            "follow-preflight: generated column evidence is missing",
+        ));
+    }
+    if result.cell(0, 0)? != Some(b"t") {
+        return Err(refusal(
+            "follow-preflight: generated columns require built-in immutable expressions and deterministic current collations",
+        ));
+    }
+    if result.cell(0, 1)? != Some(b"t") {
+        return Err(refusal(
+            "follow-preflight: replica identity keys must not contain generated columns",
+        ));
+    }
+    if major >= 18 && result.cell(0, 2)? != Some(b"t") {
+        return Err(refusal(
+            "follow-preflight: PostgreSQL 18 refuses UPDATE and DELETE on a REPLICA IDENTITY FULL table whose generated columns the publication omits",
+        ));
     }
     Ok(())
 }
@@ -290,9 +315,11 @@ pub(crate) fn require_follow_extensions(
     Ok(())
 }
 
+/// A member publishes exactly the plan's writable columns: pgoutput omits generated ones on 16
+/// and 18, and `all` is the table's full column list, so an added generated column still differs.
 fn exact_membership(
     expected: &[CloneTable],
-    actual: &[(u32, QualifiedTable, Vec<String>)],
+    actual: &[(u32, QualifiedTable, Vec<String>, Vec<String>)],
 ) -> Result<()> {
     if expected.len() != actual.len() || expected.len() > FOLLOW_MAX_TABLES {
         return Err(refusal(
@@ -300,12 +327,15 @@ fn exact_membership(
         ));
     }
     let mut seen = BTreeSet::new();
-    for (oid, name, columns) in actual {
+    for (oid, name, published, all) in actual {
         if !seen.insert(*oid)
             || expected
                 .iter()
                 .filter(|table| {
-                    table.source_oid == *oid && table.name == *name && table.all_columns == *columns
+                    table.source_oid == *oid
+                        && table.name == *name
+                        && table.writable_columns == *published
+                        && table.all_columns == *all
                 })
                 .count()
                 != 1
@@ -325,8 +355,9 @@ pub(crate) fn publication_membership(
     io: &IoControl,
 ) -> Result<()> {
     let name = source.quote_literal(&receipt.name)?;
-    let members=source.query(&format!("SELECT c.oid,p.schemaname,p.tablename,pg_catalog.to_json(p.attnames)::pg_catalog.text,p.rowfilter IS NULL AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated<>'') FROM pg_catalog.pg_publication_tables p JOIN pg_catalog.pg_namespace n ON n.nspname=p.schemaname JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=p.tablename WHERE p.pubname={name} ORDER BY c.oid LIMIT 4097"),io)?;
-    if members.columns()? != 5 || members.rows() > FOLLOW_MAX_TABLES {
+    let publication = receipt.oid;
+    let members=source.query(&format!("SELECT c.oid,p.schemaname,p.tablename,pg_catalog.to_json(p.attnames)::pg_catalog.text,p.rowfilter IS NULL AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_publication_rel r WHERE r.prpubid={publication} AND r.prrelid=c.oid AND r.prattrs IS NOT NULL),(SELECT pg_catalog.to_json(pg_catalog.array_agg(a.attname ORDER BY a.attnum))::pg_catalog.text FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) FROM pg_catalog.pg_publication_tables p JOIN pg_catalog.pg_namespace n ON n.nspname=p.schemaname JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=p.tablename WHERE p.pubname={name} ORDER BY c.oid LIMIT 4097"),io)?;
+    if members.columns()? != 6 || members.rows() > FOLLOW_MAX_TABLES {
         return Err(refusal(
             "follow-gap: publication membership evidence is invalid",
         ));
@@ -335,18 +366,21 @@ pub(crate) fn publication_membership(
     for row in 0..members.rows() {
         if members.cell(row, 4)? != Some(b"t") {
             return Err(refusal(
-                "follow-gap: publication row filters are unsupported",
+                "follow-gap: publication row filters and column lists are unsupported",
             ));
         }
-        let columns: Vec<String> = serde_json::from_str(text(&members, row, 3)?)
-            .map_err(|_| refusal("follow-gap: publication column evidence is invalid"))?;
+        let columns = |column| -> Result<Vec<String>> {
+            serde_json::from_str(text(&members, row, column)?)
+                .map_err(|_| refusal("follow-gap: publication column evidence is invalid"))
+        };
         actual.push((
             cdc_object_id(text(&members, row, 0)?)?,
             QualifiedTable {
                 schema: text(&members, row, 1)?.into(),
                 table: text(&members, row, 2)?.into(),
             },
-            columns,
+            columns(3)?,
+            columns(5)?,
         ));
     }
     exact_membership(tables, &actual)
@@ -843,10 +877,10 @@ pub(crate) fn preflight_follow_relation(
         || schema != &owned.table.name.schema
         || name != &owned.table.name.table
         || owned.generation != binding.copy_generation
-        || columns.len() != owned.table.all_columns.len()
+        || columns.len() != owned.table.writable_columns.len()
         || columns
             .iter()
-            .zip(&owned.table.all_columns)
+            .zip(&owned.table.writable_columns)
             .any(|(column, name)| &column.name != name)
         || !matches!(replica_identity, b'd' | b'i' | b'f')
     {
@@ -897,9 +931,9 @@ pub(crate) fn preflight_follow_relation(
             .map_err(|_| refusal("follow-target: invalid replica identity"))?,
         io,
     )?;
-    let attributes=target.query(&format!("WITH RECURSIVE types AS (SELECT a.attnum,a.atttypid AS base,0 AS depth FROM pg_catalog.pg_attribute a WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped UNION ALL SELECT x.attnum,t.typbasetype,x.depth+1 FROM types x JOIN pg_catalog.pg_type t ON t.oid=x.base WHERE t.typtype='d' AND x.depth<32) SELECT a.attname,a.atttypid,a.atttypmod,a.attgenerated,a.attidentity,n.nspname,t.typname,a.attnotnull FROM pg_catalog.pg_attribute a JOIN types x ON x.attnum=a.attnum JOIN pg_catalog.pg_type t ON t.oid=x.base AND t.typtype<>'d' JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1601"),io)?;
-    if attributes.columns()? != 8
-        || attributes.rows() != columns.len()
+    let attributes=target.query(&format!("WITH RECURSIVE types AS (SELECT a.attnum,a.atttypid AS base,0 AS depth FROM pg_catalog.pg_attribute a WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped UNION ALL SELECT x.attnum,t.typbasetype,x.depth+1 FROM types x JOIN pg_catalog.pg_type t ON t.oid=x.base WHERE t.typtype='d' AND x.depth<32) SELECT a.attname,a.atttypid,a.atttypmod,a.attgenerated,a.attidentity,n.nspname,t.typname,a.attnotnull,a.attgenerated<>'' AND EXISTS(SELECT 1 FROM pg_catalog.pg_attrdef ad WHERE ad.adrelid=a.attrelid AND ad.adnum=a.attnum AND NOT {}) FROM pg_catalog.pg_attribute a JOIN types x ON x.attnum=a.attnum JOIN pg_catalog.pg_type t ON t.oid=x.base AND t.typtype<>'d' JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid={oid} AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1601",unsafe_expression("ad.adbin::pg_catalog.text")),io)?;
+    if attributes.columns()? != 9
+        || attributes.rows() != owned.table.all_columns.len()
         || columns.is_empty()
         || columns.len() > 1600
     {
@@ -908,11 +942,29 @@ pub(crate) fn preflight_follow_relation(
         ));
     }
     let mut target_type_oids = Vec::with_capacity(columns.len());
-    for (row, column) in columns.iter().enumerate() {
+    let mut published_modes = Vec::with_capacity(columns.len());
+    let mut published_numbers = BTreeSet::new();
+    // The relation names exactly the writable columns in order, so the walk pairs each with its row.
+    let mut published = columns.iter().zip(&owned.table.writable_columns).peekable();
+    for (row, name) in owned.table.all_columns.iter().enumerate() {
+        if text(&attributes, row, 0)? != name {
+            return Err(refusal(
+                "follow-target: published column layout differs from target",
+            ));
+        }
+        let Some((column, _)) = published.next_if(|(_, writable)| *writable == name) else {
+            if text(&attributes, row, 3)?.is_empty() || attributes.cell(row, 8)? != Some(b"t") {
+                return Err(refusal(
+                    "follow-target: generated column differs from the plan or lacks a built-in immutable expression",
+                ));
+            }
+            continue;
+        };
         let actual = cdc_object_id(text(&attributes, row, 1)?)?;
         let modifier = text(&attributes, row, 2)?
             .parse::<i32>()
             .map_err(|_| refusal("follow-target: invalid type modifier"))?;
+        let number = row + 1;
         let custom = binding
             .source_types
             .iter()
@@ -925,16 +977,12 @@ pub(crate) fn preflight_follow_relation(
                     && text(&attributes, row, 6).ok() == Some(item.name.as_str())
             })
         };
-        if text(&attributes, row, 0)? != column.name
-            || !text(&attributes, row, 3)?.is_empty()
-            || modifier != column.type_mod
-            || !type_matches
-        {
+        if !text(&attributes, row, 3)?.is_empty() || modifier != column.type_mod || !type_matches {
             return Err(refusal(
                 "follow-target: published column type, name, modifier, or generation differs",
             ));
         }
-        if column.key != (*replica_identity == b'f' || identity_keys.contains(&(row + 1))) {
+        if column.key != (*replica_identity == b'f' || identity_keys.contains(&number)) {
             return Err(refusal(
                 "follow-target: published replica identity differs from reconstructed target",
             ));
@@ -943,11 +991,18 @@ pub(crate) fn preflight_follow_relation(
             return Err(refusal("follow-target: replica identity key is nullable"));
         }
         target_type_oids.push(actual);
+        published_modes.push(identity_modes[row]);
+        published_numbers.insert(number);
+    }
+    if published.next().is_some() || !identity_keys.is_subset(&published_numbers) {
+        return Err(refusal(
+            "follow-target: published columns do not cover the target layout and identity",
+        ));
     }
     Ok(FollowRelation {
         relation: expected.clone(),
         target_type_oids,
-        identity_modes,
+        identity_modes: published_modes,
     })
 }
 
@@ -1927,8 +1982,14 @@ mod tests {
 
     #[test]
     fn membership_requires_exact_physical_oid_name_and_column_inventory() {
-        let table = table();
-        let actual = vec![(42, table.name.clone(), table.all_columns.clone())];
+        let mut table = table();
+        table.all_columns.insert(1, "generated".into());
+        let actual = vec![(
+            42,
+            table.name.clone(),
+            table.writable_columns.clone(),
+            table.all_columns.clone(),
+        )];
         exact_membership(std::slice::from_ref(&table), &actual).unwrap();
         assert!(exact_membership(std::slice::from_ref(&table), &[]).is_err());
         let mut changed = actual.clone();
@@ -1939,6 +2000,13 @@ mod tests {
         assert!(exact_membership(std::slice::from_ref(&table), &changed).is_err());
         changed = actual.clone();
         changed[0].2.reverse();
+        assert!(exact_membership(std::slice::from_ref(&table), &changed).is_err());
+        // pgoutput sends the generated column only under publish_generated_columns=stored.
+        changed = actual.clone();
+        changed[0].2 = table.all_columns.clone();
+        assert!(exact_membership(std::slice::from_ref(&table), &changed).is_err());
+        changed = actual.clone();
+        changed[0].3.push("added".into());
         assert!(exact_membership(std::slice::from_ref(&table), &changed).is_err());
         changed = actual.clone();
         changed.push(actual[0].clone());
@@ -1964,19 +2032,6 @@ mod tests {
         );
         assert!(resource_name("slot", RunId([0; 16]), CopyGeneration(1)).is_err());
         assert!(resource_name("slot", run, CopyGeneration(0)).is_err());
-    }
-
-    #[test]
-    fn follow_preflight_refuses_any_generated_column() {
-        reject_generated(std::slice::from_ref(&table())).unwrap();
-        let mut generated = table();
-        generated.writable_columns.pop();
-        assert!(
-            reject_generated(&[generated])
-                .unwrap_err()
-                .message
-                .contains("generated")
-        );
     }
 
     #[test]

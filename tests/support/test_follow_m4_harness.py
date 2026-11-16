@@ -73,6 +73,7 @@ SOURCE_ADDITIONS = tuple("catalog::follow::tests::" + name for name in (
 SOURCE_ADMISSION = tuple("snapshot::follow_tests::" + name for name in (
     "live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses",
     "live_follow_extension_opclasses_require_the_source_extension_version_on_the_target",
+    "live_follow_generated_columns_publish_only_writable_columns",
 ))
 
 

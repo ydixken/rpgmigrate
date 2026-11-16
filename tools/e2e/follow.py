@@ -1214,7 +1214,7 @@ def inner(args):
             print(json.dumps({"follow_e2e": "diagnostic_passed", "pair": args.pair, "cases": [diagnostic_case]}, sort_keys=True))
             return
         for name, ddl, reason in (
-                ("generated_refusal", '''ALTER TABLE "M2 space".rows ADD COLUMN computed text GENERATED ALWAYS AS (value || 'generated') STORED;''', "follow-preflight: generated columns are unsupported"),
+                ("generated_refusal", USER_FUNCTIONS + 'ALTER TABLE "M2 space".rows ADD COLUMN next_identity bigint GENERATED ALWAYS AS ("M2 space".next_id(id)) STORED;', "follow-preflight: generated columns require"),
                 ("check_refusal", USER_FUNCTIONS + 'ALTER TABLE "M2 space".rows ADD CONSTRAINT checked CHECK ("M2 space".positive_id(id));', "follow-execution: table/domain CHECK"),
                 ("domain_check_refusal", 'ALTER DOMAIN "M2 space".positive ADD CONSTRAINT checked CHECK (VALUE>0) NOT VALID;', "follow-execution: table/domain CHECK"),
                 ("expression_index_refusal", USER_FUNCTIONS + 'CREATE INDEX expression_idx ON "M2 space".rows (("M2 space".next_id(id)));', "follow-execution: require indexes"),

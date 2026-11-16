@@ -9,5 +9,6 @@
   "catalog::follow::tests::live_identity_internal_replica_callbacks_refuse_both_endpoints",
   "catalog::clone::tests::live_identity_catalog_tracks_physical_and_partition_root_modes",
   "catalog::follow::tests::live_identity_target_modes_and_partition_normalization_refuse_drift",
-  "catalog::follow::tests::live_identity_cross_major_independent_leaf_refuses_before_resources"
+  "catalog::follow::tests::live_identity_cross_major_independent_leaf_refuses_before_resources",
+  "apply::plan::tests::live_generated_columns_apply_only_published_values_and_target_recomputes"
 ]
