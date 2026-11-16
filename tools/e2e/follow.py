@@ -33,8 +33,8 @@ CASES = ("initial_copy_dml", "truncate", "full_duplicates_nulls", "target_type_o
          "postdata_refusal", "backpressure", "generated_refusal", "check_refusal", "domain_check_refusal",
          "expression_index_refusal", "partial_index_refusal")
 # Follow admits built-in immutable CHECK and index expressions, so the refusal cases call user functions.
-USER_FUNCTIONS = ("""CREATE FUNCTION "M2 space".positive_id(integer) RETURNS boolean IMMUTABLE LANGUAGE sql AS 'SELECT $1>0';"""
-                  """CREATE FUNCTION "M2 space".next_id(integer) RETURNS integer IMMUTABLE LANGUAGE sql AS 'SELECT $1+1';""")
+USER_FUNCTIONS = ("""CREATE FUNCTION "M2 space".positive_id(bigint) RETURNS boolean IMMUTABLE LANGUAGE sql AS 'SELECT $1>0';"""
+                  """CREATE FUNCTION "M2 space".next_id(bigint) RETURNS bigint IMMUTABLE LANGUAGE sql AS 'SELECT $1+1';""")
 
 
 INITIAL_DML = '''INSERT INTO "M2 space".rows(id,value,feeling,positive) OVERRIDING SYSTEM VALUE VALUES(2001,'insert','busy',4);
