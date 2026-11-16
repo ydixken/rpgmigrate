@@ -152,9 +152,10 @@ def validate_operator_report(raw, binding, command, completed, *, phases=("plann
 
 
 class SubprocessFailure(RuntimeError):
-    def __init__(self, metadata):
+    def __init__(self, metadata, *, timed_out=False):
         super().__init__("owned harness subprocess failed")
         self.metadata = metadata
+        self.timed_out = timed_out
 
 
 def private_failure(kind, returncode, stderr, environment, frame, line=None):
@@ -202,7 +203,7 @@ def run(command, *, environment=None, input=None, timeout=300):
         result = subprocess.run(command, env=environment, input=input, capture_output=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         metadata = private_failure(kind, None, getattr(error, "stderr", None) or str(error).encode(), environment, caller)
-        raise SubprocessFailure(metadata) from None
+        raise SubprocessFailure(metadata, timed_out=isinstance(error, subprocess.TimeoutExpired)) from None
     if result.returncode:
         raise SubprocessFailure(private_failure(kind, result.returncode, result.stderr, environment, caller))
     return result.stdout
@@ -643,6 +644,8 @@ def copy_restart(source, target, driver, root, bindir, manifest, receipt, case):
     receipt["cases"]["copy_restart"] = {"observed": True, "previous_generation": previous, "current_generation": current, "prior_committed_tables": required_markers, "predata_drift_refused": True, "blocked_backend_pid": blocked_pid, "target_receipt": target.completion(dstname, state, manifest)}
 
 
+# On the hosted runner every Podman call waits seconds while a sibling owned container's exit cleanup unmounts its overlay root.
+CAP_EXEC_STALL_SECONDS = 30
 LOGICAL_SERVER_ARGUMENTS = ("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s")
 GIB = 1024 ** 3
 # Per-role CPU caps; admission needs the host CPUs to cover source, target and runner together.
@@ -937,14 +940,21 @@ class RuntimeGuard:
         actual = validate_owned_container(actual or self.inspect(entry["id"]), entry, self.token, self.baseline["containers"])
         if actual.get("State", {}).get("Running") is not True:
             raise RuntimeError("effective limits require a live exact owned container")
-        try:
-            observed = self.raw(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]).splitlines()
-        except SubprocessFailure as failure:
-            # An exit between the inspect and the exec leaves the caps unobserved; the final check still requires them.
-            if validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"]).get("State", {}).get("Running") is not False:
-                raise
-            entry.setdefault("cgroup_exec_after_exit", []).append(failure.metadata["diagnostic_id"])
-            return False
+        stalled_until = time.monotonic() + CAP_EXEC_STALL_SECONDS
+        while True:
+            try:
+                observed = self.raw(["exec", entry["id"], "cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]).splitlines()
+                break
+            except SubprocessFailure as failure:
+                # A stalled exec gave no answer, so it is repeated; only an answered exec can verify the caps.
+                if failure.timed_out and time.monotonic() < stalled_until:
+                    entry.setdefault("cgroup_exec_stalls", []).append(failure.metadata["diagnostic_id"])
+                    continue
+                # An exit between the inspect and the exec leaves the caps unobserved; the final check still requires them.
+                if validate_owned_container(self.inspect(entry["id"]), entry, self.token, self.baseline["containers"]).get("State", {}).get("Running") is not False:
+                    raise
+                entry.setdefault("cgroup_exec_after_exit", []).append(failure.metadata["diagnostic_id"])
+                return False
         try:
             quota, period = (int(value) for value in observed[0].split())
             memory = int(observed[1])
