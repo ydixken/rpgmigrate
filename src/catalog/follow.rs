@@ -255,8 +255,9 @@ SELECT
     Ok(())
 }
 
-/// Extension opclasses carry their extension's semantics, so the target must hold, or install
-/// through pre-data, the source's exact extension version.
+/// Extension opclasses carry their extension's semantics, so the target's installed version, or the
+/// default pre-data installs, must equal the source's or be reached from it through the target's
+/// update paths, the assumption ALTER EXTENSION UPDATE and pg_upgrade make.
 pub(crate) fn require_follow_extensions(
     source: &mut PgConnection,
     target: &mut PgConnection,
@@ -280,10 +281,11 @@ pub(crate) fn require_follow_extensions(
     for row in 0..used.rows() {
         let name = target.quote_literal(text(&used, row, 0)?)?;
         let version = target.quote_literal(text(&used, row, 1)?)?;
-        let matched = target.query(&format!("SELECT COALESCE((SELECT e.extversion FROM pg_catalog.pg_extension e WHERE e.extname={name}),(SELECT a.default_version FROM pg_catalog.pg_available_extensions a WHERE a.name={name}))={version}"), io)?;
+        // The CASE keeps pg_extension_update_paths, which raises for an unavailable extension, unevaluated.
+        let matched = target.query(&format!("SELECT COALESCE(t.v={version} OR CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_available_extensions a WHERE a.name={name}) THEN EXISTS(SELECT 1 FROM pg_catalog.pg_extension_update_paths({name}) u WHERE u.source={version} AND u.target=t.v AND u.path IS NOT NULL) ELSE false END,false) FROM (SELECT COALESCE((SELECT e.extversion FROM pg_catalog.pg_extension e WHERE e.extname={name}),(SELECT a.default_version FROM pg_catalog.pg_available_extensions a WHERE a.name={name})) v) t"), io)?;
         if matched.rows() != 1 || matched.columns()? != 1 || matched.cell(0, 0)? != Some(b"t") {
             return Err(refusal(
-                "follow-preflight: extension operator classes require the source extension version on the target",
+                "follow-preflight: extension operator classes require the source extension version, or an update path from it, on the target",
             ));
         }
     }

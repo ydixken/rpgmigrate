@@ -277,11 +277,15 @@ It admits table and domain CHECK constraints, expression indexes and partial ind
 
 A `NOT VALID` CHECK, an exclusion constraint and an expression that calls a user or extension function still refuse.
 An index operator class must be built in or belong to an extension.
-For an extension operator class, the target must already hold the source's extension version, or offer it as the default version that pre-data installs.
-We compare versions because the operator class carries the extension's semantics.
+For an extension operator class, follow takes the target's extension version: the installed one, or else the default version that pre-data installs.
+It admits the class when that version equals the source's, or when the target's `pg_extension_update_paths` lists a path from the source's version to it.
+It refuses when the target neither holds nor offers the extension, and when no path leads from the source's version, which includes a downgrade and an installed version the source's cannot reach.
+We check versions because the operator class carries the extension's semantics.
+An update path stands in for equal semantics, the same assumption `ALTER EXTENSION UPDATE` and `pg_upgrade` make, so `citext` 1.6 on PostgreSQL 16 follows into `citext` 1.8 on PostgreSQL 18.
 
-> [!important]
-> `citext` defaults to 1.6 on PostgreSQL 16 and 1.8 on PostgreSQL 18, so an index with a `citext` operator class refuses from 16 to 18.
+> [!warning]
+> Follow checks extension versions only when it plans a copy: on the first run and on a restart that copies again.
+> An `ALTER EXTENSION UPDATE` on either side during streaming is not re-checked.
 
 The replica identity index keeps its stricter rule: one valid immediate built-in btree unique index, without expressions or predicates.
 Partition keys still need plain columns and built-in operator classes, and follow still refuses generated columns.
