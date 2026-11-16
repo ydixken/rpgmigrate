@@ -116,8 +116,11 @@ Admission refuses a host with fewer CPUs than the source, target and runner caps
 Any other value is refused, and the runtime ledger and receipt record the selected profile.
 The harness reads each owned container's effective cgroup CPU and memory limits as soon as the container runs, and fails qualification if any container's limits were never observed.
 A container can exit between the inspect and the `exec` that reads its limits; when a fresh inspect then shows it stopped, the read counts as not observed and polling continues, while any other `exec` failure fails the run.
-An `exec` that gives no answer within its 5 s bound is repeated for up to 30 s, because on the hosted runner every Podman call waits while another owned container's exit cleanup unmounts its overlay root, which has taken seconds.
-Only an answered `exec` can verify the limits, and the runtime ledger keeps each stalled attempt's diagnostic id.
+On the hosted runner every Podman call waits while another owned container's exit cleanup unmounts its overlay root, which has taken seconds.
+So a read-only call (an `inspect`, a `ps`, a host capacity read, or that `exec`) that gives no answer within its bound is repeated for up to 30 s, and the runtime ledger keeps each stalled attempt's diagnostic id: the `exec`'s on its container entry, the others under `podman_query_stalls`.
+A call that changes something, such as `rm`, is never repeated, because one that timed out may still have acted.
+Only an answered `exec` can verify the limits.
+Cleanup removes a container with a 2 s stop grace inside its 10 s bound, because the runner's Python PID 1 ignores SIGTERM and Podman's default 10 s grace would use the whole bound.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
 For each pair, the engine-e2e job runs the clone qualification, the follow smoke, the cutover producer, the session-name census and the session-timeout run in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.
