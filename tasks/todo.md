@@ -4,7 +4,7 @@ The [roadmap](../docs/roadmap.md) defines the milestone scope and its 2026-11-08
 The [M0 implementation plan](../docs/superpowers/plans/2026-11-08-m0-preserve-reset.md) defines worker ownership and acceptance.
 Keep implementation evidence separate from parser compatibility and operator runtime qualification.
 M0–M5 are closed; M4 engine source and six accepted behavior documents are integrated at `67f7fcbff0a4d35cb41ba3dae8da0fe238d87476`, with separate operator test-only commit `c262322909ac03a7101ea3bfac2c4823efa62e95`.
-M6–M10 remain open; production native operator admission, kind E2E, power-loss/performance, and release qualification remain unqualified.
+M7 is closed on arm64 kind, and M6, M8, M9 and M10 remain open; production native operator admission, power-loss/performance, and release qualification remain unqualified.
 On 2026-11-09, the user directed us to push through M10: execute the approved remaining M6–M10 gates and do not stop at intermediate planning or checkpoint stages.
 Closure still requires evidence.
 Benchmark runs and VM reservations remain unapproved, main/tag/release boundaries persist.
@@ -241,7 +241,8 @@ No actual ASAN or runtime qualification follows from these source and bounded-fu
 Hosted native image publication/build evidence remains separate from hosted kind runtime qualification.
 The Guard's Podman VM transport requires a bounded Linux-native-host portability follow-up before hosted kind runtime activation; hosted offline contract checks cannot close that gate.
 Run full scoped lint, including `gocyclo`, on the actual joined source without `--new-from-rev` filtering.
-M0–M5 remain closed and M6–M10 remain open; no native operator migration or capability activation is qualified.
+M0–M5 remain closed and M7 is closed on arm64 kind; M6 and M8 stay open until the operator lifecycle and the M8 matrix rerun, M9 and M10 are open, and benchmark execution stays on HOLD.
+No native operator migration or capability activation is qualified.
 
 - [x] Complete the source-bound first native ARM64 build, smoke, single push, and preservation/window-release proof.
 - [x] Complete public visibility/linkage and anonymous manifest, config, and all-layer verification for the retained native publication.
@@ -1380,7 +1381,8 @@ The suite reads `E2E_ENGINE`, `E2E_RUNNER_IMAGE` and `E2E_SMALL` (`test/e2e/e2e_
 Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03eb6d34fc` passed six profiles and nine local reports on each of 16 to 16 and 18 to 18.
 The cross-major 16-to-18 attempt failed before PostgreSQL at a Created-container receipt/adoption race, with zero executed pair profiles/reports; its exact owned empty container/network were retired and release proved while the original RED remains immutable.
 The pending-creation fix is signed as private workflow checkpoint `1d8e5f750df2dcfde7178acaca6d30966357d76b`, with clone 48/follow 60/cutover 36 focused checks passing and primary unchanged.
-A later 16-18 M8 profile receipt from a checkout at `1d8e5f7` (6 cases, exit 0) is recorded under wave 15b; the three receipts are bound to `8ad` or `1d8e5f7`, more than 70 commits behind the line, without operator or full M8 acceptance.
+A later 16-18 M8 profile receipt from a checkout at `1d8e5f7` (6 cases, exit 0) is recorded under wave 15b as history.
+The three fresh hosted M8 receipts of run 43822503840, bound to `6690521`, supersede the `8ad` and `1d8e5f7` receipts, without operator or full M8 acceptance.
 
 Same-major receipts: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-matrix-8ad-16-16-76bcbc51/clone-m8-16-16.json`, SHA-256 `f3ee9a9158e5e5bf79635f6fb913f7c07b19d8e87c72be48d7a2f037a6cd3410`; pair 18-to-18 receipt at `20261110-matrix-8ad-18-18-64cc4f21/clone-m8-18-18.json` under the same evidence root, SHA-256 `ee0b11e5182abdc23692f75f8b50034a4b7b2857bcd093c2c7e438695b8925b3`.
 Cross-pair release: `20261110-matrix-8ad-16-18-a0c745cc/independent-manual-retirement-preservation-release-proof.json` under that root, SHA-256 `9e34bab960c7d7eb4af5add96d2817239febf30c6415b43043e73f10820bdb1f`.
@@ -1400,8 +1402,8 @@ Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, wit
 PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases were removed and original resources preserved.
 TOC proof: `/tmp/rpgmigrate-m8-catalog-toc-20261110/0942b349889341e7/final-proof.json` (lost 2026-11-12), SHA-256 `79a302da68f236c733b23f8061f3f065e2097576c614d056b58327f87946c9e2`.
 The line writes native format 9 and target metadata 7 (`src/state.rs:174-176`), and runner `db50bc9` ran M7 on it, so no format 8 profile is active.
-The M8 copy source reached the line at `908ada6`; later M8 work accumulates on `integration/engine-m8-20261116`, E8 lands it (ch), and no capability is activated.
-The [ENGINE-M8-PLAN](#wave-15b-to-15d-2026-11-16) tasks E1 to E8 and O1 to O6 drive the rest, and wave 16 ran E1, E2, E3 and E5; no M8 box is ticked without a receipt.
+The M8 copy source reached the line at `908ada6`, and E8 landed the rest at `23513bc` (ch), where E7 advertises `copy.large_objects`, `copy.binary_fallback` and `copy.split`; no runner is qualified on it.
+The [ENGINE-M8-PLAN](#wave-15b-to-15d-2026-11-16) engine tasks E1 to E8 are done; E10 and E11 intent recovery, then the O3 runner pin and the operator matrix rerun, remain.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
@@ -1410,18 +1412,22 @@ Approved interface: `/tmp/rpgmigrate-m8-contract-freeze-20261110/contract.md` (l
 Its successor is regenerated deterministically from `41db2ac0081b177874481f78434cf135471b39dc`: `/private/var/tmp/rpgmigrate-M8-ENGINE-20261112/contract.md`, SHA-256 `8fd4a5d9a6afe2d40065b78031e7c9dfc385c1e79b630f195f8a437d77645c08`, by `regenerate-contract.py` in the same directory, SHA-256 `6b9e1496bf4a2b37c5d8dd86f7a601a80ec3739021e86d19243e4f51a10c86ff`.
 The regenerated file quotes the code and is not byte-identical to the lost file.
 
-- [ ] Binary COPY with the per-table built-in-type predicate and text fallback.
-- [ ] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
-- [ ] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
+- [x] Binary COPY with the per-table built-in-type predicate and text fallback.
+- [x] ctid split parts (`--split-tables-larger-than`, `--split-max-parts`) with per-part done markers.
+- [x] Large objects: copy, follow re-sync after drain, compare coverage, data-phase restart cleanup.
+- [ ] E10 and E11 intent recovery on the line, decisions (cz) to (df).
+- [ ] O3 pins the runner image built after E10 and E11.
 - [ ] Re-run the M7 native matrix with operator defaults.
 
 We widen follow and clone for the objects the native M7 fixture leaves to pgcopydb, in this order:
 
-1. [ ] Expression and partial indexes over immutable built-in functions.
-1. [ ] Generated columns.
-1. [ ] Materialized views, refreshed in post-data.
-1. [ ] Domain CHECK in follow.
-1. [ ] Indexes with extension operator classes.
+1. [x] Expression and partial indexes over immutable built-in functions.
+1. [x] Generated columns, except FULL replica identity with a generated column on an 18 source, which refuses (cl).
+1. [x] Materialized views, refreshed in post-data.
+1. [x] Domain CHECK in follow.
+1. [x] Indexes with extension operator classes.
+
+The ticked engine boxes rest on hosted ci.yml runs 43827618223 and 43829565149 on `23513bc`, whose engine-e2e jobs ran `PROFILE=m8` and the follow widening run on 16-16, 16-18 and 18-18, and on the three M8 receipts of run 43822503840.
 
 ## M9: Durability modes and measured performance
 
@@ -2517,6 +2523,96 @@ Leader decisions, wave 17:
 
 M0–M5 are closed, M7 is closed on arm64 kind, and M6 and M8–M10 remain open.
 No M8 box is ticked, because no M8 receipt exists on the current line.
+
+### Wave 18 and the M8 engine landing, 2026-11-16
+
+Results, wave 18 engine:
+
+- [x] ENGINE-LAND11 (engine): `feat/native-engine` moved from `c9f2dfc` to `59184bc`, merging the Podman stall fix, the timeouts follow-up and the receive-status proof.
+  `f73015a` is `cf8792f` and `4eeedef` squashed (cm), because `cf8792f` alone fails markdownlint MD028; `71fda89` is `f214410` cherry-picked.
+  `task check lint test` passed with 573 Rust, 28 CLI and 566 portable tests, and `task test-db` passed on 16.16 and 18.7.
+  Hosted ci.yml run 43812355892 passed 8 of 8 on three attempts, and the push run 43815707629 passed 8 of 8.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND11-20261116/SHA256SUMS`, SHA-256 `c7ea809d12152f30b5d36d61c04776a3d69f995a58fb7ecd22dc01b7e7085014`.
+- [x] ENGINE-M8-INTEGRATE-B (engine): `integration/engine-m8-20261116` at `84c6eb3` merges E9, E5B, E3B and E4, adds the (cl) docs in `08afa15` and fixes (cu) on the follow restart in `84c6eb3`.
+  Before the fix, an interrupted follow restart re-ran `authority.advance_generation`, which unlinked the owned large objects and cleared their receipts before the foreign-object check; `publish_bound_restart` now checks first.
+  The clone restart already checked before its publish, and (cj) and (ck) needed no change.
+  The new FollowAuthority case fails without the check, and 3 of 3 mutations failed it.
+  `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43815077084 passed 8 of 8.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-INTEGRATE-B-20261116/SHA256SUMS`, SHA-256 `816d321427fba6c16c066bc012d9ce9da18df83bc9d77738abcf9874c061e76d`.
+- [x] ENGINE-M8-SYNC (engine): `396af72` merges the line at `59184bc` into the integration branch, and the only conflict was the `tools/test-db.py` help text.
+  `task test-db` passed on 16.16 and 18.7, and hosted ci.yml runs 43816992304 and 43817784596 passed 8 of 8.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-SYNC-20261116/SHA256SUMS`, SHA-256 `e23a71bc0479596f0e653e1c0d3845f40599f951870f7cd4c3cac26119c4ea10`.
+- [x] ENGINE-HARNESS-EXISTS (engine): `fix/podman-exists-repeat-20261116` at `8ae7a28` implements (cr).
+  A timed-out probe is repeated, each try capped at 5 s, within the 30 s stall bound and the run deadline, and each repeated stall is recorded with its diagnostic.
+  The new test failed on the old code, 7 of 7 mutations failed it, and hosted ci.yml run 43819212204 passed 8 of 8.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-HARNESS-EXISTS-20261116/SHA256SUMS`, SHA-256 `54294b8b3335ce3767f6d729c7986e0a93cbd7155b9cb88d6a0f19b42133d525`.
+- [x] ENGINE-M8-E6 (engine): `feat/m8-hosted-profiles-20261116` at `6690521` runs `PROFILE=m8` and a new follow widening run in hosted engine-e2e on 16-16, 18-18 and 16-18, and uploads the runtime ledgers on failure (cd, cw).
+  The widening run loads the `legacy.sql` objects, writes every table during streaming and compares them after cutover.
+  On 16-18 the citext UNIQUE constraint passes through the 1.6 to 1.8 update path, and on 18-18 the FULL table with a generated column is refused with no slot, publication or target change (cl).
+  `acd54ea` moved the M8 build smoke to the current PGDG client minors 16.16, 18.7 and 180007 and is red in hosted checks; `6690521` fixes it (db).
+  10 of 10 mutations failed the tests, and `task test-db` passed on 16.16 and 18.7.
+  Hosted ci.yml run 43822503840 passed 8 of 8 and kept three fresh M8 receipts of 6 cases each, bound to `6690521`.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E6-20261116/SHA256SUMS`, SHA-256 `e0e6dd16f582e6d9ca151888851d8a726d17eec6aa578fc3b4ef1f7783180fe4`.
+- [x] ENGINE-M8-E7 (engine): `feat/m8-capability-activation-20261116` at `b2b7442` advertises `copy.large_objects`, `copy.binary_fallback` and `copy.split` in `version --json`, with the fixtures, smokes and docs that list the capabilities.
+  3 of 3 mutations failed the tests, `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43825166547 passed 8 of 8.
+  O3 must copy `/private/var/tmp/rpgmigrate-ENGINE-M8-E7-20261116/operator-O3-fixture.diff` into the operator fixtures byte for byte.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E7-20261116/SHA256SUMS`, SHA-256 `25522f1d58ebc93d9ab3a9ccd014df7df31bb10b613a3d6d92fb5fdc5214424c`.
+- [x] ENGINE-M8-E8 (engine): `land/m8-e6-e7-20261116` at `8a960ef` rebuilds E6 and E7 on `396af72` with `acd54ea` and `6690521` squashed into `af04768`, and its diff to E7's branch is empty.
+  `3694a95` merges it and `23513bc` merges the EXISTS fix, and `feat/native-engine` moved from `59184bc` to `23513bc`.
+  `task check lint test` passed on every rebuilt commit and on the head with 578 Rust, 28 CLI and 573 portable tests, and `task test-db` passed on 16.16 and 18.7.
+  Hosted ci.yml run 43827618223 on the integration branch passed 8 of 8 on attempt 2 after a curl network failure in checks, and run 43829565149 on the line passed 8 of 8.
+  Development runner image run 43829565182 published `dev-23513bca073af8d9acd891b339a450305ce44da3-arm64` (`sha256:e9bde7babfa86aae8a14a432c0145dc565def954d16fe71ff66e845211be64d7`) and `-amd64` (`sha256:2a77ef10a9c03d8e42fde6a1b259f1f254a5209793fceeb5620e3a54c3a35599`).
+  Both images advertise ten capabilities, and neither is qualified.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E8-20261116/SHA256SUMS`, SHA-256 `77597257b1b7adfb434640da59c58040159214f4fcb8ea6f34d0501dfa23e639`.
+
+Results after the landing, on branches that are not on the line:
+
+- [x] ENGINE-M8-E10 (engine): `fix/follow-slot-intent-recovery-20261116` at `8d682fc`, from `84c6eb3`, implements (cz) for a restart in `025dd16` and for a first run in `8d682fc`.
+  Before, every retry after a kill inside `CREATE_REPLICATION_SLOT` exited 3 and the slot kept retaining WAL; after, the next start drops the recorded slot, creates it again and copies on 18-18 and 16-18.
+  Its audit of 15 windows reproduced four that still wedge and two that phase Fresh refuses, and (da), (db2), (de) and (df) decide them.
+  7 of 7 mutations failed the tests, and `task test-db` passed on 16.16 and 18.7.
+  Hosted ci.yml run 43822252947 passed 8 of 8 on attempt 2, after a `podman inspect` without an exit code in the build cleanup failed attempt 1.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E10-20261116/SHA256SUMS`, SHA-256 `aca8276cec7d7dde0953fe6293c5ca7acdfd512b70b4c128a759c2015c9256ec`.
+- [x] ENGINE-HARNESS-PINS (engine): `fix/harness-image-client-versions-20261116` at `24db730`, from `23513bc`, implements (dd) in `726fb10` and (dg) in `24db730`.
+  The M8 build smoke reads the client and libpq versions from the image's `dpkg-query` inventory, and the last timed-out Podman probe now enters the stall ledger with its diagnostic.
+  7 of 7 mutations failed the tests, and hosted ci.yml run 43832554921 passed 8 of 8 on the head; `726fb10` has no hosted run of its own.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-HARNESS-PINS-20261116/SHA256SUMS`, SHA-256 `c48ce6c9f4436954c5dfa001c02be8e02c5e6201827580be9f783e7a6302f0fa`.
+
+Decisions (cj) to (dg), 2026-11-16:
+
+- (cj) `FORMAT_VERSION` stays 9 with the required `clone_state.recopy`; state from earlier M8 dev builds refuses before database access.
+- (ck) The foreign large-object refusal is exit 2 `BadConfig` and not retryable.
+- (cl) A table on an 18 source with FULL replica identity and any generated column is refused before any slot or publication; `publish_generated_columns` stays none; the remedy is a primary key or a replica identity index without generated columns.
+- (cm) The timeouts commits `cf8792f` and `4eeedef` were squashed on landing.
+- (cn) The M8 operator line gets ci.yml push triggers.
+- (co) The fault-copy check fails closed: whole committed split parts are legitimate, every target row equals a source row once, and the count equals the done-part sum from the engine's control rows.
+- (cp) Legacy worker `/tmp` credentials are unchanged.
+- (cq) M6 runtime requalification runs on the O4 lock beside O5.
+- (cr) `RuntimeGuard.exists()` repeats a timed-out probe within the stall bound.
+- (cs) Memory volume size limits are built with `resource.MustParse`.
+- (ct) The `native-refusal` spec regains the follow preflight refusal and the empty-inventory deletion.
+- (cu) Foreign large-object admission precedes the pending-intent publish on restart.
+- (cv) Operator preflight and helpers must not refuse what the M8 engine admits; the engine's own refusals stay.
+- (cw) The harness runtime ledger is uploaded only on an engine-e2e failure, kept 7 days, after a password scan.
+- (cx) O2B's stricter block-range check is accepted.
+- (cy) The operator gets no copy of the (cl) refusal.
+- (cz) A pending slot intent without its receipt is resolved on the next start by dropping exactly the recorded slot (exact name, logical, pgoutput, the plan's database, not temporary, not active; an active slot refuses naming its backend), then creating it again; it is never adopted, because its exported snapshot died with the creating session.
+- (da) A publication intent without its receipt never committed: if no publication exists under the recorded name the intent is retired and created again; any publication under that name refuses.
+- (db) E6's red commit `acd54ea` lands squashed with its fix `6690521`.
+- (db2) A publication receipt with an unknown COMMIT outcome is resolved by exact OID, name and owner: ours is dropped and created again, absence retires it, anything else refuses; it is never adopted.
+- (dc) A foreign slot created under a pending intent's recorded name inside the creation window would be dropped; this is accepted as a documented limit, because the name is per run and per generation and the shape check stays.
+- (dd) The M8 build smoke derives the expected client and libpq versions from the image's installed packages, keeping exact equality and the 16, 18 and 18 majors.
+- (de) A confirmed slot not yet bound on a first run is dropped by its receipt with the same shape check and recreated.
+- (df) A run killed in phase Fresh restarts through roadmap decision 8's data-phase restart or the clone restart, touching only objects this run's records prove it created.
+- (dg) Every timed-out Podman probe, the last one included, is recorded in the stall ledger with its diagnostic.
+
+Known exceptions to "every commit green on its own", kept because the line is never force-pushed:
+
+- `00d8608` on `feat/native-engine` fails hosted engine-e2e on its own, because the PGDG client minors moved after the M8 smoke pinned them, and `af04768` fixes it.
+
+The M8 engine items are done on the line at `23513bc`.
+E10 and E11 intent recovery, the O3 runner pin after them, and the M7 native matrix rerun with operator defaults remain open.
+M0–M5 are closed, M7 is closed on arm64 kind, M6 and M8 stay open until the operator lifecycle and the M8 matrix rerun, and M9 and M10 are open; benchmark execution stays on HOLD.
 
 ## Capacity and parallel execution, user update 2026-11-08
 
