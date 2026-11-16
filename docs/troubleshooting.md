@@ -72,7 +72,7 @@ Do not recreate a same-name slot, silently start from a later position, or turn 
 A kill there, such as a node drain or a timeout, leaves a pending slot intent without its receipt.
 The next start, a first-run retry or `--restart`, drops exactly the recorded slot if it exists and then creates it again under a new intent.
 It never adopts that slot, because the snapshot it exported ended with the session that created it.
-It drops only a logical `pgoutput` slot on the source database that is not temporary; any other slot under that name refuses with exit 3 and stays.
+It drops only a logical `pgoutput` slot on the source database that is not temporary and has `two_phase`, `failover` and `synced` off; any other slot under that name refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
 
 > [!note]
 > While the creating session still waits, the slot is active and the start refuses with exit 3, naming the slot and its backend.

@@ -336,9 +336,10 @@ Follow retires that intent durably without any drop and refuses with exit 3, `fo
 Every other error, and a lost or incomplete reply, keeps the intent, because the server can fail after it persisted the slot.
 For example, `ReplicationSlotPersist` marks the slot persistent before `SaveSlotToPath` can raise an error, and that error leaves the slot in place.
 A start that finds an intent without its receipt, on a first run's retry or on a restart, drops the slot of exactly that name, records its absence, and creates the slot again under a new intent.
-It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, and has no active backend.
+It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, has `two_phase`, `failover` and `synced` off as this run's CREATE leaves them, and has no active backend.
+That check and the drop are one statement, which must drop exactly one slot or none; when none, the start reads the slot again to name the refusal.
 It never adopts the slot, because the exported snapshot ended with the session that created it.
-An active slot refuses with exit 3, naming the slot and its backend, and a slot of another kind under that name refuses and stays.
+A slot of another kind under that name refuses with exit 3 and stays, and so does an active slot of this run's shape, naming the slot and its backend.
 A start drops an unbound slot that has a receipt the same way, on a first run's retry or on a restart, and only at its exact consistent point, so a slot from a run killed before its binding does not stay behind retaining WAL.
 
 > [!important]

@@ -2127,6 +2127,10 @@ enum SlotKill {
     Persisted,
     ForeignPlugin,
     Physical,
+    /// Foreign pgoutput slots with an option, or in a database, that this run's CREATE never uses.
+    TwoPhase,
+    Failover,
+    OtherDatabase,
 }
 
 fn scalar(connection: &mut PgConnection, sql: &str) -> String {
@@ -2239,12 +2243,25 @@ fn shape_pending_slot(
             format!("pg_catalog.pg_create_logical_replication_slot({literal},'test_decoding')")
         }
         SlotKill::Physical => format!("pg_catalog.pg_create_physical_replication_slot({literal})"),
+        SlotKill::TwoPhase => {
+            format!(
+                "pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput',false,true)"
+            )
+        }
+        SlotKill::Failover => format!(
+            "pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput',false,false,true)"
+        ),
+        SlotKill::OtherDatabase => {
+            format!("pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')")
+        }
         SlotKill::Absent | SlotKill::Active => return None,
     };
-    scalar(
-        &mut fixture.source,
-        &format!("SELECT ({create}).slot_name::text"),
-    );
+    let session = if kill == SlotKill::OtherDatabase {
+        &mut fixture.admin
+    } else {
+        &mut fixture.source
+    };
+    scalar(session, &format!("SELECT ({create}).slot_name::text"));
     assert_eq!(scalar(&mut fixture.source, &state), "inactive");
     None
 }
@@ -2299,9 +2316,17 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
         SlotKill::Persisted,
         SlotKill::ForeignPlugin,
         SlotKill::Physical,
+        SlotKill::TwoPhase,
+        SlotKill::Failover,
+        SlotKill::OtherDatabase,
     ];
+    // Slot failover exists from PostgreSQL 17 on.
+    let failover = live_major() >= 17;
     for restart in [false, true] {
         for kill in kills {
+            if kill == SlotKill::Failover && !failover {
+                continue;
+            }
             let case = format!("restart={restart} kill={kill:?}");
             let mut fixture = Fixture::new(
                 "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
@@ -2354,7 +2379,7 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
                 let slot = scalar(
                     &mut fixture.source,
                     &format!(
-                        "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(active_pid::text,'-') FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                        "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(datoid::text,'-')||' '||two_phase||' '||coalesce(pg_catalog.to_jsonb(s)->>'failover','-')||' '||coalesce(active_pid::text,'-')||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(catalog_xmin::text,'-') FROM pg_catalog.pg_replication_slots s WHERE slot_name={literal}"
                     ),
                 );
                 let error = retry(&mut fixture).err().expect(&case);
@@ -2375,7 +2400,7 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
                     scalar(
                         &mut fixture.source,
                         &format!(
-                            "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(active_pid::text,'-') FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+                            "SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(datoid::text,'-')||' '||two_phase||' '||coalesce(pg_catalog.to_jsonb(s)->>'failover','-')||' '||coalesce(active_pid::text,'-')||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(catalog_xmin::text,'-') FROM pg_catalog.pg_replication_slots s WHERE slot_name={literal}"
                         )
                     ),
                     slot,

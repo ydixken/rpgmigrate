@@ -625,7 +625,8 @@ pub(super) fn require_restart_plan(
 }
 
 /// Drops this run's unbound slot by its recorded name and creation shape, and by its receipt's
-/// consistent point when it has one. It is never adopted: its export ended with its creating session.
+/// consistent point when it has one, in one statement. It is never adopted: its export ended with its
+/// creating session.
 fn drop_unbound_slot(
     source: &mut PgConnection,
     slot: &SourceSlotProvenance,
@@ -634,44 +635,52 @@ fn drop_unbound_slot(
 ) -> Result<()> {
     let slot_name = slot.intent().binding.slot_name();
     let name = source.quote_literal(slot_name)?;
-    let present = source.query(&format!(
-        "SELECT slot_type,plugin,datoid,temporary,active_pid,confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name={name}"
+    let point = match slot {
+        SourceSlotProvenance::Confirmed(receipt) => format!(
+            " AND s.confirmed_flush_lsn='{:X}/{:X}'::pg_catalog.pg_lsn",
+            receipt.consistent_point.0 >> 32,
+            receipt.consistent_point.0 as u32
+        ),
+        SourceSlotProvenance::Provisioning(_) => String::new(),
+    };
+    // Our CREATE sets none of these options, matching cleanup_slot_present. Untested because none fires
+    // alone: slot_type (a physical slot has no plugin), temporary (always active) and synced (standby only).
+    let shape = format!(
+        "s.slot_type='logical' AND s.plugin='pgoutput' AND s.datoid={} AND NOT s.temporary AND NOT s.two_phase AND COALESCE(pg_catalog.to_jsonb(s)->>'failover','false')='false' AND COALESCE(pg_catalog.to_jsonb(s)->>'synced','false')='false'{point}",
+        plan.source.identity.database_oid
+    );
+    let dropped = source.query(&format!(
+        "SELECT pg_catalog.pg_drop_replication_slot(s.slot_name) FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={name} AND {shape} AND s.active_pid IS NULL"
     ), io)?;
-    if present.columns()? != 6 || present.rows() > 1 {
+    if dropped.columns()? != 1
+        || dropped.rows() > 1
+        || dropped.command_tag()? != format!("SELECT {}", dropped.rows())
+    {
         return Err(follow_refusal(
-            "follow-source: pending slot inventory is invalid",
+            "follow-source: pending slot removal is unconfirmed",
         ));
     }
-    if present.rows() == 1 {
-        if let Some(pid) = present.cell(0, 4)? {
-            return Err(follow_refusal(&format!(
-                "follow-source: pending source slot {slot_name} is active in backend {}; it is never adopted, so retry once that session has ended",
-                String::from_utf8_lossy(pid)
-            )));
+    if dropped.rows() == 0 {
+        let present = source.query(&format!(
+            "SELECT COALESCE({shape},false),s.active_pid FROM pg_catalog.pg_replication_slots s WHERE s.slot_name={name}"
+        ), io)?;
+        if present.columns()? != 2 || present.rows() > 1 {
+            return Err(follow_refusal(
+                "follow-source: pending slot inventory is invalid",
+            ));
         }
-        let point = match slot {
-            SourceSlotProvenance::Confirmed(receipt) => Some(format!(
-                "{:X}/{:X}",
-                receipt.consistent_point.0 >> 32,
-                receipt.consistent_point.0 as u32
-            )),
-            SourceSlotProvenance::Provisioning(_) => None,
-        };
-        if present.cell(0, 0)? != Some(b"logical")
-            || present.cell(0, 1)? != Some(b"pgoutput")
-            || present.cell(0, 2)? != Some(plan.source.identity.database_oid.to_string().as_bytes())
-            || present.cell(0, 3)? != Some(b"f")
-            || point.is_some() && present.cell(0, 5)? != point.as_deref().map(str::as_bytes)
-        {
-            return Err(follow_refusal(&format!(
-                "follow-source: slot {slot_name} differs from this run's unbound pgoutput creation; it is never adopted or dropped"
-            )));
-        }
-        let dropped = source.query(
-            &format!("SELECT pg_catalog.pg_drop_replication_slot({name})"),
-            io,
-        )?;
-        if dropped.rows() != 1 || dropped.columns()? != 1 || dropped.command_tag()? != "SELECT 1" {
+        if present.rows() == 1 {
+            if present.cell(0, 0)? != Some(b"t") {
+                return Err(follow_refusal(&format!(
+                    "follow-source: slot {slot_name} differs from this run's unbound pgoutput creation; it is never adopted or dropped"
+                )));
+            }
+            if let Some(pid) = present.cell(0, 1)? {
+                return Err(follow_refusal(&format!(
+                    "follow-source: pending source slot {slot_name} is active in backend {}; it is never adopted, so retry once that session has ended",
+                    String::from_utf8_lossy(pid)
+                )));
+            }
             return Err(follow_refusal(
                 "follow-source: pending slot removal is unconfirmed",
             ));
