@@ -1040,6 +1040,38 @@ fn live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_
     catalog::follow::preflight_follow(&mut fixture.source, &fixture.plan, &fixture.io).unwrap();
 }
 
+/// Pins citext's recorded version on the source and, when given, on the target, runs the follow
+/// extension check, and rolls both pins back.
+fn pinned_extension_check(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    tables: &[crate::contracts::CloneTable],
+    io: &IoControl,
+    versions: (&str, Option<&str>),
+) -> Result<()> {
+    let pin = |connection: &mut PgConnection, version: &str| {
+        catalog::command(connection, "BEGIN", "BEGIN", io).unwrap();
+        let updated = connection
+            .query(&format!("UPDATE pg_catalog.pg_extension SET extversion='{version}' WHERE extname='citext' RETURNING 1"), io)
+            .unwrap();
+        assert_eq!(
+            updated.rows(),
+            1,
+            "citext must be installed to pin {version}"
+        );
+    };
+    pin(source, versions.0);
+    if let Some(version) = versions.1 {
+        pin(target, version);
+    }
+    let result = catalog::follow::require_follow_extensions(source, target, tables, io);
+    catalog::command(source, "ROLLBACK", "ROLLBACK", io).unwrap();
+    if versions.1.is_some() {
+        catalog::command(target, "ROLLBACK", "ROLLBACK", io).unwrap();
+    }
+    result
+}
+
 #[test]
 #[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
 fn live_follow_extension_opclasses_require_the_source_extension_version_on_the_target() {
@@ -1056,34 +1088,66 @@ fn live_follow_extension_opclasses_require_the_source_extension_version_on_the_t
     let info = Conninfo::new(format!("{admin} dbname={database}").into()).unwrap();
     let mut target = PgConnection::connect(&info, crate::pg::Role::Copy, &io).unwrap();
     let tables = fixture.plan.tables.clone();
-    let check = |source: &mut PgConnection, target: &mut PgConnection| {
-        catalog::follow::require_follow_extensions(source, target, &tables, &io)
-    };
-    // Absent from the target but available: pre-data installs the same default version.
-    check(&mut fixture.source, &mut target).unwrap();
-    target.query("CREATE EXTENSION citext", &io).unwrap();
-    check(&mut fixture.source, &mut target).unwrap();
-    catalog::command(&mut target, "BEGIN", "BEGIN", &io).unwrap();
-    target
+    let default = target
         .query(
-            "UPDATE pg_catalog.pg_extension SET extversion='0.0' WHERE extname='citext'",
+            "SELECT default_version FROM pg_catalog.pg_available_extensions WHERE name='citext'",
             &io,
         )
         .unwrap();
-    let error = check(&mut fixture.source, &mut target).unwrap_err();
+    let default = std::str::from_utf8(default.cell(0, 0).unwrap().unwrap())
+        .unwrap()
+        .to_owned();
     assert!(
-        error.message.contains("source extension version"),
-        "{error:?}"
+        ["1.6", "1.8"].contains(&default.as_str()),
+        "the 1.4 cases need a default updatable from 1.4, got {default}"
     );
-    catalog::command(&mut target, "ROLLBACK", "ROLLBACK", &io).unwrap();
+    // Source 1.4 against the target default stands in for 16 to 18, where citext goes 1.6 to 1.8.
+    // The 9.9 source and the 0.0 and 1.4 targets have no update path to them from the source.
+    let cases = [
+        (false, default.as_str(), None, true),
+        (false, "1.4", None, true),
+        (false, "9.9", None, false),
+        (true, default.as_str(), None, true),
+        (true, "1.4", None, true),
+        (true, default.as_str(), Some("1.4"), false),
+        (true, "1.4", Some("0.0"), false),
+        (true, "9.9", None, false),
+    ];
+    let mut wrong = Vec::new();
+    for (installed, source_version, target_version, admitted) in cases {
+        if installed {
+            target
+                .query("CREATE EXTENSION IF NOT EXISTS citext", &io)
+                .unwrap();
+        }
+        match pinned_extension_check(
+            &mut fixture.source,
+            &mut target,
+            &tables,
+            &io,
+            (source_version, target_version),
+        ) {
+            Ok(()) if admitted => {}
+            Err(error) if !admitted && error.message.contains("an update path from it") => {}
+            other => wrong.push(format!(
+                "installed={installed} source={source_version} target={target_version:?}: {other:?}"
+            )),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "unexpected extension admission: {wrong:#?}"
+    );
     catalog::command(&mut fixture.source, "BEGIN", "BEGIN", &io).unwrap();
     fixture
         .source
         .query("UPDATE pg_catalog.pg_extension SET extname='rpgmigrate_absent_extension' WHERE extname='citext'", &io)
         .unwrap();
-    let error = check(&mut fixture.source, &mut target).unwrap_err();
+    let error =
+        catalog::follow::require_follow_extensions(&mut fixture.source, &mut target, &tables, &io)
+            .unwrap_err();
     assert!(
-        error.message.contains("source extension version"),
+        error.message.contains("an update path from it"),
         "{error:?}"
     );
     catalog::command(&mut fixture.source, "ROLLBACK", "ROLLBACK", &io).unwrap();
