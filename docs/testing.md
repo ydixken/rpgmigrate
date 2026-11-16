@@ -119,7 +119,7 @@ A container can exit between the inspect and the `exec` that reads its limits; w
 An `exec` that gives no answer within its 5 s bound is repeated for up to 30 s, because on the hosted runner another owned container's start or exit cleanup stalls every Podman call for seconds.
 Only an answered `exec` can verify the limits, and the runtime ledger keeps each stalled attempt's diagnostic id.
 We run CI with `hosted-linux` because the GitHub `ubuntu-26.04` runner has 4 CPUs.
-For each pair, the engine-e2e job runs the clone qualification, the follow smoke and the cutover producer in that order, then revalidates and retains each sanitized receipt.
+For each pair, the engine-e2e job runs the clone qualification, the follow smoke, the cutover producer, the session-name census and the session-timeout run in that order, then revalidates and retains each sanitized receipt.
 We run the follow smoke and the cutover producer on every push because nothing ran them before, and both went stale unnoticed.
 The job runs there for Podman 5 and refuses an older Podman major before the harness starts.
 That runner's pasta AppArmor profile denies the SIGTERM Podman sends at rootless network teardown, so the job puts that one profile in complain mode; we accept this only because the runner is discarded after the job.
