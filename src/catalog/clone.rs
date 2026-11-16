@@ -18,7 +18,8 @@ fn admitted_relation(
         && !unusual_trigger
         && persistence == "p"
         && match kind {
-            "r" => access_method == "heap",
+            // Post-data refreshes populated materialized views from the copied tables.
+            "r" | "m" => access_method == "heap",
             "p" | "v" | "S" => true,
             _ => false,
         }
@@ -767,7 +768,7 @@ pub(crate) fn inspect_clone_tables(
                 result.cell(row, 7)? == Some(b"t"),
             ) {
                 return Err(refusal(
-                    "clone refuses foreign, materialized, unlogged, extension-owned, custom-access-method, or ALWAYS/REPLICA-trigger relations",
+                    "clone refuses foreign, unlogged, extension-owned, custom-access-method, or ALWAYS/REPLICA-trigger relations",
                 ));
             }
             if kind != "r" {
@@ -1434,13 +1435,15 @@ mod tests {
         assert!(admitted_relation("r", "p", "heap", false, false));
         assert!(admitted_relation("p", "p", "", false, false));
         assert!(admitted_relation("v", "p", "", false, false));
+        assert!(admitted_relation("m", "p", "heap", false, false));
     }
 
     #[test]
     fn unsupported_storage_and_execution_states_refuse_before_mutation() {
         for (kind, persistence, am, extension, trigger) in [
             ("f", "p", "", false, false),
-            ("m", "p", "heap", false, false),
+            ("m", "p", "custom", false, false),
+            ("m", "p", "heap", true, false),
             ("r", "u", "heap", false, false),
             ("r", "p", "custom", false, false),
             ("r", "p", "heap", true, false),
