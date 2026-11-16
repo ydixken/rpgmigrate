@@ -421,7 +421,7 @@ class ModelRuntime:
                              "architecture": "arm64", "client_versions": {tool: minors["16"] for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": libpq,
                              "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18", "library_sha256": "9"*64,
                              "packages": {name: {"version": minors[major] + "-1.pgdg13+1", "architecture": "arm64"} for name, major in (("libpq5", "18"), ("postgresql-client-16", "16"), ("postgresql-client-18", "18"))},
-                             "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
+                             "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
                              "version_text": f"rpgmigrate 0.1.0\nlibpq {libpq}\n"}
                     (receipt / "m8-smoke.json").write_text(json.dumps(smoke)); (receipt / "m8-smoke.json").chmod(0o600)
                 if self.fault == "runner": raise RuntimeError("modeled runner failure")

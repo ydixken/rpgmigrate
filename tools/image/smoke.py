@@ -12,7 +12,7 @@ import sys
 
 
 QUALIFIED_CAPABILITIES = [
-    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
+    "clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1",
 ]
 HEADER = re.compile(r"^===rpgmigrate-smoke:([a-z0-9_]+)===$", re.MULTILINE)
 EMIT = r'''

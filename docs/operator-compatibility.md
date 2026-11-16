@@ -117,11 +117,18 @@ The [CRD and renderers][op-types] also expose these feature groups:
 
 Retain [API combination constraints][op-admission], including all-database exclusions and ownership-handover requirements.
 The M2 plain-clone implementation covers schema, parallel text COPY, post-data, sequences, and ANALYZE.
-Binary COPY, splitting, large objects, and full operator configuration behavior remain unqualified and explicitly staged.
+Full operator configuration behavior remains unqualified and explicitly staged.
 M3/M4 follow and cutover implementation does not qualify the complete operator workflow.
 Use the task ledger for the exact closing gates.
 The M7 vertical slice explicitly switches off binary COPY, splitting, and large objects.
-M8 qualifies them before using operator defaults.
+M8 activates them: discovery advertises `copy.large_objects`, `copy.binary_fallback` and `copy.split`, which the operator defaults require.
+The activated profile changes what an operator-default run does to the source and target:
+
+- The initial large-object copy runs inside the source snapshot transaction, so it extends how long that session holds its `ACCESS SHARE` locks (see the [snapshot session warning](native-protocol.md#session-timeouts)).
+- Follow keeps each materialized view's content from the copy snapshot and does not refresh it at cutover; refresh views on the target after cutover when they must reflect later changes.
+- Follow refuses an 18 source table with `REPLICA IDENTITY FULL` and any generated column before it creates a slot or publication, because 18 fails that table's own `UPDATE` and `DELETE` once a publication without generated columns covers it.
+  Give such a table a primary key or a replica identity index on columns that are not generated.
+- On an 18 source, switching a published table with a generated column to `REPLICA IDENTITY FULL` during follow makes the source's `UPDATE` and `DELETE` on that table fail.
 
 The M8 standalone defaults leave binary COPY off and set the split threshold to zero with a maximum of eight parts.
 The candidate includes large objects and defaults to four large-object workers.
@@ -158,16 +165,16 @@ Comparison keeps its existing transport outside the native Report DTO.
 Use `version --json` capabilities in preflight, `native-report: {json}` stdout for phase/progress/drain/cleanup, and work identity derived from the Migration UID and PVC.
 Keep the existing per-table comparison JSON array and `"compare progress: "` shapes outside `ParseReport`.
 Discovery stays identity-free with exactly `protocol_version`, `engine_version`, and `capabilities` under protocol v1.
-Linux advertises the ordered core six followed by `verify.sealed_files.v1`.
-Non-Linux keeps the original six, as defined in the [native protocol](native-protocol.md#discovery).
-The shared 134-file fixture trees preserve the historical empty/six-name syntax and distinguish fixture-only `qualified_capabilities` from `qualified_linux_capabilities`.
+Linux advertises the activated M8 profile: the core six with the three copy capabilities in reserved order, followed by `verify.sealed_files.v1`.
+Non-Linux advertises the same nine without it, as defined in the [native protocol](native-protocol.md#discovery).
+The shared 134-file fixture trees preserve the historical empty syntax and distinguish fixture-only `qualified_capabilities` from `qualified_linux_capabilities`.
 Neither extends executable discovery.
 The mandatory native M6 base profile requires `verify.sealed_files.v1` even when optional verification is off, because helper workflows can reach sealed-file comparison.
-Old six-name discovery remains valid syntax but fails native admission before credential projection.
-The actual historical golden is compacted to a valid line for that refusal control, creating/deleting only one discovery Job and no DB helper.
-The Linux-seven golden passes the corresponding mocked checked preflight.
+Non-Linux discovery remains valid syntax but fails native admission before credential projection.
+The non-Linux golden is compacted to a valid line for that refusal control, creating/deleting only one discovery Job and no DB helper.
+The Linux golden passes the corresponding mocked checked preflight.
 This is consumer evidence, not runtime acceptance.
-Keep unknown/duplicate/null/field/framing refusals, require every selected capability, and retain the binary/split/large-object default refusals.
+Keep unknown/duplicate/null/field/framing refusals, require every selected capability, and refuse the binary/split/large-object defaults when discovery lacks the matching copy capability.
 Non-Linux core standalone verification retains its existing profile but cannot satisfy native M6 sealed-file admission.
 The [private sealed-file interface](native-protocol.md#private-sealed-file-inputs-for-comparison) preserves raw DSN and Report/compare-array contracts.
 Runtime descriptor/kernel/file and database checks remain mandatory.

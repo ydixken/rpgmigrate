@@ -12,10 +12,13 @@ import unittest
 ROOT = Path(__file__).resolve().parent / "fixtures/native/v1"
 KINDS = {"version", "report", "transport", "compare_array", "compare_progress", "argv"}
 QUALIFIED_CAPABILITIES = [
-    "clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
+    "clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1",
 ]
 
 
+COPY_CAPABILITIES = ["copy.large_objects", "copy.binary_fallback", "copy.split"]
+# The M7 profile, before the copy capabilities were activated.
+PRE_ACTIVATION_CAPABILITIES = [capability for capability in QUALIFIED_CAPABILITIES if capability not in COPY_CAPABILITIES]
 LINUX_QUALIFIED_CAPABILITIES = QUALIFIED_CAPABILITIES + ["verify.sealed_files.v1"]
 RESERVED_CAPABILITIES = [
     "clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput",
@@ -160,7 +163,7 @@ class NativeFixtureTests(unittest.TestCase):
         invalid = [None, "clone.single_db", [], QUALIFIED_CAPABILITIES + ["unknown"],
                    QUALIFIED_CAPABILITIES + ["clone.single_db"], list(reversed(QUALIFIED_CAPABILITIES))]
         invalid += [QUALIFIED_CAPABILITIES[:i] + QUALIFIED_CAPABILITIES[i + 1:] for i in range(len(QUALIFIED_CAPABILITIES))]
-        invalid += [QUALIFIED_CAPABILITIES + [capability] for capability in ["copy.large_objects", "copy.binary_fallback", "copy.split"]]
+        invalid += [PRE_ACTIVATION_CAPABILITIES, PRE_ACTIVATION_CAPABILITIES + COPY_CAPABILITIES]
         for capabilities in invalid:
             with self.subTest(capabilities=capabilities):
                 self.mutate(lambda root: self.change_json(root, "contract.json", lambda data: data.update(qualified_capabilities=capabilities)), refresh=True)

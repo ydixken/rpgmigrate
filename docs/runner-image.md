@@ -86,20 +86,18 @@ It decodes the local golden and `contract.json` with duplicate-field refusal, ch
 The required capability array is:
 
 ```json
-["clone.single_db","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1","verify.sealed_files.v1"]
+["clone.single_db","copy.large_objects","copy.binary_fallback","copy.split","cdc.pgoutput","progress.v1","cutover.v1","verify.v1","cleanup.v1","verify.sealed_files.v1"]
 ```
 
-The accepted `version-empty-capabilities` and original six-capability `version-qualified-profile` fixtures preserve historical parser behavior.
-Either set fails this Linux producer check.
-The portable six-capability fixture and `qualified_capabilities` metadata stay unchanged.
-Linux builds add `verify.sealed_files.v1`, matched by fixture-only `qualified_linux_capabilities`.
-Non-Linux builds retain six capabilities because the internal sealed-file comparison mode requires Linux.
+The accepted `version-empty-capabilities` fixture and the non-Linux `version-qualified-profile` fixture fail this Linux producer check, and so does the pre-M8 array without the three copy capabilities.
+Linux builds add `verify.sealed_files.v1` to the non-Linux `qualified_capabilities`, matched by fixture-only `qualified_linux_capabilities`.
+Non-Linux builds advertise nine capabilities because the internal sealed-file comparison mode requires Linux.
 The new capability describes compiled sealed-file comparison support.
 Kernel, descriptor, file, and runtime admission checks remain mandatory.
-The narrowed engine profile covers single-database text COPY, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
+The activated M8 engine profile covers single-database clone with binary COPY and its text fallback, split table parts, large objects, measured progress, pgoutput protocol v1 follow, persisted endpos and drain, schema/data comparison, and exact owned cleanup.
 The command paths include `clone`, `follow`, `list progress --json`, the supported `stream sentinel get` and `stream sentinel set endpos` forms, `stream cleanup`, and `compare schema` or `compare data`.
-The profile requires PostgreSQL 16 or 18 with source major no greater than target, explicit large-object skipping for follow, unsplit text COPY, and `durable` mode.
-Binary COPY, splitting, large objects, replay-safe cadence, and relaxed durability remain outside this advertisement.
+The profile requires PostgreSQL 16 or 18 with source major no greater than target, and `durable` mode.
+Replay-safe cadence and relaxed durability remain outside this advertisement.
 Discovery permits capability assessment.
 It does not open operator admission or certify helper, database, recovery, or cutover behavior.
 

@@ -50,7 +50,7 @@ def build_smoke(binding):
             "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18", "library_sha256": "7"*64,
             "packages": {"libpq5": {"version": "18.7-1.pgdg13+1", "architecture": "arm64"}, "postgresql-client-16": {"version": "16.16-1.pgdg13+1", "architecture": "arm64"},
                          "postgresql-client-18": {"version": "18.7-1.pgdg13+1", "architecture": "arm64"}},
-            "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
+            "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
             "version_text": "rpgmigrate 0.1.0\nlibpq 180007\n"}
 
 
