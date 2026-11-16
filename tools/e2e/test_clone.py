@@ -1421,6 +1421,48 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 self.assertEqual((sum(call == name for call, _ in calls), status), (1, "unresolved"))
                 self.assertNotIn("podman_query_stalls", guard.ledger)
 
+    def test_a_stalled_absence_probe_is_repeated_until_answered_or_its_deadline(self):
+        # (script, expected, attempts, stalls recorded); exists answers by return code, so a clean answer retains no diagnostic.
+        cases = [(["stall", 0], True, 2, 1), (["stall", 1], False, 2, 1), (["stall", "stall", 1], False, 3, 2),
+                 (["stall"] * 6, subprocess.TimeoutExpired, 6, 5), ([125], RuntimeError, 1, 0), ([FileNotFoundError], FileNotFoundError, 1, 0),
+                 (["stall", 125], RuntimeError, 2, 1), ([0], True, 1, 0), ([1], False, 1, 0)]
+        for script, expected, attempts, stalls in cases:
+            clock, calls, remaining = CreationClock(), [], list(script)
+            def podman(argv, *, timeout, **_):
+                self.assertEqual((argv, timeout), (["podman", "container", "exists", "a"*64], 5))
+                calls.append(argv)
+                outcome = remaining.pop(0)
+                if outcome == "stall":
+                    clock.now += timeout
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                if outcome is FileNotFoundError:
+                    raise FileNotFoundError("podman")
+                return subprocess.CompletedProcess(argv, outcome, stdout=b"", stderr=b"")
+            guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+            guard.runtime, guard.deadline, guard.ledger = "podman", clock.now + 900, {}
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary, patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), \
+                    patch.object(harness.time, "monotonic", side_effect=clock.monotonic), patch.object(harness.subprocess, "run", side_effect=podman):
+                if isinstance(expected, type):
+                    with self.assertRaises(expected): guard.exists("container", "a"*64)
+                else:
+                    self.assertIs(guard.exists("container", "a"*64), expected)
+                recorded = guard.ledger.get("podman_query_stalls", [])
+                retained = {path.stem for path in Path(temporary).glob("*.json")}
+                self.assertEqual((len(calls), len(recorded), set(recorded), remaining), (attempts, stalls, retained, []))
+                self.assertLessEqual(clock.now - 100, harness.PODMAN_STALL_SECONDS)
+        # The run deadline caps the repeat even inside the stall bound.
+        clock = CreationClock()
+        guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+        guard.runtime, guard.deadline, guard.ledger = "podman", clock.now + 12, {}
+        def stall(argv, *, timeout, **_):
+            clock.now += timeout
+            raise subprocess.TimeoutExpired(argv, timeout)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), \
+                patch.object(harness.time, "monotonic", side_effect=clock.monotonic), patch.object(harness.subprocess, "run", side_effect=stall) as run, \
+                self.assertRaisesRegex(RuntimeError, "deadline expired"):
+            guard.exists("network", "c"*64)
+        self.assertEqual((run.call_count, clock.now - 100), (3, 12))
+
     def test_container_removal_fits_its_bound_when_pid_one_ignores_sigterm(self):
         # Modeled on podman 6.2 locally: rm --force on a Python PID 1 took 10.23 s with the default grace and 2.15 s with --time 2.
         unmount = 3
