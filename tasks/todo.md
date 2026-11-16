@@ -1380,7 +1380,7 @@ The suite reads `E2E_ENGINE`, `E2E_RUNNER_IMAGE` and `E2E_SMALL` (`test/e2e/e2e_
 Actual standalone CLI qualification on source `8ad2d3f04beb67de814b4e83e4184d03eb6d34fc` passed six profiles and nine local reports on each of 16 to 16 and 18 to 18.
 The cross-major 16-to-18 attempt failed before PostgreSQL at a Created-container receipt/adoption race, with zero executed pair profiles/reports; its exact owned empty container/network were retired and release proved while the original RED remains immutable.
 The pending-creation fix is signed as private workflow checkpoint `1d8e5f750df2dcfde7178acaca6d30966357d76b`, with clone 48/follow 60/cutover 36 focused checks passing and primary unchanged.
-Fresh cross-pair qualification is not yet available and its admission proposal is active without a new VM run; the two positive receipts remain bound to `8ad`, without operator or full M8 acceptance.
+A later 16-18 M8 profile receipt from a checkout at `1d8e5f7` (6 cases, exit 0) is recorded under wave 15b; the three receipts are bound to `8ad` or `1d8e5f7`, more than 70 commits behind the line, without operator or full M8 acceptance.
 
 Same-major receipts: `/Users/ydixken/.cache/rpgmigrate-m8-workflow-evidence/20261110-matrix-8ad-16-16-76bcbc51/clone-m8-16-16.json`, SHA-256 `f3ee9a9158e5e5bf79635f6fb913f7c07b19d8e87c72be48d7a2f037a6cd3410`; pair 18-to-18 receipt at `20261110-matrix-8ad-18-18-64cc4f21/clone-m8-18-18.json` under the same evidence root, SHA-256 `ee0b11e5182abdc23692f75f8b50034a4b7b2857bcd093c2c7e438695b8925b3`.
 Cross-pair release: `20261110-matrix-8ad-16-18-a0c745cc/independent-manual-retirement-preservation-release-proof.json` under that root, SHA-256 `9e34bab960c7d7eb4af5add96d2817239febf30c6415b43043e73f10820bdb1f`.
@@ -1390,7 +1390,7 @@ Signed successor tree `d453580e1ffdd0844f98d521d66743d0a37b0968` is clean on the
 The approved [M8 plan](../docs/superpowers/plans/2026-11-09-m8-feature-widening.md) freezes fresh native format 9 / metadata 7, separate `ClonePlan.copy_tables`, conservative binary fallback, and mandatory exact LO comparison under the unchanged array contract plus a proven-empty inventory guard.
 No format/runtime gate or capability is qualified by this plan.
 The approved plan permits isolated M8 source work before M7 closure after Task 1 freezes the shared interface.
-The root approved the Task 1 interface freeze; isolated state/CLI, catalog, authority, COPY/large-object, and phase/recovery owners are building against it.
+The root approved the Task 1 interface freeze, and the M8 copy source built against it landed on the line at `908ada6`.
 Isolated joined source tree `2e528d290bebc9f9f5677bd4fab44dccd53d99ae` passed formatting, strict all-target Clippy, and 75 affected unit cases against confirmed stock libpq 18.6.
 Earlier 188 passes and two obsolete-fixture failures retain separate provenance; corrected selectors passed without relabeling that earlier input.
 At the earlier joined-source checkpoint, compare/progress wiring had source tests only; the later component checkpoint above records the additional same-major runtime evidence.
@@ -1399,8 +1399,9 @@ Joined source proof: `/tmp/rpgmigrate-m8-joined-source-v5-20261110/verification-
 Actual PostgreSQL 16/18 schema-only TOCs and restores exclude large objects, with positive controls including them, so the tested archive path needs no extra LO exclusions; the later component checkpoint above supersedes the earlier PostgreSQL 18 catalog hold.
 PostgreSQL 16 exact catalog-class checks passed; the two owned scratch databases were removed and original resources preserved.
 TOC proof: `/tmp/rpgmigrate-m8-catalog-toc-20261110/0942b349889341e7/final-proof.json` (lost 2026-11-12), SHA-256 `79a302da68f236c733b23f8061f3f065e2097576c614d056b58327f87946c9e2`.
-Keep the active format 8 / metadata 6 profile separate from candidate format 9 / metadata 7.
-The isolated M8 code/docs handoff is signed as recorded above; M8 source reaches the engine primary only through the integration branch once its hosted CI is green, and no activation is authorized.
+The line writes native format 9 and target metadata 7 (`src/state.rs:174-176`), and runner `db50bc9` ran M7 on it, so no format 8 profile is active.
+The M8 copy source reached the line at `908ada6`; later M8 work accumulates on `integration/engine-m8-20261116`, E8 lands it (ch), and no capability is activated.
+The [ENGINE-M8-PLAN](#wave-15b-to-15d-2026-11-16) tasks E1 to E8 and O1 to O6 drive the rest, and wave 16 ran E1, E2, E3 and E5; no M8 box is ticked without a receipt.
 The approved bounded split policy defaults to max parts 8, rejects explicit zero, and caps the actual plan at 4096 parts; standalone defaults remain binary false, threshold 0, and large-object jobs 4, with operator defaults unchanged.
 A provisional execution profile permits schema restore only in `PreDataPending`; resolve the actual source snapshot and post-restore target plan, then atomically `confirm_pre_data` before permits.
 A new-generation restart requires positive own-resource absence and a fresh resolved profile.
@@ -1466,6 +1467,8 @@ The integrated ten-guide checker passed as recorded above, while actual ASAN and
 - [ ] README index, getting started, durability, operator guide, troubleshooting; docs drift and STE100 checks.
 - [ ] Parser fuzzing and a sanitizer or Miri job over `src/pg/ffi.rs`.
 - [ ] Independent reviews of durability, recovery and the operator diff; final matrix on the exact image digest.
+- [ ] A CSI work volume with fsGroup on both architectures, which neither the arm64 kind runs nor the amd64 smoke exercise.
+- [ ] Remove the privileged runner scale set `github-runner-rpgmigrate-native` after the M10 runs.
 
 ## Leader takeover and wave results, 2026-11-12
 
@@ -2277,7 +2280,7 @@ Through wave 14, M0–M5 were closed and M6–M10 open.
 ### Wave 15, 2026-11-16
 
 Wave 15a fixed four boundary findings, the replay gap and the guard's volume race on branches from `db23902`, and designed the lifecycle fix twice.
-OP-HELPER-LEAKS (D1 and D2) and ENGINE-CENSUS-FLAKE have no result in this record.
+OP-HELPER-LEAKS (D1 and D2) and ENGINE-CENSUS-FLAKE have no result line here; their heads `d53242c` and `60b8448` land through INTEGRATE10 and ENGINE-LAND9 below.
 
 - [x] OP-GUARD-VOLUME-RACE (operator): `fix/kind-guard-volume-race-20261115` at `f546ada` implements decision (ay).
   When `podman volume inspect` fails, `volume_inventory` counts the volume as absent only if the run owns it by neither label nor ledger, the failure is not a cancellation, and a fresh listing no longer shows it; otherwise it still refuses.
@@ -2334,6 +2337,186 @@ Leader decisions, wave 15b:
 - (bg) The engine line takes the session-timeout fix, the census fix and the (ba) docs amendment now; no new runner is qualified before the M8 engine integration lands, so the M8 operator line gets one runner bump.
 
 M0–M5 are closed, M7 is closed on arm64 kind with its hosted amd64 item open, and M6 and M8–M10 remain open.
+
+### Wave 15b to 15d, 2026-11-16
+
+Wave 15b to 15d ran under the relayed request "when will m10 be finished".
+Several workers read that question as no authority for remote writes, so most of the wave stopped before it changed anything.
+
+- [x] OP-LIFECYCLE-T1 (operator): `fix/native-lifecycle-t1-20261116` at `26980a5`, from `f40e106`, implements design B's T1 in three commits.
+  `3965bf9` adds the status fields `nativeWorkerIntent`, `nativeJobSHA256`, `nativeReportJobUID` and `nativeFreshAttempt` in both API versions, and the `Blocked` and `CleanupFailed` conditions with their reasons.
+  `d429701` extracts the work claim and retry seams and keeps today's owner reference and GC policy, as (be) requires.
+  `26980a5` adds the `Blocked` setter and clearer and the `CleanupFailed` message, which nothing calls before T2.
+  Against the `f40e106` CRD the 45 new CEL specs gave 5 passes and 40 failures; with the branch CRD all 45 pass.
+  13 of 14 mutations failed the tests, and the survivor is equivalent because `MaxLength` already bounds it.
+  The non-e2e Go suite passed 6052 tests on 16.15 and 18.7.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-LIFECYCLE-T1-20261116/SHA256SUMS`, SHA-256 `577c467675886ea57de0c00d2e7707b7a2b51cb296619d61f5307c6bf5a0a4ff`.
+- [x] ENGINE-M8-PLAN (engine, read-only): the plan is `/private/var/tmp/rpgmigrate-ENGINE-M8-PLAN-20261116/plan.md`.
+  Binary COPY, split parts and large objects are on the line since `908ada6` in format 9 / metadata 7, and the operator switches them off, so M8 needs proof and activation rather than a port.
+  The five widening items exist on no branch, and they are exactly the objects of the operator's `legacy.sql`, which the `native-refusal` spec relies on.
+  It found an unrecorded 16-18 M8 profile receipt from a checkout at `1d8e5f7`: 6 cases, exit 0, `~/.cache/rpgmigrate-m8-workflow-evidence/20261110-cross-successor-1d8-16-18-9408fdf6/clone-m8-16-18.json`, SHA-256 `b9959d015ba00d4dcbf166abfa815a81aa4297d1a8914eec78fa326f769b6a0c`.
+  Engine tasks: E1 review, E2 fault matrix, E3 follow admission, E4 generated columns, E5 materialized views, E6 hosted profiles, E7 capability activation, E8 land and runner.
+  Operator tasks: O1 owned inventory helper, O2 defaults and specs, O3 runner bump, O4 locks, O5 kind rerun of 36 runs, O6 closing review; R records the result.
+  Order: wave A (E1, E2, E3, E5, O2), B (E4, O1), C (E6), D (E7, E8), E (O3, O4), F (O5), G (O6, R).
+  Its estimate is an inference from task sizes and the pace of waves 13 to 15: 47 to 52 agent hours on the critical path, 58 to 65 wall-clock hours, M8 around 2026-11-19 to 2026-11-21, and M10 not before about 2026-11-27.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-PLAN-20261116/SHA256SUMS`, SHA-256 `6176336dd2e25ede90860fa6823c1e4a99ad6bddccf78e059142fe5df373f83e`.
+- [ ] ENGINE-LAND9 (engine): `integration/engine-land9-20261116` at `55f748a` merges `b029bd3`, `60b8448` and the (ba) docs commit, and it held the fast-forward.
+  `task test-db` on 16.16 failed twice in `completed_stop_while_fifo_full_preserves_order_and_unapplied_feedback_floor`.
+  That test failed 7 of 40 loops at the head and 0 of 40 at `718464c`, and the bisect pointed at `b029bd3`.
+  Hosted ci.yml run 43778058714 passed 8 of 8 on attempt 2, after the `observe_caps` exec timeout failed attempt 1.
+  ENGINE-RECEIVE-LAND9 completed the land in wave 16.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND9-20261116/SHA256SUMS`, SHA-256 `d5a73b02c8a303f35fbd2463626d2f7dfaae1a4d8710362d3359b48bcecd8b46`.
+
+Refusals and stops, none of which committed or pushed:
+
+- Wave 15b: INTEGRATE10 refused, because the question did not ask for remote writes; OP-LIFECYCLE-T2 and T3 stopped on the missing M8 line.
+- Wave 15c: OP-CRED-MEMORY refused for the same reason; OP-LIFECYCLE-T4 and OP-SECRET-REACH-DOCS stopped on the missing M8 line or T2.
+- Wave 15d: ENGINE-CENSUS-LOG and ENGINE-TIMEOUTS-STARTUP stopped before committing, because the line had not moved; both kept their work as patches.
+
+### amd64 runner and smoke, 2026-11-16
+
+- [x] AMD64-RUNNER-PUSH: app-of-apps commit `8dca743` is on its `dev` branch, which the live cluster deploys, and Argo CD synced it.
+  It adds the runner scale set `github-runner-rpgmigrate-native` (gha-runner-scale-set 0.14.2, privileged Docker-in-Docker, min 0, max 1) for the operator repository, separate from the two existing sets.
+  The other runner apps and the ARC controller stayed unchanged.
+  Evidence: `/private/var/tmp/rpgmigrate-AMD64-RUNNER-PUSH-20261116/SHA256SUMS`, SHA-256 `81ade02809e766aaa163476a422301246a3426146c2adeab18bd1782435ccbe9`.
+- [x] AMD64-SMOKE (operator): `ci/native-amd64-smoke-20261116` at `8312663`, from `db23902`, adds `native-amd64-smoke.yml`, and run 43783002734 passed four specs on amd64.
+  automatic-cutover passed on 16:16, 18:18 and 16:18, and live-writer on 16:18, each `Completed` with `CutoverCompleted=True/NativeDrainConfirmed`.
+  This is a smoke and not a qualification: the suite ran in CNPG mode inside the runner's Docker-in-Docker, without the guard, its lock or its receipts.
+  Its own storage manifest creates the work claims as 0700 for uid 65532, so no CSI work volume with fsGroup was exercised, as on arm64 (bx).
+  The first run 43782166504 failed on two workflow bugs that `8312663` fixed.
+  The failed `rpgmigrate-cleanup-rejoin-*` and extra `rpgmigrate-cleaned-*` Jobs before the successful cleanup appear here as on arm64.
+  Open: the scanned artifacts are public for 14 days, and any writer can reach the privileged runner through a push or a dispatch.
+  The leader suggests removing the scale set after the M10 runs.
+  Evidence: `/private/var/tmp/rpgmigrate-AMD64-SMOKE-20261116/SHA256SUMS`, SHA-256 `52fed7deaf0ab1c242ff07067fb9e1fc4394830fb458f059487458a6d274169f`.
+
+### Wave 16, 2026-11-16
+
+User decisions, 2026-11-16:
+
+- (bh) The native follow work PVC carries no owner reference, and the operator deletes it itself after native cleanup.
+  The ClusterRole gains `delete` on `persistentvolumeclaims` (design B R5 and T4), the only approved RBAC change.
+- (bi) The native worker's and evidence Job's passfile and connection files move to a small memory-backed volume (boundary F3); `/tmp` stays as it is.
+- (bj) Boundary F7 is documented only.
+- (bk) M7 is closed on arm64 kind; the amd64 smoke ran green on the user's cluster as a smoke, not a qualification.
+- (bo) A new dedicated runner scale set serves native amd64 E2E, separate from the existing two.
+- (bp) The leader's agents may push the app-of-apps change directly; the push went to `dev`, which the cluster deploys.
+- The user replied "continue" to the leader's restart plan: the M8 operator line, lifecycle T2 to T4, the credential and docs changes, the receive-test fix, the engine follow-ups, M8 wave A and the actionlint runner label.
+- The user then gave full authority to push and merge feature, integration and line branches.
+  Main, tags, releases and GHCR release or `latest` publication stay out of scope.
+
+Leader decisions, wave 16:
+
+- (bl) The seam harness change `5552205` is accepted.
+- (bm) The PostgreSQL 16 census window is closed through `log_connections` lines matched by pid and backend start.
+- (bn) The timeout startup failures get a root cause, and the overrides move into startup options with the read-back refusal kept.
+- (bq) The first amd64 runs are a smoke in the dedicated runner's Docker-in-Docker, isolated from the production API server and CRDs.
+  The guard, its pins and its refusals are not changed or bypassed, and the guard's Linux transport stays M10 work.
+- (br) If kind could not run in the chart's Docker-in-Docker sidecar, the set would switch to an explicit privileged sidecar; the smoke did not need it.
+- (bs) The legacy event reason `CleanupFailed` stays, and the native condition type `CleanupFailed` is a separate API field that `docs/reference/conditions.md` tells apart.
+- (bt) The census and startup-timeout follow-ups build on `integration/engine-land9-20261116`, and ENGINE-LAND10 brings them onto the line.
+- (bu) The census excludes the harness's own psql sessions caught in the window under the existing harness-name rule, checks engine sessions in full, and copies the census servers' logs into the run's evidence.
+- (bv) The startup overrides also apply to replication sessions, a pooler that strips or rejects them makes the session fail closed, and `docs/native-protocol.md` says so; the harness own-sessions change is accepted.
+- (bw) A flaky test gets a root cause; a production defect behind it is fixed first, and the test keeps its full strength.
+- (bx) The amd64 smoke keeps its own work-volume storage manifest.
+- Plan D1: `native-refusal` moves to a still-refused `UNLOGGED` table on all three pairs, and a new `native-widening` spec covers `legacy.sql`.
+- Plan D2: the native empty or LO-only verification route stays deferred.
+- Plan D3: hosted amd64 `PROFILE=m8` receipts are accepted for the engine pairs.
+- Plan D4: M9 starts after E8 lands.
+
+Results, wave 16 engine:
+
+- [x] ENGINE-RECEIVE-LAND9 (engine): `f681195` fixes the flaky receive test without loosening it, and `feat/native-engine` moved from `718464c` to `f681195` (decision bw).
+  The root cause is a race in the test: when the test thread stored `stop` before the receiver decoded the frames, no send was refused and `backpressure_reported` stayed false.
+  The full-FIFO cases now wait until a send is refused before they stop, through a test-only `FollowReceiver::wait_full`.
+  Before, the case failed 10 of 60 and 27 of 120 loops in a capped container; after, 0 of 250 twice, and removing the wait failed 19 of 150.
+  The production path handles the same interleaving correctly, as the peer receipts of the failing runs show.
+  `task check lint test` passed with 571 Rust, 28 CLI and 553 portable tests, and `task test-db` passed on 16.16 and 18.7.
+  Hosted ci.yml run 43796108737 on the line passed 8 of 8.
+  Development runner image run 43796108851 published `dev-f681195…-arm64`; the amd64 push ended `PUSH_OUTCOME_UNKNOWN` and was not retried (ci).
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-RECEIVE-LAND9-20261116/SHA256SUMS`, SHA-256 `bf5f56d473bdbc59c33592e354f6d8ea6891ef771020732bdb4d3890649f06b0`.
+- [x] ENGINE-CAPS-FLAKE (engine): `fix/observe-caps-exec-timeout-20261116` at `8c39c1f` repeats a timed-out cgroup cap exec, each attempt bounded at 5 s, for up to 30 s.
+  A Podman call on the hosted runner stalls for seconds while the exit cleanup of another container unmounts its overlay.
+  Before the fix 8 of 9 subtests of the new test failed; after it all 9 pass, and 6 of 6 mutations failed it.
+  The 4 failed attempts of hosted run 43795625799 were census and startup-timeout failures, which (bm) and (bn) own.
+  The probe branch `ci/observe-caps-probe-20261116` at `cf2bac4` must never merge.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-CAPS-FLAKE-20261116/SHA256SUMS`, SHA-256 `682c231df8fe832e004e0cfcdf6395fd7837a4e3c3f49c5fc0fd22009cec7bcc`.
+- [x] ENGINE-CENSUS-LOG (engine): `fix/session-census-connection-log-20261116` at `8a0a9ef` implements (bm) and (bu) in four commits.
+  An unnamed backend gone before its name passes only on exactly one matching "connection authorized" line, and the PostgreSQL 18 "starting" allowance is removed as unreachable.
+  On PostgreSQL 16 under contention, 5 of 5 runs failed before and 0 of 5 after, and all 1994 planted sessions failed.
+  All 12 live controls held on 16.15 and 18.6, and 15 of 15 mutations failed the tests.
+  Hosted ci.yml run 43795267622 passed on attempts 1, 3, 4 and 5; attempt 2 failed in the startup-timeout step.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-CENSUS-LOG-20261116/wave16/SHA256SUMS`, SHA-256 `d9ce66a43095e42163da2080a4df981e2a29cf0b6aa80f3c57380d8eb8bf5e5e`.
+- [x] ENGINE-TIMEOUTS-STARTUP (engine): `fix/session-timeouts-at-startup-20261116` at `e18f0c3` implements (bn) and (bv).
+  `bfb6ba2` sends the four timeout overrides in the startup `options` of every SQL and replication session, after the caller's options, and keeps the read-back refusal; `transaction_timeout` stays a `SET` on 17 and later.
+  `e18f0c3` keeps the harness's own sessions out of the timeout FATAL count.
+  The root cause: `idle_session_timeout` ended engine sessions between ReadyForQuery and the first `SET`, 5 of 6 rounds under contention.
+  The new slow-start live test fails without the options on 16 and 18 and passes with them, and 8 of 8 mutations failed the tests.
+  Hosted ci.yml run 43792407627 passed 8 of 8 on four attempts.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-TIMEOUTS-STARTUP-20261116/SHA256SUMS`, SHA-256 `85e07bfd017fc42802ede0efec5fd9574b20295ed0a4481fc0191506695cad97`.
+- [x] ENGINE-LAND10 (engine): `integration/engine-land10-20261116` merges `8c39c1f`, `8a0a9ef` and `e18f0c3` without conflicts, and `feat/native-engine` moved from `f681195` to `b28a77e` (decision bt).
+  `task check lint test` passed with 572 Rust, 28 CLI and 558 portable tests, and `task test-db` passed on 16.16 and 18.7.
+  The local timeout and census targets passed on all three pairs, with 0 FATAL or ERROR lines.
+  Hosted ci.yml runs 43800404545, 43801034199 and 43801604235 passed 8 of 8 on the exact head.
+  Development runner image run 43801604281 published `dev-b28a77e13c8b172b48f47dd63bedc8ddcae71153-amd64` (`sha256:c3d84365…a772`) and `-arm64` (`sha256:589c3b56…68b8`).
+  The qualified runner stays `dev-db50bc9` until E8 (bg).
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-LAND10-20261116/SHA256SUMS`, SHA-256 `411c7509cc2d04de861aba3ec9825a752c86b55c2e688b0ab3ccbbf52708bf81`.
+- [x] ENGINE-M8-E1 (engine, read-only review): two verified defects at `55f748a`, no edits.
+  F1 (P2): a kill between `native.advance_copy_generation` and `authority.advance_generation` (`src/clone.rs:196-197`) wedges every later clone restart with "recopy requires the next exact owned generation" and then "generation or snapshot binding differs".
+  The M8 large-object reset runs inside that window, which measured 6.62 s with 31 owned objects; it reproduced on 18 to 18 and 16 to 18.
+  F2 (P3): a target that already holds a large object passes the empty-target check, and the clone refuses only after every table is copied.
+  The 19 binary-candidate types match PostgreSQL 18.7, and a mixed binary and split clone matched every table.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E1-20261116/SHA256SUMS`, SHA-256 `5f3be527a13e9ecae44da26c0345d332d6e5d0e807ac8c5c63fc22a25ccd8004`.
+- [x] ENGINE-M8-E2 (engine, test only): `test/m8-fault-matrix-20261116` at `6d6da40` adds six live cases for the plan's six E2 groups on 16 and 18.
+  They kill split parts, a lost part-marker COMMIT, a binary relay, large objects mid-copy and the final large-object re-sync; none exposed a production defect.
+  10 of 10 mutations failed the cases on 16.16 and 18.7, and 20 of 20 stress loops passed on each major.
+  `task test-db` passed on both majors, hosted ci.yml run 43802344527 passed 8 of 8, and live-minors run 43802398982 passed.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E2-20261116/SHA256SUMS`, SHA-256 `50d9305ffc86223c9c3a56cde0a57080472e141bd27887ace6f74b2067aac6df`.
+- [x] ENGINE-M8-E3 (engine): `feat/follow-admission-widening-20261116` at `8386f3b` admits built-in CHECK, expression and partial indexes and extension opclasses in follow.
+  An expression passes only with listed node types, immutable `pg_catalog` functions and operators, and deterministic current collations; `NOT VALID`, user functions, stable built-ins and exclusion constraints still refuse.
+  The citext UNIQUE constraint is admitted on 16:16 and 18:18 and refused on 16:18, because citext is 1.6 on 16 and 1.8 on 18; decision (ca) settles it.
+  16 of 16 mutations failed the tests, `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43799644663 passed 8 of 8 on attempt 2 after a census failure.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E3-20261116/SHA256SUMS`, SHA-256 `8a0fbe5ec656d7424088f524563fe20dc548cf487c6794c04717043ef0c92dcc`.
+- [x] ENGINE-M8-E5 (engine): `feat/matview-post-data-refresh-20261116` at `c0f1f2d` refreshes populated materialized views after post-data in dependency order.
+  The 16 and 18 TOCs confirm that a schema-only archive creates every view `WITH NO DATA`.
+  The engine reads back every view's populated state on the target, and it refuses a populated view over an unpopulated one, which pg_dump would leave empty; decision (cb) confirms it.
+  5 of 5 mutations failed the tests, `task test-db` passed on 16.16 and 18.7, and hosted ci.yml run 43798950602 passed 8 of 8.
+  Evidence: `/private/var/tmp/rpgmigrate-ENGINE-M8-E5-20261116/SHA256SUMS`, SHA-256 `13f6241374375cd4f9a5253802c9b893779c87d8cb0397a59e3c3c66869bde78`.
+
+Results, wave 16 operator, for the tasks with a result line when this was written:
+
+- [x] INTEGRATE10 (operator): `feat/native-operator-m8-20261116` at `d9674b7`, from `db23902`, merges the nine wave 14, 15a and T1 branches in order (decision bf).
+  The last merge folds in one test fix: `TestNativeBuildersDisableServiceLinks` lists the PVC builder `buildNativeWorkClaim` by name as podless, and 5 of 5 mutations failed it.
+  The non-e2e Go suite passed 6121 tests on 16.15 and 18.6, the cluster-free e2e suite 849 and 850 with `-race`, and the seam harness 67 of 67 on each pair.
+  ci.yml and e2e-kind.yml do not trigger on the M8 line, so only the GitLab mirror ran.
+  Evidence: `/private/var/tmp/rpgmigrate-INTEGRATE10-20261116/SHA256SUMS`, SHA-256 `79a4685ca6d1ade935be4c12397182670f20f5038fefcaf230a1a06f2a9ad847`.
+- [x] OP-ACTIONLINT-LABEL (operator): `ce2b2f8` on `ci/native-amd64-smoke-20261116` lists `github-runner-rpgmigrate-native` for actionlint.
+  actionlint 1.7.7 failed before and passes after, and removing the label fails it again; smoke run 43791615193 passed 4 of 4.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-ACTIONLINT-LABEL-20261116/SHA256SUMS`, SHA-256 `5edfc73d2ed6d27409a0923076f0c15b8c4bb107ec61ecb04c70767253b5c3fd`.
+- [x] OP-SECRET-REACH-DOCS (operator): `docs/native-secret-reach-20261116` at `c95c278`, from `d9674b7`, documents F7 (decision bj).
+  A new `docs/installation.md` section warns that Migration `create` rights send any namespace Secret to a host of the author's choice, and `migration_editor_role.yaml` points to it.
+  `mkdocs build --strict` and the link check passed.
+  Evidence: `/private/var/tmp/rpgmigrate-OP-SECRET-REACH-DOCS-20261116/SHA256SUMS`, SHA-256 `6543cb5ff6cbd05f771040e823903497c0a5d3a1dbb91fc8296e0e0a10c31db3`.
+
+OP-LIFECYCLE-T2, OP-CRED-MEMORY and OP-M8-O2 have no result line in this record.
+
+Leader decisions, wave 17:
+
+- (by) The clone recopy persists a restart intent as follow does (E1 F1), so a restart after a kill anywhere between `advance_copy_generation` and `advance_generation` completes; ENGINE-M8-E9 owns it.
+- (bz) A fresh clone or follow with large objects selected refuses before the pre-data restore when the target holds any large object, read from `pg_largeobject_metadata`, and a restart admits only OIDs this run's receipts own (E1 F2); ENGINE-M8-E5B owns it.
+- (ca) Follow admits an extension opclass when the target's extension version equals the source's, or the target's version is reachable from the source's through the target's `pg_extension_update_paths`.
+  It refuses an absent extension or a version no update path reaches; this is the assumption of `ALTER EXTENSION UPDATE` and pg_upgrade, and the docs say so; ENGINE-M8-E3B owns it.
+- (cb) E5's refusal of a populated materialized view over an unpopulated one is confirmed.
+- (cc) E2's registration edits outside its file list are accepted, and the engine harness adds no real-process M8 kill receipts, because the operator's fault-copy spec kills the real runner mid split copy in the kind rerun.
+- (cd) Hosted CI uploads the copied census logs only when a census job fails, after the harness's password scan, with 7-day retention; E6 adds it to `ci.yml`.
+- (ce) Podman's read-only harness queries (`inspect`, `ps`, `network inspect`) get the cap exec's bounded repeat on timeout, teardown must not race its own bound, and the probe branch is deleted; ENGINE-HARNESS-PODMAN owns it.
+- (cf) The fresh-session check at `tools/e2e/timeouts.py:60` retries a bounded number of times only after the idle-session FATAL, and still requires one fresh session to read the value.
+  pg_dump and pg_restore children get `-c transaction_timeout=0` in `PGOPTIONS` on 17 and later, and `docs/native-protocol.md` names the engine's own `SET transaction_timeout` window as a known fail-closed limit; ENGINE-TIMEOUTS-FOLLOWUP owns it.
+- (cg) "A status goes out while the FIFO is full" gets a fast, deterministic, gated proof; ENGINE-RECEIVE-STATUS owns it.
+- (ch) M8 work accumulates on `integration/engine-m8-20261116`, and E8 lands it on the line; harness follow-ups land separately through LAND11.
+- (ci) The amd64 dev image of `f681195`, whose push outcome is unknown, is left as is.
+
+M0–M5 are closed, M7 is closed on arm64 kind, and M6 and M8–M10 remain open.
+No M8 box is ticked, because no M8 receipt exists on the current line.
 
 ## Capacity and parallel execution, user update 2026-11-08
 
