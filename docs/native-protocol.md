@@ -181,6 +181,16 @@ Follow replicates tables only: it keeps each materialized view's content from th
 Refresh the views on the target after cutover when their content must reflect later changes.
 `compare data` counts no materialized view as a table, and `compare schema` sees only their definitions.
 
+## Large-object admission
+
+With large objects selected, clone and follow refuse a target that holds a large object this run does not own, before the pre-data restore.
+A fresh run owns none, so any target large object refuses.
+A restart of the copy admits exactly the OIDs that this run's durable large-object receipts record, and refuses any other before the owned reset.
+The refusal names the count and the lowest unowned OID.
+The check reads `pg_catalog.pg_largeobject_metadata` directly, because an object owned by the bootstrap superuser has no `pg_shdepend` row.
+With `--skip-large-objects` the check does not apply.
+Each large-object permit checks the inventory again, so an object created on the target after planning still refuses before any object copy.
+
 ## Work identity and ownership
 
 Operator runs supply all four environment variables together:

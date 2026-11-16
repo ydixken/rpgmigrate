@@ -1430,6 +1430,30 @@ fn live_large_object_kills_mid_object_and_after_commit_restart_without_duplicate
     );
 }
 
+/// Runs the restart plan admission that `clone --restart` runs before the owned reset.
+fn restart_admission(
+    fixture: &mut Fixture,
+    target: &mut PgConnection,
+    owned: &[u32],
+    skip: bool,
+) -> Result<ClonePlan> {
+    let metadata = crate::clone::metadata(&fixture.state, &fixture.plan, target, &fixture.io)?;
+    let previous = fixture.state.checked_clone()?.unwrap();
+    let mut copy_policy = fixture.plan.copy_policy;
+    copy_policy.skip_large_objects = skip;
+    catalog::plan_clone(
+        fixture.snapshot.connection()?,
+        target,
+        fixture.plan.generation,
+        fixture.plan.policy,
+        copy_policy,
+        &metadata,
+        &previous.owned_objects,
+        owned,
+        &fixture.io,
+    )
+}
+
 #[test]
 #[ignore = "requires the disposable M8 PostgreSQL harness"]
 fn live_large_object_restart_unlinks_only_owned_objects_and_keeps_foreign_ones() {
@@ -1438,17 +1462,53 @@ fn live_large_object_restart_unlinks_only_owned_objects_and_keeps_foreign_ones()
         (92002, "'6f776e65642074776f'"),
     ];
 
-    // A foreign object at another OID survives the owned reset and then refuses admission.
+    // Restart planning admits exactly the receipted OIDs; skipping large objects skips the check.
     let databases = FreshDatabases::create();
     let mut fixture = large_object_fixture(&databases, &objects);
     assert_eq!(fixture.copy_large_objects().unwrap().objects, 2);
     let mut target = connect(&databases.target);
+    let owned = fixture
+        .authority
+        .owned_large_object_oids(&fixture.io)
+        .unwrap();
+    assert_eq!(owned, [92001, 92002]);
+    restart_admission(&mut fixture, &mut target, &owned, false).unwrap();
+    restart_admission(&mut fixture, &mut target, &[], true).unwrap();
+    let refusal = restart_admission(&mut fixture, &mut target, &owned[..1], false).unwrap_err();
+    assert!(
+        refusal
+            .message
+            .contains("refuses 1 target large objects this run does not own, first OID 92002"),
+        "{}",
+        refusal.message
+    );
     target
         .query(
             "SELECT pg_catalog.lo_from_bytea(95001,pg_catalog.decode('f0f1','hex'))",
             &control(),
         )
         .unwrap();
+    // clone --restart refuses the foreign object here, before the owned reset.
+    let refusal = restart_admission(&mut fixture, &mut target, &owned, false).unwrap_err();
+    assert!(
+        refusal
+            .message
+            .contains("refuses 1 target large objects this run does not own, first OID 95001"),
+        "{}",
+        refusal.message
+    );
+    let refusal = restart_admission(&mut fixture, &mut target, &[], false).unwrap_err();
+    assert!(
+        refusal
+            .message
+            .contains("refuses 3 target large objects this run does not own, first OID 92001"),
+        "{}",
+        refusal.message
+    );
+    restart_admission(&mut fixture, &mut target, &[], true).unwrap();
+    assert_eq!(large_objects(&mut target).len(), 3);
+
+    // This fixture's restart skips planning: the permit refuses the survivor as the second line.
     let foreign = large_objects(&mut target)
         .into_iter()
         .filter(|row| row.starts_with("95001:"))

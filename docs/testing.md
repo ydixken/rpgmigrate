@@ -202,7 +202,7 @@ The fixed points come from a target CHECK that waits on a test-held advisory loc
 The split case kills mid-part, after the split reset commit and after the last part, and every restart ends with each row exactly once.
 The lost-marker case requires the coordinator to wait behind the withheld COMMIT, then either count the durable marker or refuse with `commit-outcome-unknown` and restart under a new generation.
 The relay case terminates the source session mid binary COPY and requires no rows, no marker and a refused copy report.
-The large-object cases kill mid-object and between objects, unlink only receipted objects on restart, keep a foreign object at another OID and refuse a foreign replacement of an owned OID.
+The large-object cases kill mid-object and between objects, unlink only receipted objects on restart, refuse a foreign object at another OID in restart planning and again at the permit after a reset that keeps it, and refuse a foreign replacement of an owned OID.
 The generation-advance case kills a restart after its native advance at four points of the target publish: blocked on the marker table before the reset, blocked on the second object's deletion lock after the first unlink, with the reset COMMIT withheld and dropped, and with that COMMIT forwarded after the engine lost its reply.
 Each restart resumes the recopy intent, ends two generations later and copies every row and large object exactly once.
 A restart killed again while it resumes the intent leaves the same intent, and an intent naming another snapshot of the previous generation refuses before any write.
@@ -288,6 +288,7 @@ The target role needs schema creation and ownership of the restored objects, nat
 The disposable checks use fixture database owners.
 They do not qualify an operator least-privilege deployment.
 Fresh targets must be collision-free apart from the empty-database baseline and exact owned native bookkeeping.
+With large objects selected, a fresh target must hold no large object, and a restart admits only the OIDs its receipts own.
 The first operator `--restart` may initialize an absent native path or an accepted private empty directory through the checked creation path.
 Resume on an absent or empty path refuses.
 A resource-free native INIT state may retry only with its exact existing caller binding, without adopting foreign, legacy, or old-format state.

@@ -121,6 +121,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             options.copy_policy(),
             &[],
             &[],
+            &[],
             io,
         )?;
         native.bind_clone(&plan, snapshot.ticket())?;
@@ -154,6 +155,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
         if entry == Entry::Recopy {
             let previous = previous.as_ref().expect("recopy has native state");
             let metadata = metadata(&native, &plan, &mut target, io)?;
+            let owned_large_objects = authority.owned_large_object_oids(io)?;
             let candidate = catalog::plan_clone(
                 snapshot.connection()?,
                 &mut target,
@@ -162,6 +164,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
                 options.copy_policy(),
                 &metadata,
                 &previous.owned_objects,
+                &owned_large_objects,
                 io,
             )?;
             let candidate = resolve_copy_profile(&mut snapshot, &mut target, &candidate, io)?;

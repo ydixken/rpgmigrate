@@ -3458,6 +3458,22 @@ impl CloneAuthority {
     ) -> Option<LargeObjectCompletion> {
         self.authority.large_object_completion(phase)
     }
+    /// Every OID this run's large-object receipts own, in OID order, for restart admission.
+    pub(crate) fn owned_large_object_oids(&mut self, io: &IoControl) -> Result<Vec<u32>> {
+        let mut oids = Vec::new();
+        loop {
+            let page = metadata::large_object_page(
+                self.authority.session.connection()?,
+                &self.authority.provenance,
+                oids.last().copied().unwrap_or(0),
+                io,
+            )?;
+            if page.is_empty() {
+                return Ok(oids);
+            }
+            oids.extend(page.iter().map(|done| done.object_oid));
+        }
+    }
     pub(crate) fn resolve_large_object_unknown(
         &mut self,
         oid: u32,
