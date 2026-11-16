@@ -185,7 +185,7 @@ It does not claim a pause inside the blocked table's COPY stream.
 
 ### M8 component profile
 
-`task test-clone`, also called by `task test-db`, requires exactly ten named component tests and a matching libtest summary with no ignored or failed cases.
+`task test-clone`, also called by `task test-db`, requires exactly fifteen named component tests and a matching libtest summary with no ignored or failed cases.
 The profile retains the seven clone snapshot, COPY, and marker cases.
 The new cases check actual binary COPY row counts for empty, single-row, and multiple-row streams and row preservation across split parts.
 They also check initial copying of empty, binary, multi-chunk, and sparse large objects.
@@ -193,7 +193,15 @@ The Rust tests use the existing disposable empty source/target databases and con
 The split component case checks complete row and distinct-key counts.
 The direct CLI split profile below checks simultaneous workers and the operator's 536870912-byte split threshold.
 The large-object component case checks initial content and retry.
-Final re-sync, metadata policies, comparison, fault recovery, and cleanup require separate runtime receipts.
+
+Five fault cases stop the engine at a fixed point and recover the way `clone --restart` does, in the same process.
+A kill drops the engine objects without cleanup and terminates every engine session on both databases, as a process kill closes its sockets.
+The fixed points come from a target CHECK that waits on a test-held advisory lock, a held large-object advisory lock, and a relay that withholds one part's COMMIT from the server.
+The split case kills mid-part, after the split reset commit and after the last part, and every restart ends with each row exactly once.
+The lost-marker case requires the coordinator to wait behind the withheld COMMIT, then either count the durable marker or refuse with `commit-outcome-unknown` and restart under a new generation.
+The relay case terminates the source session mid binary COPY and requires no rows, no marker and a refused copy report.
+The large-object cases kill mid-object and between objects, unlink only receipted objects on restart, keep a foreign object at another OID and refuse a foreign replacement of an owned OID.
+Final re-sync faults, metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]
 > Wiring component tests does not qualify the M8 workflow or activate `copy.binary_fallback`, `copy.split`, or `copy.large_objects`.
@@ -260,6 +268,7 @@ The [case manifest](../tests/fixtures/clone/m8-cases.json), [fixtures](../tests/
 The three large-object cases require durable completion at the exact final follow boundary and an injected target mismatch that comparison must reject before restoration.
 All cases require stable physical inventories and matching independent table fingerprints.
 These profiles do not exercise interrupted binary relay, split restart, interrupted large-object copy, large-object reset/restart, or failure during final re-sync.
+The component cases above cover all but final re-sync failure in-process; no profile kills the real executable at those points.
 The [roadmap](roadmap.md) retains those recovery and operator closing gates separately.
 
 ### Plain clone admission and recovery

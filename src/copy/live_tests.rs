@@ -26,6 +26,38 @@ fn control() -> IoControl {
     IoControl::unbounded(Arc::new(AtomicBool::new(false)))
 }
 
+fn harness_context() -> serde_json::Value {
+    let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
+    let context: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
+    let root = PathBuf::from(context["root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+        context["token"].as_str().unwrap()
+    );
+    context
+}
+
+fn harness_root() -> PathBuf {
+    PathBuf::from(harness_context()["root"].as_str().unwrap())
+}
+
+fn admin(variable: &str) -> Conninfo {
+    Conninfo::new(std::env::var_os(variable).expect("clone harness endpoint required")).unwrap()
+}
+
+fn connect(info: &Conninfo) -> PgConnection {
+    PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap()
+}
+
+// libpq keeps the last value of a repeated keyword.
+fn with_keyword(info: &Conninfo, keyword: &str, value: &str) -> Conninfo {
+    use std::os::unix::ffi::OsStringExt;
+    let mut raw = info.as_c_str().to_bytes().to_vec();
+    raw.extend_from_slice(format!(" {keyword}='{value}'").as_bytes());
+    Conninfo::new(std::ffi::OsString::from_vec(raw)).unwrap()
+}
+
 fn fixture_copy_tables(
     tables: &[crate::contracts::CloneTable],
     format: CopyFormat,
@@ -102,22 +134,27 @@ impl Fixture {
         format: CopyFormat,
         parts: Vec<crate::contracts::CopyPart>,
     ) -> Self {
-        let context = std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned harness required");
-        let context: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap();
-        let root = PathBuf::from(context["root"].as_str().unwrap());
-        assert_eq!(
-            std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
-            context["token"].as_str().unwrap()
-        );
-        let source_info = Conninfo::new(
-            std::env::var_os("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN").expect("M2 source required"),
+        Self::new_on(
+            admin("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN"),
+            admin("RPGMIGRATE_TEST_CLONE_TARGET_ADMIN"),
+            source_ddl,
+            target_ddl,
+            seed,
+            format,
+            parts,
         )
-        .unwrap();
-        let target_info = Conninfo::new(
-            std::env::var_os("RPGMIGRATE_TEST_CLONE_TARGET_ADMIN").expect("M2 target required"),
-        )
-        .unwrap();
+    }
+
+    fn new_on(
+        source_info: Conninfo,
+        target_info: Conninfo,
+        source_ddl: &[&str],
+        target_ddl: &[&str],
+        seed: &[&str],
+        format: CopyFormat,
+        parts: Vec<crate::contracts::CopyPart>,
+    ) -> Self {
+        let root = harness_root();
         let io = control();
         let mut source = PgConnection::connect(&source_info, crate::pg::Role::Copy, &io).unwrap();
         let mut target = PgConnection::connect(&target_info, crate::pg::Role::Copy, &io).unwrap();
@@ -237,6 +274,55 @@ impl Fixture {
 
     fn target(&self) -> PgConnection {
         PgConnection::connect(&self.options.target, crate::pg::Role::Copy, &control()).unwrap()
+    }
+
+    fn copy_large_objects(&mut self) -> Result<crate::contracts::LargeObjectCompletion> {
+        crate::large_objects::run_initial(
+            &self.options,
+            &self.plan,
+            &mut self.snapshot,
+            &mut self.authority,
+            &self.io,
+        )
+    }
+
+    fn restart(self) -> Self {
+        self.try_restart().unwrap()
+    }
+
+    /// Drops the engine objects without cleanup, as a killed process does, then follows `clone --restart`.
+    fn try_restart(self) -> Result<Self> {
+        let Self {
+            mut options,
+            snapshot,
+            state,
+            authority,
+            schema,
+            ..
+        } = self;
+        drop((authority, snapshot, state));
+        // A new process starts with fresh cancellation and deadline state.
+        let io = control();
+        options.state.action = StateAction::Restart;
+        let mut state = state::open_clone(&options.state, None, &io)?;
+        let previous = state.checked_clone()?.unwrap();
+        assert_eq!(previous.phase, ClonePhase::Copying);
+        let mut plan = previous.plan.clone();
+        plan.generation = CopyGeneration(plan.generation.0 + 1);
+        let snapshot = CloneSnapshot::export(connect(&options.source), plan.generation, &io)?;
+        let mut authority =
+            CloneAuthority::acquire(connect(&options.target), &mut state, &previous.plan, &io)?;
+        state.advance_copy_generation(&plan, snapshot.ticket())?;
+        authority.advance_generation(&state, &io)?;
+        Ok(Self {
+            options,
+            plan,
+            snapshot,
+            state,
+            authority,
+            schema,
+            io,
+        })
     }
 }
 
@@ -718,4 +804,916 @@ fn live_large_object_initial_copy_preserves_empty_binary_multichunk_and_sparse_o
     )
     .unwrap();
     assert_eq!(retry, completion);
+}
+
+// M8 fault matrix: each kill drops the engine objects and terminates their sessions, then recovers.
+
+const SPLIT_ROWS: u64 = 2000;
+// 1000-byte rows pack seven to a block, so row 561 is the first row of block 80, inside part 2.
+const SPLIT_HOLD_ID: u64 = 561;
+
+fn split_parts() -> Vec<crate::contracts::CopyPart> {
+    [(1, 0, Some(50)), (2, 50, Some(150)), (3, 150, None)]
+        .into_iter()
+        .map(
+            |(number, start_block, end_block)| crate::contracts::CopyPart {
+                number,
+                count: 3,
+                start_block,
+                end_block,
+            },
+        )
+        .collect()
+}
+
+// The target CHECK waits on a test-held advisory lock when it reaches row `id`, pausing that COPY mid-stream.
+fn held_payload(key: i64, id: u64) -> String {
+    format!(
+        "CREATE TABLE payload (id integer CHECK (id <> {id} OR pg_catalog.pg_advisory_xact_lock_shared({key}::int8)::text IS NOT NULL), value text)"
+    )
+}
+
+fn split_fixture(target_ddl: &str) -> Fixture {
+    let mut fixture = Fixture::new_profile(
+        &["CREATE TABLE payload (id integer, value text)"],
+        &[target_ddl],
+        &[&format!(
+            "INSERT INTO payload SELECT n,repeat('x',1000) FROM generate_series(1,{SPLIT_ROWS}) AS n"
+        )],
+        CopyFormat::Binary,
+        split_parts(),
+    );
+    fixture.options.table_jobs = 1;
+    fixture
+}
+
+fn value(connection: &mut PgConnection, sql: &str) -> String {
+    let result = connection.query(sql, &control()).unwrap();
+    assert_eq!(result.rows(), 1, "{sql}");
+    String::from_utf8(result.cell(0, 0).unwrap().unwrap().to_vec()).unwrap()
+}
+
+fn poll(mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !ready() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    true
+}
+
+fn wait_until(what: &str, ready: impl FnMut() -> bool) {
+    assert!(poll(ready), "{what}");
+}
+
+fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+    let mut found = None;
+    wait_until(what, || {
+        found = probe();
+        found.is_some()
+    });
+    found.unwrap()
+}
+
+/// Runs `engine` here while `controller` injects faults from its own sessions; `ready` starts the engine.
+fn controlled<T>(
+    fixture: &mut Fixture,
+    engine: impl FnOnce(&mut Fixture) -> T,
+    controller: impl FnOnce(&dyn Fn()) + Send,
+) -> T {
+    let (sender, started) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let control = scope.spawn(move || {
+            controller(&|| {
+                let _ = sender.send(());
+            })
+        });
+        if started.recv().is_err() {
+            std::panic::resume_unwind(control.join().unwrap_err());
+        }
+        let result = engine(fixture);
+        if let Err(panic) = control.join() {
+            std::panic::resume_unwind(panic);
+        }
+        result
+    })
+}
+
+fn advisory_waiter(connection: &mut PgConnection, class: Option<i32>, key: i64) -> Option<u32> {
+    let filter = match class {
+        Some(class) => format!("classid={class}::oid AND objid={key}::oid AND objsubid=2"),
+        None => format!(
+            "classid=({key}::int8>>32)::oid AND objid=({key}::int8&4294967295)::oid AND objsubid=1"
+        ),
+    };
+    let result = connection
+        .query(
+            &format!("SELECT pid FROM pg_catalog.pg_locks WHERE locktype='advisory' AND database=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()) AND {filter} AND NOT granted"),
+            &control(),
+        )
+        .unwrap();
+    (result.rows() == 1).then(|| {
+        std::str::from_utf8(result.cell(0, 0).unwrap().unwrap())
+            .unwrap()
+            .parse()
+            .unwrap()
+    })
+}
+
+/// Terminates every other client session on each observer's database, as a process kill closes its sockets.
+fn kill_engine(observers: &mut [&mut PgConnection]) {
+    let mut keep = Vec::new();
+    for observer in observers.iter_mut() {
+        keep.push(value(observer, "SELECT pg_catalog.pg_backend_pid()"));
+    }
+    let others = format!(
+        "FROM pg_catalog.pg_stat_activity WHERE datname=pg_catalog.current_database() AND backend_type='client backend' AND pid <> ALL('{{{}}}'::int4[])",
+        keep.join(",")
+    );
+    // An observer inside a transaction keeps its first activity snapshot unless it clears it.
+    let fresh = |observer: &mut PgConnection| {
+        value(observer, "SELECT pg_catalog.pg_stat_clear_snapshot()::text");
+    };
+    for observer in observers.iter_mut() {
+        fresh(observer);
+        observer
+            .query(
+                &format!("SELECT pg_catalog.pg_terminate_backend(pid) {others}"),
+                &control(),
+            )
+            .unwrap();
+    }
+    for observer in observers.iter_mut() {
+        wait_until("killed engine sessions did not end", || {
+            fresh(observer);
+            value(observer, &format!("SELECT count(*) {others}")) == "0"
+        });
+    }
+}
+
+fn rows(connection: &mut PgConnection, schema: &str, predicate: &str) -> (u64, u64) {
+    let result = connection
+        .query(
+            &format!("SELECT count(*),count(DISTINCT id) FROM ONLY {schema}.payload{predicate}"),
+            &control(),
+        )
+        .unwrap();
+    let cell = |column| {
+        std::str::from_utf8(result.cell(0, column).unwrap().unwrap())
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    (cell(0), cell(1))
+}
+
+fn assert_markers(fixture: &mut Fixture, parts: usize) {
+    let markers = fixture.authority.durable_markers(&fixture.io).unwrap();
+    assert_eq!(markers.len(), parts);
+    assert!(
+        markers
+            .iter()
+            .all(|marker| marker.generation == fixture.plan.generation)
+    );
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_split_kills_after_reset_mid_part_and_after_last_part_restart_with_every_row_once() {
+    let key = 0x4d38_e201;
+    let mut fixture = split_fixture(&held_payload(key, SPLIT_HOLD_ID));
+    let schema = fixture.schema.clone();
+    let (source_info, target_info) = (
+        fixture.options.source.clone(),
+        fixture.options.target.clone(),
+    );
+    let mut source = connect(&source_info);
+    assert_eq!(
+        value(
+            &mut source,
+            &format!(
+                "SELECT (ctid::text::point)[0] FROM ONLY {schema}.payload WHERE id={SPLIT_HOLD_ID}"
+            )
+        ),
+        "80"
+    );
+    let first_part = rows(
+        &mut source,
+        &schema,
+        " WHERE ctid < '(50,0)'::pg_catalog.tid",
+    );
+    drop(source);
+
+    // Kill mid-part: part 1 commits, part 2 streams into its open transaction and stops at the held row.
+    let failure = controlled(&mut fixture, Fixture::copy, |ready| {
+        let mut source = connect(&source_info);
+        let mut target = connect(&target_info);
+        target
+            .query(
+                &format!("SELECT pg_catalog.pg_advisory_lock({key})"),
+                &control(),
+            )
+            .unwrap();
+        ready();
+        let worker = wait_for("part 2 did not reach its held row", || {
+            advisory_waiter(&mut target, None, key)
+        });
+        // COPY FROM advances tuples_processed only per flushed batch; received bytes show the open stream.
+        let streamed = value(
+            &mut target,
+            &format!(
+                "SELECT bytes_processed FROM pg_catalog.pg_stat_progress_copy WHERE pid={worker}"
+            ),
+        );
+        assert!(
+            streamed.parse::<u64>().unwrap() > 0,
+            "part 2 was not mid-stream"
+        );
+        kill_engine(&mut [&mut source, &mut target]);
+    })
+    .unwrap_err();
+    assert!(!failure.message.is_empty());
+    let mut target = connect(&target_info);
+    assert_eq!(rows(&mut target, &schema, ""), first_part);
+
+    // Kill after the split reset commit and before any permit.
+    let mut fixture = fixture.restart();
+    assert_markers(&mut fixture, 0);
+    fixture
+        .authority
+        .prepare_split_tables(&fixture.state, &fixture.io)
+        .unwrap();
+    assert_eq!(rows(&mut target, &schema, ""), (0, 0));
+
+    // Kill after the last part committed, before the copy is aggregated or the stage advances.
+    let mut fixture = fixture.restart();
+    let report = fixture.copy().unwrap();
+    assert_eq!(report.rows, SPLIT_ROWS);
+    assert_markers(&mut fixture, 3);
+
+    let mut fixture = fixture.restart();
+    assert_markers(&mut fixture, 0);
+    let report = fixture.copy().unwrap();
+    assert_eq!((report.tables, report.rows), (1, SPLIT_ROWS));
+    assert_eq!(fixture.authority.copy_report(&fixture.io).unwrap(), report);
+    assert_markers(&mut fixture, 3);
+    assert_eq!(fixture.plan.generation, CopyGeneration(4));
+    assert_eq!(rows(&mut target, &schema, ""), (SPLIT_ROWS, SPLIT_ROWS));
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_split_lost_part_marker_commit_resolves_through_fence_barrier_or_restarts_generation() {
+    for commit in [true, false] {
+        let mut fixture = split_fixture("CREATE TABLE payload (id integer, value text)");
+        let schema = fixture.schema.clone();
+        let direct = fixture.options.target.clone();
+        let last_part = rows(
+            &mut connect(&fixture.options.source),
+            &schema,
+            " WHERE ctid >= '(150,0)'::pg_catalog.tid",
+        );
+        let hold = CommitHold::start(3);
+        fixture.options.target = hold.conninfo(&direct);
+        let coordinator = fixture.authority.coordinator_pid();
+        let observed = std::sync::Mutex::new((false, None));
+        let result = controlled(&mut fixture, Fixture::copy, |ready| {
+            ready();
+            let held = hold.wait_held();
+            let mut target = connect(&direct);
+            // Without the fence barrier the coordinator reads the marker before the COMMIT lands.
+            let blocked = poll(|| {
+                value(
+                    &mut target,
+                    &format!("SELECT {held} = ANY(pg_catalog.pg_blocking_pids({coordinator}))"),
+                ) == "t"
+            });
+            let tag = hold.release(commit);
+            *observed.lock().unwrap() = (blocked, tag);
+        });
+        let (blocked, tag) = observed.into_inner().unwrap();
+        assert!(
+            blocked,
+            "the coordinator did not wait behind the held part-marker COMMIT"
+        );
+        fixture.options.target = direct;
+        let mut target = fixture.target();
+        if commit {
+            assert_eq!(tag.as_deref(), Some("COMMIT"));
+            let report = result.unwrap();
+            assert_eq!(report.rows, SPLIT_ROWS);
+            assert_eq!(fixture.authority.copy_report(&fixture.io).unwrap(), report);
+            assert_markers(&mut fixture, 3);
+            assert_eq!(rows(&mut target, &schema, ""), (SPLIT_ROWS, SPLIT_ROWS));
+            continue;
+        }
+        assert_eq!(tag, None);
+        let error = result.unwrap_err();
+        assert!(
+            error.message.contains("commit-outcome-unknown"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            rows(&mut target, &schema, ""),
+            (SPLIT_ROWS - last_part.0, SPLIT_ROWS - last_part.1)
+        );
+        let mut fixture = fixture.restart();
+        assert_markers(&mut fixture, 0);
+        let report = fixture.copy().unwrap();
+        assert_eq!(report.rows, SPLIT_ROWS);
+        assert_markers(&mut fixture, 3);
+        assert_eq!(rows(&mut target, &schema, ""), (SPLIT_ROWS, SPLIT_ROWS));
+    }
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_binary_source_error_mid_relay_leaves_no_marker_and_counts_no_partial_rows() {
+    let key = 0x4d38_e203;
+    let total = 20_000;
+    let mut fixture = Fixture::new_profile(
+        &["CREATE TABLE payload (id integer, value text)"],
+        &[&held_payload(key, 200)],
+        &[&format!(
+            "INSERT INTO payload SELECT n,repeat('b',1000) FROM generate_series(1,{total}) AS n"
+        )],
+        CopyFormat::Binary,
+        vec![crate::contracts::CopyPart {
+            number: 1,
+            count: 1,
+            start_block: 0,
+            end_block: None,
+        }],
+    );
+    fixture.options.table_jobs = 1;
+    let schema = fixture.schema.clone();
+    let (source_info, target_info) = (
+        fixture.options.source.clone(),
+        fixture.options.target.clone(),
+    );
+    let failure = controlled(&mut fixture, Fixture::copy, |ready| {
+        let mut source = connect(&source_info);
+        let mut target = connect(&target_info);
+        target
+            .query(&format!("SELECT pg_catalog.pg_advisory_lock({key})"), &control())
+            .unwrap();
+        ready();
+        wait_for("the relay did not reach the held target row", || {
+            advisory_waiter(&mut target, None, key)
+        });
+        let relay = value(
+            &mut source,
+            "SELECT pid FROM pg_catalog.pg_stat_activity WHERE datname=pg_catalog.current_database() AND state='active' AND query LIKE 'COPY (SELECT %FORMAT binary)'",
+        );
+        let sent: u64 = value(
+            &mut source,
+            &format!(
+                "SELECT tuples_processed FROM pg_catalog.pg_stat_progress_copy WHERE pid={relay}"
+            ),
+        )
+        .parse()
+        .unwrap();
+        assert!(sent > 0 && sent < total, "source COPY was not mid-relay: {sent}");
+        source
+            .query(
+                &format!("SELECT pg_catalog.pg_terminate_backend({relay})"),
+                &control(),
+            )
+            .unwrap();
+        wait_until("the source relay backend did not end", || {
+            value(
+                &mut source,
+                &format!("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid={relay}"),
+            ) == "0"
+        });
+    })
+    .unwrap_err();
+    assert!(!failure.message.is_empty());
+    let mut target = connect(&target_info);
+    assert_eq!(rows(&mut target, &schema, ""), (0, 0));
+    // The failed worker cancelled this process; the read-back below runs as a fresh coordinator call.
+    fixture.io = control();
+    let owned = fixture.state.owned_copy_tables().unwrap();
+    let part = fixture.plan.copy_tables[0].parts[0];
+    assert_eq!(
+        fixture
+            .authority
+            .resolve_unknown(&owned[0], &part, &fixture.io)
+            .unwrap(),
+        None
+    );
+    assert!(fixture.authority.copy_report(&fixture.io).is_err());
+    let mut fixture = fixture.restart();
+    let report = fixture.copy().unwrap();
+    assert_eq!(report.rows, total);
+    assert_eq!(rows(&mut target, &schema, ""), (total, total));
+}
+
+/// A fresh database pair: large objects are database-wide, so these cases cannot share the harness pair.
+struct FreshDatabases {
+    source: Conninfo,
+    target: Conninfo,
+    names: [String; 2],
+}
+
+impl FreshDatabases {
+    fn create() -> Self {
+        let source = admin("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN");
+        let target = admin("RPGMIGRATE_TEST_CLONE_TARGET_ADMIN");
+        let case = CASE.fetch_add(1, Ordering::Relaxed);
+        let names = ["s", "t"].map(|side| format!("m8_lo_{side}_{}_{case}", std::process::id()));
+        let mut connection = connect(&source);
+        for name in &names {
+            connection
+                .query(
+                    &format!("CREATE DATABASE {name} TEMPLATE template0 ENCODING 'UTF8'"),
+                    &control(),
+                )
+                .unwrap();
+        }
+        Self {
+            source: with_keyword(&source, "dbname", &names[0]),
+            target: with_keyword(&target, "dbname", &names[1]),
+            names,
+        }
+    }
+}
+
+impl Drop for FreshDatabases {
+    fn drop(&mut self) {
+        let Ok(mut connection) = PgConnection::connect(
+            &admin("RPGMIGRATE_TEST_CLONE_SOURCE_ADMIN"),
+            crate::pg::Role::Copy,
+            &control(),
+        ) else {
+            return;
+        };
+        for name in &self.names {
+            let _ = connection.query(
+                &format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
+                &control(),
+            );
+        }
+    }
+}
+
+fn large_object_fixture(databases: &FreshDatabases, objects: &[(u32, &str)]) -> Fixture {
+    let seed = objects
+        .iter()
+        .map(|(oid, hex)| {
+            format!("SELECT pg_catalog.lo_from_bytea({oid},pg_catalog.decode({hex},'hex'))")
+        })
+        .collect::<Vec<_>>();
+    let seed = seed.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut fixture = Fixture::new_on(
+        databases.source.clone(),
+        databases.target.clone(),
+        &[],
+        &[],
+        &seed,
+        CopyFormat::Text,
+        vec![crate::contracts::CopyPart {
+            number: 1,
+            count: 1,
+            start_block: 0,
+            end_block: None,
+        }],
+    );
+    fixture.options.large_objects_jobs = 1;
+    assert_eq!(fixture.copy().unwrap().tables, 0);
+    fixture
+}
+
+fn large_objects(connection: &mut PgConnection) -> Vec<String> {
+    let result = connection
+        .query(
+            "SELECT m.oid::pg_catalog.text||':'||pg_catalog.length(pg_catalog.lo_get(m.oid))||':'||pg_catalog.md5(pg_catalog.lo_get(m.oid)) FROM pg_catalog.pg_largeobject_metadata m ORDER BY m.oid",
+            &control(),
+        )
+        .unwrap();
+    (0..result.rows())
+        .map(|row| String::from_utf8(result.cell(row, 0).unwrap().unwrap().to_vec()).unwrap())
+        .collect()
+}
+
+fn hold_object(connection: &mut PgConnection, oid: u32, lock: bool) {
+    let class = crate::apply::checkpoint::LARGE_OBJECT_LOCK_CLASS;
+    let function = if lock { "lock" } else { "unlock" };
+    connection
+        .query(
+            &format!("SELECT pg_catalog.pg_advisory_{function}({class},{oid})"),
+            &control(),
+        )
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_large_object_kills_mid_object_and_after_commit_restart_without_duplicate_or_missing_object()
+{
+    let databases = FreshDatabases::create();
+    let mut fixture = large_object_fixture(
+        &databases,
+        &[
+            (91001, "repeat('a1',4096)"),
+            (91002, "repeat('5a',3*1024*1024+11)"),
+            (91003, "'00ff275c'"),
+        ],
+    );
+    let class = crate::apply::checkpoint::LARGE_OBJECT_LOCK_CLASS;
+    let expected = large_objects(&mut connect(&databases.source));
+    assert_eq!(expected.len(), 3);
+
+    // Kill mid-object: 91001 commits, 91002 is created in its open transaction and waits to write.
+    let failure = controlled(&mut fixture, Fixture::copy_large_objects, |ready| {
+        let mut source = connect(&databases.source);
+        let mut target = connect(&databases.target);
+        let mut blocker = connect(&databases.target);
+        hold_object(&mut target, 91002, true);
+        ready();
+        wait_for("the 91002 worker did not wait for its object lock", || {
+            advisory_waiter(&mut target, Some(class), 91002)
+        });
+        blocker.query("BEGIN", &control()).unwrap();
+        blocker
+            .query(
+                "LOCK TABLE pg_catalog.pg_largeobject IN SHARE MODE",
+                &control(),
+            )
+            .unwrap();
+        hold_object(&mut target, 91002, false);
+        wait_until("the 91002 worker did not wait to write its first chunk", || {
+            value(
+                &mut target,
+                "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='relation' AND relation='pg_catalog.pg_largeobject'::pg_catalog.regclass AND NOT granted",
+            ) == "1"
+        });
+        kill_engine(&mut [&mut source, &mut target, &mut blocker]);
+    })
+    .unwrap_err();
+    assert!(!failure.message.is_empty());
+    let mut target = connect(&databases.target);
+    assert_eq!(large_objects(&mut target), expected[..1]);
+
+    let mut fixture = fixture.restart();
+    assert!(large_objects(&mut target).is_empty());
+    assert!(
+        fixture
+            .authority
+            .durable_large_objects(&fixture.io)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Kill after two object commits, before the third object and the phase completion.
+    let failure = controlled(&mut fixture, Fixture::copy_large_objects, |ready| {
+        let mut source = connect(&databases.source);
+        let mut target = connect(&databases.target);
+        hold_object(&mut target, 91003, true);
+        ready();
+        wait_for("the 91003 worker did not wait for its object lock", || {
+            advisory_waiter(&mut target, Some(class), 91003)
+        });
+        assert_eq!(large_objects(&mut target), expected[..2]);
+        kill_engine(&mut [&mut source, &mut target]);
+    })
+    .unwrap_err();
+    assert!(!failure.message.is_empty());
+    assert_eq!(
+        fixture
+            .authority
+            .large_object_completion(crate::apply::LargeObjectPhase::Initial),
+        None
+    );
+
+    let mut fixture = fixture.restart();
+    let mut target = connect(&databases.target);
+    assert!(large_objects(&mut target).is_empty());
+    let completion = fixture.copy_large_objects().unwrap();
+    assert_eq!(completion.objects, 3);
+    assert_eq!(completion.bytes, 4096 + 3 * 1024 * 1024 + 11 + 4);
+    assert_eq!(large_objects(&mut target), expected);
+    let receipts = fixture
+        .authority
+        .durable_large_objects(&fixture.io)
+        .unwrap();
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|done| done.object_oid)
+            .collect::<Vec<_>>(),
+        [91001, 91002, 91003]
+    );
+    assert!(
+        receipts
+            .iter()
+            .all(|done| done.generation == CopyGeneration(3)
+                && done.sync_phase == crate::apply::LargeObjectPhase::Initial)
+    );
+    assert_eq!(
+        fixture
+            .authority
+            .large_object_completion(crate::apply::LargeObjectPhase::Initial),
+        Some(completion)
+    );
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_large_object_restart_unlinks_only_owned_objects_and_keeps_foreign_ones() {
+    let objects = [
+        (92001, "'6f776e6564206f6e65'"),
+        (92002, "'6f776e65642074776f'"),
+    ];
+
+    // A foreign object at another OID survives the owned reset and then refuses admission.
+    let databases = FreshDatabases::create();
+    let mut fixture = large_object_fixture(&databases, &objects);
+    assert_eq!(fixture.copy_large_objects().unwrap().objects, 2);
+    let mut target = connect(&databases.target);
+    target
+        .query(
+            "SELECT pg_catalog.lo_from_bytea(95001,pg_catalog.decode('f0f1','hex'))",
+            &control(),
+        )
+        .unwrap();
+    let foreign = large_objects(&mut target)
+        .into_iter()
+        .filter(|row| row.starts_with("95001:"))
+        .collect::<Vec<_>>();
+    assert_eq!(foreign.len(), 1);
+    let mut fixture = fixture.restart();
+    assert_eq!(large_objects(&mut target), foreign);
+    assert!(
+        fixture
+            .authority
+            .durable_large_objects(&fixture.io)
+            .unwrap()
+            .is_empty()
+    );
+    let refusal = fixture.copy_large_objects().unwrap_err();
+    assert!(
+        refusal.message.contains("unrecorded target object"),
+        "{}",
+        refusal.message
+    );
+    assert_eq!(large_objects(&mut target), foreign);
+
+    // A foreign object that replaced an owned OID refuses the reset and keeps every object.
+    let databases = FreshDatabases::create();
+    let mut fixture = large_object_fixture(&databases, &objects);
+    assert_eq!(fixture.copy_large_objects().unwrap().objects, 2);
+    let mut target = connect(&databases.target);
+    target
+        .query(
+            "SELECT pg_catalog.lo_unlink(92001),pg_catalog.lo_from_bytea(92001,pg_catalog.decode('f0f2','hex'))",
+            &control(),
+        )
+        .unwrap();
+    let replaced = large_objects(&mut target);
+    assert_eq!(replaced.len(), 2);
+    let refusal = fixture.try_restart().err().unwrap();
+    assert!(refusal.message.contains("drifted"), "{}", refusal.message);
+    assert_eq!(large_objects(&mut target), replaced);
+}
+
+#[derive(Default)]
+struct HeldCommit {
+    pid: Option<u32>,
+    server: Option<std::os::unix::net::UnixStream>,
+    frames: Vec<u8>,
+    tag: Option<String>,
+    ready: bool,
+    closed: bool,
+}
+
+type SharedHold = Arc<(std::sync::Mutex<HeldCommit>, std::sync::Condvar)>;
+
+/// Relays target sessions and withholds the COMMIT of the n-th COPY FROM STDIN session from the server.
+struct CommitHold {
+    directory: PathBuf,
+    shared: SharedHold,
+    stop: Arc<AtomicBool>,
+    accept: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CommitHold {
+    fn start(copy: usize) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let context = harness_context();
+        let socket_dir = PathBuf::from(context["socket_dir"].as_str().unwrap());
+        let port = context["port"].as_u64().unwrap();
+        let directory = socket_dir.join(format!(
+            "hold-{}-{}",
+            std::process::id(),
+            CASE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let listener =
+            std::os::unix::net::UnixListener::bind(directory.join(format!(".s.PGSQL.{port}")))
+                .unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let upstream = socket_dir.join(format!(".s.PGSQL.{port}"));
+        let shared = SharedHold::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let (shared, stop) = (shared.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let copies = Arc::new(AtomicU64::new(0));
+                while !stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((client, _)) => {
+                            let (upstream, copies, shared) =
+                                (upstream.clone(), copies.clone(), shared.clone());
+                            std::thread::spawn(move || {
+                                relay_session(client, &upstream, &copies, copy as u64, &shared)
+                            });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(2))
+                        }
+                        Err(_) => return,
+                    }
+                }
+            })
+        };
+        Self {
+            directory,
+            shared,
+            stop,
+            accept: Some(accept),
+        }
+    }
+
+    fn conninfo(&self, direct: &Conninfo) -> Conninfo {
+        with_keyword(direct, "host", self.directory.to_str().unwrap())
+    }
+
+    fn wait_held(&self) -> u32 {
+        let (lock, signal) = &*self.shared;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut held = lock.lock().unwrap();
+        while held.server.is_none() || held.pid.is_none() {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("the selected part COMMIT was never withheld");
+            held = signal.wait_timeout(held, remaining).unwrap().0;
+        }
+        held.pid.unwrap()
+    }
+
+    /// Forwards the withheld COMMIT and returns its tag, or closes the backend so the server aborts.
+    fn release(&self, commit: bool) -> Option<String> {
+        use std::io::Write;
+        let (lock, signal) = &*self.shared;
+        let mut held = lock.lock().unwrap();
+        let mut server = held.server.take().expect("no withheld COMMIT");
+        if commit {
+            let frames = std::mem::take(&mut held.frames);
+            server.write_all(&frames).unwrap();
+        } else {
+            server.shutdown(std::net::Shutdown::Both).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !(held.closed || commit && held.ready) {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("the withheld backend did not answer or close");
+            held = signal.wait_timeout(held, remaining).unwrap().0;
+        }
+        let _ = server.shutdown(std::net::Shutdown::Both);
+        held.tag.clone()
+    }
+}
+
+impl Drop for CommitHold {
+    fn drop(&mut self) {
+        if let Some(server) = self.shared.0.lock().unwrap().server.take() {
+            let _ = server.shutdown(std::net::Shutdown::Both);
+        }
+        self.stop.store(true, Ordering::Release);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn read_frame(stream: &mut impl std::io::Read, typed: bool) -> Option<Vec<u8>> {
+    let mut frame = vec![0; if typed { 5 } else { 4 }];
+    stream.read_exact(&mut frame).ok()?;
+    let start = frame.len() - 4;
+    let length = u32::from_be_bytes(frame[start..].try_into().unwrap()) as usize;
+    if !(4..=64 * 1024 * 1024).contains(&length) {
+        return None;
+    }
+    frame.resize(start + length, 0);
+    stream.read_exact(&mut frame[start + 4..]).ok()?;
+    Some(frame)
+}
+
+fn relay_session(
+    mut client: std::os::unix::net::UnixStream,
+    upstream: &std::path::Path,
+    copies: &AtomicU64,
+    selected: u64,
+    shared: &SharedHold,
+) {
+    use std::io::Write;
+    use std::net::Shutdown;
+    client.set_nonblocking(false).unwrap();
+    let Ok(mut server) = std::os::unix::net::UnixStream::connect(upstream) else {
+        return;
+    };
+    let held = Arc::new(AtomicBool::new(false));
+    let pid = Arc::new(std::sync::Mutex::new(None));
+    {
+        let (mut server, mut client) = (server.try_clone().unwrap(), client.try_clone().unwrap());
+        let (held, pid, shared) = (held.clone(), pid.clone(), shared.clone());
+        std::thread::spawn(move || {
+            while let Some(frame) = read_frame(&mut server, true) {
+                if frame[0] == b'K' && frame.len() == 13 {
+                    *pid.lock().unwrap() =
+                        Some(u32::from_be_bytes(frame[5..9].try_into().unwrap()));
+                }
+                if held.load(Ordering::Acquire) {
+                    let mut state = shared.0.lock().unwrap();
+                    if frame[0] == b'C' {
+                        state.tag =
+                            Some(String::from_utf8_lossy(&frame[5..frame.len() - 1]).into());
+                    }
+                    state.ready |= frame[0] == b'Z';
+                    shared.1.notify_all();
+                } else if client.write_all(&frame).is_err() {
+                    break;
+                }
+            }
+            if held.load(Ordering::Acquire) {
+                shared.0.lock().unwrap().closed = true;
+                shared.1.notify_all();
+            }
+            let _ = client.shutdown(Shutdown::Both);
+        });
+    }
+    let startup = loop {
+        let Some(frame) = read_frame(&mut client, false) else {
+            return;
+        };
+        // libpq may ask to negotiate encryption first; this local relay always declines.
+        if frame.len() == 8 && matches!(&frame[4..], [4, 210, 22, 47] | [4, 210, 22, 48]) {
+            let _ = client.write_all(b"N");
+            continue;
+        }
+        break frame;
+    };
+    if server.write_all(&startup).is_err() {
+        return;
+    }
+    let (mut counted, mut selected_session, mut withheld) = (false, false, None::<Vec<u8>>);
+    while let Some(frame) = read_frame(&mut client, true) {
+        if frame[0] == b'P' {
+            let body = &frame[5..];
+            let name = body
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(body.len());
+            let query = body[name + 1..]
+                .split(|byte| *byte == 0)
+                .next()
+                .unwrap_or(&[]);
+            if !counted
+                && query.starts_with(b"COPY ")
+                && query.windows(11).any(|w| w == b" FROM STDIN")
+            {
+                counted = true;
+                selected_session = copies.fetch_add(1, Ordering::SeqCst) + 1 == selected;
+            }
+            if selected_session && query == b"COMMIT" {
+                held.store(true, Ordering::Release);
+                withheld = Some(Vec::new());
+            }
+        }
+        if let Some(frames) = withheld.as_mut() {
+            frames.extend_from_slice(&frame);
+            if frame[0] == b'S' {
+                let mut state = shared.0.lock().unwrap();
+                state.frames = std::mem::take(frames);
+                state.pid = *pid.lock().unwrap();
+                state.server = Some(server.try_clone().unwrap());
+                shared.1.notify_all();
+                drop(state);
+                let _ = client.shutdown(Shutdown::Both);
+                return;
+            }
+            continue;
+        }
+        if server.write_all(&frame).is_err() {
+            break;
+        }
+    }
+    let _ = server.shutdown(Shutdown::Write);
 }
