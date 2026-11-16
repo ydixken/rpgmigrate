@@ -68,6 +68,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn final_phase_absent_receipt_names_the_follow_resume_not_a_copy_restart() {
+        assert!(FINAL_RECEIPT_ABSENT.starts_with("commit-outcome-unknown: "));
+        assert!(FINAL_RECEIPT_ABSENT.contains("resume the follow"));
+        assert!(!FINAL_RECEIPT_ABSENT.contains("restart"));
+    }
+
+    #[test]
     fn canonical_hex_is_bounded_and_rejects_invalid_server_data() {
         assert_eq!(decode_hex(b"00ff275c").unwrap(), [0, 255, 39, 92]);
         assert_eq!(encode_hex(&[0, 255, 39, 92]).unwrap(), "00ff275c");
@@ -779,6 +786,9 @@ pub(crate) fn run_initial(
     Ok(completion)
 }
 
+// The final re-sync runs in an anchored follow, which can only resume; its next drain repeats the re-sync.
+const FINAL_RECEIPT_ABSENT: &str = "commit-outcome-unknown: final large object receipt is absent; resume the follow so its drain repeats the final large-object re-sync";
+
 pub(crate) fn run_final(
     options: &crate::contracts::CloneOptions,
     plan: &crate::contracts::ClonePlan,
@@ -836,7 +846,9 @@ pub(crate) fn run_final(
                 return Err(refusal("large-objects: duplicate object completion"));
             }
             if matches!(outcome, crate::apply::CopyCommitOutcome::Unknown) {
-                let durable=authority.resolve_large_object_unknown(plan,request,receipt.object_oid,io)?.ok_or_else(|| refusal("commit-outcome-unknown: large object receipt is absent; restart the copy generation"))?;
+                let durable = authority
+                    .resolve_large_object_unknown(plan, request, receipt.object_oid, io)?
+                    .ok_or_else(|| refusal(FINAL_RECEIPT_ABSENT))?;
                 if durable != receipt {
                     return Err(refusal(
                         "large-objects: durable receipt disagrees with completed object",

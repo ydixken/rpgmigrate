@@ -85,6 +85,7 @@ def module_cases(manifest, profile):
             "copy::live_tests::live_binary_source_error_mid_relay_leaves_no_marker_and_counts_no_partial_rows",
             "copy::live_tests::live_large_object_kills_mid_object_and_after_commit_restart_without_duplicate_or_missing_object",
             "copy::live_tests::live_large_object_restart_unlinks_only_owned_objects_and_keeps_foreign_ones",
+            "copy::live_tests::live_generation_advance_kills_resume_the_recopy_intent_with_every_row_and_object_once",
         ]
     if profile == "Transport":
         return manifest["transport_cases"]

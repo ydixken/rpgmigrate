@@ -3372,7 +3372,7 @@ fn follow_reset_fixture(io: &IoControl, empty: bool) -> (NativeState, CloneAutho
             &binding,
         )
         .unwrap();
-    authority.advance_generation(&native, io).unwrap();
+    authority.advance_generation(&mut native, io).unwrap();
     native.finish_follow_restart().unwrap();
     assert!(
         metadata::read_markers(

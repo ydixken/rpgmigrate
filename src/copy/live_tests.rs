@@ -293,7 +293,7 @@ impl Fixture {
     /// Drops the engine objects without cleanup, as a killed process does, then follows `clone --restart`.
     fn try_restart(self) -> Result<Self> {
         let Self {
-            mut options,
+            options,
             snapshot,
             state,
             authority,
@@ -301,6 +301,10 @@ impl Fixture {
             ..
         } = self;
         drop((authority, snapshot, state));
+        Self::reopen(options, schema)
+    }
+
+    fn reopen(mut options: CloneOptions, schema: String) -> Result<Self> {
         // A new process starts with fresh cancellation and deadline state.
         let io = control();
         options.state.action = StateAction::Restart;
@@ -312,8 +316,13 @@ impl Fixture {
         let snapshot = CloneSnapshot::export(connect(&options.source), plan.generation, &io)?;
         let mut authority =
             CloneAuthority::acquire(connect(&options.target), &mut state, &previous.plan, &io)?;
-        state.advance_copy_generation(&plan, snapshot.ticket())?;
-        authority.advance_generation(&state, &io)?;
+        crate::clone::advance_copy_generation(
+            &mut state,
+            &mut authority,
+            &plan,
+            snapshot.ticket(),
+            &io,
+        )?;
         Ok(Self {
             options,
             plan,
@@ -878,9 +887,9 @@ fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 }
 
 /// Runs `engine` here while `controller` injects faults from its own sessions; `ready` starts the engine.
-fn controlled<T>(
-    fixture: &mut Fixture,
-    engine: impl FnOnce(&mut Fixture) -> T,
+fn controlled<S, T>(
+    subject: S,
+    engine: impl FnOnce(S) -> T,
     controller: impl FnOnce(&dyn Fn()) + Send,
 ) -> T {
     let (sender, started) = std::sync::mpsc::channel();
@@ -893,7 +902,7 @@ fn controlled<T>(
         if started.recv().is_err() {
             std::panic::resume_unwind(control.join().unwrap_err());
         }
-        let result = engine(fixture);
+        let result = engine(subject);
         if let Err(panic) = control.join() {
             std::panic::resume_unwind(panic);
         }
@@ -1075,7 +1084,7 @@ fn live_split_lost_part_marker_commit_resolves_through_fence_barrier_or_restarts
             &schema,
             " WHERE ctid >= '(150,0)'::pg_catalog.tid",
         );
-        let hold = CommitHold::start(3);
+        let hold = CommitHold::start(Withhold::Copy(3));
         fixture.options.target = hold.conninfo(&direct);
         let coordinator = fixture.authority.coordinator_pid();
         let observed = std::sync::Mutex::new((false, None));
@@ -1480,6 +1489,251 @@ fn live_large_object_restart_unlinks_only_owned_objects_and_keeps_foreign_ones()
     assert_eq!(large_objects(&mut target), replaced);
 }
 
+/// A kill point inside the target publish of a generation advance, after the native advance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AdvanceKill {
+    BeforeReset,
+    MidLargeObjectReset,
+    BeforeCommit,
+    AfterCommit,
+}
+
+const ADVANCE_ROWS: u64 = 2000;
+
+fn metadata_schema(target: &mut PgConnection) -> String {
+    value(
+        target,
+        r"SELECT pg_catalog.quote_ident(nspname) FROM pg_catalog.pg_namespace WHERE nspname LIKE '\_rpgmigrate\_%'",
+    )
+}
+
+/// The target control generation and its `markers/of generation` and `receipts/of generation` counts.
+fn target_generation(target: &mut PgConnection, generation: u64) -> String {
+    let metadata = metadata_schema(target);
+    value(
+        target,
+        &format!(
+            "SELECT (SELECT clone_state::pg_catalog.jsonb->>'generation' FROM ONLY {metadata}.checkpoint)||' '||(SELECT count(*)||'/'||count(*) FILTER (WHERE copy_generation={generation}) FROM ONLY {metadata}.copy_done)||' '||(SELECT count(*)||'/'||count(*) FILTER (WHERE copy_generation={generation}) FROM ONLY {metadata}.large_object_done)"
+        ),
+    )
+}
+
+fn native_generation(options: &CloneOptions) -> (u64, Option<u64>) {
+    let saved = state::inspect_clone(&options.state, None, &control())
+        .unwrap()
+        .clone_state;
+    assert_eq!(saved.phase, ClonePhase::Copying);
+    (
+        saved.plan.generation.0,
+        saved.recopy.map(|previous| previous.generation.0),
+    )
+}
+
+/// Restarts from `options` and kills that engine at `point`; the target stays at its previous generation
+/// unless the withheld COMMIT is forwarded.
+fn kill_generation_advance(
+    databases: &FreshDatabases,
+    options: &CloneOptions,
+    schema: &str,
+    point: AdvanceKill,
+) {
+    let restart = |options: CloneOptions| Fixture::reopen(options, schema.into()).err();
+    let failure = if matches!(point, AdvanceKill::BeforeCommit | AdvanceKill::AfterCommit) {
+        let hold = CommitHold::start(Withhold::After(b"lo_unlink"));
+        let mut held = options.clone();
+        held.target = hold.conninfo(&options.target);
+        controlled(held, restart, |ready| {
+            ready();
+            hold.wait_held();
+            let commit = point == AdvanceKill::AfterCommit;
+            assert_eq!(hold.release(commit).as_deref(), commit.then_some("COMMIT"));
+        })
+    } else {
+        controlled(options.clone(), restart, |ready| {
+            let mut source = connect(&databases.source);
+            let mut target = connect(&databases.target);
+            let mut blocker = connect(&databases.target);
+            let metadata = metadata_schema(&mut target);
+            let object =
+                "locktype='object' AND classid='pg_catalog.pg_largeobject'::pg_catalog.regclass";
+            let (lock, waiter) = if point == AdvanceKill::BeforeReset {
+                (
+                    format!("LOCK TABLE ONLY {metadata}.copy_done IN ACCESS EXCLUSIVE MODE"),
+                    format!(
+                        "locktype='relation' AND relation='{metadata}.copy_done'::pg_catalog.regclass"
+                    ),
+                )
+            } else {
+                // The comment lock blocks the deletion lock that lo_unlink takes on the second object.
+                (
+                    "COMMENT ON LARGE OBJECT 94002 IS NULL".into(),
+                    format!("{object} AND objid=94002"),
+                )
+            };
+            blocker.query("BEGIN", &control()).unwrap();
+            blocker.query(&lock, &control()).unwrap();
+            ready();
+            wait_until(
+                "the coordinator did not wait inside its generation publish",
+                || {
+                    value(
+                        &mut target,
+                        &format!(
+                            "SELECT count(*) FROM pg_catalog.pg_locks WHERE NOT granted AND {waiter}"
+                        ),
+                    ) == "1"
+                },
+            );
+            if point == AdvanceKill::MidLargeObjectReset {
+                let unlinked = format!(
+                    "SELECT count(*) FROM pg_catalog.pg_locks WHERE granted AND mode='AccessExclusiveLock' AND {object} AND objid=94001"
+                );
+                assert_eq!(
+                    value(&mut target, &unlinked),
+                    "1",
+                    "the first owned object was not unlinked yet"
+                );
+            }
+            kill_engine(&mut [&mut source, &mut target, &mut blocker]);
+        })
+    };
+    assert!(
+        !failure
+            .expect("the killed restart completed")
+            .message
+            .is_empty()
+    );
+}
+
+#[test]
+#[ignore = "requires the disposable M8 PostgreSQL harness"]
+fn live_generation_advance_kills_resume_the_recopy_intent_with_every_row_and_object_once() {
+    let databases = FreshDatabases::create();
+    let ddl = "CREATE TABLE payload (id integer, value text)";
+    let seed = [
+        format!(
+            "INSERT INTO payload SELECT n,'row-'||n FROM generate_series(1,{ADVANCE_ROWS}) AS n"
+        ),
+        "SELECT pg_catalog.lo_from_bytea(94001,pg_catalog.decode(repeat('a1',4096),'hex'))".into(),
+        "SELECT pg_catalog.lo_from_bytea(94002,pg_catalog.decode(repeat('5a',70000),'hex'))".into(),
+        "SELECT pg_catalog.lo_from_bytea(94003,pg_catalog.decode('00ff275c','hex'))".into(),
+    ];
+    let seed = seed.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut fixture = Fixture::new_on(
+        databases.source.clone(),
+        databases.target.clone(),
+        &[ddl],
+        &[ddl],
+        &seed,
+        CopyFormat::Text,
+        vec![crate::contracts::CopyPart {
+            number: 1,
+            count: 1,
+            start_block: 0,
+            end_block: None,
+        }],
+    );
+    fixture.options.large_objects_jobs = 1;
+    let expected = large_objects(&mut connect(&databases.source));
+    assert_eq!(expected.len(), 3);
+    // A kill terminates every other session on the target, so each check opens its own.
+    let observe = || connect(&databases.target);
+    let copy_once = |fixture: &mut Fixture| {
+        assert_eq!(fixture.copy().unwrap().rows, ADVANCE_ROWS);
+        assert_eq!(fixture.copy_large_objects().unwrap().objects, 3);
+        let mut target = observe();
+        assert_eq!(
+            rows(&mut target, &fixture.schema, ""),
+            (ADVANCE_ROWS, ADVANCE_ROWS)
+        );
+        assert_eq!(large_objects(&mut target), expected);
+        let generation = fixture.plan.generation.0;
+        assert_eq!(
+            target_generation(&mut target, generation),
+            format!("{generation} 1/1 3/3")
+        );
+    };
+    copy_once(&mut fixture);
+
+    for point in [
+        AdvanceKill::BeforeReset,
+        AdvanceKill::MidLargeObjectReset,
+        AdvanceKill::BeforeCommit,
+        AdvanceKill::AfterCommit,
+    ] {
+        let (options, schema) = (fixture.options.clone(), fixture.schema.clone());
+        let generation = fixture.plan.generation.0;
+        drop(fixture);
+        // A restart that resumes an intent and is killed again leaves the same intent behind.
+        let kills: &[AdvanceKill] = if point == AdvanceKill::BeforeReset {
+            &[point, AdvanceKill::MidLargeObjectReset]
+        } else {
+            &[point]
+        };
+        for kill in kills {
+            kill_generation_advance(&databases, &options, &schema, *kill);
+            let mut target = observe();
+            assert_eq!(
+                native_generation(&options),
+                (generation + 1, Some(generation)),
+                "{kill:?}"
+            );
+            if point == AdvanceKill::AfterCommit {
+                assert_eq!(
+                    target_generation(&mut target, generation + 1),
+                    format!("{} 0/0 0/0", generation + 1)
+                );
+                assert!(large_objects(&mut target).is_empty());
+            } else {
+                assert_eq!(
+                    target_generation(&mut target, generation),
+                    format!("{generation} 1/1 3/3"),
+                    "{kill:?}"
+                );
+                assert_eq!(large_objects(&mut target), expected, "{kill:?}");
+            }
+            assert_eq!(rows(&mut target, &schema, ""), (ADVANCE_ROWS, ADVANCE_ROWS));
+        }
+        if point == AdvanceKill::BeforeReset {
+            // An intent naming another snapshot of the previous generation is not this run's target.
+            let manifest = options.state.path.join("manifest.json");
+            let original = std::fs::read(&manifest).unwrap();
+            let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            changed["clone_state"]["recopy"]["token"] = "foreign-previous-snapshot".into();
+            std::fs::write(&manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let refusal = Fixture::reopen(options.clone(), schema.clone())
+                .err()
+                .unwrap();
+            assert!(
+                refusal
+                    .message
+                    .contains("generation or snapshot binding differs"),
+                "{}",
+                refusal.message
+            );
+            assert_eq!(
+                native_generation(&options),
+                (generation + 1, Some(generation))
+            );
+            assert_eq!(
+                target_generation(&mut observe(), generation),
+                format!("{generation} 1/1 3/3")
+            );
+            std::fs::write(&manifest, original).unwrap();
+        }
+        fixture = Fixture::reopen(options.clone(), schema).unwrap();
+        assert_eq!(fixture.plan.generation.0, generation + 2);
+        assert_eq!(native_generation(&options), (generation + 2, None));
+        let mut target = observe();
+        assert_eq!(
+            target_generation(&mut target, generation + 2),
+            format!("{} 0/0 0/0", generation + 2)
+        );
+        assert!(large_objects(&mut target).is_empty());
+        copy_once(&mut fixture);
+    }
+}
+
 #[derive(Default)]
 struct HeldCommit {
     pid: Option<u32>,
@@ -1492,7 +1746,16 @@ struct HeldCommit {
 
 type SharedHold = Arc<(std::sync::Mutex<HeldCommit>, std::sync::Condvar)>;
 
-/// Relays target sessions and withholds the COMMIT of the n-th COPY FROM STDIN session from the server.
+/// The target session whose next COMMIT the relay withholds.
+#[derive(Clone, Copy)]
+enum Withhold {
+    /// The n-th session to start a COPY FROM STDIN.
+    Copy(u64),
+    /// The first session to send a statement containing these bytes.
+    After(&'static [u8]),
+}
+
+/// Relays target sessions and withholds the selected session's COMMIT from the server.
 struct CommitHold {
     directory: PathBuf,
     shared: SharedHold,
@@ -1501,7 +1764,7 @@ struct CommitHold {
 }
 
 impl CommitHold {
-    fn start(copy: usize) -> Self {
+    fn start(select: Withhold) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let context = harness_context();
         let socket_dir = PathBuf::from(context["socket_dir"].as_str().unwrap());
@@ -1530,7 +1793,7 @@ impl CommitHold {
                             let (upstream, copies, shared) =
                                 (upstream.clone(), copies.clone(), shared.clone());
                             std::thread::spawn(move || {
-                                relay_session(client, &upstream, &copies, copy as u64, &shared)
+                                relay_session(client, &upstream, &copies, select, &shared)
                             });
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1620,7 +1883,7 @@ fn relay_session(
     mut client: std::os::unix::net::UnixStream,
     upstream: &std::path::Path,
     copies: &AtomicU64,
-    selected: u64,
+    select: Withhold,
     shared: &SharedHold,
 ) {
     use std::io::Write;
@@ -1685,12 +1948,16 @@ fn relay_session(
                 .split(|byte| *byte == 0)
                 .next()
                 .unwrap_or(&[]);
-            if !counted
-                && query.starts_with(b"COPY ")
-                && query.windows(11).any(|w| w == b" FROM STDIN")
-            {
+            let (matched, rank) = match select {
+                Withhold::Copy(rank) => (
+                    query.starts_with(b"COPY ") && query.windows(11).any(|w| w == b" FROM STDIN"),
+                    rank,
+                ),
+                Withhold::After(needle) => (query.windows(needle.len()).any(|w| w == needle), 1),
+            };
+            if !counted && matched {
                 counted = true;
-                selected_session = copies.fetch_add(1, Ordering::SeqCst) + 1 == selected;
+                selected_session = copies.fetch_add(1, Ordering::SeqCst) + 1 == rank;
             }
             if selected_session && query == b"COMMIT" {
                 held.store(true, Ordering::Release);

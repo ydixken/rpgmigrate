@@ -301,6 +301,7 @@ mod tests {
                 generation,
             }],
             completion: None,
+            recopy: None,
         };
         let progress = CloneProgress {
             generation,

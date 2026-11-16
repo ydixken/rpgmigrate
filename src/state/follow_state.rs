@@ -797,6 +797,7 @@ impl NativeState {
             owned_objects: Vec::new(),
             owned_tables: Vec::new(),
             completion: None,
+            recopy: None,
         };
         clone.validate()?;
         if restarting {
@@ -868,6 +869,15 @@ impl FollowState {
             .is_some_and(|name| !valid_name(name))
         {
             return Err(bad_state("state-follow: invalid unowned origin name"));
+        }
+        if manifest
+            .clone_state
+            .as_ref()
+            .is_some_and(|clone| clone.recopy.is_some())
+        {
+            return Err(bad_state(
+                "state-follow: follow restart keeps its own restart record, not a clone recopy intent",
+            ));
         }
         if self.cleanup.is_some() {
             let binding = self.binding.as_ref().ok_or_else(|| {
@@ -1528,6 +1538,27 @@ mod tests {
         );
         native.finish_follow_restart().unwrap();
         assert!(native.checked_follow_restart().unwrap().is_none());
+    }
+
+    #[test]
+    fn follow_state_never_carries_a_clone_recopy_intent() {
+        let (tmp, mut native, plan, _) = bound_follow();
+        let manifest = tmp.path().join("manifest.json");
+        let before = fs::read(&manifest).unwrap();
+        let mut next = native.checked_manifest().unwrap();
+        next.clone_state.as_mut().unwrap().recopy = Some(SnapshotTicket {
+            token: "snapshot-0".into(),
+            source: plan.source.clone(),
+            generation: CopyGeneration(0),
+        });
+        let error = native.replace_manifest(next).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("state-follow: follow restart keeps"),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), before);
     }
 
     #[test]

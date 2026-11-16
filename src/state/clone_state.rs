@@ -43,6 +43,9 @@ pub(crate) struct CloneState {
     pub(crate) owned_objects: Vec<OwnedObject>,
     pub(crate) owned_tables: Vec<OwnedCopyTable>,
     pub(crate) completion: Option<CopyReport>,
+    /// The previous generation's ticket, kept from the native advance until the target publishes it.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) recopy: Option<SnapshotTicket>,
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +226,7 @@ impl NativeState {
             owned_objects: Vec::new(),
             owned_tables: Vec::new(),
             completion: None,
+            recopy: None,
         };
         clone.validate()?;
         if let Some(existing) = &next.clone_state {
@@ -321,6 +325,11 @@ impl NativeState {
                 "state-recovery: recopy requires positively owned pre-postdata state",
             ));
         }
+        if clone.recopy.is_some() {
+            return Err(bad_state(
+                "state-recovery: the interrupted generation advance must reach the target first",
+            ));
+        }
         let generation = clone
             .plan
             .generation
@@ -341,7 +350,8 @@ impl NativeState {
                 "state-generation: fresh snapshot source or generation differs",
             ));
         }
-        clone.ticket = ticket.clone();
+        // The intent lands in the same manifest write as the generation, so no state has one without the other.
+        clone.recopy = Some(std::mem::replace(&mut clone.ticket, ticket.clone()));
         clone.plan = plan.clone();
         for table in &mut clone.owned_tables {
             table.generation = ticket.generation;
@@ -349,6 +359,21 @@ impl NativeState {
         clone.completion = None;
         clone.validate()?;
         self.replace_manifest(next)
+    }
+
+    /// Drops the recopy intent once the target holds the native generation and returns the state.
+    pub(crate) fn finish_recopy(&mut self) -> Result<CloneState> {
+        let mut next = self.checked_manifest()?;
+        let clone = next
+            .clone_state
+            .as_mut()
+            .ok_or_else(|| bad_state("state-clone: clone binding is absent"))?;
+        if clone.recopy.take().is_none() {
+            return Ok(clone.clone());
+        }
+        let finished = clone.clone();
+        self.replace_manifest(next)?;
+        Ok(finished)
     }
 
     pub(crate) fn mark_stage(&mut self, phase: ClonePhase) -> Result<()> {
@@ -499,6 +524,18 @@ impl CloneState {
         {
             return Err(bad_state(
                 "state-clone: invalid clone identity, snapshot, generation, or profile",
+            ));
+        }
+        if self.recopy.as_ref().is_some_and(|previous| {
+            self.phase != ClonePhase::Copying
+                || previous.source != plan.source
+                || previous.generation.0.checked_add(1) != Some(plan.generation.0)
+                || previous.token.is_empty()
+                || previous.token.len() > MAX_SNAPSHOT_TOKEN_BYTES
+                || previous.token.contains('\0')
+        }) {
+            return Err(bad_state(
+                "state-recovery: recopy intent is not the previous generation of a copying clone",
             ));
         }
         let owned_phase = !matches!(self.phase, ClonePhase::Fresh | ClonePhase::PreDataPending);

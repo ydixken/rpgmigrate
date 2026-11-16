@@ -48,6 +48,9 @@ Keep workdirs private and preserve ownership and permissions when retaining evid
 
 A lost pre-anchor snapshot cannot be reused.
 An admitted restart must obtain a new snapshot and generation, with exact owned target cleanup and the documented boundary checks.
+A clone restart advances native state first and records the previous generation's snapshot as a recopy intent in the same write.
+If the process dies before the target commits its reset of the previous generation's markers and owned large objects, the next `--restart` or `--resume --not-consistent` publishes that pending generation first and then starts a fresh one.
+The target must still hold exactly the recorded previous generation and snapshot, or already hold the native generation with no retained receipts; any other target refuses before a write.
 An uncertain pre-data ownership handoff or post-data utility outcome refuses recovery.
 Preserve uncertain objects for manual review or use a fresh positively established migration.
 
@@ -60,6 +63,8 @@ Do not recreate a same-name slot, silently start from a later position, or turn 
 A lost COMMIT reply or synchronous-wait warning leaves the outcome unknown.
 Do not infer rollback from the connection error or advance feedback from visible data.
 Require the checked independent barrier described in [target observation](native-cutover-handoff.md#independent-m6-observation).
+During the initial copy, an absent COPY marker or large-object receipt after that barrier needs `--restart` under a new copy generation.
+In the final large-object re-sync the follow is anchored and cannot restart its copy generation, so resume the follow and let its next drain repeat the re-sync.
 
 An active worker can hold the target fence after set-endpos has persisted E locally.
 Keep the saved E, wait for worker exit, and retry identical-E JSON observation with the standalone helper.

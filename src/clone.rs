@@ -2,7 +2,7 @@ use crate::apply::CloneAuthority;
 use crate::catalog;
 use crate::contracts::{
     CloneOptions, ClonePlan, CopyGeneration, CopyReport, Error, ErrorKind, IoControl, OwnedObject,
-    RestorePolicy, Result, StateAction,
+    RestorePolicy, Result, SnapshotTicket, StateAction,
 };
 use crate::identity::StreamId;
 use crate::pg::PgConnection;
@@ -193,8 +193,13 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
                     "clone-recovery: recorded table ownership changed before restart",
                 ));
             }
-            native.advance_copy_generation(&candidate, snapshot.ticket())?;
-            authority.advance_generation(&native, io)?;
+            advance_copy_generation(
+                &mut native,
+                &mut authority,
+                &candidate,
+                snapshot.ticket(),
+                io,
+            )?;
             plan = candidate;
         }
         let archive = crate::schema::dump(&options, snapshot.ticket(), &native, io)?;
@@ -257,6 +262,25 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
     authority.record_complete(&report, io)?;
     native.record_clone_complete(&report)?;
     completion(&options, &native, &plan, &report, io)
+}
+
+/// Moves native state, then the target, to `candidate`; a recopy intent left by a crash between
+/// those two steps is published to the target first, so the restart takes the exact next generation.
+pub(crate) fn advance_copy_generation(
+    native: &mut NativeState,
+    authority: &mut CloneAuthority,
+    candidate: &ClonePlan,
+    ticket: &SnapshotTicket,
+    io: &IoControl,
+) -> Result<()> {
+    if native
+        .checked_clone()?
+        .is_some_and(|state| state.recopy.is_some())
+    {
+        authority.advance_generation(native, io)?;
+    }
+    native.advance_copy_generation(candidate, ticket)?;
+    authority.advance_generation(native, io)
 }
 
 pub(crate) fn require_pre_data_match(result: Result<bool>) -> Result<()> {
