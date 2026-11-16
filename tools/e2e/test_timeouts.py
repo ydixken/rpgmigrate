@@ -2,6 +2,7 @@
 
 import copy
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -71,6 +72,54 @@ class HarnessOptionsTests(unittest.TestCase):
         database.harness_options = timeouts.harness_options(18)
         self.assertNotIn("options", database.connection("x"))
         self.assertNotIn("options", database.operator_uri("x", "source"))
+
+
+class FreshSession:
+    """Answers each psql call with the next (returncode, stderr); refuses calls past the script."""
+
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        if not self.answers:
+            raise AssertionError("fresh-session check ran past its bound")
+        returncode, stderr = self.answers.pop(0)
+        return subprocess.CompletedProcess(command, returncode, b"20ms\n" if returncode == 0 else b"", stderr)
+
+
+IDLE = (2, b"FATAL:  57P05\nserver closed the connection unexpectedly\nconnection to server was lost\n")
+
+
+class FreshSettingTests(unittest.TestCase):
+    def setUp(self):
+        self.database = clone.Database("source", Path("/bin"), {})
+        self.database.harness_options = timeouts.harness_options(18)
+
+    def test_one_fresh_session_without_options_reads_the_value(self):
+        session = FreshSession((0, b""))
+        self.assertEqual(timeouts.fresh_setting(self.database, "x", "idle_session_timeout", run=session), "20ms")
+        command, kwargs = session.calls[0]
+        self.assertNotIn("options", " ".join(command))
+        self.assertIn("VERBOSITY=sqlstate", command)
+        self.assertEqual(kwargs["input"], b"SELECT pg_catalog.current_setting('idle_session_timeout');")
+
+    def test_only_the_idle_session_fatal_is_retried(self):
+        session = FreshSession(IDLE, IDLE, (0, b""))
+        self.assertEqual(timeouts.fresh_setting(self.database, "x", "idle_session_timeout", run=session), "20ms")
+        self.assertEqual(len(session.calls), 3)
+        for stderr in (b"ERROR:  57014\n", b"FATAL:  57P01\nconnection to server was lost\n", b"FATAL:  57P055\n",
+                       b"psql: error: connection to server failed\n", b"", b"FATAL:  terminating connection due to idle-session timeout\n"):
+            session = FreshSession((2, stderr), (0, b""))
+            with self.subTest(stderr=stderr), self.assertRaises(RuntimeError):
+                timeouts.fresh_setting(self.database, "x", "idle_session_timeout", run=session)
+            self.assertEqual(len(session.calls), 1)
+
+    def test_retries_are_bounded_and_never_read_as_success(self):
+        session = FreshSession(*[IDLE] * timeouts.FRESH_ATTEMPTS)
+        with self.assertRaisesRegex(RuntimeError, "ended every fresh session"):
+            timeouts.fresh_setting(self.database, "x", "idle_session_timeout", run=session)
+        self.assertEqual(len(session.calls), timeouts.FRESH_ATTEMPTS)
 
 
 class HoldTests(unittest.TestCase):
