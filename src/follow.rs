@@ -192,8 +192,7 @@ fn recopy(
     let mut target = target(options, Role::Copy, io)?;
     if let Some(restart) = native.checked_follow_restart()? {
         if restart.new_bound {
-            authority.advance_generation(native, io)?;
-            native.finish_follow_restart()?;
+            publish_bound_restart(&saved.plan, &mut authority, &mut target, native, io)?;
         } else if restart.slot_absent && restart.publication_absent {
             let mut next = saved.plan.clone();
             next.generation = restart.next_generation;
@@ -233,6 +232,23 @@ fn recopy(
         io,
     )?;
     Ok((plan, binding))
+}
+
+/// Publishes an interrupted restart's bound generation, which unlinks the owned large objects,
+/// so a target large object this run does not own refuses before that write.
+pub(crate) fn publish_bound_restart(
+    plan: &ClonePlan,
+    authority: &mut CloneAuthority,
+    target: &mut PgConnection,
+    native: &mut NativeState,
+    io: &IoControl,
+) -> Result<()> {
+    if !plan.copy_policy.skip_large_objects {
+        let owned = authority.owned_large_object_oids(io)?;
+        catalog::require_owned_large_objects(target, &owned, io)?;
+    }
+    authority.advance_generation(native, io)?;
+    native.finish_follow_restart()
 }
 
 fn restart_plan(

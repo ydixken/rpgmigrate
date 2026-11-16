@@ -208,6 +208,8 @@ Each restart resumes the recopy intent, ends two generations later and copies ev
 A restart killed again while it resumes the intent leaves the same intent, and an intent naming another snapshot of the previous generation refuses before any write.
 `task test-follow-authority` adds one case that kills the final large-object re-sync mid-way and again after its durable receipt.
 The next drain must reconcile, refuse after source drift, and report completion only once the target matches the source.
+A second case stops a follow restart after its new binding and before the publish that resets the previous generation, then adds a foreign large object.
+The restart must refuse naming only that object and leave the target row and objects unchanged, then publish and unlink only owned objects once it is gone.
 Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]

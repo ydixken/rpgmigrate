@@ -186,6 +186,7 @@ Refresh the views on the target after cutover when their content must reflect la
 With large objects selected, clone and follow refuse a target that holds a large object this run does not own, before the pre-data restore.
 A fresh run owns none, so any target large object refuses.
 A restart of the copy admits exactly the OIDs that this run's durable large-object receipts record, and refuses any other before the owned reset.
+That includes a restart that first finishes an interrupted generation advance, in clone or follow, so the refusal comes before any target write.
 The refusal names the count and the lowest unowned OID.
 The check reads `pg_catalog.pg_largeobject_metadata` directly, because an object owned by the bootstrap superuser has no `pg_shdepend` row.
 With `--skip-large-objects` the check does not apply.

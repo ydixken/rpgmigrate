@@ -133,7 +133,7 @@ def protocol_self_check(cluster, manifest):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--follow-authority", action="store_true", help="require eighteen exact native pgoutput target authority, cutover and final re-sync fault cases")
+    modes.add_argument("--follow-authority", action="store_true", help="require nineteen exact native pgoutput target authority, cutover, final re-sync and restart admission cases")
     modes.add_argument("--follow-receive", action="store_true", help="require eleven exact native pgoutput receiver and checked cutover cases")
     modes.add_argument("--follow-apply", action="store_true", help="require twelve exact native pgoutput row semantics and catalog identity cases")
     modes.add_argument("--follow-snapshot", action="store_true", help="require nine exact pgoutput snapshot cases and five independent fault receipts")

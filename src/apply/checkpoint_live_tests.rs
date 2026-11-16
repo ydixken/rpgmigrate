@@ -4497,3 +4497,149 @@ fn follow_final_large_object_resync_kill_reconciles_or_refuses_and_never_complet
     );
     assert_eq!(large_object_rows(&mut target), expected);
 }
+
+#[test]
+#[ignore = "requires owned authority PostgreSQL harness"]
+fn follow_bound_restart_refuses_a_foreign_large_object_before_its_publish() {
+    let io = control();
+    let _objects = CaseObjects(&[93011, 93012, 93019]);
+    let options = large_object_cutover_options();
+    let initial = state();
+    let path = initial.identity().canonical_path.clone();
+    drop(initial);
+    let mut native = crate::state::open_follow(
+        &StateRequest {
+            path,
+            action: StateAction::Resume,
+        },
+        None,
+        None,
+        &io,
+    )
+    .unwrap();
+    let mut source = named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", &io);
+    let mut target = named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io);
+    let objects = "SELECT coalesce(pg_catalog.string_agg(oid::pg_catalog.text,',' ORDER BY oid),'') FROM pg_catalog.pg_largeobject_metadata";
+    for sql in [
+        "SELECT pg_catalog.lo_from_bytea(93011,pg_catalog.decode('0a0b','hex'))",
+        "SELECT pg_catalog.lo_from_bytea(93012,pg_catalog.decode('0c0d','hex'))",
+    ] {
+        source.query(sql, &io).unwrap();
+    }
+    assert_eq!(scalar_text(&mut source, objects), "93011,93012");
+    assert_eq!(scalar_text(&mut target, objects), "");
+    let mut plan = ClonePlan {
+        source: crate::catalog::read_clone_source(&mut source, &io).unwrap(),
+        target: crate::catalog::read_clone_target(&mut target, &io).unwrap(),
+        generation: CopyGeneration(1),
+        tables: Vec::new(),
+        copy_policy: options.copy_policy(),
+        copy_tables: Vec::new(),
+        sequences: Vec::new(),
+        policy: crate::contracts::RestorePolicy::default(),
+    };
+    let ticket = |plan: &ClonePlan, binding: &FollowBinding| crate::contracts::SnapshotTicket {
+        token: binding.slot.snapshot_token.clone(),
+        source: plan.source.clone(),
+        generation: plan.generation,
+    };
+    let binding = follow_reset_resources(&mut native, &plan, 30);
+    native
+        .bind_follow(&plan, &ticket(&plan, &binding), &binding)
+        .unwrap();
+    let mut copy = CloneAuthority::acquire(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+        &mut native,
+        &plan,
+        &io,
+    )
+    .unwrap();
+    native.begin_pre_data().unwrap();
+    copy.mark_stage(ClonePhase::PreDataPending, &io).unwrap();
+    native
+        .confirm_pre_data(&plan, Vec::new(), Vec::new())
+        .unwrap();
+    copy.bind_tables(&native, &io).unwrap();
+    let mut snapshot = crate::snapshot::CloneSnapshot::export(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_SOURCE", &io),
+        plan.generation,
+        &io,
+    )
+    .unwrap();
+    crate::large_objects::run_initial(&options, &plan, &mut snapshot, &mut copy, &io).unwrap();
+    snapshot.finish(&io).unwrap();
+    // Stop a follow restart after its new binding and before the publish that resets generation 1.
+    let restart = copy.begin_follow_restart(&mut native, &plan, &io).unwrap();
+    native.confirm_follow_slot_absent(&restart).unwrap();
+    native.confirm_follow_publication_absent(&restart).unwrap();
+    plan.generation = CopyGeneration(2);
+    let binding = follow_reset_resources(&mut native, &plan, 40);
+    native
+        .bind_follow(&plan, &ticket(&plan, &binding), &binding)
+        .unwrap();
+    drop(copy);
+    let saved = native.checked_clone().unwrap().unwrap();
+    let mut authority = CloneAuthority::acquire(
+        named_connection("RPGMIGRATE_TEST_AUTHORITY_ADMIN", &io),
+        &mut native,
+        &saved.plan,
+        &io,
+    )
+    .unwrap();
+    assert!(native.checked_follow_restart().unwrap().unwrap().new_bound);
+    assert_eq!(
+        authority.owned_large_object_oids(&io).unwrap(),
+        [93011, 93012]
+    );
+    target
+        .query(
+            "SELECT pg_catalog.lo_from_bytea(93019,pg_catalog.decode('00ff','hex'))",
+            &io,
+        )
+        .unwrap();
+    let row = format!(
+        "SELECT t.xmin::pg_catalog.text||' '||pg_catalog.row_to_json(t)::pg_catalog.text FROM {} t",
+        qualified(&mut target, &authority.authority.provenance)
+    );
+    let before = scalar_text(&mut target, &row);
+
+    let refusal = crate::follow::publish_bound_restart(
+        &saved.plan,
+        &mut authority,
+        &mut target,
+        &mut native,
+        &io,
+    )
+    .unwrap_err();
+    assert!(
+        refusal.message.contains(
+            "clone refuses 1 target large objects this run does not own, first OID 93019"
+        ),
+        "{}",
+        refusal.message
+    );
+    assert!(native.checked_follow_restart().unwrap().unwrap().new_bound);
+    assert_eq!(scalar_text(&mut target, &row), before);
+    assert_eq!(scalar_text(&mut target, objects), "93011,93012,93019");
+    assert_eq!(
+        authority.owned_large_object_oids(&io).unwrap(),
+        [93011, 93012]
+    );
+
+    // Without the foreign object the same restart publishes generation 2 and unlinks only owned objects.
+    target
+        .query("SELECT pg_catalog.lo_unlink(93019)", &io)
+        .unwrap();
+    crate::follow::publish_bound_restart(
+        &saved.plan,
+        &mut authority,
+        &mut target,
+        &mut native,
+        &io,
+    )
+    .unwrap();
+    assert!(native.checked_follow_restart().unwrap().is_none());
+    assert_ne!(scalar_text(&mut target, &row), before);
+    assert_eq!(scalar_text(&mut target, objects), "");
+    assert!(authority.owned_large_object_oids(&io).unwrap().is_empty());
+}

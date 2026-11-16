@@ -7,7 +7,8 @@ pub(crate) use clone::provisional_copy_tables;
 pub(crate) use clone::{
     analyze_clone, binary_copy_compatible, clone_object_inventory, inspect_clone_tables,
     plan_clone, read_clone_source, read_clone_target, reconcile_clone_tables,
-    resolve_clone_copy_tables, sync_clone_sequences, verify_exact_exclusions,
+    require_owned_large_objects, resolve_clone_copy_tables, sync_clone_sequences,
+    verify_exact_exclusions,
 };
 pub(crate) use follow::{
     FollowRelation, check_follow_health, follow_confirmed_flush, follow_start_confirmed_flush,
