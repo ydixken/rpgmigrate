@@ -32,7 +32,9 @@ fn entry(phase: Option<ClonePhase>, anchored: bool, action: StateAction) -> Resu
     match (phase, anchored, action) {
         (None, false, _) => Ok(Entry::Fresh),
         (Some(ClonePhase::Analyzing), true, StateAction::Resume) => Ok(Entry::Streaming),
-        (Some(ClonePhase::Copying), false, StateAction::Resume | StateAction::Restart) => {
+        (Some(phase), false, StateAction::Resume | StateAction::Restart)
+            if phase.restarts_copy() =>
+        {
             Ok(Entry::Recopy)
         }
         _ => Err(refusal(
@@ -202,6 +204,8 @@ fn recopy(
     let saved = native
         .checked_clone()?
         .ok_or_else(|| refusal("follow: restart lost owned copy state"))?;
+    // A Fresh run restored no pre-data, so after its new snapshot it continues as a first run does.
+    let pre_data = saved.phase == ClonePhase::Fresh;
     let owned_large_objects = authority.owned_large_object_oids(io)?;
     let checked = restart_plan(
         options,
@@ -216,18 +220,22 @@ fn recopy(
     plan.generation = restart.next_generation;
     let mut snapshot = FollowSnapshot::restart(options, &plan, native, io)?;
     let binding = snapshot.binding().clone();
-    plan = crate::clone::resolve_copy_profile(snapshot.snapshot_mut(), &mut target, &plan, io)?;
+    if !pre_data {
+        plan = crate::clone::resolve_copy_profile(snapshot.snapshot_mut(), &mut target, &plan, io)?;
+    }
     native.bind_follow(&plan, snapshot.snapshot_mut().ticket(), &binding)?;
     authority.advance_generation(native, io)?;
     native.finish_follow_restart()?;
-    authority.truncate_follow_workset(native, io)?;
+    if !pre_data {
+        authority.truncate_follow_workset(native, io)?;
+    }
     let plan = copy_initial(
         options,
         &plan,
         snapshot,
         native,
         &mut authority,
-        false,
+        pre_data,
         &mut target,
         io,
     )?;
@@ -280,12 +288,14 @@ fn restart_plan(
         &checked.tables,
         io,
     )?;
-    crate::clone::require_pre_data_match(crate::schema::compare_pre_data(
-        &options.clone,
-        snapshot.ticket(),
-        &metadata,
-        io,
-    ))?;
+    if saved.phase != ClonePhase::Fresh {
+        crate::clone::require_pre_data_match(crate::schema::compare_pre_data(
+            &options.clone,
+            snapshot.ticket(),
+            &metadata,
+            io,
+        ))?;
+    }
     snapshot.finish(io)?;
     Ok(checked)
 }
@@ -1255,14 +1265,12 @@ mod tests {
     }
 
     #[test]
-    fn only_recorded_copying_can_restart_before_anchor() {
+    fn only_recorded_fresh_or_copying_can_restart_before_anchor() {
         for action in [StateAction::Resume, StateAction::Restart] {
-            assert_eq!(
-                entry(Some(ClonePhase::Copying), false, action).unwrap(),
-                Entry::Recopy
-            );
+            for phase in [ClonePhase::Fresh, ClonePhase::Copying] {
+                assert_eq!(entry(Some(phase), false, action).unwrap(), Entry::Recopy);
+            }
             for phase in [
-                ClonePhase::Fresh,
                 ClonePhase::PreDataPending,
                 ClonePhase::PostDataPending,
                 ClonePhase::PostDataComplete,

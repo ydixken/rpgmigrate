@@ -2524,3 +2524,305 @@ fn live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adop
         );
     }
 }
+
+/// A source and a target database on the follow harness cluster, dropped with the case.
+struct FreshPair {
+    admin: PgConnection,
+    names: [String; 2],
+    endpoints: super::fresh_kill::Endpoints,
+    root: PathBuf,
+}
+
+impl FreshPair {
+    fn new(seed: &str) -> Self {
+        let context: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned follow harness required"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let root = PathBuf::from(context["root"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+            context["token"].as_str().unwrap()
+        );
+        let admin_info = std::env::var("RPGMIGRATE_TEST_FOLLOW_SOURCE_ADMIN")
+            .expect("owned follow source required");
+        let mut admin = PgConnection::connect(
+            &Conninfo::new(admin_info.clone().into()).unwrap(),
+            crate::pg::Role::Copy,
+            &control(),
+        )
+        .unwrap();
+        let case = CASE.fetch_add(1, Ordering::Relaxed);
+        let names = ["s", "t"].map(|side| format!("m8_fresh_{side}_{}_{case}", std::process::id()));
+        for name in &names {
+            admin
+                .query(&format!("CREATE DATABASE {name}"), &control())
+                .unwrap();
+        }
+        let info =
+            |name: &str| Conninfo::new(format!("{admin_info} dbname={name}").into()).unwrap();
+        let endpoints = super::fresh_kill::Endpoints {
+            source: info(&names[0]),
+            target: info(&names[1]),
+        };
+        let mut source =
+            PgConnection::connect(&endpoints.source, crate::pg::Role::Copy, &control()).unwrap();
+        for statement in seed.split(';').filter(|s| !s.trim().is_empty()) {
+            source.query(statement, &control()).unwrap();
+        }
+        Self {
+            admin,
+            names,
+            endpoints,
+            root,
+        }
+    }
+
+    fn options(&self) -> FollowOptions {
+        FollowOptions {
+            clone: CloneOptions {
+                source: self.endpoints.source.clone(),
+                target: self.endpoints.target.clone(),
+                state: StateRequest {
+                    path: self.root.join(format!("{}-state", self.names[0])),
+                    action: StateAction::Create,
+                },
+                operator: None,
+                table_jobs: 2,
+                post_data_jobs: 2,
+                policy: RestorePolicy::default(),
+                not_consistent: false,
+                use_copy_binary: true,
+                split_tables_larger_than: 0,
+                split_max_parts: 8,
+                skip_large_objects: false,
+                large_objects_jobs: 2,
+            },
+            slot_name: String::new(),
+            publication_name: String::new(),
+            origin_name: None,
+            apply_group_txns: 100,
+            limits: FollowLimits::default(),
+        }
+    }
+
+    fn data(&self, info: &Conninfo) -> String {
+        scalar(
+            &mut PgConnection::connect(info, crate::pg::Role::Copy, &control()).unwrap(),
+            "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+        )
+    }
+}
+
+impl Drop for FreshPair {
+    fn drop(&mut self) {
+        // The case owns both fresh databases and every slot in them; nothing else is selected.
+        let _ = self.admin.query(
+            &format!("SELECT pg_catalog.pg_drop_replication_slot(slot_name) FROM pg_catalog.pg_replication_slots WHERE database IN ('{}','{}') AND NOT active", self.names[0], self.names[1]),
+            &control(),
+        );
+        for name in &self.names {
+            let _ = self.admin.query(
+                &format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
+                &control(),
+            );
+        }
+    }
+}
+
+const FRESH_SEED: &str = "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))";
+
+/// The native manifest's copy phase, generation and target provenance phase.
+fn fresh_state(options: &FollowOptions) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(options.clone.state.path.join("manifest.json")).unwrap())
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once() {
+    use super::fresh_kill::{FreshKill, follow_until_analyzing, kill_at, kill_in_publish};
+    for (kill, publish) in [
+        (FreshKill::Fence, false),
+        (FreshKill::TargetIntent, false),
+        (FreshKill::TargetCommitted, false),
+        (FreshKill::Confirmed, false),
+        (FreshKill::Confirmed, true),
+    ] {
+        let case = format!("kill={kill:?} publish={publish}");
+        let pair = FreshPair::new(FRESH_SEED);
+        let expected = pair.data(&pair.endpoints.source);
+        assert!(expected.starts_with("300/300 2/"), "{expected}");
+        let mut options = pair.options();
+        let run = crate::state::open_follow(&options.clone.state, None, None, &control())
+            .unwrap()
+            .identity()
+            .run;
+        // The operator's first attempt restarts, and every later attempt resumes without consistency.
+        options.clone.state.action = StateAction::Restart;
+        kill_at(kill, &pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        });
+        let killed = fresh_state(&options);
+        assert_eq!(killed["clone_state"]["phase"], "fresh", "{case}");
+        assert_eq!(killed["clone_state"]["plan"]["generation"], 1, "{case}");
+        let target = killed["target_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["phase"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let schema = super::fresh_kill::metadata_schema(run);
+        let mut observer =
+            PgConnection::connect(&pair.endpoints.target, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let metadata =
+            format!("SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname='{schema}'");
+        match kill {
+            FreshKill::Fence => assert!(target.is_empty(), "{case}"),
+            FreshKill::TargetIntent => {
+                assert_eq!(target, ["provisioning"], "{case}");
+                assert_eq!(scalar(&mut observer, &metadata), "0", "{case}");
+            }
+            FreshKill::TargetCommitted => {
+                assert_eq!(target, ["provisioning"], "{case}");
+                wait_until("the held metadata COMMIT never landed", || {
+                    scalar(&mut observer, &metadata) == "1"
+                });
+            }
+            FreshKill::Confirmed => assert_eq!(target, ["confirmed"], "{case}"),
+        }
+        options.clone.state.action = StateAction::Resume;
+        options.clone.not_consistent = true;
+        let mut generation = 2;
+        if publish {
+            kill_in_publish(&pair.endpoints, run, |io| {
+                crate::follow::run(options.clone(), io)
+            });
+            let interrupted = fresh_state(&options);
+            assert_eq!(interrupted["clone_state"]["phase"], "fresh", "{case}");
+            assert_eq!(
+                interrupted["clone_state"]["plan"]["generation"], 2,
+                "{case}"
+            );
+            assert_eq!(
+                interrupted["follow_state"]["restart"]["new_bound"], true,
+                "{case}"
+            );
+            generation = 3;
+        }
+        let _ = follow_until_analyzing(&pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        });
+        let finished = fresh_state(&options);
+        assert_eq!(finished["clone_state"]["phase"], "analyzing", "{case}");
+        assert_eq!(
+            finished["clone_state"]["plan"]["generation"], generation,
+            "{case}"
+        );
+        assert!(finished["follow_state"]["restart"].is_null(), "{case}");
+        assert_eq!(pair.data(&pair.endpoints.target), expected, "{case}");
+        let mut source =
+            PgConnection::connect(&pair.endpoints.source, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let resource =
+            |kind| catalog::follow::resource_name(kind, run, CopyGeneration(generation)).unwrap();
+        assert_eq!(
+            scalar(
+                &mut source,
+                "SELECT coalesce(string_agg(slot_name,',' ORDER BY slot_name),'none') FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())"
+            ),
+            resource("slot"),
+            "{case}"
+        );
+        assert_eq!(
+            scalar(
+                &mut source,
+                "SELECT coalesce(string_agg(pubname,',' ORDER BY pubname),'none') FROM pg_catalog.pg_publication"
+            ),
+            resource("publication"),
+            "{case}"
+        );
+    }
+    // Anything the run did not create refuses and stays: a foreign target table in phase Fresh,
+    // and source pre-data drift once tables were created and copying began.
+    for drift in [false, true] {
+        let case = format!("drift={drift}");
+        let pair = FreshPair::new(FRESH_SEED);
+        let expected = pair.data(&pair.endpoints.source);
+        let mut options = pair.options();
+        let run = crate::state::open_follow(&options.clone.state, None, None, &control())
+            .unwrap()
+            .identity()
+            .run;
+        options.clone.state.action = StateAction::Restart;
+        let mut source =
+            PgConnection::connect(&pair.endpoints.source, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let mut target =
+            PgConnection::connect(&pair.endpoints.target, crate::pg::Role::Copy, &control())
+                .unwrap();
+        let (change, undo, refusal) = if drift {
+            let object = scalar(
+                &mut source,
+                "SELECT min(oid)::text FROM pg_catalog.pg_largeobject_metadata",
+            );
+            super::fresh_kill::kill_in_large_object(
+                &pair.endpoints,
+                object.parse().unwrap(),
+                |io| crate::follow::run(options.clone(), io),
+            );
+            assert_eq!(fresh_state(&options)["clone_state"]["phase"], "copying");
+            (
+                "ALTER TABLE public.items ADD CONSTRAINT drift CHECK (id > 0)",
+                "ALTER TABLE public.items DROP CONSTRAINT drift",
+                "clone-recovery: pre-data schema drift prevents restart",
+            )
+        } else {
+            super::fresh_kill::kill_at(
+                super::fresh_kill::FreshKill::Fence,
+                &pair.endpoints,
+                run,
+                |io| crate::follow::run(options.clone(), io),
+            );
+            (
+                "CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES(7)",
+                "DROP TABLE public.items",
+                "clone requires a collision-free target; existing objects are never adopted",
+            )
+        };
+        let side = if drift { &mut source } else { &mut target };
+        for statement in change.split("; ") {
+            side.query(statement, &control()).unwrap();
+        }
+        let before = fresh_state(&options);
+        options.clone.state.action = StateAction::Resume;
+        options.clone.not_consistent = true;
+        let error = crate::follow::run(options.clone(), &control()).expect_err(&case);
+        assert!(error.message.contains(refusal), "{case}: {}", error.message);
+        let after = fresh_state(&options);
+        assert_eq!(after["clone_state"], before["clone_state"], "{case}");
+        assert_eq!(after["follow_state"], before["follow_state"], "{case}");
+        if !drift {
+            assert_eq!(
+                scalar(
+                    &mut target,
+                    "SELECT string_agg(id::text,',') FROM public.items"
+                ),
+                "7"
+            );
+        }
+        let side = if drift { &mut source } else { &mut target };
+        side.query(undo, &control()).unwrap();
+        let _ = super::fresh_kill::follow_until_analyzing(&pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        });
+        let finished = fresh_state(&options);
+        assert_eq!(finished["clone_state"]["phase"], "analyzing", "{case}");
+        assert_eq!(finished["clone_state"]["plan"]["generation"], 2, "{case}");
+        assert_eq!(pair.data(&pair.endpoints.target), expected, "{case}");
+    }
+}

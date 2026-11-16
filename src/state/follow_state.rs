@@ -471,7 +471,7 @@ impl NativeState {
             self.synchronize_manifest()?;
             return Ok(restart.clone());
         }
-        if saved.phase != ClonePhase::Copying
+        if !saved.phase.restarts_copy()
             || !same_plan(&saved.plan, plan)
             || follow.binding.as_ref() != Some(expected)
         {
@@ -849,7 +849,7 @@ impl NativeState {
                 .clone_state
                 .as_mut()
                 .ok_or_else(|| bad_state("state-follow: restart lacks owned copy state"))?;
-            if saved.phase != ClonePhase::Copying
+            if !saved.phase.restarts_copy()
                 || !same_plan(&saved.plan, plan)
                 || saved.plan.generation.0.checked_add(1) != Some(plan.generation.0)
             {
@@ -955,7 +955,7 @@ fn require_pending_resource_retirement(
         || !expected.slot_absent
         || !expected.publication_absent
         || follow.binding.as_ref() != Some(&expected.previous)
-        || saved.phase != ClonePhase::Copying
+        || !saved.phase.restarts_copy()
         || saved.plan.generation != expected.previous.copy_generation
     {
         return Err(bad_state(
@@ -1057,7 +1057,7 @@ impl FollowState {
             if restart.previous.stream().run != manifest.run
                 || restart.previous.copy_generation.0.checked_add(1)
                     != Some(restart.next_generation.0)
-                || saved.phase != ClonePhase::Copying
+                || !saved.phase.restarts_copy()
                 || self.binding.as_ref().is_none_or(|binding| {
                     if restart.new_bound {
                         binding.copy_generation != restart.next_generation
@@ -1671,6 +1671,55 @@ mod tests {
         native.mark_stage(ClonePhase::PostDataPending).unwrap();
         assert!(native.begin_follow_restart(&binding, &plan).is_err());
         assert!(native.checked_follow_restart().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_fresh_bound_follow_restarts_but_pending_predata_never_does() {
+        for pending in [false, true] {
+            let tmp = super::super::tests::TempDir::new();
+            let mut native = open_follow(
+                &StateRequest {
+                    path: tmp.path(),
+                    action: StateAction::Create,
+                },
+                None,
+                None,
+                &control(),
+            )
+            .unwrap();
+            let mut plan = empty_plan();
+            let old = create_resources(&mut native, &plan, 10);
+            let ticket = SnapshotTicket {
+                token: old.slot.snapshot_token.clone(),
+                source: plan.source.clone(),
+                generation: plan.generation,
+            };
+            native.bind_follow(&plan, &ticket, &old).unwrap();
+            if pending {
+                native.begin_pre_data().unwrap();
+                let before = fs::read(tmp.path().join("manifest.json")).unwrap();
+                assert!(native.begin_follow_restart(&old, &plan).is_err());
+                assert_eq!(fs::read(tmp.path().join("manifest.json")).unwrap(), before);
+                continue;
+            }
+            let restart = native.begin_follow_restart(&old, &plan).unwrap();
+            native.confirm_follow_slot_absent(&restart).unwrap();
+            native.confirm_follow_publication_absent(&restart).unwrap();
+            plan.generation = restart.next_generation;
+            let binding = create_resources(&mut native, &plan, 20);
+            let ticket = SnapshotTicket {
+                token: binding.slot.snapshot_token.clone(),
+                source: plan.source.clone(),
+                generation: plan.generation,
+            };
+            native.bind_follow(&plan, &ticket, &binding).unwrap();
+            let saved = native.checked_clone().unwrap().unwrap();
+            assert_eq!(saved.phase, ClonePhase::Fresh);
+            assert_eq!(saved.plan.generation, CopyGeneration(2));
+            assert!(saved.owned_tables.is_empty());
+            native.finish_follow_restart().unwrap();
+            native.begin_pre_data().unwrap();
+        }
     }
 
     #[test]

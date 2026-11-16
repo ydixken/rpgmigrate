@@ -291,6 +291,10 @@ mod clone_tests {
 }
 
 #[cfg(test)]
+#[path = "snapshot/fresh_kill.rs"]
+pub(crate) mod fresh_kill;
+
+#[cfg(test)]
 #[path = "snapshot/follow_tests.rs"]
 mod follow_tests;
 

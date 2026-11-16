@@ -13,9 +13,25 @@ use crate::state::{
 use std::collections::BTreeSet;
 
 // Stable database-wide session fence: ASCII RPGM, serial writer slot 1, across all runs.
-const FENCE_CLASS: i32 = 0x5250_474d;
-fn fence_slot(run: crate::identity::RunId) -> i32 {
+pub(crate) const FENCE_CLASS: i32 = 0x5250_474d;
+pub(crate) fn fence_slot(run: crate::identity::RunId) -> i32 {
     i32::from_ne_bytes(crc32fast::hash(&run.0).to_ne_bytes())
+}
+
+/// A Fresh state owns no target table yet (its validation keeps the workset empty), so only a
+/// Copying workset is reconciled against the target catalog.
+fn owned_workset_matches(
+    connection: &mut PgConnection,
+    state: &CloneState,
+    io: &IoControl,
+) -> Result<bool> {
+    if state.phase == ClonePhase::Fresh {
+        return Ok(state.owned_tables.is_empty() && state.owned_objects.is_empty());
+    }
+    Ok(
+        crate::catalog::reconcile_clone_tables(connection, &state.plan, &state.owned_objects, io)?
+            == state.owned_tables,
+    )
 }
 // Bound backend statement memory independently of the consumer cache.
 const MAX_PREPARED_DML: usize = 1024;
@@ -2537,8 +2553,8 @@ impl CloneControl {
                 .final_sync
                 .is_none_or(|final_sync| next.large_objects.final_sync == Some(final_sync));
         let restart = self.generation.0.checked_add(1) == Some(next.generation.0)
-            && self.phase == ClonePhase::Copying
-            && next.phase == ClonePhase::Copying
+            && self.phase.restarts_copy()
+            && next.phase == self.phase
             && self.source_timeline == next.source_timeline
             && self.table_count == next.table_count
             && next.prepared_generation.is_none()
@@ -3426,8 +3442,8 @@ impl CloneAuthority {
                 || !(control.generation == expected.generation
                     && control.snapshot_token == expected.snapshot_token
                     || (behind_by_intent || pending_binding)
-                        && control.phase == ClonePhase::Copying
-                        && expected.phase == ClonePhase::Copying
+                        && control.phase.restarts_copy()
+                        && expected.phase == control.phase
                         && control.generation.0.checked_add(1) == Some(expected.generation.0))
             {
                 return Err(refusal(
@@ -3517,7 +3533,7 @@ impl CloneAuthority {
                     refusal("target-follow: restart requires its native follow binding")
                 })?
                 .clone();
-            if self.state.phase != ClonePhase::Copying
+            if !self.state.phase.restarts_copy()
                 || self.state.plan.source != checked_plan.source
                 || self.state.plan.target != checked_plan.target
                 || self.state.plan.tables != checked_plan.tables
@@ -3548,19 +3564,13 @@ impl CloneAuthority {
                     .row
                     .clone
                     .as_ref()
-                    .is_none_or(|c| c.phase != ClonePhase::Copying)
+                    .is_none_or(|c| c.phase != self.state.phase)
             {
                 return Err(refusal(
                     "target-follow: durable anchored or post-data work cannot restart COPY",
                 ));
             }
-            let rebound = crate::catalog::reconcile_clone_tables(
-                self.authority.session.connection()?,
-                &self.state.plan,
-                &self.state.owned_objects,
-                io,
-            )?;
-            if rebound != self.state.owned_tables {
+            if !owned_workset_matches(self.authority.session.connection()?, &self.state, io)? {
                 return Err(refusal(
                     "target-follow: exact target ownership changed before source replacement",
                 ));
@@ -3687,8 +3697,8 @@ impl CloneAuthority {
             self.issued.clear();
             return Ok(());
         }
-        if next.phase != ClonePhase::Copying
-            || old.phase != ClonePhase::Copying
+        if !next.phase.restarts_copy()
+            || old.phase != next.phase
             || old.generation.0.checked_add(1) != Some(next.plan.generation.0)
             || next.plan.source != self.state.plan.source
             || next.plan.target != self.state.plan.target
@@ -3717,13 +3727,7 @@ impl CloneAuthority {
                 "target-clone: recopy requires the next exact owned generation",
             ));
         }
-        let rebound = crate::catalog::reconcile_clone_tables(
-            self.authority.session.connection()?,
-            &next.plan,
-            &next.owned_objects,
-            io,
-        )?;
-        if rebound != next.owned_tables {
+        if !owned_workset_matches(self.authority.session.connection()?, &next, io)? {
             return Err(refusal(
                 "target-follow: exact target ownership changed before generation advance",
             ));
@@ -4847,6 +4851,34 @@ mod clone_marker_tests {
         next.prepared_generation = None;
         next.large_objects.initial = None;
         old.validate_transition(&next).unwrap();
+    }
+
+    #[test]
+    fn a_restart_control_keeps_its_fresh_or_copying_phase_into_the_next_generation() {
+        let mut old = CloneControl::from_state(&saved());
+        for (from, to, admitted) in [
+            (ClonePhase::Fresh, ClonePhase::Fresh, true),
+            (ClonePhase::Copying, ClonePhase::Copying, true),
+            (ClonePhase::Fresh, ClonePhase::Copying, false),
+            (ClonePhase::Copying, ClonePhase::Fresh, false),
+            (
+                ClonePhase::PreDataPending,
+                ClonePhase::PreDataPending,
+                false,
+            ),
+        ] {
+            old.phase = from;
+            let mut next = old.clone();
+            next.phase = to;
+            next.generation = CopyGeneration(old.generation.0 + 1);
+            next.large_objects.generation = next.generation;
+            next.snapshot_token = "next-snapshot".into();
+            assert_eq!(
+                old.validate_transition(&next).is_ok(),
+                admitted,
+                "{from:?} to {to:?}"
+            );
+        }
     }
 
     #[test]

@@ -352,6 +352,21 @@ A start that finds an unconfirmed publication, on a first run's retry or on an u
    The dropping transaction reads the OID again and, after `DROP PUBLICATION`, requires that the object lock the drop took names that OID, so a publication that replaced it meanwhile rolls the drop back.
 4. Any other publication under the name is not this run's: the start refuses with exit 3, naming the publication and its OID, and leaves it and the native state unchanged.
 
+### Restart before the pre-data restore
+
+A clone or follow killed after it bound its snapshot and before it recorded the pre-data handoff is in phase `fresh`.
+We restart it through the copy restart (roadmap decision 8), because the target holds nothing of it but the run's bookkeeping schema:
+
+1. The target bookkeeping intent is resolved first.
+   The intent's nonce is written inside the creating transaction, so a schema whose row carries it is this run's and is used; an absent one is created again under the same intent.
+2. The restart takes a new snapshot under the next copy generation.
+   A follow drops its slot and publication by their bound receipts before it creates new ones.
+3. No table creation is recorded in phase `fresh`, so the restart truncates and reconciles no table and skips the pre-data comparison.
+4. It then restores pre-data from the new snapshot and records the handoff as a first run does.
+
+A clone accepts this restart from `--restart` or `--resume --not-consistent`, and a follow from `--restart` or `--resume`.
+Phase `pre_data_pending` still refuses, because the utility's outcome on the target is unknown.
+
 ## Replication, endpos, and drain
 
 Every replication payload MUST explicitly measure `certified_lsn`, including an endpos acknowledgment.

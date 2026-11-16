@@ -24,8 +24,11 @@ fn entry(phase: Option<ClonePhase>, action: StateAction, not_consistent: bool) -
         (None, StateAction::Create | StateAction::Restart, false)
         | (None, StateAction::Resume, _) => Ok(Entry::Fresh),
         (Some(ClonePhase::Complete), StateAction::Resume, _) => Ok(Entry::Complete),
-        (Some(ClonePhase::Copying), StateAction::Restart, false)
-        | (Some(ClonePhase::Copying), StateAction::Resume, true) => Ok(Entry::Recopy),
+        (Some(phase), StateAction::Restart, false) | (Some(phase), StateAction::Resume, true)
+            if phase.restarts_copy() =>
+        {
+            Ok(Entry::Recopy)
+        }
         (Some(ClonePhase::PostDataComplete), StateAction::Resume, false) => {
             Ok(Entry::AfterPostData)
         }
@@ -35,7 +38,7 @@ fn entry(phase: Option<ClonePhase>, action: StateAction, not_consistent: bool) -
         (Some(ClonePhase::PreDataPending), _, _) => Err(refusal(
             "clone-recovery: pre-data ownership handoff is unproven; preserve target objects and use a fresh migration after manual inspection",
         )),
-        (Some(ClonePhase::Copying), _, _) => Err(refusal(
+        (Some(ClonePhase::Fresh | ClonePhase::Copying), _, _) => Err(refusal(
             "clone-recovery: COPY snapshot was lost; use --restart or --resume --not-consistent before post-data",
         )),
         (Some(ClonePhase::Complete), _, _) => Err(refusal(
@@ -151,6 +154,10 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
     }
     let mut plan = plan;
     let report;
+    // A Fresh run restored no pre-data, so after its new snapshot it continues as a first run does.
+    let pre_data = previous
+        .as_ref()
+        .is_none_or(|state| state.phase == ClonePhase::Fresh);
     if matches!(entry, Entry::Fresh | Entry::Recopy) {
         if entry == Entry::Recopy {
             let previous = previous.as_ref().expect("recopy has native state");
@@ -167,20 +174,31 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
                 &owned_large_objects,
                 io,
             )?;
-            let candidate = resolve_copy_profile(&mut snapshot, &mut target, &candidate, io)?;
+            let candidate = if pre_data {
+                candidate
+            } else {
+                resolve_copy_profile(&mut snapshot, &mut target, &candidate, io)?
+            };
             require_same_plan(&plan, &candidate)?;
-            require_pre_data_match(crate::schema::compare_pre_data(
-                &options,
-                snapshot.ticket(),
-                &metadata,
-                io,
-            ))?;
-            let rebound = catalog::reconcile_clone_tables(
-                &mut target,
-                &candidate,
-                &previous.owned_objects,
-                io,
-            )?;
+            if !pre_data {
+                require_pre_data_match(crate::schema::compare_pre_data(
+                    &options,
+                    snapshot.ticket(),
+                    &metadata,
+                    io,
+                ))?;
+            }
+            // A Fresh run owns no target table yet, so there is no workset to reconcile.
+            let rebound = if pre_data {
+                Vec::new()
+            } else {
+                catalog::reconcile_clone_tables(
+                    &mut target,
+                    &candidate,
+                    &previous.owned_objects,
+                    io,
+                )?
+            };
             if rebound.len() != previous.owned_tables.len()
                 || rebound
                     .iter()
@@ -206,7 +224,7 @@ pub(crate) fn run(mut options: CloneOptions, io: &IoControl) -> Result<String> {
             plan = candidate;
         }
         let archive = crate::schema::dump(&options, snapshot.ticket(), &native, io)?;
-        if entry == Entry::Fresh {
+        if pre_data {
             let owned = crate::schema::restore_pre(&options, &plan, &archive, &mut native, io)?;
             authority.mark_stage(ClonePhase::PreDataPending, io)?;
             let tables = catalog::reconcile_clone_tables(&mut target, &plan, &owned, io)?;
@@ -547,15 +565,18 @@ mod tests {
 
     #[test]
     fn lost_snapshot_requires_explicit_fresh_generation() {
-        assert!(entry(Some(ClonePhase::Copying), StateAction::Resume, false).is_err());
-        assert_eq!(
-            entry(Some(ClonePhase::Copying), StateAction::Resume, true).unwrap(),
-            Entry::Recopy
-        );
-        assert_eq!(
-            entry(Some(ClonePhase::Copying), StateAction::Restart, false).unwrap(),
-            Entry::Recopy
-        );
+        for phase in [ClonePhase::Fresh, ClonePhase::Copying] {
+            assert!(entry(Some(phase), StateAction::Resume, false).is_err());
+            assert!(entry(Some(phase), StateAction::Restart, true).is_err());
+            assert_eq!(
+                entry(Some(phase), StateAction::Resume, true).unwrap(),
+                Entry::Recopy
+            );
+            assert_eq!(
+                entry(Some(phase), StateAction::Restart, false).unwrap(),
+                Entry::Recopy
+            );
+        }
     }
 
     #[test]
@@ -585,7 +606,6 @@ mod tests {
     #[test]
     fn uncertain_utility_stages_refuse_recovery() {
         for phase in [
-            ClonePhase::Fresh,
             ClonePhase::PreDataPending,
             ClonePhase::PostDataPending,
             ClonePhase::SequencesPending,

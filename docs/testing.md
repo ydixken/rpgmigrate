@@ -187,7 +187,7 @@ It does not claim a pause inside the blocked table's COPY stream.
 
 ### M8 component profile
 
-`task test-clone`, also called by `task test-db`, requires exactly sixteen named component tests and a matching libtest summary with no ignored or failed cases.
+`task test-clone`, also called by `task test-db`, requires exactly seventeen named component tests and a matching libtest summary with no ignored or failed cases.
 The profile retains the seven clone snapshot, COPY, and marker cases.
 The new cases check actual binary COPY row counts for empty, single-row, and multiple-row streams and row preservation across split parts.
 They also check initial copying of empty, binary, multi-chunk, and sparse large objects.
@@ -220,6 +220,11 @@ A foreign or replacing publication must refuse naming it, with the native state 
 Every other start must create a publication of a new OID under a new intent, never adopt the old one, and export a snapshot that holds each source row and large object exactly once.
 A third case ends a first run after its slot receipt and before its binding, then leaves the slot at its recorded point, removes it, or replaces it with a later `pgoutput` or a `test_decoding` slot.
 A replaced slot must refuse with the native state and that slot unchanged; every other start must drop the slot and create a later one under a new intent, whose snapshot holds each source row and large object exactly once.
+A fourth case kills a first follow run in phase `fresh`: waiting on the target fence, inside its bookkeeping CREATE after the intent, after that CREATE committed without its reply, and after it was confirmed.
+After the last point a second variant also kills the restart inside its generation publish.
+Each restart must reach `analyzing` at copy generation two, or three after the publish kill, with every row and large object exactly once and only that generation's slot and publication left on the source.
+A foreign target table after the fence kill, and a source CHECK added after a kill during the copy, must each refuse with the native state unchanged and the foreign table intact, then complete once removed.
+`task test-clone` adds the same case for clone, which must complete with one marker and two large-object receipts of the final generation.
 Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]

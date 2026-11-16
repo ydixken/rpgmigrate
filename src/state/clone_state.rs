@@ -18,6 +18,12 @@ pub(crate) enum ClonePhase {
 }
 
 impl ClonePhase {
+    /// A fresh-snapshot restart replaces only these phases: Fresh has restored nothing on the
+    /// target, and Copying owns exactly the tables whose creation this run recorded.
+    pub(crate) fn restarts_copy(self) -> bool {
+        matches!(self, Self::Fresh | Self::Copying)
+    }
+
     pub(crate) fn permits(self, next: Self) -> bool {
         self == next
             || matches!(
@@ -320,7 +326,7 @@ impl NativeState {
             .clone_state
             .as_mut()
             .ok_or_else(|| bad_state("state-clone: clone binding is absent"))?;
-        if clone.phase != ClonePhase::Copying {
+        if !clone.phase.restarts_copy() {
             return Err(bad_state(
                 "state-recovery: recopy requires positively owned pre-postdata state",
             ));
@@ -527,7 +533,7 @@ impl CloneState {
             ));
         }
         if self.recopy.as_ref().is_some_and(|previous| {
-            self.phase != ClonePhase::Copying
+            !self.phase.restarts_copy()
                 || previous.source != plan.source
                 || previous.generation.0.checked_add(1) != Some(plan.generation.0)
                 || previous.token.is_empty()

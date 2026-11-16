@@ -54,6 +54,14 @@ The target must still hold exactly the recorded previous generation and snapshot
 An uncertain pre-data ownership handoff or post-data utility outcome refuses recovery.
 Preserve uncertain objects for manual review or use a fresh positively established migration.
 
+## Killed before the pre-data restore
+
+A clone or follow that bound its snapshot and died before it recorded the pre-data handoff (native phase `fresh`) has restored nothing on the target.
+The next `--resume --not-consistent` (the operator's retry), or `--restart` for clone, restarts it under the next copy generation the way a copy restart does.
+A follow first drops its slot and publication by their bound receipts and creates new ones, and both then restore pre-data from the new snapshot as a first run would.
+A target bookkeeping intent left by the kill is resolved first: the schema whose row carries the intent's nonce is this run's, and an absent one is created again.
+A plain `--resume` of such a clone refuses with exit 3, `clone-recovery: COPY snapshot was lost; use --restart or --resume --not-consistent before post-data`.
+
 After a durable anchor, resume still requires the exact source identity, slot/publication provenance, target authority, and retained WAL.
 Missing WAL or a replaced source resource is a recovery gap.
 Do not recreate a same-name slot, silently start from a later position, or turn absent evidence into success.
