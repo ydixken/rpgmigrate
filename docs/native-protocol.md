@@ -348,8 +348,9 @@ Only the source identity that the plan recorded is checked first; a first run th
 > Two migrations must never share a slot name on one source.
 > The operator passes one stable `--slot-name` across runs and generations, so the engine's default per-run name does not separate them.
 > A pending intent has no receipt, so the start identifies its slot only by the recorded name and the shape check above.
-> A foreign slot under that name is dropped only in one case: it takes the name after the repeated check and before this run's CREATE reaches the server's name check, and this process dies before it reads the reply.
-> From the name check on, any concurrent CREATE under the name fails with 42710.
+> A foreign slot of this run's shape is therefore dropped when it takes the name after this run's last completed collision check and this run ends without the outcome of its CREATE.
+> That covers a CREATE never sent, a lost reply, and an unfinished slot that ended with its session, after which the name stays free until the next start.
+> While this run's CREATE holds the name, from the server's name check until its session ends, any concurrent CREATE under the name fails with 42710.
 
 ### Publication creation recovery
 
