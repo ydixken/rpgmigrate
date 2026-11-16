@@ -1,15 +1,18 @@
 """Portable controls for the session-name census judgement and process-port mapping."""
 
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sessions
 
 HARNESS = "rpgmigrate_m2_harness"
+ENGINE_LINE = sessions.logline("rpgmigrate[100] compare")
 
 
 def row(pid, name, port, kind="client backend", state="active", start="t0"):
@@ -33,10 +36,10 @@ class JudgeTests(unittest.TestCase):
             row(6, "rpgmigrate[300] receive", 9002)])
         self.assertTrue({("source", "follow", "copy", "pg_dump"), ("source", "follow", "receive", "walsender"),
                          ("source", "compare-schema", "copy", "pg_dump"), ("source", "cleanup", "receive")} <= coverage)
-        self.assertEqual(counts, {"sessions": 5, "pre_startup_only": 0, "joined": 4})
+        self.assertEqual(counts, {"sessions": 5, "logged": 0, "joined": 4})
 
     def test_every_misnamed_engine_session_refuses(self):
-        for rows in ([row(1, "", 5001)], [row(1, "", 9000, state="idle")],
+        for rows in ([row(1, "", 5001)], [row(1, "", 9000, state="idle")], [row(1, "", 5001, state="starting")],
                      [row(1, "rpgmigrate[100] copy", 5001), row(1, "rpgmigrate[100] apply", 5001)],
                      [row(1, "rpgmigrate[999] copy", 9000)], [row(1, "rpgmigrate[300] apply", 9000)],
                      [row(1, "rpgmigrate[100] copy", 5001, kind="walsender")],
@@ -47,13 +50,60 @@ class JudgeTests(unittest.TestCase):
                 self.judge(rows)
 
     def test_sampler_controls_pass_only_once_the_backend_is_named(self):
-        for name, script in sessions.CONTROLS.items():
+        for name, (script, _) in sessions.CONTROLS.items():
             rows = [row for sample in script for row in sample]
             with self.subTest(name=name):
                 if name == "settles":
                     self.assertEqual(self.judge(rows)[0], {("source", "follow", "compare")})
                 else:
                     self.assertRaises(RuntimeError, self.judge, rows)
+
+    def test_vanished_window_backend_takes_only_its_one_logged_engine_name(self):
+        window = row(7, "", 9000, state=None)
+        def gone(*messages, start="t0"):
+            return {"pid": 7, "start": start, "gone": True,
+                    "logged": [{"user": "postgres", "database": "db", "message": message} for message in messages]}
+        engine = "connection authorized: user=postgres database=db application_name=rpgmigrate[100] compare"
+        coverage, counts = self.judge([window, gone(engine)])
+        self.assertEqual((coverage, counts["logged"]), ({("source", "follow", "compare")}, 1))
+        for rows in ([window], [window, gone()], [window, gone(engine, engine)], [window, gone(engine, start="t1")],
+                     [window, gone("connection authorized: user=postgres database=db")],
+                     [window, gone("connection authorized: user=postgres database=db application_name=")],
+                     [window, gone("connection authorized: user=postgres database=db application_name=psql")],
+                     [window, gone(engine.replace("rpgmigrate[100]", "rpgmigrate[999]"))],
+                     [window, gone(engine + " SSL enabled (protocol=TLSv1.3, cipher=x, bits=256)")],
+                     [window, gone(engine.replace("database=db", "database=other"))],
+                     [window, {**gone(engine), "logged": None}],
+                     [window, row(7, "", 9000, state="idle"), gone(engine)], [{**window, "type": "walsender"}, gone(engine)],
+                     [window, gone(engine), row(8, "", 9001, state=None)]):
+            with self.subTest(rows=rows), self.assertRaises(RuntimeError):
+                self.judge(rows)
+        harness = engine.replace("rpgmigrate[100] compare", HARNESS)
+        self.assertEqual(self.judge([window, gone(harness)]), (set(), {"sessions": 0, "logged": 0, "joined": 0}))
+        for rows in ([window, gone(harness, harness)], [window, gone(harness, start="t1")], [{**window, "type": "walsender"}, gone(harness)],
+                     [window, row(7, "", 9000, state="idle"), gone(harness)]):
+            with self.subTest(rows=rows), self.assertRaises(RuntimeError):
+                self.judge(rows)
+        with self.assertRaises(RuntimeError):
+            self.judge([window, gone(engine)], pinned="pinned")
+        self.assertEqual(self.judge([window, gone(engine.replace("rpgmigrate[100] compare", "pinned"))], pinned="pinned")[1]["logged"], 1)
+
+    def test_census_logs_are_copied_whole_and_refused_when_absent_misnamed_or_secret(self):
+        class Server:
+            environment = {"PGPASSWORD": "fixture-secret"}
+            def __init__(self, files):
+                self.files = files
+            def sql(self, name, sql):
+                return json.dumps(self.files).encode()
+        logged = {"postgresql.json": ENGINE_LINE + "\n", "postgresql.log": ""}
+        with tempfile.TemporaryDirectory() as temporary, patch.object(sessions.clone, "DIAGNOSTIC_ROOT", Path(temporary)):
+            sessions.retain_logs({"source": Server(logged), "target": Server(logged)})
+            for side in ("source", "target"):
+                self.assertEqual({path.name: path.read_text() for path in (Path(temporary) / "census-logs" / side).iterdir()}, logged)
+            for files in ({}, {"postgresql.log": ""}, {"../postgresql.json": ""}, {".json": ""},
+                          {"postgresql.json": "password=fixture-secret"}):
+                with self.subTest(files=files), self.assertRaises(RuntimeError):
+                    sessions.retain_logs({"source": Server(files)})
 
     def test_pinned_names_must_survive_on_every_session(self):
         coverage, _ = self.judge([row(1, "pinned", 5001), row(2, "pinned", 5002)], pinned="pinned")
@@ -63,7 +113,7 @@ class JudgeTests(unittest.TestCase):
                 self.judge([row(1, "pinned", 5001), row(2, name, 5002)], pinned="pinned")
 
     def test_receipt_requires_every_variant_and_observation(self):
-        receipt = {"mode": "session_names", "sampler_controls": {side: list(sessions.CONTROLS) for side in ("source", "target")}, "cases": {
+        receipt = {"mode": "session_names", "sampler_controls": {side: [*sessions.CONTROLS, "connection_log"] for side in ("source", "target")}, "cases": {
             variant: {"pinned": variant != "default", "counts": {"source": {"sessions": 1}, "target": {"sessions": 1}},
                       "observed": [list(item) for item in (sessions.REQUIRED if variant == "default" else sessions.REQUIRED_PINNED)]}
             for variant in sessions.VARIANTS}}
@@ -71,7 +121,7 @@ class JudgeTests(unittest.TestCase):
         broken = {**receipt, "cases": {**receipt["cases"], "default": {**receipt["cases"]["default"], "observed": receipt["cases"]["default"]["observed"][1:]}}}
         missing = {**receipt, "cases": {key: value for key, value in receipt["cases"].items() if key != "conninfo"}}
         empty = {**receipt, "cases": {**receipt["cases"], "environment": {**receipt["cases"]["environment"], "counts": {"source": {"sessions": 0}}}}}
-        uncontrolled = {**receipt, "sampler_controls": {"source": list(sessions.CONTROLS), "target": ["settles"]}}
+        uncontrolled = {**receipt, "sampler_controls": {"source": [*sessions.CONTROLS, "connection_log"], "target": list(sessions.CONTROLS)}}
         for value in (broken, missing, empty, uncontrolled, {key: item for key, item in receipt.items() if key != "sampler_controls"},
                       {**receipt, "mode": "smoke"}):
             with self.assertRaises(RuntimeError):

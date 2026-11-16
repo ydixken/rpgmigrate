@@ -1397,6 +1397,7 @@ def main():
             raise RuntimeError("inside qualification requires a receipt destination")
         inner(args)
     else:
+        census = ()
         if args.cutover:
             import cutover
             manifest = cutover.load_manifest()
@@ -1405,6 +1406,7 @@ def main():
             import sessions
             manifest = load_manifest()
             validator = lambda report, manifest: sessions.validate_receipt(report)
+            census = sessions.SERVER_ARGUMENTS
         elif args.timeouts:
             import timeouts
             manifest = load_manifest()
@@ -1414,7 +1416,8 @@ def main():
             validator = lambda report, manifest: validate_receipt(report, manifest, diagnostic_case=args.diagnostic_case)
         clone.outer(args, program="follow", manifest=manifest,
                     receipt_validator=validator,
-                    server_arguments=("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s"))
+                    server_arguments=("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s",
+                                      *census))
     return 0
 
 

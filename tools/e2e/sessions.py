@@ -38,8 +38,23 @@ SAMPLE = """CREATE FUNCTION {sample}(databases text[], target int DEFAULT NULL) 
   FROM pg_catalog.pg_stat_activity a
   WHERE a.datname = ANY(databases) AND a.backend_type IN ('client backend', 'walsender') AND (target IS NULL OR a.pid = target)
 $sample$;"""
+# The census servers log each authorized connection as JSON in their data directory, where a superuser can read it back.
+SERVER_ARGUMENTS = ("-c", "logging_collector=on", "-c", "log_destination=jsonlog", "-c", "log_connections=on", "-c", "log_timezone=UTC")
+LINES = """CREATE FUNCTION {lines}() RETURNS SETOF text LANGUAGE sql AS $lines$
+  SELECT pg_catalog.regexp_split_to_table(pg_catalog.pg_read_file(pg_catalog.current_setting('log_directory') || '/' || f.name), E'\\n')
+  FROM pg_catalog.pg_ls_logdir() f WHERE f.name LIKE '%.json'
+$lines$;"""
+# The log keeps a backend's start to the second (MyStartTime), so pid, start second, client port and database identify it.
+LOGGED = """CREATE FUNCTION {logged}(databases text[], backend jsonb) RETURNS jsonb LANGUAGE sql AS $logged$
+  SELECT coalesce(jsonb_agg(jsonb_build_object('user', e->>'user', 'database', e->>'dbname', 'message', e->>'message')), '[]')
+  FROM (SELECT line::jsonb AS e FROM {lines}() line WHERE pg_catalog.pg_input_is_valid(line, 'jsonb')) l
+  WHERE e->>'backend_type' = 'client backend' AND e->>'message' LIKE 'connection authorized: %' AND e->>'dbname' = ANY(databases)
+    AND e->>'pid' = backend->>'pid' AND e->>'remote_port' = backend->>'port'
+    AND (e->>'session_start')::timestamptz = pg_catalog.date_trunc('second', (backend->>'start')::timestamptz)
+$logged$;"""
 # pgstat_bestart (16) and pgstat_bestart_final (18) publish a NULL state before pgstat_report_appname, so a session sampled
-# only there looks unnamed; that backend alone is re-read until it leaves the window, vanishes or a second passes.
+# only there looks unnamed; that backend alone is re-read until it leaves the window or a second passes, and one gone by then
+# gets its logged connections.
 SAMPLER = """CREATE TABLE {stop}();
 CREATE PROCEDURE {procedure}(databases text[], INOUT seen jsonb DEFAULT '{{}}') LANGUAGE plpgsql AS $census$
 DECLARE deadline timestamptz := clock_timestamp() + interval '900 seconds';
@@ -49,7 +64,7 @@ BEGIN
     PERFORM pg_catalog.pg_stat_clear_snapshot();
     sample := {sample}(databases);
     seen := seen || sample;
-    FOR pending IN SELECT (value->>'pid')::int AS pid, value->>'start' AS start FROM jsonb_each(sample)
+    FOR pending IN SELECT key, value, (value->>'pid')::int AS pid, value->>'start' AS start FROM jsonb_each(sample)
                    WHERE coalesce(value->>'name', '') = '' AND value->>'state' IS NULL LOOP
       settle := clock_timestamp() + interval '1 second';
       LOOP
@@ -57,12 +72,19 @@ BEGIN
         PERFORM pg_catalog.pg_stat_clear_snapshot();
         latest := {sample}(databases, pending.pid);
         seen := seen || latest;
+        IF NOT EXISTS (SELECT FROM jsonb_each(latest) WHERE value->>'start' = pending.start) THEN
+          seen := seen || jsonb_build_object('gone/' || pending.key, pending.value || '{{"gone": true}}');
+          EXIT;
+        END IF;
         EXIT WHEN clock_timestamp() > settle OR NOT EXISTS (SELECT FROM jsonb_each(latest) WHERE value->>'start' = pending.start
           AND coalesce(value->>'name', '') = '' AND value->>'state' IS NULL);
       END LOOP;
     END LOOP;
     EXIT WHEN EXISTS (SELECT FROM {stop}) OR clock_timestamp() > deadline;
     PERFORM pg_catalog.pg_sleep(0.002);
+  END LOOP;
+  FOR pending IN SELECT key, value FROM jsonb_each(seen) WHERE value ? 'gone' LOOP
+    seen := seen || jsonb_build_object(pending.key, pending.value || jsonb_build_object('logged', {logged}(databases, pending.value)));
   END LOOP;
 END
 $census$;"""
@@ -75,7 +97,9 @@ class ServerCensus:
         self.database, self.name = database, name
         token = uuid.uuid4().hex[:12]
         self.stop_table, self.procedure, sample = "census_stop_" + token, "census_" + token, "census_sample_" + token
-        database.sql("postgres", SAMPLE.format(sample=sample) + SAMPLER.format(stop=self.stop_table, procedure=self.procedure, sample=sample))
+        lines, logged = "census_lines_" + token, "census_logged_" + token
+        database.sql("postgres", SAMPLE.format(sample=sample) + LINES.format(lines=lines) + LOGGED.format(logged=logged, lines=lines)
+                     + SAMPLER.format(stop=self.stop_table, procedure=self.procedure, sample=sample, logged=logged))
         self.address = database.sql("postgres", "SELECT host(inet_server_addr());").decode().strip()
         call = f"CALL {self.procedure}(ARRAY['{name}'], '{{}}'::jsonb);"
         self.process = subprocess.Popen([str(database.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
@@ -101,37 +125,76 @@ class ServerCensus:
         return list(json.loads(output).values())
 
 
-# Scripted pg_stat_activity samples for one backend caught before its name: only the settled case may pass the judge.
-WINDOW = {"pid": 7, "start": "s", "type": "client backend", "name": "", "port": 9000, "state": None}
-CONTROLS = {"settles": [[WINDOW], [WINDOW], [{**WINDOW, "name": "rpgmigrate[100] compare"}]], "stays_unnamed": [[WINDOW]],
-            "unnamed_idle": [[WINDOW], [{**WINDOW, "state": "idle"}]], "vanishes": [[WINDOW], []]}
+# Scripted pg_stat_activity samples and connection log lines for one backend caught before its name; PASSING may pass the judge.
+WINDOW = {"pid": 7, "start": "2026-11-16 10:00:00.25+00", "type": "client backend", "name": "", "port": 9000, "state": None}
+
+
+def logline(name, start="2026-11-16 10:00:00 UTC", message=None, **fields):
+    if message is None:
+        message = "connection authorized: user=postgres database=control" + ("" if name is None else " application_name=" + name)
+    return json.dumps({"user": "postgres", "dbname": "control", "pid": 7, "remote_port": 9000, "session_start": start,
+                       "backend_type": "client backend", "message": message, **fields})
+
+
+ENGINE = logline("rpgmigrate[100] compare")
+ENGINE_OTHER_DATABASE = "connection authorized: user=postgres database=other application_name=rpgmigrate[100] compare"
+DISCONNECTED = logline(None, message="disconnection: session time: 0:00:00.010 user=postgres")
+CONTROLS = {"settles": ([[WINDOW], [WINDOW], [{**WINDOW, "name": "rpgmigrate[100] compare"}]], []),
+            "stays_unnamed": ([[WINDOW]], [ENGINE]), "unnamed_idle": ([[WINDOW], [{**WINDOW, "state": "idle"}]], [ENGINE]),
+            "vanishes": ([[WINDOW], []], []), "vanishes_logged": ([[WINDOW], []], [ENGINE, DISCONNECTED]),
+            "vanishes_logged_other": ([[WINDOW], []], [logline("psql")]), "vanishes_logged_unnamed": ([[WINDOW], []], [logline(None)]),
+            "vanishes_logged_elsewhere": ([[WINDOW], []], [logline("rpgmigrate[100] compare", "2026-11-16 10:00:01 UTC")]),
+            "vanishes_logged_twice": ([[WINDOW], []], [ENGINE, ENGINE]),
+            "vanishes_logged_other_backend": ([[WINDOW], []], [logline("rpgmigrate[100] compare", **field) for field in
+                                                               ({"pid": 8}, {"remote_port": 9001}, {"backend_type": "walsender"},
+                                                                {"dbname": "other", "message": ENGINE_OTHER_DATABASE})]),
+            "vanishes_logged_harness": ([[WINDOW], []], [logline("harness")])}
+PASSING = {"settles", "vanishes_logged", "vanishes_logged_harness"}
 SCRIPT = """CREATE SEQUENCE {sample}_calls;
 CREATE FUNCTION {sample}(databases text[], target int DEFAULT NULL) RETURNS jsonb LANGUAGE sql AS $script$
   SELECT samples->(least(nextval('{sample}_calls'), jsonb_array_length(samples)) - 1)::int FROM (SELECT $json${samples}$json$::jsonb AS samples) s
-$script$;"""
+$script$;
+CREATE FUNCTION {lines}() RETURNS SETOF text LANGUAGE sql AS $script$ SELECT jsonb_array_elements_text($json${log}$json$::jsonb) $script$;"""
 
 
 def controls(source, target):
-    """Runs the real sampler procedure over each scripted backend on both servers; returns the controls that held."""
+    """Runs the real sampler and log matcher over each scripted backend, then reads each server's own connection log back."""
     held = {}
     for side, database in (("source", source), ("target", target)):
-        for name, script in CONTROLS.items():
+        for name, (script, log) in CONTROLS.items():
             token = uuid.uuid4().hex[:12]
             stop, procedure, sample = "control_stop_" + token, "control_" + token, "control_sample_" + token
+            lines, logged = "control_lines_" + token, "control_logged_" + token
             samples = json.dumps([{"/".join(str(row[key]) for key in ("pid", "start", "state", "name") if row[key] is not None): row
                                    for row in rows} for rows in script])
-            output = database.sql("postgres", SCRIPT.format(sample=sample, samples=samples)
-                                  + SAMPLER.format(stop=stop, procedure=procedure, sample=sample)
+            output = database.sql("postgres", SCRIPT.format(sample=sample, samples=samples, lines=lines, log=json.dumps(log))
+                                  + LOGGED.format(logged=logged, lines=lines)
+                                  + SAMPLER.format(stop=stop, procedure=procedure, sample=sample, logged=logged)
                                   + f"INSERT INTO {stop} DEFAULT VALUES; CALL {procedure}(ARRAY['control'], '{{}}'::jsonb);")
             try:
                 judge(side, list(json.loads(output).values()), {}, {100: "compare-data"}, "harness", None)
                 passed = True
             except RuntimeError:
                 passed = False
-            if passed != (name == "settles"):
+            if passed != (name in PASSING):
                 raise RuntimeError(f"{side} session sampler control {name} did not hold")
             held.setdefault(side, []).append(name)
+        connection_log(database)
+        held[side].append("connection_log")
     return held
+
+
+def connection_log(database):
+    """Requires the real log reader to find exactly one line for an earlier harness connection, under its harness name."""
+    token = uuid.uuid4().hex[:12]
+    lines, logged = "census_lines_" + token, "census_logged_" + token
+    backend = database.sql("postgres", LINES.format(lines=lines) + LOGGED.format(logged=logged, lines=lines)
+                           + "SELECT jsonb_build_object('pid', pid, 'start', backend_start::text, 'port', client_port) "
+                           + "FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid();").decode().strip()
+    expected = [{"user": "postgres", "database": "postgres", "message": "connection authorized: user=postgres database=postgres application_name="
+                 + database.application}]
+    query = f"SELECT {logged}(ARRAY['postgres'], $json${backend}$json$::jsonb);"
+    clone.wait_for(lambda: json.loads(database.sql("postgres", query)) == expected, "server connection log line", timeout=10)
 
 
 def address(text):
@@ -208,22 +271,37 @@ class ProcessCensus(threading.Thread):
         return self.ports
 
 
+def logged_name(entries):
+    """The application name in a backend's only connection-authorized line, or None."""
+    if not isinstance(entries, list) or len(entries) != 1:
+        return None
+    entry = entries[0]
+    prefix = f"connection authorized: user={entry['user']} database={entry['database']} application_name="
+    message = entry["message"] or ""
+    return message[len(prefix):] if message.startswith(prefix) and len(message) > len(prefix) else None
+
+
 def judge(side, rows, ports, phases, harness, pinned):
     """Every non-harness session must carry the engine's name; returns observed coverage."""
-    sessions = {}
+    sessions, gone = {}, {}
     for row in rows:
+        if row.get("gone"):
+            gone[(row["pid"], row["start"])] = row.get("logged")
+            continue
         session = sessions.setdefault((row["pid"], row["start"]), {"names": set(), "states": set(), "type": row["type"], "port": row["port"]})
         session["names"].add(row["name"] or "")
         session["states"].add(row["state"] or "")
-    coverage, counts = set(), {"sessions": 0, "pre_startup_only": 0, "joined": 0}
-    for session in sessions.values():
-        if harness in session["names"]:
-            continue
+    coverage, counts = set(), {"sessions": 0, "logged": 0, "joined": 0}
+    for key, session in sessions.items():
         names = session["names"] - {""}
+        # Only a client backend seen solely before its name and gone at the re-read may take its logged name.
+        logged = not names and session["type"] == "client backend" and session["states"] == {""} and key in gone
+        if logged:
+            names = {logged_name(gone[key])} - {None}
+        if harness in names:
+            continue
+        counts["logged"] += bool(logged and names)
         if not names:
-            if session["states"] <= {"starting"}:
-                counts["pre_startup_only"] += 1
-                continue
             raise RuntimeError(f"{side} engine session has no application name")
         if len(names) != 1:
             raise RuntimeError(f"{side} engine session changed its application name")
@@ -278,7 +356,38 @@ def engine(driver, state, phase, phases, argv):
     return stdout
 
 
+LOGS = """SELECT coalesce(json_object_agg(f.name, pg_catalog.pg_read_file(pg_catalog.current_setting('log_directory') || '/' || f.name)), '{}')
+  FROM pg_catalog.pg_ls_logdir() f;"""
+
+
+def retain_logs(databases):
+    """Copies each census server's log files into the run's diagnostics, so a judged connection line can be read back."""
+    for side, database in databases.items():
+        files = json.loads(database.sql("postgres", LOGS))
+        if not any(name.endswith(".json") for name in files) or not all(re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", name) for name in files):
+            raise RuntimeError(side + " census server log files are absent or misnamed")
+        secret = database.environment.get("PGPASSWORD")
+        if secret and any(secret in text for text in files.values()):
+            raise RuntimeError(side + " census server log carries a credential")
+        directory = clone.DIAGNOSTIC_ROOT / "census-logs" / side
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for name, text in files.items():
+            (directory / name).write_text(text)
+
+
 def run(source, target, case, launch, driver):
+    try:
+        return variants(source, target, case, launch, driver)
+    finally:
+        failed = sys.exc_info()[0] is not None
+        try:
+            retain_logs({"source": source, "target": target})
+        except Exception:
+            if not failed:
+                raise
+
+
+def variants(source, target, case, launch, driver):
     import cutover
     cases = {}
     for variant in VARIANTS:
@@ -330,7 +439,7 @@ def run(source, target, case, launch, driver):
 
 
 def validate_receipt(report):
-    if report.get("sampler_controls") != {side: list(CONTROLS) for side in ("source", "target")}:
+    if report.get("sampler_controls") != {side: [*CONTROLS, "connection_log"] for side in ("source", "target")}:
         raise RuntimeError("session census receipt lacks its sampler controls")
     cases = report.get("cases")
     if report.get("mode") != "session_names" or not isinstance(cases, dict) or tuple(sorted(cases)) != tuple(sorted(VARIANTS)):

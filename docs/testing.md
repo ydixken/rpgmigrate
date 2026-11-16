@@ -480,7 +480,11 @@ The session census runs clone, follow to an endpos, `compare data`, `compare sch
 A procedure inside each server samples `pg_stat_activity` every few milliseconds, and the harness maps each client socket, by server address and local port, to the engine and its `pg_dump` and `pg_restore` children through `/proc`.
 PostgreSQL publishes a new backend's entry a moment before its application name.
 So the procedure re-reads a backend that has no state and no name, for up to a second, until it reports either.
-A backend that stays unnamed, turns idle unnamed or exits unnamed still fails, and scripted controls on both servers prove each case before every run.
+A backend that exits first is judged by the name in its `connection authorized` line, which the census servers log as JSON with `log_connections`.
+The line must be the only one for that pid, start second, client port and database, and its name gets the same checks as a sampled name.
+A backend that stays unnamed, turns idle unnamed, or exits with no such line, two of them or no name in it still fails.
+Scripted controls on both servers prove each case before every run, and a live probe proves the log reader finds the harness's own connection.
+When the run ends, pass or fail, the harness copies each census server's log files to `target/e2e/failures/<run>/census-logs/<side>/`, and a server without a JSON log or with the fixture password in its log fails the run.
 Every client backend and walsender in the case databases, other than the harness's own, must carry `rpgmigrate[<pid>] <role>` for the invocation and phase that opened it, or the pinned name.
 Each required side, phase and role, the walsender and both utility children must be observed, so a census that sees no engine session fails.
 
