@@ -415,12 +415,15 @@ class ModelRuntime:
                 binding = json.loads((receipt / "m8-input.json").read_text()) if (receipt / "m8-input.json").exists() else None
                 smoke = None
                 if binding:
-                    import copy_features
-                    minors, libpq = copy_features.CLIENT_MINORS, copy_features.LINKED_LIBPQ
+                    # Later PGDG minors than any the harness names; each smoke_ fault breaks one package rule.
+                    packages = {"libpq5": "18.8-1.pgdg13+1", "postgresql-client-16": "16.17-1.pgdg13+1", "postgresql-client-18": "18.8-1.pgdg13+1"}
+                    client, libpq = {"smoke_client": "16.16"}.get(self.fault, "16.17"), {"smoke_libpq": 180007}.get(self.fault, 180008)
+                    packages.update({"smoke_major": {"postgresql-client-18": "17.2-1.pgdg13+1"}, "smoke_unparsable": {"libpq5": "18.8"}}.get(self.fault, {}))
+                    if self.fault == "smoke_missing": del packages["postgresql-client-18"]
                     smoke = {"binary_sha256": binding["binary_sha256"], "source_tree_sha256": binding["source_tree_sha256"], "runner_image_id": binding["runner_image_id"],
-                             "architecture": "arm64", "client_versions": {tool: minors["16"] for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": libpq,
+                             "architecture": "arm64", "client_versions": {tool: client for tool in ("psql", "pg_dump", "pg_restore")}, "linked_libpq": libpq,
                              "library_path": "/usr/lib/aarch64-linux-gnu/libpq.so.5.18", "library_sha256": "9"*64,
-                             "packages": {name: {"version": minors[major] + "-1.pgdg13+1", "architecture": "arm64"} for name, major in (("libpq5", "18"), ("postgresql-client-16", "16"), ("postgresql-client-18", "18"))},
+                             "packages": {name: {"version": version, "architecture": "arm64"} for name, version in packages.items()},
                              "version_json": {"protocol_version": 1, "engine_version": "0.1.0", "capabilities": ["clone.single_db", "copy.large_objects", "copy.binary_fallback", "copy.split", "cdc.pgoutput", "progress.v1", "cutover.v1", "verify.v1", "cleanup.v1", "verify.sealed_files.v1"]},
                              "version_text": f"rpgmigrate 0.1.0\nlibpq {libpq}\n"}
                     (receipt / "m8-smoke.json").write_text(json.dumps(smoke)); (receipt / "m8-smoke.json").chmod(0o600)
@@ -1044,6 +1047,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         try:
             for profile, fault, location in (("disabled", None, "default"), ("disabled", None, "root"), ("disabled", None, "nested"),
                                              ("m8", None, "cache"), ("m8", "runner", "cache"), ("m8", "data_directory", "cache"), ("m8", "foreign_private", "cache"), ("disabled", "runner_exit_race", "hosted"), ("disabled", "source_exit_race", "hosted"),
+                                             *(("m8", fault, "cache") for fault in ("smoke_client", "smoke_major", "smoke_missing", "smoke_unparsable", "smoke_libpq")),
                                              ("disabled", None, "native"), ("disabled", None, "hosted")):
                 with self.subTest(profile=profile, fault=fault, location=location), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary).resolve(); (root / "tools/e2e").mkdir(parents=True)
@@ -1116,6 +1120,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
                     self.assertNotIn("must-not-persist", json.dumps(ledger))
                     self.assertNotIn("private-never-persist", json.dumps(ledger))
                     self.assertEqual(output.exists(), fault is None)
+                    self.assertEqual((ledger.get("build_smoke_unavailable"), "build_smoke" in ledger),
+                                     (True, False) if str(fault).startswith("smoke_") else (None, profile == "m8" and fault in (None, "runner")))
                     if fault == "runner_exit_race":
                         runner = next(entry for entry in ledger["containers"] if entry["role"] == "runner")
                         self.assertEqual((ledger["failure"]["stage"], len(runner["cgroup_exec_after_exit"]), runner.get("cgroup_verified")), ("receipt_validation", 1, None))

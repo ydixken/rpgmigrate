@@ -288,6 +288,29 @@ class CopyFeatureTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 harness.validate_build_smoke({**smoke, **change}, binding, "16-18")
 
+    def test_build_smoke_binds_clients_and_libpq_to_the_installed_packages_not_a_fixed_minor(self):
+        # The development image installs current PGDG clients, so a later minor is valid only when the packages say so.
+        binding = artifact_binding()
+        def image(client16="16.17-1.pgdg13+1", client18="18.8-1.pgdg13+1", libpq5="18.8-1.pgdg13+1", tools="18.8", linked=180008, drop=()):
+            packages = {name: {"version": version, "architecture": "arm64"} for name, version in
+                        (("libpq5", libpq5), ("postgresql-client-16", client16), ("postgresql-client-18", client18)) if name not in drop}
+            return {**build_smoke(binding), "packages": packages, "linked_libpq": linked, "version_text": "rpgmigrate 0.1.0\nlibpq " + str(linked) + "\n",
+                    "client_versions": tools if isinstance(tools, dict) else dict.fromkeys(("psql", "pg_dump", "pg_restore"), tools)}
+        for matching in (image(), build_smoke(binding), image(client18="1:18.10-2.pgdg13+1", libpq5="18.10-2.pgdg13+1", tools="18.10", linked=180010)):
+            with self.subTest(matching=matching["packages"]):
+                harness.validate_build_smoke(matching, binding, "16-18")
+        cases = {
+            "client differs from its package": [image(tools="18.7"), image(tools={"psql": "18.8", "pg_dump": "18.8", "pg_restore": "18.7"})],
+            "wrong major": [image(client18="17.2-1.pgdg13+1", tools="17.2"), image(client16="15.10-1.pgdg13+1"), image(libpq5="16.16-1.pgdg13+1", linked=160016)],
+            "missing package": [image(drop=("libpq5",)), image(drop=("postgresql-client-16",)), image(drop=("postgresql-client-18",))],
+            "unparsable version": [image(client18="18.8"), image(client18="18.8beta1-1.pgdg13+1"), image(client18="18-1.pgdg13+1"), image(client18=""), image(client18=18.8)],
+            "linked libpq differs from libpq5": [image(linked=180007), image(libpq5="18.7-1.pgdg13+1"), image(linked=180008.0)],
+        }
+        for rule, variants in cases.items():
+            for variant in variants:
+                with self.subTest(rule=rule, packages=variant["packages"], linked=variant["linked_libpq"]), self.assertRaises(RuntimeError):
+                    harness.validate_build_smoke(variant, binding, "16-18")
+
 
     def test_database_receipts_bind_each_fresh_oid_to_exact_server_and_case(self):
         self.assertTrue(callable(getattr(harness, "validate_database_identities", None)), "missing exact database identity evidence")

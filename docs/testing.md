@@ -238,6 +238,10 @@ The matrix task forwards the selected profile through 16 to 16, 18 to 18, and 16
 
 Use a clean committed candidate checkout and complete runtime admission before running these commands.
 The M8 outer harness builds a debug executable from that source, measures its image and utility identities, and uses fresh owned resources.
+Before the workflow, its build smoke reads the installed `libpq5`, `postgresql-client-16` and `postgresql-client-18` package versions in the development image with `dpkg-query`.
+It requires those packages to be majors 18, 16 and 18, the target major's `psql`, `pg_dump` and `pg_restore` to report their package's upstream version, and the executable's linked libpq to equal the `libpq5` version.
+We check against the installed packages rather than a fixed minor, because `tools/e2e/Containerfile` installs the current PGDG clients; the receipt records the versions observed.
+A missing package, an unparsable version or any mismatch fails the run.
 It rejects the old Go report probe, so unset `RPGMIGRATE_E2E_REPORT_PROBE` explicitly.
 
 1. Run the first pair in its admitted runtime window.
