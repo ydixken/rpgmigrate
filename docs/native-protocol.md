@@ -341,8 +341,10 @@ That check and the drop are one statement, which must drop exactly one slot or n
 It never adopts the slot, because the exported snapshot ended with the session that created it.
 A slot of another kind under that name refuses with exit 3 and stays, and so does an active slot of this run's shape, naming the slot and its backend.
 A start drops an unbound slot that has a receipt the same way, on a first run's retry or on a restart, and only at its exact consistent point, so a slot from a run killed before its binding does not stay behind retaining WAL.
-A start retires this run's pending slot, proven by its intent or its unbound receipt, before any check that does not concern it.
-Only the source identity that the plan recorded is checked first; a first run then retires the slot before its plan and inventory comparisons, and a restart before the rest of its source preflight and its pending publication checks, so no later refusal leaves the slot retaining WAL.
+A start retires this run's pending slot, proven by its intent or its unbound receipt, before the checks that do not concern it, so their refusals do not leave the slot retaining WAL.
+Only the source identity that the plan recorded is checked first.
+A first run then retires the slot before its plan and inventory comparisons.
+A restart retires it once it holds the target authority, before the rest of its source preflight and its pending publication checks; a refusal while it acquires that authority still leaves the slot for the next start.
 
 > [!important]
 > Two migrations must never share a slot name on one source.
