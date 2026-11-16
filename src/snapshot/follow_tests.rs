@@ -1364,7 +1364,7 @@ fn pinned_extension_check(
 
 #[test]
 #[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
-fn live_follow_extension_opclasses_require_the_source_extension_version_on_the_target() {
+fn live_follow_extension_opclasses_require_the_source_version_or_an_update_path_on_the_target() {
     let mut fixture = Fixture::new(
         "CREATE EXTENSION citext; CREATE TABLE public.items(id integer PRIMARY KEY,email citext UNIQUE)",
     );
