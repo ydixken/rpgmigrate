@@ -70,7 +70,16 @@ It drops only a logical `pgoutput` slot on the source database that is not tempo
 > While the creating session still waits, the slot is active and the start refuses with exit 3, naming the slot and its backend.
 > End the blocking source transaction or wait for that session to end, then retry.
 
-An interrupted publication CREATE still refuses for manual inspection, so preserve the native state.
+## Interrupted follow publication creation
+
+`CREATE PUBLICATION` waits for a `SHARE UPDATE EXCLUSIVE` lock on every member table, and its `COMMIT` can wait for a synchronous standby.
+A kill there leaves a publication intent, or its receipt, without the confirmed outcome.
+The next start, a first-run retry or a restart, resolves it before it creates a slot.
+It retires the intent when no publication has the recorded name, and drops the publication with exactly the recorded OID and owner, so it creates the publication again under a new intent and never adopts the old one.
+
+> [!caution]
+> A publication of any other identity under the recorded name refuses with exit 3: `follow-source: publication <name> (OID <oid>) exists, but this run's CREATE under that name never committed`, or `... is not this run's unconfirmed creation (OID <recorded>)`.
+> The engine never drops it; remove it only after you confirm nothing else uses it, then retry.
 
 ## Unknown COMMIT or target fence conflict
 

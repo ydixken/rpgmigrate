@@ -1700,15 +1700,19 @@ fn live_follow_positive_publication_retry_requires_the_persisted_source_plan() {
             assert_eq!(snapshot.binding().publication, receipt);
             snapshot.finish(&fixture.io).unwrap();
         } else {
-            assert!(
-                snapshot
-                    .err()
-                    .expect("unconfirmed candidate must refuse")
-                    .message
-                    .contains("unconfirmed")
-            );
-            let slots=fixture.source.query("SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())",&fixture.io).unwrap();
-            assert_eq!(slots.cell(0, 0).unwrap(), Some(b"0".as_slice()));
+            // A committed but unconfirmed candidate is dropped by its recorded OID, never adopted.
+            let snapshot = snapshot.unwrap();
+            assert_eq!(snapshot.binding().publication.name, receipt.name);
+            assert_ne!(snapshot.binding().publication.oid, receipt.oid);
+            let slot = snapshot.receipt().intent.binding.slot_name().to_owned();
+            snapshot.finish(&fixture.io).unwrap();
+            fixture
+                .source
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot('{slot}')"),
+                    &fixture.io,
+                )
+                .unwrap();
         }
     }
 }
@@ -2044,6 +2048,308 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
                 .source
                 .query(
                     &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})"),
+                    &fixture.io,
+                )
+                .unwrap();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PublicationKill {
+    /// The intent was recorded and its CREATE never committed.
+    IntentAbsent,
+    /// Another session created a publication under the intent's name afterwards.
+    IntentForeign,
+    /// The receipt was recorded and COMMIT never reached the server.
+    ReceiptRolledBack,
+    /// The receipt was recorded and COMMIT succeeded, but its reply was lost.
+    ReceiptCommitted,
+    /// The receipt was recorded and a publication of another OID took its name.
+    ReceiptForeign,
+    /// As `ReceiptCommitted`, but another session replaces it while the retry's DROP waits.
+    ReplacedDuringRemoval,
+}
+
+/// Reopens native state as the next process does after a kill.
+fn reopen_native(fixture: &mut Fixture) {
+    drop(fixture.native.take());
+    fixture.options.clone.state.action = StateAction::Resume;
+    fixture.native = Some(
+        crate::state::open_follow(
+            &fixture.options.clone.state,
+            None,
+            fixture.options.origin_name.as_deref(),
+            &fixture.io,
+        )
+        .unwrap(),
+    );
+}
+
+/// Leaves this run's publication CREATE where `kill` names and returns every OID it saw under `name`.
+fn interrupt_publication_create(
+    fixture: &mut Fixture,
+    name: &str,
+    kill: PublicationKill,
+) -> Vec<String> {
+    let native = fixture.native.as_mut().unwrap();
+    let intent = native.begin_publication(name).unwrap();
+    let mut seen = Vec::new();
+    let create = format!(
+        "CREATE PUBLICATION {name} FOR TABLE ONLY public.items WITH(publish_via_partition_root=false)"
+    );
+    if kill != PublicationKill::IntentAbsent && kill != PublicationKill::IntentForeign {
+        catalog::command(&mut fixture.source, "BEGIN", "BEGIN", &fixture.io).unwrap();
+        catalog::command(
+            &mut fixture.source,
+            &create,
+            "CREATE PUBLICATION",
+            &fixture.io,
+        )
+        .unwrap();
+        let receipt =
+            catalog::follow::publication_receipt(&mut fixture.source, name, &fixture.io).unwrap();
+        native
+            .record_publication_created(&intent, &receipt)
+            .unwrap();
+        seen.push(receipt.oid.to_string());
+        if matches!(
+            kill,
+            PublicationKill::ReceiptCommitted | PublicationKill::ReplacedDuringRemoval
+        ) {
+            assert!(matches!(
+                fixture.source.commit_observed(&fixture.io).unwrap(),
+                CommitObservation::Committed
+            ));
+        } else {
+            catalog::command(&mut fixture.source, "ROLLBACK", "ROLLBACK", &fixture.io).unwrap();
+        }
+    }
+    if matches!(
+        kill,
+        PublicationKill::IntentForeign | PublicationKill::ReceiptForeign
+    ) {
+        fixture.source.query(&create, &fixture.io).unwrap();
+        seen.push(scalar(
+            &mut fixture.source,
+            &format!("SELECT oid::text FROM pg_catalog.pg_publication WHERE pubname='{name}'"),
+        ));
+    }
+    reopen_native(fixture);
+    seen
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted() {
+    let kills = [
+        PublicationKill::IntentAbsent,
+        PublicationKill::IntentForeign,
+        PublicationKill::ReceiptRolledBack,
+        PublicationKill::ReceiptCommitted,
+        PublicationKill::ReceiptForeign,
+        PublicationKill::ReplacedDuringRemoval,
+    ];
+    for restart in [false, true] {
+        for kill in kills {
+            let case = format!("restart={restart} kill={kill:?}");
+            let mut fixture = Fixture::new(
+                "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+            );
+            let expected = scalar(
+                &mut fixture.source,
+                "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+            );
+            let mut next = fixture.plan.clone();
+            if restart {
+                let mut snapshot = fixture.create();
+                let binding = snapshot.binding().clone();
+                let ticket = snapshot.snapshot_mut().ticket().clone();
+                snapshot.finish(&fixture.io).unwrap();
+                let native = fixture.native.as_mut().unwrap();
+                native.bind_follow(&next, &ticket, &binding).unwrap();
+                native.begin_pre_data().unwrap();
+                let (objects, tables) = synthetic_handoff(&next);
+                native.confirm_pre_data(&next, objects, tables).unwrap();
+                let recorded = native.begin_follow_restart(&binding, &next).unwrap();
+                next.generation = recorded.next_generation;
+                // The restart removes both old resources by their receipts before its own CREATE.
+                let slot = fixture
+                    .source
+                    .quote_literal(binding.slot.intent.binding.slot_name())
+                    .unwrap();
+                scalar(
+                    &mut fixture.source,
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})::text"),
+                );
+                native.confirm_follow_slot_absent(&recorded).unwrap();
+                fixture
+                    .source
+                    .query(
+                        &format!("DROP PUBLICATION {}", binding.publication.name),
+                        &fixture.io,
+                    )
+                    .unwrap();
+                native.confirm_follow_publication_absent(&recorded).unwrap();
+            } else {
+                fixture
+                    .native
+                    .as_mut()
+                    .unwrap()
+                    .prepare_follow_source(&next)
+                    .unwrap();
+            }
+            let run = fixture.native.as_ref().unwrap().identity().run;
+            let name = catalog::follow::resource_name("publication", run, next.generation).unwrap();
+            let seen = interrupt_publication_create(&mut fixture, &name, kill);
+            let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+            let manifest = || std::fs::read(&manifest_path).unwrap();
+            let before: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
+            let pending = before["follow_state"]["publication"].clone();
+            assert_ne!(pending["phase"], "confirmed", "{case}");
+            let retry = |fixture: &mut Fixture| {
+                let native = fixture.native.as_mut().unwrap();
+                if restart {
+                    FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io)?;
+                    FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io)
+                } else {
+                    FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+                }
+            };
+            let publications = |fixture: &mut Fixture| {
+                scalar(
+                    &mut fixture.source,
+                    "SELECT coalesce(string_agg(pubname||' '||oid,',' ORDER BY pubname),'none') FROM pg_catalog.pg_publication",
+                )
+            };
+            if kill == PublicationKill::ReplacedDuringRemoval {
+                let bytes = manifest();
+                let (ready, held) = std::sync::mpsc::channel();
+                let info = fixture.options.clone.source.clone();
+                let (holder_name, done) = (name.clone(), Arc::new(AtomicBool::new(false)));
+                let replaced = std::thread::scope(|scope| {
+                    let finished = Arc::clone(&done);
+                    let controller = scope.spawn(move || {
+                        let connect = || {
+                            PgConnection::connect(&info, crate::pg::Role::Copy, &control()).unwrap()
+                        };
+                        let (mut holder, mut observer) = (connect(), connect());
+                        holder.query("BEGIN", &control()).unwrap();
+                        // A membership change holds the publication's object lock, so the retry's DROP waits on it.
+                        holder.query(&format!("ALTER PUBLICATION {holder_name} SET TABLE ONLY public.items"), &control()).unwrap();
+                        ready.send(()).unwrap();
+                        wait_until("the retry's DROP never waited on the publication lock", || {
+                            scalar(&mut observer, "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND NOT granted") == "1"
+                        });
+                        holder.query(&format!("DROP PUBLICATION {holder_name}"), &control()).unwrap();
+                        holder.query(&format!("CREATE PUBLICATION {holder_name} FOR TABLE ONLY public.items"), &control()).unwrap();
+                        holder.query("COMMIT", &control()).unwrap();
+                        finished.store(true, Ordering::Release);
+                        scalar(&mut observer, &format!("SELECT oid::text FROM pg_catalog.pg_publication WHERE pubname='{holder_name}'"))
+                    });
+                    held.recv().unwrap();
+                    let error = retry(&mut fixture).err().expect(&case);
+                    let oid = controller
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    assert!(done.load(Ordering::Acquire), "{case}");
+                    assert!(
+                        error.message.starts_with(&format!(
+                            "follow-source: publication {name} changed identity during its removal"
+                        )),
+                        "{case}: {}",
+                        error.message
+                    );
+                    oid
+                });
+                assert_ne!(replaced, seen[0], "{case}");
+                assert_eq!(manifest(), bytes, "{case}");
+                assert_eq!(
+                    publications(&mut fixture),
+                    format!("{name} {replaced}"),
+                    "{case}"
+                );
+                fixture
+                    .source
+                    .query(&format!("DROP PUBLICATION {name}"), &fixture.io)
+                    .unwrap();
+                reopen_native(&mut fixture);
+            }
+            if matches!(
+                kill,
+                PublicationKill::IntentForeign | PublicationKill::ReceiptForeign
+            ) {
+                let foreign = publications(&mut fixture);
+                let bytes = manifest();
+                let error = retry(&mut fixture).err().expect(&case);
+                let refusal = if kill == PublicationKill::IntentForeign {
+                    format!(
+                        "follow-source: publication {name} (OID {}) exists, but this run's CREATE under that name never committed",
+                        seen[0]
+                    )
+                } else {
+                    format!(
+                        "follow-source: publication {name} (OID {}) is not this run's unconfirmed creation (OID {})",
+                        seen[1], seen[0]
+                    )
+                };
+                assert!(
+                    error.message.starts_with(&refusal),
+                    "{case}: {}",
+                    error.message
+                );
+                assert_eq!(manifest(), bytes, "{case}");
+                assert_eq!(publications(&mut fixture), foreign, "{case}");
+                assert_eq!(
+                    source_resources(&mut fixture).1.as_deref(),
+                    Some(b"0".as_slice())
+                );
+                // Clear the hazard as an operator would, by exact name, outside the engine.
+                fixture
+                    .source
+                    .query(&format!("DROP PUBLICATION {name}"), &fixture.io)
+                    .unwrap();
+                reopen_native(&mut fixture);
+            }
+            let snapshot =
+                retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+            let mut snapshot = snapshot;
+            let publication = snapshot.binding().publication.clone();
+            assert_eq!(publication.name, name, "{case}");
+            for old in &seen {
+                assert_ne!(&publication.oid.to_string(), old, "{case}: adopted");
+            }
+            assert_eq!(
+                publications(&mut fixture),
+                format!("{name} {}", publication.oid),
+                "{case}"
+            );
+            for sql in [
+                "INSERT INTO public.items VALUES(301,'after')",
+                "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('01','hex'))",
+            ] {
+                fixture.source.query(sql, &fixture.io).unwrap();
+            }
+            assert_eq!(snapshot_rows_and_objects(&mut snapshot), expected, "{case}");
+            let after: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
+            assert_eq!(after["follow_state"]["publication"]["phase"], "confirmed");
+            assert_ne!(
+                after["follow_state"]["publication"]["intent"]["nonce"], pending["intent"]["nonce"],
+                "{case}"
+            );
+            assert_eq!(
+                source_resources(&mut fixture).1.as_deref(),
+                Some(b"1".as_slice())
+            );
+            let slot = fixture
+                .source
+                .quote_literal(snapshot.receipt().intent.binding.slot_name())
+                .unwrap();
+            snapshot.finish(&fixture.io).unwrap();
+            fixture
+                .source
+                .query(
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({slot})"),
                     &fixture.io,
                 )
                 .unwrap();

@@ -214,6 +214,10 @@ The restart must refuse naming only that object and leave the target row and obj
 It then leaves the recorded slot absent, active, persisted, or replaced by a `test_decoding` or physical slot under that name.
 An active or foreign slot must refuse with the native state and the slot unchanged.
 Every other start must drop the slot and create it again under a new intent, whose snapshot holds each source row and large object exactly once.
+A second case stops publication creation, on a first run and on a restart, after its intent alone or after its receipt with the `COMMIT` rolled back or committed.
+It also places a foreign publication under the recorded name, and replaces the committed one while the retry's `DROP` waits on its lock.
+A foreign or replacing publication must refuse naming it, with the native state and that publication unchanged.
+Every other start must create a publication of a new OID under a new intent, never adopt the old one, and export a snapshot that holds each source row and large object exactly once.
 Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]

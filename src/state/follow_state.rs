@@ -606,6 +606,31 @@ impl NativeState {
         self.replace_manifest(next)
     }
 
+    /// A publication CREATE this run never confirmed may be retired on a first run's retry or on a
+    /// restart whose old resources are absent, and only while no slot intent follows it.
+    pub(crate) fn require_unconfirmed_publication_retirement(
+        &self,
+        pending: &PublicationProvenance,
+    ) -> Result<()> {
+        require_unconfirmed_publication(&self.checked_manifest()?, pending).map(drop)
+    }
+
+    pub(crate) fn retire_unconfirmed_publication(
+        &mut self,
+        pending: &PublicationProvenance,
+    ) -> Result<()> {
+        let mut next = self.checked_manifest()?;
+        let first_run = require_unconfirmed_publication(&next, pending)?;
+        next.follow_state
+            .as_mut()
+            .expect("checked follow state")
+            .publication = None;
+        self.replace_manifest(next)?;
+        // The state is again a fresh first run's, which a reopen would also authorize for one CREATE.
+        self.fresh_created |= first_run;
+        Ok(())
+    }
+
     pub(crate) fn confirm_pending_follow_publication_absent(
         &mut self,
         proof: &crate::snapshot::PendingFollowPublicationAbsence,
@@ -883,6 +908,35 @@ fn require_pending_source_slot(manifest: &Manifest, intent: &SourceSlotIntent) -
         ));
     }
     Ok(())
+}
+
+/// Returns whether `pending` belongs to a first run (true) or to an unbound restart (false).
+fn require_unconfirmed_publication(
+    manifest: &Manifest,
+    pending: &PublicationProvenance,
+) -> Result<bool> {
+    let follow = manifest
+        .follow_state
+        .as_ref()
+        .ok_or_else(|| bad_state("state-follow: native state is not a follow run"))?;
+    let first_run = follow.preliminary.is_some()
+        && follow.binding.is_none()
+        && follow.restart.is_none()
+        && manifest.clone_state.is_none();
+    let restart = follow
+        .restart
+        .as_ref()
+        .is_some_and(|r| r.slot_absent && r.publication_absent && !r.new_bound);
+    if pending.confirmed().is_some()
+        || follow.publication.as_ref() != Some(pending)
+        || manifest.source_slot.is_some()
+        || !first_run && !restart
+    {
+        return Err(bad_state(
+            "state-follow: unconfirmed publication retirement differs from its exact pending CREATE",
+        ));
+    }
+    Ok(first_run)
 }
 
 fn require_pending_resource_retirement(
@@ -1636,6 +1690,107 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(validate_follow_source_types(&types, None).is_err());
+    }
+
+    #[test]
+    fn unconfirmed_publication_retirement_requires_its_exact_pending_create() {
+        let tmp = super::super::tests::TempDir::new();
+        let mut native = open_follow(
+            &StateRequest {
+                path: tmp.path(),
+                action: StateAction::Create,
+            },
+            None,
+            None,
+            &control(),
+        )
+        .unwrap();
+        native.prepare_follow_source(&empty_plan()).unwrap();
+        let intent = native.begin_publication("rpgmigrate_pending").unwrap();
+        let receipt = PublicationReceipt {
+            name: intent.name.clone(),
+            oid: 7,
+            owner_oid: 8,
+        };
+        let pending = PublicationProvenance::Provisioning {
+            intent: intent.clone(),
+        };
+        let mut other = intent.clone();
+        other.nonce[0] ^= 1;
+        let manifest = tmp.path().join("manifest.json");
+        let before = fs::read(&manifest).unwrap();
+        for wrong in [
+            PublicationProvenance::Provisioning { intent: other },
+            PublicationProvenance::Created {
+                intent: intent.clone(),
+                receipt: receipt.clone(),
+            },
+        ] {
+            assert!(native.retire_unconfirmed_publication(&wrong).is_err());
+            assert_eq!(fs::read(&manifest).unwrap(), before);
+        }
+        native
+            .record_publication_created(&intent, &receipt)
+            .unwrap();
+        let created = native.checked_publication().unwrap().unwrap();
+        assert!(native.retire_unconfirmed_publication(&pending).is_err());
+        drop(native);
+        // The next process finds the receipt, never a fresh authorization, until it retires it.
+        let mut native = open_follow(
+            &StateRequest {
+                path: tmp.path(),
+                action: StateAction::Resume,
+            },
+            None,
+            None,
+            &control(),
+        )
+        .unwrap();
+        assert!(native.begin_publication("rpgmigrate_pending").is_err());
+        native.retire_unconfirmed_publication(&created).unwrap();
+        assert!(native.checked_publication().unwrap().is_none());
+        assert!(native.retire_unconfirmed_publication(&created).is_err());
+        let again = native.begin_publication("rpgmigrate_pending").unwrap();
+        assert_ne!(again.nonce, intent.nonce);
+        assert!(native.begin_publication("rpgmigrate_pending").is_err());
+        let receipt = PublicationReceipt { oid: 9, ..receipt };
+        native.record_publication_created(&again, &receipt).unwrap();
+        native.confirm_publication(&again, &receipt).unwrap();
+        let confirmed = native.checked_publication().unwrap().unwrap();
+        assert!(native.retire_unconfirmed_publication(&confirmed).is_err());
+    }
+
+    #[test]
+    fn restart_retires_an_unconfirmed_publication_only_while_unbound_without_a_slot() {
+        let (_tmp, mut native, mut plan, old) = bound_follow();
+        let restart = native.begin_follow_restart(&old, &plan).unwrap();
+        native.confirm_follow_slot_absent(&restart).unwrap();
+        native.confirm_follow_publication_absent(&restart).unwrap();
+        let intent = native.begin_publication("rpgmigrate_restart").unwrap();
+        let pending = native.checked_publication().unwrap().unwrap();
+        plan.generation = restart.next_generation;
+        let slot = native
+            .begin_source_slot(
+                &SourceSlotBinding::new(
+                    old.stream(),
+                    "rpgmigrate_restart".into(),
+                    Plugin::Pgoutput,
+                    plan.generation.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(native.retire_unconfirmed_publication(&pending).is_err());
+        let mut next = native.checked_manifest().unwrap();
+        assert_eq!(
+            next.source_slot,
+            Some(SourceSlotProvenance::Provisioning(slot))
+        );
+        next.source_slot = None;
+        native.replace_manifest(next).unwrap();
+        native.retire_unconfirmed_publication(&pending).unwrap();
+        let again = native.begin_publication("rpgmigrate_restart").unwrap();
+        assert_ne!(again.nonce, intent.nonce);
     }
 
     #[test]

@@ -333,7 +333,19 @@ It drops the slot only when it is a logical `pgoutput` slot on the source databa
 It never adopts the slot, because the exported snapshot ended with the session that created it.
 An active slot refuses with exit 3, naming the slot and its backend, and a slot of another kind under that name refuses and stays.
 A restart drops an unbound slot that has a receipt the same way, and only at its exact consistent point.
-A publication intent without its confirmed receipt still refuses.
+
+### Publication creation recovery
+
+Follow records a publication intent (name and nonce) before `BEGIN`, and its receipt (name, OID and owner, read inside the creating transaction) before it sends `COMMIT`.
+The receipt reaches the native manifest through a file fsync, a rename and a directory fsync, so an intent without a receipt never sent `COMMIT` and never committed.
+A start that finds an unconfirmed publication, on a first run's retry or on an unbound restart, resolves it before any slot intent:
+
+1. With only an intent, no publication under the recorded name means the CREATE rolled back; the start retires the intent and creates the publication again under a new one.
+2. With a receipt, no publication under the name means its `COMMIT` failed, and the start does the same.
+3. A publication with exactly the recorded OID and owner committed without its reply reaching the engine.
+   The start drops it and creates it again; it never adopts it.
+   The dropping transaction reads the OID again and, after `DROP PUBLICATION`, requires that the object lock the drop took names that OID, so a publication that replaced it meanwhile rolls the drop back.
+4. Any other publication under the name is not this run's: the start refuses with exit 3, naming the publication and its OID, and leaves it and the native state unchanged.
 
 ## Replication, endpos, and drain
 

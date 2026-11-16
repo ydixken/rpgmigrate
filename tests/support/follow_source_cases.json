@@ -14,5 +14,6 @@
   "snapshot::follow_tests::live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses",
   "snapshot::follow_tests::live_follow_extension_opclasses_require_the_source_extension_version_on_the_target",
   "snapshot::follow_tests::live_follow_generated_columns_publish_only_writable_columns",
-  "snapshot::follow_tests::live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again"
+  "snapshot::follow_tests::live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again",
+  "snapshot::follow_tests::live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted"
 ]

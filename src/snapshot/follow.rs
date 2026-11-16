@@ -2,7 +2,7 @@ use super::*;
 use crate::contracts::{ClonePlan, FollowBinding, FollowOptions, SnapshotTicket};
 use crate::identity::StreamId;
 use crate::pg::CommitObservation;
-use crate::state::SourceSlotProvenance;
+use crate::state::{PublicationProvenance, SourceSlotProvenance};
 
 pub(crate) struct FollowSnapshot {
     snapshot: CloneSnapshot,
@@ -60,14 +60,10 @@ impl FollowSnapshot {
                 "follow-restart: only an unbound replacement after old-resource absence can retire",
             ));
         }
+        // An unconfirmed publication CREATE is resolved by `create`, which every restart reaches.
         let publication = native
             .checked_publication()?
-            .map(|p| {
-                p.confirmed().cloned().ok_or_else(|| {
-                    follow_refusal("follow-restart: pending publication creation is unproven")
-                })
-            })
-            .transpose()?;
+            .and_then(|p| p.confirmed().cloned());
         let slot = match native.checked_source_slot()? {
             Some(slot)
                 if slot.intent().binding.stream() == restart.previous.stream()
@@ -399,6 +395,14 @@ impl FollowSnapshot {
             drop_unbound_slot(&mut source, &slot, plan, io)?;
             native.confirm_pending_source_slot_absent(slot.intent())?;
         }
+        if let Some(pending) = native
+            .checked_publication()?
+            .filter(|p| p.confirmed().is_none())
+        {
+            native.require_unconfirmed_publication_retirement(&pending)?;
+            drop_unconfirmed_publication(&mut source, &pending, io)?;
+            native.retire_unconfirmed_publication(&pending)?;
+        }
         let reusable_publication = match native.checked_publication()? {
             None => None,
             Some(provenance) => {
@@ -663,6 +667,92 @@ fn drop_unbound_slot(
         return Err(follow_refusal(
             "follow-source: pending slot remains after removal",
         ));
+    }
+    Ok(())
+}
+
+/// Resolves a publication CREATE whose COMMIT this run never confirmed. Its receipt is fsynced before
+/// COMMIT is sent, so an intent alone never committed; a receipt is ours only at its recorded OID and owner,
+/// and is then dropped, never adopted.
+fn drop_unconfirmed_publication(
+    source: &mut PgConnection,
+    pending: &PublicationProvenance,
+    io: &IoControl,
+) -> Result<()> {
+    let name = &pending.intent().name;
+    let literal = source.quote_literal(name)?;
+    let inventory =
+        format!("SELECT oid,pubowner FROM pg_catalog.pg_publication WHERE pubname={literal}");
+    let owned = |present: &crate::pg::PgResult| -> Result<bool> {
+        if present.columns()? != 2 || present.rows() > 1 {
+            return Err(follow_refusal(
+                "follow-source: unconfirmed publication inventory is invalid",
+            ));
+        }
+        if present.rows() == 0 {
+            return Ok(false);
+        }
+        let oid = String::from_utf8_lossy(present.cell(0, 0)?.unwrap_or_default()).into_owned();
+        match pending {
+            PublicationProvenance::Created { receipt, .. }
+                if oid == receipt.oid.to_string()
+                    && present.cell(0, 1)? == Some(receipt.owner_oid.to_string().as_bytes()) =>
+            {
+                Ok(true)
+            }
+            PublicationProvenance::Created { receipt, .. } => Err(follow_refusal(&format!(
+                "follow-source: publication {name} (OID {oid}) is not this run's unconfirmed creation (OID {}); it is never adopted or dropped",
+                receipt.oid
+            ))),
+            _ => Err(follow_refusal(&format!(
+                "follow-source: publication {name} (OID {oid}) exists, but this run's CREATE under that name never committed; it is not this run's and is never adopted or dropped"
+            ))),
+        }
+    };
+    if !owned(&source.query(&inventory, io)?)? {
+        return Ok(());
+    }
+    let PublicationProvenance::Created { receipt, .. } = pending else {
+        unreachable!("only a recorded receipt is owned")
+    };
+    let required = catalog::configure_durability(source, io)?;
+    catalog::command(source, "BEGIN", "BEGIN", io)?;
+    if !owned(&source.query(&inventory, io)?)? {
+        return catalog::command(source, "ROLLBACK", "ROLLBACK", io);
+    }
+    let identifier = source.quote_identifier(name)?;
+    catalog::command(
+        source,
+        &format!("DROP PUBLICATION {identifier}"),
+        "DROP PUBLICATION",
+        io,
+    )?;
+    // DROP resolves the name again under its own lock; that lock names the publication it removed.
+    let dropped = source.query("SELECT objid FROM pg_catalog.pg_locks WHERE pid=pg_catalog.pg_backend_pid() AND locktype='object' AND classid='pg_catalog.pg_publication'::pg_catalog.regclass AND mode='AccessExclusiveLock' AND granted", io)?;
+    if dropped.columns()? != 1
+        || dropped.rows() != 1
+        || dropped.cell(0, 0)? != Some(receipt.oid.to_string().as_bytes())
+    {
+        return Err(follow_refusal(&format!(
+            "follow-source: publication {name} changed identity during its removal; it is never adopted or dropped"
+        )));
+    }
+    catalog::command(
+        source,
+        "SET CONSTRAINTS ALL IMMEDIATE",
+        "SET CONSTRAINTS",
+        io,
+    )?;
+    catalog::confirm_durability(source, required, io)?;
+    if !matches!(source.commit_observed(io), Ok(CommitObservation::Committed)) {
+        return Err(follow_refusal(&format!(
+            "follow-source: unconfirmed publication {name} removal outcome is unknown; retry to resolve it by its recorded OID"
+        )));
+    }
+    if owned(&source.query(&inventory, io)?)? {
+        return Err(follow_refusal(&format!(
+            "follow-source: unconfirmed publication {name} remains after removal"
+        )));
     }
     Ok(())
 }
