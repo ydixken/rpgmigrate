@@ -29,7 +29,9 @@ pub(crate) use io::operation_control;
 pub(crate) use ffi::TransactionStatus;
 pub(crate) use ffi::UtilityEnvironment;
 #[cfg(test)]
-pub(crate) use ffi::{UTILITY_LIVENESS_KEYS, parsed_utility_environment};
+pub(crate) use ffi::{
+    CANCEL_BEFORE_SLOT_DISPATCH, UTILITY_LIVENESS_KEYS, parsed_utility_environment,
+};
 
 pub(crate) use replication::{CreatedLogicalSlot, SlotCreateOutcome};
 pub(crate) use replication::{IdentifySystem, ReplicationFrame, ReplicationPoll, StandbyStatus};

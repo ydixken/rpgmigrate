@@ -515,9 +515,11 @@ impl FollowSnapshot {
                 follow_refusal("follow-source: existing slot or publication is never adopted")
             }));
         }
-        let outcome =
-            exporter.create_logical_slot_export(slot_binding.slot_name(), "pgoutput", io)?;
-        if matches!(outcome, SlotCreateOutcome::NameTaken) {
+        let outcome = exporter.create_logical_slot_export(slot_binding.slot_name(), "pgoutput", io);
+        if matches!(
+            outcome,
+            SlotCreateOutcome::NameTaken | SlotCreateOutcome::NotSent(_)
+        ) {
             native.retire_uncreated_source_slot(&slot_intent)?;
         }
         let receipt =

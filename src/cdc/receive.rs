@@ -1133,12 +1133,10 @@ mod tests {
             );
         }
         let slot = format!("receive_live_{}", std::process::id());
-        let created = match source
-            .create_logical_slot_export(&slot, "pgoutput", &control)
-            .unwrap()
-        {
+        let created = match source.create_logical_slot_export(&slot, "pgoutput", &control) {
             crate::pg::SlotCreateOutcome::Created(created) => created,
-            crate::pg::SlotCreateOutcome::Unknown(failure) => {
+            crate::pg::SlotCreateOutcome::Unknown(failure)
+            | crate::pg::SlotCreateOutcome::NotSent(failure) => {
                 panic!("owned slot creation failed: {failure:?}")
             }
             crate::pg::SlotCreateOutcome::NameTaken => panic!("owned slot name was taken"),
@@ -1227,12 +1225,10 @@ mod tests {
             owner_oid: number(1),
         };
         let mut exporter = PgConnection::connect_replication(&conninfo, &control).unwrap();
-        let created = match exporter
-            .create_logical_slot_export(&slot, "pgoutput", &control)
-            .unwrap()
-        {
+        let created = match exporter.create_logical_slot_export(&slot, "pgoutput", &control) {
             crate::pg::SlotCreateOutcome::Created(created) => created,
-            crate::pg::SlotCreateOutcome::Unknown(failure) => {
+            crate::pg::SlotCreateOutcome::Unknown(failure)
+            | crate::pg::SlotCreateOutcome::NotSent(failure) => {
                 panic!("owned slot creation failed: {failure:?}")
             }
             crate::pg::SlotCreateOutcome::NameTaken => panic!("owned slot name was taken"),

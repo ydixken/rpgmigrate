@@ -14,6 +14,8 @@ pub(crate) enum SlotCreateOutcome {
     Created(CreatedLogicalSlot),
     /// The server refused the name before allocating a slot, so this CREATE created nothing.
     NameTaken,
+    /// The command failed before PQsendQuery, so the server never received this CREATE.
+    NotSent(Error),
     Unknown(Error),
 }
 

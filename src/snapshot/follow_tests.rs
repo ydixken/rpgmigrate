@@ -1804,6 +1804,7 @@ struct RelayState {
     hold: std::sync::Mutex<Option<&'static [u8]>>,
     hits: AtomicU64,
     creates: AtomicU64,
+    drops: AtomicU64,
     pumps: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
@@ -1897,6 +1898,10 @@ impl Relay {
         self.state.creates.load(Ordering::Acquire)
     }
 
+    fn drops(&self) -> u64 {
+        self.state.drops.load(Ordering::Acquire)
+    }
+
     /// Closes every relayed session and points the fixture at the server again.
     fn release(self, fixture: &mut Fixture) {
         fixture.options.clone.source = self.direct.clone();
@@ -1952,9 +1957,13 @@ fn relay_pump(
         if upstream {
             seen.extend_from_slice(&buffer[..size]);
             let create = contains(&seen, b"CREATE_REPLICATION_SLOT");
+            let drop = contains(&seen, b"pg_drop_replication_slot");
             let held = (*state.hold.lock().unwrap()).filter(|pattern| contains(&seen, pattern));
             if create {
                 state.creates.fetch_add(1, Ordering::AcqRel);
+            }
+            if drop {
+                state.drops.fetch_add(1, Ordering::AcqRel);
             }
             if held.is_some() {
                 state.hits.fetch_add(1, Ordering::AcqRel);
@@ -1963,7 +1972,11 @@ fn relay_pump(
                 }
             }
             // A tail shorter than either pattern still finds one split across two reads.
-            let keep = if create || held.is_some() { 0 } else { 31 };
+            let keep = if create || drop || held.is_some() {
+                0
+            } else {
+                31
+            };
             seen.drain(..seen.len().saturating_sub(keep));
         }
         if !state.frozen.load(Ordering::Acquire) && to.write_all(&buffer[..size]).is_err() {
@@ -2118,6 +2131,94 @@ fn live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept() {
                 &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
             );
         }
+    }
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_create_error_before_dispatch_retires_its_intent_without_a_drop() {
+    for restart in [false, true] {
+        let case = format!("restart={restart}");
+        let mut fixture = Fixture::new(
+            "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+        );
+        fixture.options.slot_name = format!("{}_slot", fixture.database);
+        let name = fixture.options.slot_name.clone();
+        let literal = fixture.source.quote_literal(&name).unwrap();
+        let identity = format!(
+            "SELECT coalesce((SELECT plugin||' '||datoid||' '||restart_lsn||' '||confirmed_flush_lsn||' '||catalog_xmin FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+        );
+        let next = if restart {
+            record_restart(&mut fixture).0
+        } else {
+            fixture.plan.clone()
+        };
+        let relay = Relay::start(&mut fixture);
+        // A stop signal that lands after the repeated collision check and before PQsendQuery.
+        crate::pg::CANCEL_BEFORE_SLOT_DISPATCH.with(|armed| armed.set(true));
+        let io = control();
+        let native = fixture.native.as_mut().unwrap();
+        let outcome = if restart {
+            FollowSnapshot::restart(&fixture.options, &next, native, &io)
+        } else {
+            FollowSnapshot::create(&fixture.options, &next, native, &io)
+        };
+        assert!(
+            !crate::pg::CANCEL_BEFORE_SLOT_DISPATCH.with(|armed| armed.replace(false)),
+            "{case}: slot creation never reached its dispatch check"
+        );
+        let error = outcome.err().expect(&case);
+        assert_eq!(error.message, "PostgreSQL operation cancelled", "{case}");
+        assert_eq!(relay.creates(), 0, "{case}");
+        // A restart drops only the bound generation's slot, before it records the new intent.
+        let dropped = relay.drops();
+        assert_eq!(dropped, u64::from(restart), "{case}");
+        assert!(
+            fixture
+                .native
+                .as_ref()
+                .unwrap()
+                .checked_source_slot()
+                .unwrap()
+                .is_none(),
+            "{case}"
+        );
+        assert_eq!(scalar(&mut fixture.source, &identity), "absent", "{case}");
+        // Another run's slot of this run's exact shape then takes the name; it is never this run's.
+        scalar(
+            &mut fixture.source,
+            &format!(
+                "SELECT (pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')).slot_name::text"
+            ),
+        );
+        let foreign = scalar(&mut fixture.source, &identity);
+        let native = fixture.native.as_mut().unwrap();
+        let error = if restart {
+            FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io).and_then(
+                |()| FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io),
+            )
+        } else {
+            FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+        }
+        .err()
+        .expect(&case);
+        assert_eq!(
+            error.message,
+            if restart {
+                "follow-restart: a slot reappeared after recorded absence"
+            } else {
+                "follow-source: existing slot or publication is never adopted"
+            },
+            "{case}"
+        );
+        assert_eq!(relay.drops(), dropped, "{case}");
+        assert_eq!(relay.creates(), 0, "{case}");
+        relay.release(&mut fixture);
+        assert_eq!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+        scalar(
+            &mut fixture.source,
+            &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+        );
     }
 }
 

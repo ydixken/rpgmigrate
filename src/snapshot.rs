@@ -318,6 +318,8 @@ fn created_data(
                 ),
             ));
         }
+        // The caller retires its intent first; this CREATE never reached the server.
+        SlotCreateOutcome::NotSent(failure) => return Err(failure),
         SlotCreateOutcome::Unknown(failure) => {
             return Err(refusal(&format!(
                 "source-slot-create-unknown: slot may retain WAL; the next start drops it by its recorded intent and creation shape, then creates it again (failure category {:?})",

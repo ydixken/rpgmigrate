@@ -1022,17 +1022,29 @@ impl PgConnection {
         slot: &str,
         plugin: &str,
         io: &IoControl,
-    ) -> Result<SlotCreateOutcome> {
+    ) -> SlotCreateOutcome {
         let io = &io::operation_control(io);
-        self.require_mode(Mode::Logical)?;
-        let raw = self.require(Phase::Idle)?;
-        let command = create_slot_command(slot, plugin)?;
-        io::check(io)?;
-        if self.transaction_status()? != TransactionStatus::Idle {
-            return Err(error(
-                "PostgreSQL logical slot creation requires an idle transaction",
-            ));
-        }
+        let ready = (|| {
+            self.require_mode(Mode::Logical)?;
+            let raw = self.require(Phase::Idle)?;
+            let command = create_slot_command(slot, plugin)?;
+            #[cfg(test)]
+            if CANCEL_BEFORE_SLOT_DISPATCH.with(|armed| armed.replace(false)) {
+                io.cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            io::check(io)?;
+            if self.transaction_status()? != TransactionStatus::Idle {
+                return Err(error(
+                    "PostgreSQL logical slot creation requires an idle transaction",
+                ));
+            }
+            Ok((raw, command))
+        })();
+        let (raw, command) = match ready {
+            Ok(ready) => ready,
+            Err(failure) => return SlotCreateOutcome::NotSent(failure),
+        };
         self.phase = Phase::Query;
         // PQsendQuery can partially send even on failure; every error from here has an unknown outcome.
         let outcome = (|| {
@@ -1087,7 +1099,7 @@ impl PgConnection {
             )
             .map(Some)
         })();
-        Ok(match outcome {
+        match outcome {
             Ok(Some(created)) => {
                 self.phase = Phase::SnapshotExport;
                 SlotCreateOutcome::Created(created)
@@ -1101,7 +1113,7 @@ impl PgConnection {
                 self.phase = Phase::Idle;
                 SlotCreateOutcome::Unknown(failure)
             }
-        })
+        }
     }
 
     pub(crate) fn start_replication(
@@ -1706,6 +1718,12 @@ impl Drop for CopyBuffer {
         // SAFETY: this allocation came from libpq and has exactly one owner.
         unsafe { pq::PQfreemem(self.raw.as_ptr().cast()) };
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Raises the caller's cancellation at this thread's next slot export check before dispatch, once.
+    pub(crate) static CANCEL_BEFORE_SLOT_DISPATCH: Cell<bool> = const { Cell::new(false) };
 }
 
 fn check_slot_export_completion(
@@ -2473,17 +2491,20 @@ mod tests {
         assert!(connection.raw.is_some());
     }
 
+    fn not_sent(outcome: SlotCreateOutcome) -> Error {
+        match outcome {
+            SlotCreateOutcome::NotSent(failure) => failure,
+            _ => panic!("a check before dispatch did not report NotSent"),
+        }
+    }
+
     #[test]
     fn create_slot_export_rejects_before_dispatch_and_preserves_owner() {
         let mut connection = unconnected();
         let io = control();
         for (slot, plugin) in [("bad;slot", "test_decoding"), ("pgcopydb", "bad;plugin")] {
             assert_eq!(
-                connection
-                    .create_logical_slot_export(slot, plugin, &io)
-                    .err()
-                    .unwrap()
-                    .message,
+                not_sent(connection.create_logical_slot_export(slot, plugin, &io)).message,
                 "PostgreSQL logical slot creation arguments are invalid"
             );
             assert!(connection.raw.is_some());
@@ -2500,27 +2521,21 @@ mod tests {
             (&cancelled, "PostgreSQL operation cancelled"),
         ] {
             let deadline = io.deadline;
-            let failure = connection
-                .create_logical_slot_export("pgcopydb", "test_decoding", io)
-                .err()
-                .unwrap();
+            let failure =
+                not_sent(connection.create_logical_slot_export("pgcopydb", "test_decoding", io));
             assert_eq!(failure.message, expected);
             assert_eq!(io.deadline, deadline);
             assert!(connection.raw.is_some());
             assert!(connection.phase == Phase::Idle);
         }
         connection.mode = Mode::Sql;
-        let failure = connection
-            .create_logical_slot_export("pgcopydb", "test_decoding", &io)
-            .err()
-            .unwrap();
+        let failure =
+            not_sent(connection.create_logical_slot_export("pgcopydb", "test_decoding", &io));
         assert!(failure.message.contains("connection mode"));
         connection.mode = Mode::Logical;
         connection.phase = Phase::CopyBoth;
-        let failure = connection
-            .create_logical_slot_export("pgcopydb", "test_decoding", &io)
-            .err()
-            .unwrap();
+        let failure =
+            not_sent(connection.create_logical_slot_export("pgcopydb", "test_decoding", &io));
         assert!(failure.message.contains("protocol state"));
         assert!(connection.raw.is_some());
         assert!(connection.phase == Phase::CopyBoth);
@@ -2529,10 +2544,11 @@ mod tests {
     #[test]
     fn create_slot_export_requires_idle_transaction_before_dispatch() {
         let mut connection = unconnected();
-        let failure = connection
-            .create_logical_slot_export("pgcopydb", "test_decoding", &control())
-            .err()
-            .unwrap();
+        let failure = not_sent(connection.create_logical_slot_export(
+            "pgcopydb",
+            "test_decoding",
+            &control(),
+        ));
         assert_eq!(
             failure.message,
             "PostgreSQL logical slot creation requires an idle transaction"
@@ -2646,9 +2662,7 @@ mod tests {
                 &control(),
             )
             .unwrap();
-            let outcome = connection
-                .create_logical_slot_export("e12", "pgoutput", &control())
-                .unwrap();
+            let outcome = connection.create_logical_slot_export("e12", "pgoutput", &control());
             match outcome {
                 SlotCreateOutcome::NameTaken => {
                     assert!(taken, "{case}");
@@ -2665,6 +2679,7 @@ mod tests {
                     );
                 }
                 SlotCreateOutcome::Created(_) => panic!("{case}: a refusal created a slot"),
+                SlotCreateOutcome::NotSent(_) => panic!("{case}: CREATE was sent"),
             }
             drop(connection);
             peer.join().unwrap();
@@ -2732,11 +2747,7 @@ mod tests {
         assert!(connection.server_version().is_err());
         assert!(connection.is_replication().is_err());
         assert!(connection.quote_literal("value").is_err());
-        assert!(
-            connection
-                .create_logical_slot_export("pgcopydb", "test_decoding", &control())
-                .is_err()
-        );
+        not_sent(connection.create_logical_slot_export("pgcopydb", "test_decoding", &control()));
     }
 
     #[test]
