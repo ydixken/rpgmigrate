@@ -202,12 +202,19 @@ The engine sets the name as libpq's `fallback_application_name` at connect time,
 A caller's own `fallback_application_name`, from the conninfo or a service file, also keeps precedence, and utilities still refuse it.
 The phase that opens a session picks its role:
 
-- `receive`: replication-protocol connections, the source health check, and slot or publication creation, restart and cleanup, including `stream cleanup` on both sides.
-- `copy`: planning, snapshot export and import, schema, table and sequence copy, ANALYZE, large objects, `ping`, `copy table-data`, and every `pg_dump` and `pg_restore` child.
+- `receive`: replication-protocol connections, the source health check, slot or publication creation, restart and cleanup, including `stream cleanup` on both sides, and the `--follow` source snapshot session.
+- `copy`: planning, plain clone snapshot export and import, schema, table and sequence copy, ANALYZE, large objects, `ping`, `copy table-data`, and every `pg_dump` and `pg_restore` child.
 - `apply`: apply, checkpoint, barrier, fence and drain sessions, final source sequence synchronization, and the `stream sentinel` commands.
 - `compare`: `compare schema` and `compare data`.
 
 `<pid>` is the engine process ID, including in a child's name.
+Children get the name through `PGAPPNAME`, because `pg_dump` and `pg_restore` pass their own `fallback_application_name`.
+The SQL LIKE prefix is `rpgmigrate[%`.
+The future runner flag is `--rpgmigrate-runner-image`, its chart value is `rpgmigrateRunnerImage`, and its default stays empty until image qualification.
+The runner executable is `/usr/local/bin/rpgmigrate`.
+Matching-major tools live in `/usr/lib/postgresql/16/bin` and `/usr/lib/postgresql/18/bin`.
+Default `psql` is major 18.
+M5/M6 implement the image and its wiring.
 
 ### Session timeouts
 
@@ -222,14 +229,11 @@ We clear them because a copy, an index build or a comparison legitimately outlas
 > The source snapshot session stays in one `REPEATABLE READ READ ONLY` transaction from snapshot import to the end of the table copy.
 > It holds an `ACCESS SHARE` lock on every copied table, its indexes and its sequences, and its snapshot holds back the source's removal horizon.
 > A source `ALTER TABLE`, `TRUNCATE`, `DROP` or `VACUUM FULL` on a copied table waits for the whole copy, and queries queued behind that DDL wait with it.
-> With `--follow` the same session first creates the publication, so it is named `receive`; a plain clone names it `copy`.
-Children get the name through `PGAPPNAME`, because `pg_dump` and `pg_restore` pass their own `fallback_application_name`.
-The SQL LIKE prefix is `rpgmigrate[%`.
-The future runner flag is `--rpgmigrate-runner-image`, its chart value is `rpgmigrateRunnerImage`, and its default stays empty until image qualification.
-The runner executable is `/usr/local/bin/rpgmigrate`.
-Matching-major tools live in `/usr/lib/postgresql/16/bin` and `/usr/lib/postgresql/18/bin`.
-Default `psql` is major 18.
-M5/M6 implement the image and its wiring.
+> Source sessions keep `lock_timeout` at `0`, as `pg_dump` does without `--lock-wait-timeout`, so an engine session that meets such DDL waits for it instead of failing.
+> Run source DDL on copied tables before the clone starts or after it ends.
+
+With `--follow` the source snapshot session runs as `receive`, because it is a replication-resource session: it creates the publication, imports the slot's snapshot and checks the copy plan, its publication membership and its type map under that snapshot.
+A plain clone names the same session `copy`.
 
 ## Replication, endpos, and drain
 
