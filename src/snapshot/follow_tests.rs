@@ -2801,7 +2801,11 @@ fn live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once() {
         let before = fresh_state(&options);
         options.clone.state.action = StateAction::Resume;
         options.clone.not_consistent = true;
-        let error = crate::follow::run(options.clone(), &control()).expect_err(&case);
+        // A start that wrongly proceeds is cancelled once it streams, so it fails here instead of hanging.
+        let error = super::fresh_kill::follow_until_analyzing(&pair.endpoints, run, |io| {
+            crate::follow::run(options.clone(), io)
+        })
+        .expect_err(&case);
         assert!(error.message.contains(refusal), "{case}: {}", error.message);
         let after = fresh_state(&options);
         assert_eq!(after["clone_state"], before["clone_state"], "{case}");
