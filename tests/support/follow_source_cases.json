@@ -10,5 +10,7 @@
   "catalog::follow::tests::live_cleanup_publication_identity_options_membership_refuse",
   "catalog::follow::tests::live_cleanup_active_or_foreign_slot_survives",
   "catalog::follow::tests::live_cleanup_recorded_removal_reappearance_survives",
-  "catalog::follow::tests::live_cleanup_source_binding_mismatch_preserves_resources"
+  "catalog::follow::tests::live_cleanup_source_binding_mismatch_preserves_resources",
+  "snapshot::follow_tests::live_follow_admits_validated_builtin_checks_expression_indexes_and_extension_opclasses",
+  "snapshot::follow_tests::live_follow_extension_opclasses_require_the_source_extension_version_on_the_target"
 ]

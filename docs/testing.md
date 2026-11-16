@@ -286,6 +286,7 @@ Text COPY admits built-in types, enums, domains, arrays, standalone composite ty
 It refuses `reg*` types, `aclitem` and `pg_node_tree`, whose text is not portable, as well as table row types and base types that no extension owns.
 An extension that owns a column type must be available on the target, or planning refuses before mutation.
 Planning does not compare extension versions, because pre-data installs the target's default version; the 16 to 18 container pair runs `citext` across such a version change.
+Follow does compare them for extension index operator classes, as [follow admission](native-protocol.md#follow-admission) describes.
 Binary COPY keeps its built-in scalar predicate, so a table with any of these columns falls back to text.
 The M8 component and direct CLI profiles above cover the candidate implementation.
 The separate follow profile below controls `clone --follow` qualification.
@@ -391,7 +392,7 @@ The follow harness reuses the clone harness's immutable server images, private i
 The harness takes the native format and target metadata it expects from `NATIVE_FORMAT` and `TARGET_METADATA` in `tools/e2e/follow.py`, and the cutover and M8 checks import them.
 A portable test pins both to the constants in `src/state.rs`, so a format bump fails `task test` until someone reviews the harness.
 It starts logical decoding only inside its disposable source container and checks the executable's actual linked libpq version.
-Follow refuses a domain CHECK that any column reaches through domains, arrays, or composite members.
+Follow checks every domain CHECK that any column reaches through domains, arrays, or composite members, under the [follow admission](native-protocol.md#follow-admission) rules.
 The separate positive fixture contains no generated columns, CHECK constraints, domain CHECK, expression or partial indexes, or user callbacks.
 Its DEFAULT, INDEX, and keyless FULL identities cover changed keys, duplicate rows, NULLs, unchanged TOAST, TRUNCATE, explicit identity values, and differing source/target custom type OIDs.
 The smoke DML inserts, updates, and deletes `citext`, domain, composite, and array values, including case-only changes.

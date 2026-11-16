@@ -1474,7 +1474,7 @@ class FollowHarnessTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         context = {"root": directory.name, "token": "owned"}
         authority_fault_receipts(context["root"], context["token"])
-        for profile, count in (("FollowSource", 12), ("FollowAuthority", 17), ("FollowReceive", 11), ("FollowApply", 11)):
+        for profile, count in (("FollowSource", 14), ("FollowAuthority", 17), ("FollowReceive", 11), ("FollowApply", 11)):
             cases = module_cases({}, profile)
             self.assertEqual(len(cases), count)
             records = "".join(f"test {name} ... ok\n" for name in cases)

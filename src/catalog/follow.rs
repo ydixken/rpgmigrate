@@ -180,28 +180,55 @@ fn inspect_source_tables(
     Ok(())
 }
 
+/// Node labels whose evaluation calls no function beyond the funcid/opno fields checked below.
+const ADMITTED_NODES: &str = "'ARRAYCOERCEEXPR','ARRAYEXPR','BOOLEANTEST','BOOLEXPR','CASEEXPR','CASETESTEXPR','CASEWHEN','COALESCEEXPR','COERCETODOMAINVALUE','COLLATEEXPR','CONST','DISTINCTEXPR','FUNCEXPR','NULLIFEXPR','NULLTEST','OPEXPR','RELABELTYPE','SCALARARRAYOPEXPR','VAR'";
+
+/// SQL that is true unless `oid` names a deterministic collation whose recorded version is current.
+/// The default collation (oid 100) records its version in pg_database, never in pg_collation.
+fn unsafe_collation(oid: &str) -> String {
+    format!(
+        "NOT EXISTS(SELECT 1 FROM pg_catalog.pg_collation co WHERE co.oid={oid} AND co.collisdeterministic AND (CASE WHEN co.oid=100 THEN (SELECT d.datcollversion IS DISTINCT FROM pg_catalog.pg_database_collation_actual_version(d.oid) FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()) ELSE co.collversion IS DISTINCT FROM pg_catalog.pg_collation_actual_version(co.oid) END) IS FALSE)"
+    )
+}
+
+/// SQL that is true when a stored node tree leaves the admitted subset. Node trees name pinned
+/// builtins that have no pg_depend rows, so they are the admission proof for expressions.
+fn unsafe_expression(tree: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM pg_catalog.regexp_matches({tree},'[{{]([A-Z_]+)','g') m(g) WHERE m.g[1] NOT IN ({ADMITTED_NODES})) OR \
+EXISTS(SELECT 1 FROM pg_catalog.regexp_matches({tree},':(funcid|opfuncid|hashfuncid|negfuncid) ([0-9]+)','g') m(g) WHERE m.g[2]<>'0' AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid=p.pronamespace WHERE p.oid=m.g[2]::pg_catalog.oid AND p.oid<16384 AND ns.nspname='pg_catalog' AND p.provolatile='i')) OR \
+EXISTS(SELECT 1 FROM pg_catalog.regexp_matches({tree},':opno ([0-9]+)','g') m(g) WHERE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_namespace ns ON ns.oid=o.oprnamespace JOIN pg_catalog.pg_proc p ON p.oid=o.oprcode WHERE o.oid=m.g[1]::pg_catalog.oid AND o.oid<16384 AND ns.nspname='pg_catalog' AND p.oid<16384 AND p.provolatile='i')) OR \
+EXISTS(SELECT 1 FROM pg_catalog.regexp_matches({tree},':[A-Za-z_]*[Cc]oll[A-Za-z_]* ([0-9]+)','g') m(g) WHERE m.g[1]<>'0' AND {}))",
+        unsafe_collation("m.g[1]::pg_catalog.oid")
+    )
+}
+
 pub(super) fn require_follow_execution(
     connection: &mut PgConnection,
     oid: u32,
     io: &IoControl,
 ) -> Result<()> {
-    // Pinned builtins can lack pg_depend rows, so expression absence is the safe admission proof.
-    // The default collation (oid 100) records its version in pg_database, never in pg_collation.
+    // Extension opclasses pass here; require_follow_extensions binds their version to the target.
     let result=connection.query(&format!(r#"WITH RECURSIVE ancestors(oid) AS (
  SELECT {oid}::pg_catalog.oid UNION SELECT i.inhparent FROM pg_catalog.pg_inherits i JOIN ancestors a ON a.oid=i.inhrelid
 ), {}
 SELECT
- NOT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.contype IN ('c','x') AND (c.conrelid IN (SELECT oid FROM ancestors) OR c.contypid IN (SELECT oid FROM types))),
+ NOT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint c WHERE (c.conrelid IN (SELECT oid FROM ancestors) OR c.contypid IN (SELECT oid FROM types)) AND (c.contype='x' OR (c.contype='c' AND (NOT c.convalidated OR c.conbin IS NULL OR {})))),
  NOT EXISTS(SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=idx.relam WHERE i.indrelid IN (SELECT oid FROM ancestors) AND (
- i.indexprs IS NOT NULL OR i.indpred IS NOT NULL OR NOT i.indisvalid OR NOT i.indisready OR NOT i.indislive OR am.oid>=16384 OR am.amname NOT IN ('btree','hash','gist','gin','spgist','brin') OR
- EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_opclass op ON op.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=op.opcnamespace WHERE op.oid IS NULL OR op.oid>=16384 OR ns.nspname<>'pg_catalog' OR op.opcmethod<>am.oid) OR
- EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_collation co ON co.oid=key.oid WHERE key.oid<>0 AND (co.oid IS NULL OR NOT co.collisdeterministic OR (CASE WHEN co.oid=100 THEN (SELECT d.datcollversion IS DISTINCT FROM pg_catalog.pg_database_collation_actual_version(d.oid) FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()) ELSE co.collversion IS DISTINCT FROM pg_catalog.pg_collation_actual_version(co.oid) END) IS NOT FALSE))
+ {} OR NOT i.indisvalid OR NOT i.indisready OR NOT i.indislive OR am.oid>=16384 OR am.amname NOT IN ('btree','hash','gist','gin','spgist','brin') OR
+ EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_opclass op ON op.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=op.opcnamespace WHERE op.oid IS NULL OR op.opcmethod<>am.oid OR NOT ((op.oid<16384 AND ns.nspname='pg_catalog') OR EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_opclass'::pg_catalog.regclass AND d.objid=op.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e'))) OR
+ EXISTS(SELECT 1 FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) key(oid) WHERE key.oid<>0 AND {})
  )),
  NOT EXISTS(SELECT 1 FROM pg_catalog.pg_partitioned_table p WHERE p.partrelid IN (SELECT oid FROM ancestors) AND (
  p.partexprs IS NOT NULL OR 0=ANY(p.partattrs::pg_catalog.int2[]) OR
  EXISTS(SELECT 1 FROM pg_catalog.unnest(p.partclass::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_opclass op ON op.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=op.opcnamespace LEFT JOIN pg_catalog.pg_am am ON am.oid=op.opcmethod WHERE op.oid IS NULL OR op.oid>=16384 OR ns.nspname<>'pg_catalog' OR am.oid>=16384 OR am.amname NOT IN ('btree','hash')) OR
  EXISTS(SELECT 1 FROM pg_catalog.unnest(p.partcollation::pg_catalog.oid[]) key(oid) LEFT JOIN pg_catalog.pg_collation co ON co.oid=key.oid LEFT JOIN pg_catalog.pg_namespace ns ON ns.oid=co.collnamespace WHERE key.oid<>0 AND (co.oid IS NULL OR ns.nspname<>'pg_catalog' OR co.collname NOT IN ('C','POSIX') OR NOT co.collisdeterministic OR co.collversion IS DISTINCT FROM pg_catalog.pg_collation_actual_version(co.oid)))
- ))"#, super::clone::column_types(&oid.to_string())),io)?;
+ ))"#,
+        super::clone::column_types(&oid.to_string()),
+        unsafe_expression("c.conbin::pg_catalog.text"),
+        unsafe_expression("pg_catalog.concat_ws(' ',i.indexprs::pg_catalog.text,i.indpred::pg_catalog.text)"),
+        unsafe_collation("key.oid"),
+    ),io)?;
     if result.rows() != 1 || result.columns()? != 3 {
         return Err(refusal(
             "follow-execution: catalog safety evidence is missing",
@@ -210,11 +237,11 @@ SELECT
     for (column, message) in [
         (
             0,
-            "follow-execution: table/domain CHECK and exclusion constraints are unsupported",
+            "follow-execution: table/domain CHECK constraints require validated built-in immutable expressions; exclusion constraints are unsupported",
         ),
         (
             1,
-            "follow-execution: require plain indexes with built-in methods/opclasses and deterministic current collations",
+            "follow-execution: require indexes with built-in methods, built-in or extension opclasses, built-in immutable expressions, and deterministic current collations",
         ),
         (
             2,
@@ -223,6 +250,41 @@ SELECT
     ] {
         if result.cell(0, column)? != Some(b"t") {
             return Err(refusal(message));
+        }
+    }
+    Ok(())
+}
+
+/// Extension opclasses carry their extension's semantics, so the target must hold, or install
+/// through pre-data, the source's exact extension version.
+pub(crate) fn require_follow_extensions(
+    source: &mut PgConnection,
+    target: &mut PgConnection,
+    tables: &[CloneTable],
+    io: &IoControl,
+) -> Result<()> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let oids = tables
+        .iter()
+        .map(|table| table.source_oid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let used = source.query(&format!("SELECT DISTINCT e.extname::pg_catalog.text,e.extversion FROM pg_catalog.pg_index i CROSS JOIN LATERAL pg_catalog.unnest(i.indclass::pg_catalog.oid[]) k(oid) JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_opclass'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid WHERE i.indrelid IN ({oids}) ORDER BY 1 LIMIT 1025"), io)?;
+    if used.rows() > 1024 || used.columns()? != 2 {
+        return Err(refusal(
+            "follow-preflight: extension operator class inventory exceeds its bound",
+        ));
+    }
+    for row in 0..used.rows() {
+        let name = target.quote_literal(text(&used, row, 0)?)?;
+        let version = target.quote_literal(text(&used, row, 1)?)?;
+        let matched = target.query(&format!("SELECT COALESCE((SELECT e.extversion FROM pg_catalog.pg_extension e WHERE e.extname={name}),(SELECT a.default_version FROM pg_catalog.pg_available_extensions a WHERE a.name={name}))={version}"), io)?;
+        if matched.rows() != 1 || matched.columns()? != 1 || matched.cell(0, 0)? != Some(b"t") {
+            return Err(refusal(
+                "follow-preflight: extension operator classes require the source extension version on the target",
+            ));
         }
     }
     Ok(())
