@@ -1233,8 +1233,8 @@ copy_request(relay)
         old = manifest["transport_cases"] + manifest["copy_cases"]
         old += module_cases(manifest, "Prepared") + authority
         self.assertEqual(len(replication), 9)
-        self.assertEqual(len(old), 40)
-        self.assertEqual(len(module_cases(manifest, "Engine")), 50)
+        self.assertEqual(len(old), 41)
+        self.assertEqual(len(module_cases(manifest, "Engine")), 51)
         self.assertEqual(module_cases(manifest, "Engine"), old + replication + [
             "compare::tests::live_canonical_rows_preserve_only_generated_identity_null_and_duplicates"])
         self.assertEqual(module_cases(manifest, "Replication"), replication)

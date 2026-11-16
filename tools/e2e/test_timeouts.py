@@ -6,6 +6,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import clone
 import timeouts
 
 
@@ -57,6 +58,19 @@ class ReceiptTests(unittest.TestCase):
             mutate(changed)
             with self.subTest(index=index), self.assertRaises(RuntimeError):
                 timeouts.validate_receipt(changed)
+
+
+class HarnessOptionsTests(unittest.TestCase):
+    def test_harness_sessions_clear_every_setting_the_server_has(self):
+        self.assertEqual(timeouts.harness_options(16), " options='-c statement_timeout=0 -c lock_timeout=0 "
+                         "-c idle_in_transaction_session_timeout=0 -c idle_session_timeout=0'")
+        self.assertEqual(timeouts.harness_options(18), timeouts.harness_options(16)[:-1] + " -c transaction_timeout=0'")
+
+    def test_engine_conninfo_never_carries_the_harness_options(self):
+        database = clone.Database("source", Path("/bin"), {})
+        database.harness_options = timeouts.harness_options(18)
+        self.assertNotIn("options", database.connection("x"))
+        self.assertNotIn("options", database.operator_uri("x", "source"))
 
 
 class HoldTests(unittest.TestCase):

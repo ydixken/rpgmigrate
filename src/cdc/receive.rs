@@ -1070,7 +1070,8 @@ mod tests {
         ));
         let mut source = PgConnection::connect_replication(&conninfo, &control).unwrap();
         configure(&mut source, &control).unwrap();
-        // Startup options stand in for server, database and role timeouts, which configure must clear.
+        // Caller startup options stand in for server, database and role timeouts.
+        // The engine's own startup options clear four of them; configure clears transaction_timeout.
         let mut names = vec![
             "statement_timeout",
             "lock_timeout",
@@ -1097,12 +1098,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let select = format!("SELECT {settings}");
-        for expected in [b"4321ms".as_slice(), b"0"] {
+        for configured in [false, true] {
             let observed = timed.logical_query(&select, &control).unwrap();
-            for column in 0..names.len() {
-                assert_eq!(observed.cell(0, column).unwrap(), Some(expected));
+            for (column, name) in names.iter().enumerate() {
+                let expected: &[u8] = if configured || *name != "transaction_timeout" {
+                    b"0"
+                } else {
+                    b"4321ms"
+                };
+                assert_eq!(observed.cell(0, column).unwrap(), Some(expected), "{name}");
             }
-            if expected != b"0" {
+            if !configured {
                 configure(&mut timed, &control).unwrap();
             }
         }

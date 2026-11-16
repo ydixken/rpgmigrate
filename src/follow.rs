@@ -722,21 +722,9 @@ mod tests {
         message
     }
 
-    /// Answers a PostgreSQL 16 peer's share of the connect-time timeout reset.
+    /// Answers a PostgreSQL 16 peer's connect-time timeout read-back; startup options cleared them.
     fn answer_session_timeouts(stream: &mut TcpStream) {
         let parsed = [peer_message(b'1', b""), peer_message(b'2', b"")].concat();
-        for _ in 0..4 {
-            for tag in b"PBDES" {
-                assert_eq!(read_peer_message(stream), *tag);
-            }
-            let reply = [
-                parsed.clone(),
-                peer_message(b'n', b""),
-                peer_message(b'C', b"SET\0"),
-                peer_message(b'Z', b"I"),
-            ];
-            stream.write_all(&reply.concat()).unwrap();
-        }
         for tag in b"PBDES" {
             assert_eq!(read_peer_message(stream), *tag);
         }

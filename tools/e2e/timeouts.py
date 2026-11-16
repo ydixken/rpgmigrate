@@ -17,6 +17,11 @@ HOLD_SECONDS = 2
 FATAL = "SELECT coalesce(sum(sessions_fatal), -1) FROM pg_catalog.pg_stat_database WHERE datname = '{}';"
 
 
+def harness_options(major):
+    """Startup options that keep the harness's own sessions out of the sessions_fatal count."""
+    return " options='" + " ".join(f"-c {name}=0" for name, _, minimum in SETTINGS if major >= minimum) + "'"
+
+
 def expected_sides(majors, minimum):
     return sorted(side for side, major in majors.items() if major >= minimum)
 
@@ -41,6 +46,7 @@ def run(source, target, case, launch, driver):
               for side, database in (("source", source), ("target", target))}
     cases = {}
     for name, value, minimum in SETTINGS:
+        source.harness_options = target.harness_options = ""
         srcname, dstname, _, _, state = case("timeout_" + name)
         applied = expected_sides(majors, minimum)
         cases[name] = {"value": value, "majors": majors, "applied": applied}
@@ -53,6 +59,8 @@ def run(source, target, case, launch, driver):
             # A fresh session must see the setting, so the run cannot pass because nothing was set.
             if database.sql(database_name, f"SELECT pg_catalog.current_setting('{name}');").decode().strip() != value:
                 raise RuntimeError(f"{side} database setting {name} is not in force")
+        # From here the harness's own sessions clear the case setting at startup, so a FATAL is an engine session's.
+        source.harness_options, target.harness_options = harness_options(majors["source"]), harness_options(majors["target"])
         before = fatal_sessions(source, target, srcname, dstname)
         if any(count < 0 for count in before.values()):
             raise RuntimeError("session statistics are unavailable")
@@ -78,6 +86,7 @@ def run(source, target, case, launch, driver):
         if any(lost.values()):
             raise RuntimeError(f"{name} ended engine sessions: " + json.dumps(lost, sort_keys=True))
         cases[name].update(held_seconds=held, tables=len(data), completed=True, fatal_sessions=lost)
+    source.harness_options = target.harness_options = ""
     return cases
 
 

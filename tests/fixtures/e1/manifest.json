@@ -22,7 +22,8 @@
     "pg::live_tests::raw_copy_handles_empty_null_escaped_bytes_and_one_oversize_frame",
     "pg::live_tests::late_copy_error_and_copy_abort_leave_transactions_rollbackable",
     "pg::live_tests::query_deadline_and_cancellation_stop_waiting",
-    "pg::live_tests::passfile_and_service_authentication_preserve_security_checks"
+    "pg::live_tests::passfile_and_service_authentication_preserve_security_checks",
+    "pg::live_tests::startup_options_clear_timeouts_before_a_slow_first_statement"
   ],
   "copy_cases": [
     "catalog::tests::live_preflight_retains_target_locks_and_source_snapshot",

@@ -51,7 +51,7 @@ class CatalogHarnessTests(unittest.TestCase):
     def test_catalog_cases_do_not_enter_engine_or_copy_inventory(self):
         manifest = load_manifest()
         engine = module_cases(manifest, "Engine")
-        self.assertEqual(len(engine), 50)
+        self.assertEqual(len(engine), 51)
         self.assertEqual(len(manifest["cases"]), 40)
         self.assertTrue(set(CASES).isdisjoint(engine))
         self.assertEqual(len(module_cases(manifest, "Authority")), 19)

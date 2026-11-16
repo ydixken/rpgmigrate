@@ -624,7 +624,7 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             from db_harness import load_manifest, module_cases
             manifest = load_manifest()
             engine = module_cases(manifest, "Engine")
-            self.assertEqual(len(engine), 50)
+            self.assertEqual(len(engine), 51)
             retained = [name for name in engine if not any(skip in name for skip in skips)]
             self.assertEqual(retained, engine)
             for profile in ("Catalog", "SourceCatalog", "Schema", "FollowSource"):
