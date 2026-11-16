@@ -348,7 +348,7 @@ Schema3 checks pre-data drift, effective service/authentication/TLS option prese
 Its owned TCP/SCRAM relay checks selected-peer loss with TLS disabled.
 Option-byte evidence does not qualify TLS handshakes, client certificates, or encrypted keys.
 FollowSnapshot additionally requires five fault receipts and three CREATE-tail phases.
-The four adapter profiles, Transport, Prepared, Authority, and Replication, intentionally select subsets of Engine50.
+The four adapter profiles, Transport, Prepared, Authority, and Replication, intentionally select subsets of Engine.
 They are not additional disjoint cases.
 FollowReceive uses `--include-ignored --exact` with all eleven manifest names, because its required inventory includes ignored and nonignored tests.
 Using only `--ignored` silently omits required receiver cases and fails the inventory check.

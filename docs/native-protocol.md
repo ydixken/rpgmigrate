@@ -219,11 +219,21 @@ M5/M6 implement the image and its wiring.
 ### Session timeouts
 
 Every engine session sets `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` and `idle_session_timeout` to `0`, and `transaction_timeout` to `0` on PostgreSQL 17 and later.
-SQL sessions do this at connect, before their first engine statement; replication sessions do it in their setup, before `CREATE_REPLICATION_SLOT` or `START_REPLICATION`.
+The first four travel as `-c` switches in the startup packet's `options`, SQL and replication sessions alike.
+We send them there because the server arms `idle_session_timeout` as soon as it reports ready for a query: under CPU contention a 20 ms database setting ended sessions before their first `SET` arrived.
+The engine appends its switches after any `options` the caller passes in the conninfo, a service file or `PGOPTIONS`, so the caller's other switches are kept and the engine's values win.
+A startup switch is a client setting, which outranks database, role and role-in-database settings (`GucSource` in `src/include/utils/guc.h`, applied by `process_startup_options` before `process_settings` in `postinit.c`, on 16 and 18 alike).
+PostgreSQL 16 rejects an unknown name in startup options, so `transaction_timeout` is a `SET` instead: the first statement of a SQL session, and part of a replication session's setup before `CREATE_REPLICATION_SLOT` or `START_REPLICATION`.
+It counts only inside a transaction, so the idle gap before that `SET` does not expose it.
 The engine then reads all of them back and refuses the session unless each is `0`.
-These values override the server, database and role settings and any `options` the caller passes, as `pg_dump` and `pg_restore` do.
+
+> [!important]
+> A connection pooler in front of either server must forward the `options` startup parameter, for SQL and replication sessions.
+> Otherwise every engine session fails closed: a pooler that rejects the parameter fails the connection, and one that strips it leaves any server timeout in force, which the read-back then refuses.
+
 We clear them because a copy, an index build or a comparison legitimately outlasts any production value, and because the engine's own copy workers queue on the owned checkpoint lock, so even `lock_timeout` fails a clone without outside contention.
-`pg_dump` and `pg_restore` clear the first four and `transaction_timeout` themselves; the engine adds `-c idle_session_timeout=0` to their `PGOPTIONS`, because an idle parallel restore worker would otherwise be ended between items.
+`pg_dump` and `pg_restore` inherit the connection's options, startup switches included, through `PGOPTIONS`, and also clear the first four and `transaction_timeout` themselves.
+The engine adds `-c idle_session_timeout=0` to their `PGOPTIONS` as well, because they never clear that one and an idle parallel restore worker would otherwise be ended between items.
 
 > [!warning]
 > The source snapshot session stays in one `REPEATABLE READ READ ONLY` transaction from snapshot import to the end of the table copy.

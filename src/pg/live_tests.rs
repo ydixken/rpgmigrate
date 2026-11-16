@@ -286,3 +286,96 @@ fn passfile_and_service_authentication_preserve_security_checks() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires isolated harness connection"]
+fn startup_options_clear_timeouts_before_a_slow_first_statement() {
+    use super::test_support::{Files, quote};
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let io = control();
+    let direct = PgConnection::connect(&fixture(), crate::pg::Role::Copy, &io).unwrap();
+    let environment = direct.utility_environment().unwrap();
+    let value = |name: &str| {
+        let (_, value) = environment
+            .values
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap();
+        value.clone().into_string().unwrap()
+    };
+    let (host, port, version) = (
+        value("PGHOST"),
+        value("PGPORT"),
+        direct.server_version().unwrap(),
+    );
+    drop(direct);
+    let files = Files::new();
+    let listener = UnixListener::bind(files.root.join(format!(".s.PGSQL.{port}"))).unwrap();
+    let upstream = std::path::Path::new(&host).join(format!(".s.PGSQL.{port}"));
+    let proxy = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        let mut server = UnixStream::connect(upstream).unwrap();
+        let (mut replies, mut back) = (server.try_clone().unwrap(), client.try_clone().unwrap());
+        let replies = std::thread::spawn(move || std::io::copy(&mut replies, &mut back).map(drop));
+        // Each client message reaches the server ten times the idle-session timeout late.
+        let mut buffer = [0; 8192];
+        while let Ok(count @ 1..) = client.read(&mut buffer) {
+            std::thread::sleep(Duration::from_millis(200));
+            if server.write_all(&buffer[..count]).is_err() {
+                break;
+            }
+        }
+        let _ = server.shutdown(std::net::Shutdown::Both);
+        let _ = replies.join().unwrap();
+    });
+    let mut names = vec![
+        "idle_in_transaction_session_timeout",
+        "idle_session_timeout",
+        "lock_timeout",
+        "statement_timeout",
+    ];
+    let mut caller = "-c statement_timeout=20ms -c lock_timeout=1ms -c idle_in_transaction_session_timeout=20ms -c idle_session_timeout=20ms".to_owned();
+    if version >= 170_000 {
+        names.push("transaction_timeout");
+        caller.push_str(" -c transaction_timeout=50ms");
+    }
+    let mut conninfo = std::env::var_os("RPGMIGRATE_TEST_SOURCE").unwrap();
+    conninfo.push(format!(
+        " host={} options={}",
+        quote(files.root.to_str().unwrap()),
+        quote(&caller)
+    ));
+    let mut slow = PgConnection::connect(
+        &Conninfo::new(conninfo).unwrap(),
+        crate::pg::Role::Copy,
+        &io,
+    )
+    .expect("the server must not end the session before the first statement arrives");
+    let list = names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let settings = slow
+        .query(&format!("SELECT name, setting, source FROM pg_catalog.pg_settings WHERE name IN ({list}) ORDER BY name"), &io)
+        .unwrap();
+    assert_eq!(settings.rows(), names.len());
+    for (row, name) in names.iter().enumerate() {
+        // A startup option is a client source, which outranks database and role settings.
+        let source: &[u8] = if *name == "transaction_timeout" {
+            b"session"
+        } else {
+            b"client"
+        };
+        assert_eq!(settings.cell(row, 0).unwrap(), Some(name.as_bytes()));
+        assert_eq!(
+            settings.cell(row, 1).unwrap(),
+            Some(b"0".as_slice()),
+            "{name}"
+        );
+        assert_eq!(settings.cell(row, 2).unwrap(), Some(source), "{name}");
+    }
+    drop(slow);
+    proxy.join().unwrap();
+}

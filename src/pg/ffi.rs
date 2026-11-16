@@ -334,19 +334,33 @@ fn connect_start(conninfo: &Conninfo, mode: Mode, name: &CStr) -> Result<*mut pq
             values.push(c"database".as_ptr());
         }
     }
+    let (fallback, mut options) = caller_settings(&keys, &values)?;
     // A caller's own fallback name, from the DSN or a service file, keeps precedence over ours.
-    if !caller_fallback(&keys, &values)? {
+    if !fallback {
         keys.push(c"fallback_application_name".as_ptr());
         values.push(name.as_ptr());
     }
+    // The server applies these before its first ReadyForQuery, so no idle gap precedes them.
+    // A later -c wins, and a client setting outranks database and role settings.
+    if !options.is_empty() {
+        options.push(b' ');
+    }
+    options.extend_from_slice(STARTUP_TIMEOUTS.as_bytes());
+    let options = CString::new(options)
+        .map_err(|_| error("PostgreSQL connection options contain a NUL byte"))?;
+    keys.push(c"options".as_ptr());
+    values.push(options.as_ptr());
     keys.push(ptr::null());
     values.push(ptr::null());
     // SAFETY: terminated arrays and strings stay live while libpq expands and copies them.
     Ok(unsafe { pq::PQconnectStartParams(keys.as_ptr(), values.as_ptr(), 1) })
 }
 
-/// Reports whether libpq resolves a fallback_application_name from the caller's settings.
-fn caller_fallback(keys: &[*const c_char], values: &[*const c_char]) -> Result<bool> {
+/// Session timeouts every server major has; transaction_timeout (17+) is set after connect.
+const STARTUP_TIMEOUTS: &str = "-c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c idle_session_timeout=0";
+
+/// Resolves whether the caller's settings carry a fallback_application_name, and their options.
+fn caller_settings(keys: &[*const c_char], values: &[*const c_char]) -> Result<(bool, Vec<u8>)> {
     // An invalid sslmode stops libpq after it applied the DSN, service file and environment, before any socket.
     let keys: Vec<_> = keys
         .iter()
@@ -365,10 +379,15 @@ fn caller_fallback(keys: &[*const c_char], values: &[*const c_char]) -> Result<b
         Err(error("PostgreSQL option probe opened a socket"))
     } else {
         connection_option(probe, c"fallback_application_name")
+            .and_then(|fallback| Ok((fallback, connection_option(probe, c"options")?)))
     };
     // SAFETY: the probe is released once here.
     unsafe { pq::PQfinish(probe.as_ptr()) };
-    Ok(value?.is_some_and(|value| !value.is_empty()))
+    let (fallback, options) = value?;
+    Ok((
+        fallback.is_some_and(|value| !value.is_empty()),
+        options.unwrap_or_default(),
+    ))
 }
 
 /// Copies one effective option of a connection object, or None when it is unset.
@@ -531,14 +550,15 @@ impl PgConnection {
             replication: ReplicationState::default(),
             copy_pending: Vec::new(),
         };
-        // Replication sessions disable them in their own setup, before their first protocol command.
+        // Startup cleared them; replication sessions confirm that in their own setup, before their first protocol command.
         if mode == Mode::Sql {
             connection.disable_timeouts(io)?;
         }
         Ok(connection)
     }
 
-    /// Clears server, database and role timeouts that would end a long engine phase.
+    /// Confirms startup cleared the server, database and role timeouts that would end a long engine phase.
+    /// A pooler that drops startup options leaves them in force, so this read-back refuses.
     pub(crate) fn disable_timeouts(&mut self, io: &IoControl) -> Result<()> {
         let mut names = vec![
             "statement_timeout",
@@ -546,15 +566,14 @@ impl PgConnection {
             "idle_in_transaction_session_timeout",
             "idle_session_timeout",
         ];
-        if self.server_version()? >= 170_000 {
-            names.push("transaction_timeout");
-        }
         let run = |connection: &mut Self, sql: &str| match connection.mode {
             Mode::Sql => connection.query(sql, io),
             Mode::Logical => connection.logical_query(sql, io),
         };
-        for name in &names {
-            if run(self, &format!("SET {name} TO 0"))?.command_tag()? != "SET" {
+        // Older servers reject this name at startup; it runs only in a transaction, so no idle gap precedes it.
+        if self.server_version()? >= 170_000 {
+            names.push("transaction_timeout");
+            if run(self, "SET transaction_timeout TO 0")?.command_tag()? != "SET" {
                 return Err(error("PostgreSQL session timeout was not disabled"));
             }
         }
@@ -2121,6 +2140,160 @@ mod tests {
         value
     }
 
+    /// Serves one session the way a server with 20ms database-level timeouts would.
+    /// It honours startup `-c` options in order unless it strips them, as some poolers do.
+    fn timeout_peer(
+        version: &'static str,
+        strip: bool,
+    ) -> (u16, std::thread::JoinHandle<(String, Vec<String>)>) {
+        use std::io::{Read, Write};
+        fn message(tag: u8, body: &[u8]) -> Vec<u8> {
+            [&[tag][..], &(body.len() as u32 + 4).to_be_bytes(), body].concat()
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut size = [0; 4];
+            stream.read_exact(&mut size).unwrap();
+            let mut startup = vec![0; u32::from_be_bytes(size) as usize - 4];
+            stream.read_exact(&mut startup).unwrap();
+            let fields: Vec<_> = startup[4..].split(|byte| *byte == 0).collect();
+            let options = fields
+                .chunks(2)
+                .find(|pair| pair[0] == b"options")
+                .map(|pair| String::from_utf8(pair[1].to_vec()).unwrap())
+                .unwrap_or_default();
+            let mut names = vec![
+                "statement_timeout",
+                "lock_timeout",
+                "idle_in_transaction_session_timeout",
+                "idle_session_timeout",
+            ];
+            if version != "16.0" {
+                names.push("transaction_timeout");
+            }
+            let mut settings: Vec<_> = names
+                .iter()
+                .map(|name| (*name, "20ms".to_owned()))
+                .collect();
+            let words: Vec<_> = options.split_ascii_whitespace().collect();
+            for pair in words.windows(2).filter(|pair| !strip && pair[0] == "-c") {
+                let (name, value) = pair[1].split_once('=').unwrap();
+                if let Some(setting) = settings.iter_mut().find(|(known, _)| *known == name) {
+                    setting.1 = value.to_owned();
+                }
+            }
+            let ready = message(b'Z', b"I");
+            let version = format!("server_version\0{version}\0");
+            stream
+                .write_all(
+                    &[
+                        message(b'R', &[0; 4]),
+                        message(b'S', version.as_bytes()),
+                        ready.clone(),
+                    ]
+                    .concat(),
+                )
+                .unwrap();
+            let mut queries = Vec::new();
+            loop {
+                let mut tag = [0; 1];
+                if stream.read_exact(&mut tag).is_err() || tag[0] == b'X' {
+                    return (options, queries);
+                }
+                stream.read_exact(&mut size).unwrap();
+                let mut body = vec![0; u32::from_be_bytes(size) as usize - 4];
+                stream.read_exact(&mut body).unwrap();
+                if tag[0] == b'P' {
+                    let sql = body.split(|byte| *byte == 0).nth(1).unwrap();
+                    queries.push(String::from_utf8(sql.to_vec()).unwrap());
+                } else if tag[0] == b'S' {
+                    let sql = queries.last().unwrap();
+                    let mut reply = vec![message(b'1', b""), message(b'2', b"")];
+                    if let Some(name) = sql
+                        .strip_prefix("SET ")
+                        .and_then(|set| set.strip_suffix(" TO 0"))
+                    {
+                        settings
+                            .iter_mut()
+                            .find(|(known, _)| *known == name)
+                            .unwrap()
+                            .1 = "0".into();
+                        reply.extend([message(b'n', b""), message(b'C', b"SET\0")]);
+                    } else {
+                        let count = (settings.len() as u16).to_be_bytes();
+                        let (mut fields, mut row) = (count.to_vec(), count.to_vec());
+                        for (_, value) in &settings {
+                            fields.extend(b"c\0\0\0\0\0\0\0\0\0\0\x19\xff\xff\xff\xff\xff\xff\0\0");
+                            row.extend((value.len() as u32).to_be_bytes());
+                            row.extend(value.as_bytes());
+                        }
+                        reply.extend([
+                            message(b'T', &fields),
+                            message(b'D', &row),
+                            message(b'C', b"SELECT 1\0"),
+                        ]);
+                    }
+                    reply.push(ready.clone());
+                    stream.write_all(&reply.concat()).unwrap();
+                }
+            }
+        });
+        (port, peer)
+    }
+
+    #[test]
+    fn startup_options_clear_timeouts_after_caller_options_and_the_read_back_refuses() {
+        let caller = "-c search_path=caller -c idle_session_timeout=20ms";
+        for (version, strip, dsn_options, expected) in [
+            ("16.0", false, "", STARTUP_TIMEOUTS.to_owned()),
+            (
+                "16.0",
+                false,
+                caller,
+                format!("{caller} {STARTUP_TIMEOUTS}"),
+            ),
+            (
+                "18.0",
+                false,
+                caller,
+                format!("{caller} {STARTUP_TIMEOUTS}"),
+            ),
+            ("16.0", true, caller, format!("{caller} {STARTUP_TIMEOUTS}")),
+            ("18.0", true, "", STARTUP_TIMEOUTS.to_owned()),
+        ] {
+            let (port, peer) = timeout_peer(version, strip);
+            let conninfo = format!(
+                "host=127.0.0.1 port={port} dbname=x user=x sslmode=disable gssencmode=disable connect_timeout=2 options='{dsn_options}'"
+            );
+            let outcome = PgConnection::connect(
+                &Conninfo::new(conninfo.into()).unwrap(),
+                Role::Copy,
+                &control(),
+            );
+            let case = format!("{version} strip={strip} options={dsn_options:?}");
+            match (strip, outcome) {
+                (false, Ok(connection)) => drop(connection),
+                (true, Err(failure)) => assert!(
+                    failure.message.contains("remains enabled"),
+                    "{case}: {}",
+                    failure.message
+                ),
+                (_, outcome) => panic!("{case}: unexpected outcome {:?}", outcome.err()),
+            }
+            let (options, queries) = peer.join().unwrap();
+            assert_eq!(options, expected, "{case}");
+            let mut sent = if version == "16.0" {
+                vec![]
+            } else {
+                vec!["SET transaction_timeout TO 0"]
+            };
+            sent.push(if version == "16.0" { "SELECT pg_catalog.current_setting('statement_timeout'),pg_catalog.current_setting('lock_timeout'),pg_catalog.current_setting('idle_in_transaction_session_timeout'),pg_catalog.current_setting('idle_session_timeout')" } else { "SELECT pg_catalog.current_setting('statement_timeout'),pg_catalog.current_setting('lock_timeout'),pg_catalog.current_setting('idle_in_transaction_session_timeout'),pg_catalog.current_setting('idle_session_timeout'),pg_catalog.current_setting('transaction_timeout')" });
+            assert_eq!(queries, sent, "{case}: only the read-back follows startup");
+        }
+    }
+
     #[test]
     fn caller_fallback_names_win_and_the_probe_opens_no_socket() {
         // The service-file case runs live in schema's auth and TLS utility test.
@@ -2133,7 +2306,7 @@ mod tests {
             let conninfo = Conninfo::new(input.clone().into()).unwrap();
             let keys = [c"dbname".as_ptr()];
             let values = [conninfo.as_c_str().as_ptr()];
-            assert_eq!(caller_fallback(&keys, &values).unwrap(), found, "{input}");
+            assert_eq!(caller_settings(&keys, &values).unwrap().0, found, "{input}");
             assert_eq!(started_fallback(&input), Some(expected), "{input}");
         }
     }
