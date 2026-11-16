@@ -328,16 +328,25 @@ Each publication member must match the plan exactly on both majors:
 
 Follow records a slot intent (the run's stream, slot name, plugin, copy generation and a nonce) before `CREATE_REPLICATION_SLOT`, and its receipt (consistent point and snapshot name) after the command returns.
 One intent authorizes one CREATE.
+Follow checks that no slot holds the name before it creates the publication, and again after it records the intent, immediately before the CREATE.
+A slot that the repeated check finds is not this run's, because the CREATE was never sent: follow retires the intent durably and refuses with exit 3, `follow-source: existing slot or publication is never adopted`.
+A complete `ErrorResponse` with SQLSTATE 42710, as the command's only result and followed by `ReadyForQuery`, proves that the server's name check refused the CREATE before it allocated a slot.
+PostgreSQL raises 42710 there only (16.15 `slot.c:312-314`, 18.7 `slot.c:412-414`).
+Follow retires that intent durably without any drop and refuses with exit 3, `follow-source: slot <name> already exists, so this run's CREATE created nothing; it is never adopted or dropped`.
+Every other error, and a lost or incomplete reply, keeps the intent, because the server can fail after it persisted the slot.
+For example, `ReplicationSlotPersist` marks the slot persistent before `SaveSlotToPath` can raise an error, and that error leaves the slot in place.
 A start that finds an intent without its receipt, on a first run's retry or on a restart, drops the slot of exactly that name, records its absence, and creates the slot again under a new intent.
 It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, and has no active backend.
 It never adopts the slot, because the exported snapshot ended with the session that created it.
 An active slot refuses with exit 3, naming the slot and its backend, and a slot of another kind under that name refuses and stays.
 A start drops an unbound slot that has a receipt the same way, on a first run's retry or on a restart, and only at its exact consistent point, so a slot from a run killed before its binding does not stay behind retaining WAL.
 
-> [!note]
+> [!important]
+> Two migrations must never share a slot name on one source.
+> The operator passes one stable `--slot-name` across runs and generations, so the engine's default per-run name does not separate them.
 > A pending intent has no receipt, so the start identifies its slot only by the recorded name and the shape check above.
-> The name is unique per run and copy generation unless `--slot-name` sets it, so a foreign slot under it requires another run to use the same explicit name.
-> We accept that limit: such a slot, created between the collision check and the CREATE, would be dropped on the next start.
+> A foreign slot under that name is dropped only in one case: it takes the name after the repeated check and before this run's CREATE reaches the server's name check, and this process dies before it reads the reply.
+> From the name check on, any concurrent CREATE under the name fails with 42710.
 
 ### Publication creation recovery
 

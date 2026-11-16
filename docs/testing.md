@@ -220,6 +220,10 @@ A foreign or replacing publication must refuse naming it, with the native state 
 Every other start must create a publication of a new OID under a new intent, never adopt the old one, and export a snapshot that holds each source row and large object exactly once.
 A third case ends a first run after its slot receipt and before its binding, then leaves the slot at its recorded point, removes it, or replaces it with a later `pgoutput` or a `test_decoding` slot.
 A replaced slot must refuse with the native state and that slot unchanged; every other start must drop the slot and create a later one under a new intent, whose snapshot holds each source row and large object exactly once.
+Another case lets a foreign slot take the name inside the creation window, on a first run and on a restart, through a relay that holds one engine message.
+Held at `CREATE PUBLICATION`, the repeated check must find the slot and refuse before any `CREATE_REPLICATION_SLOT` is sent.
+Held at `CREATE_REPLICATION_SLOT`, the server's 42710 must refuse it.
+Both must retire the intent, keep the slot unchanged and refuse again on the next start, then create this run's own slot once the foreign one is gone.
 A fourth case kills a first follow run in phase `fresh`: waiting on the target fence, inside its bookkeeping CREATE after the intent, after that CREATE committed without its reply, and after it was confirmed.
 After the last point a second variant also kills the restart inside its generation publish.
 Each restart must reach `analyzing` at copy generation two, or three after the publish kill, with every row and large object exactly once and only that generation's slot and publication left on the source.

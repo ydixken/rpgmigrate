@@ -222,7 +222,7 @@ tasks:
         test --locked --lib snapshot::follow_fault_tests::live_follow_ -- --ignored --test-threads=1
 
   test-follow-source:
-    desc: Run nineteen exact pgoutput source snapshot and owned cleanup cases
+    desc: Run twenty exact pgoutput source snapshot and owned cleanup cases
     cmds:
       - >-
         {{.RUN}} {{.PYTHON_COMMAND}} tools/test-db.py --follow-source -- {{.CARGO_COMMAND}}

@@ -436,6 +436,19 @@ impl NativeState {
         Ok(intent)
     }
 
+    /// Retires an intent whose CREATE was never sent or was refused by the server's name check;
+    /// either way the server holds nothing of this run's under that name.
+    pub(crate) fn retire_uncreated_source_slot(&mut self, intent: &SourceSlotIntent) -> Result<()> {
+        let mut next = self.checked_manifest()?;
+        if next.source_slot != Some(SourceSlotProvenance::Provisioning(intent.clone())) {
+            return Err(bad_state(
+                "state-source: retirement does not match the persisted source slot intent",
+            ));
+        }
+        next.source_slot = None;
+        self.replace_manifest(next)
+    }
+
     pub(crate) fn confirm_source_slot(
         &mut self,
         intent: &SourceSlotIntent,

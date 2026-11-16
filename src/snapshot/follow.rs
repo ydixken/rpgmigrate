@@ -517,8 +517,26 @@ impl FollowSnapshot {
             publication
         };
         let slot_intent = native.begin_source_slot(&slot_binding)?;
+        // CREATE has not been sent, so a slot that took the name since the first check is not ours.
+        let free = source
+            .query(
+                &format!("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name={slot})"),
+                io,
+            )
+            .and_then(|taken| {
+                Ok(taken.rows() == 1 && taken.columns()? == 1 && taken.cell(0, 0)? == Some(b"f"))
+            });
+        if !matches!(free, Ok(true)) {
+            native.retire_uncreated_source_slot(&slot_intent)?;
+            return Err(free.err().unwrap_or_else(|| {
+                follow_refusal("follow-source: existing slot or publication is never adopted")
+            }));
+        }
         let outcome =
             exporter.create_logical_slot_export(slot_binding.slot_name(), "pgoutput", io)?;
+        if matches!(outcome, SlotCreateOutcome::NameTaken) {
+            native.retire_uncreated_source_slot(&slot_intent)?;
+        }
         let receipt =
             native.confirm_source_slot(&slot_intent, created_data(&slot_binding, outcome)?)?;
         let ticket = SnapshotTicket {

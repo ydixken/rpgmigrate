@@ -78,6 +78,14 @@ It drops only a logical `pgoutput` slot on the source database that is not tempo
 > While the creating session still waits, the slot is active and the start refuses with exit 3, naming the slot and its backend.
 > End the blocking source transaction or wait for that session to end, then retry.
 
+A slot that another session created under the name before this run's CREATE is not this run's.
+The run refuses with exit 3, `follow-source: existing slot or publication is never adopted`, or `follow-source: slot <name> already exists, so this run's CREATE created nothing; it is never adopted or dropped`, and records no slot intent.
+Later starts refuse while that slot exists, with the first text on a first run or `follow-restart: a slot reappeared after recorded absence` on a restart, and leave it in place.
+
+> [!caution]
+> Two migrations must never share a slot name on one source; with the operator, that means two Migrations with the same slot name.
+> Give each its own name, remove the other slot only after you confirm nothing uses it, then retry.
+
 A first run killed after the slot was created but before it bound the snapshot leaves the slot's receipt.
 The next start drops that slot only at its recorded consistent point and creates it again, so it does not keep retaining WAL.
 A slot under that name at another position or of another plugin refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.

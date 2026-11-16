@@ -83,6 +83,7 @@ SOURCE_M8 = tuple("snapshot::follow_tests::" + name for name in (
     "live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_adopted",
     "live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adopted",
     "live_follow_fresh_bound_run_restarts_its_data_phase_with_every_row_once",
+    "live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept",
 ))
 
 
@@ -146,7 +147,7 @@ class FollowM4HarnessTests(unittest.TestCase):
     def test_authority_inventory_preserves_eleven_and_requires_six_cutover_and_two_m8_cases(self):
         self.assertEqual(module_cases({}, "FollowAuthority"), [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS, *AUTHORITY_M8])
 
-    def test_source_inventory_preserves_seven_and_requires_five_cleanup_three_admission_and_four_m8_cases(self):
+    def test_source_inventory_preserves_seven_and_requires_five_cleanup_three_admission_and_five_m8_cases(self):
         self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS, *SOURCE_ADMISSION, *SOURCE_M8])
 
     def test_receive_inventory_preserves_four_cases_and_requires_seven_cutover_cases(self):

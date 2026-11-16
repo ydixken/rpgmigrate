@@ -308,6 +308,16 @@ fn created_data(
 ) -> Result<CreatedSlotData> {
     let created = match outcome {
         SlotCreateOutcome::Created(created) => created,
+        // The caller retires its intent first; the server's name check proves nothing was created.
+        SlotCreateOutcome::NameTaken => {
+            return Err(Error::new(
+                ErrorKind::BadState,
+                format!(
+                    "follow-source: slot {} already exists, so this run's CREATE created nothing; it is never adopted or dropped",
+                    binding.slot_name()
+                ),
+            ));
+        }
         SlotCreateOutcome::Unknown(failure) => {
             return Err(refusal(&format!(
                 "source-slot-create-unknown: slot may retain WAL; retain native intent for manual review (failure category {:?})",

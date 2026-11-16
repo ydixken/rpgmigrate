@@ -606,6 +606,46 @@ fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create(
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+fn an_uncreated_slot_intent_is_retired_only_in_its_exact_pending_form() {
+    let plan = PendingFixture::plan();
+    let (root, mut native) = PendingFixture::open();
+    let manifest = || std::fs::read(root.join("state/manifest.json")).unwrap();
+    native.prepare_follow_source(&plan).unwrap();
+    PendingFixture::publication(&mut native, 30);
+    let binding = PendingFixture::slot_binding(&native, &plan);
+    let pending = native.begin_source_slot(&binding).unwrap();
+    let before = manifest();
+    let mut changed = pending.clone();
+    changed.nonce[0] ^= 1;
+    assert!(native.retire_uncreated_source_slot(&changed).is_err());
+    assert_eq!(manifest(), before);
+    native.retire_uncreated_source_slot(&pending).unwrap();
+    drop(native);
+    let mut native = PendingFixture::reopen(&root, StateAction::Resume);
+    assert!(native.checked_source_slot().unwrap().is_none());
+    assert!(native.retire_uncreated_source_slot(&pending).is_err());
+    let replacement = native.begin_source_slot(&binding).unwrap();
+    let receipt = native
+        .confirm_source_slot(
+            &replacement,
+            CreatedSlotData {
+                consistent_point: crate::identity::SourceEndLsn(70),
+                snapshot_name: "snapshot-70".into(),
+            },
+        )
+        .unwrap();
+    let before = manifest();
+    assert!(
+        native
+            .retire_uncreated_source_slot(&receipt.intent)
+            .is_err()
+    );
+    assert_eq!(manifest(), before);
+    drop(native);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 struct Fixture {
     admin: PgConnection,
     source: PgConnection,
@@ -1737,6 +1777,342 @@ fn live_follow_positive_publication_retry_requires_the_persisted_source_plan() {
                     &fixture.io,
                 )
                 .unwrap();
+        }
+    }
+}
+
+fn harness_context() -> serde_json::Value {
+    let context =
+        std::env::var_os("RPGMIGRATE_TEST_CONTEXT").expect("owned follow harness required");
+    serde_json::from_slice(&std::fs::read(context).unwrap()).unwrap()
+}
+
+/// Relays the engine's sessions to the owned server. A held pattern pauses the first client chunk
+/// that contains it until opened. Frozen, nothing passes either way and every server session stays
+/// open until release, which is how a stopped or killed engine loses a reply the server completes.
+struct Relay {
+    direct: Conninfo,
+    directory: PathBuf,
+    state: Arc<RelayState>,
+    acceptor: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct RelayState {
+    stop: AtomicBool,
+    frozen: AtomicBool,
+    hold: std::sync::Mutex<Option<&'static [u8]>>,
+    hits: AtomicU64,
+    creates: AtomicU64,
+    pumps: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl Relay {
+    fn start(fixture: &mut Fixture) -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let context = harness_context();
+        let socket_dir = PathBuf::from(context["socket_dir"].as_str().unwrap());
+        let port = context["port"].as_u64().unwrap();
+        let directory = socket_dir.join(format!(
+            "relay-{}-{}",
+            std::process::id(),
+            CASE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let listener = UnixListener::bind(directory.join(format!(".s.PGSQL.{port}"))).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = socket_dir.join(format!(".s.PGSQL.{port}"));
+        let state = Arc::new(RelayState::default());
+        let shared = Arc::clone(&state);
+        let acceptor = std::thread::spawn(move || {
+            while !shared.stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        client.set_nonblocking(false).unwrap();
+                        let server = UnixStream::connect(&server).unwrap();
+                        let mut pumps = shared.pumps.lock().unwrap();
+                        for (from, to, upstream) in [
+                            (
+                                client.try_clone().unwrap(),
+                                server.try_clone().unwrap(),
+                                true,
+                            ),
+                            (server, client, false),
+                        ] {
+                            let shared = Arc::clone(&shared);
+                            pumps.push(std::thread::spawn(move || {
+                                relay_pump(from, to, upstream, &shared)
+                            }));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("relay accept failed: {error}"),
+                }
+            }
+        });
+        let direct = fixture.options.clone.source.clone();
+        let host = fixture
+            .source
+            .quote_literal(directory.to_str().unwrap())
+            .unwrap();
+        fixture.options.clone.source = Conninfo::new(
+            format!(
+                "{} host={host}",
+                std::str::from_utf8(direct.as_c_str().to_bytes()).unwrap()
+            )
+            .into(),
+        )
+        .unwrap();
+        Self {
+            direct,
+            directory,
+            state,
+            acceptor: Some(acceptor),
+        }
+    }
+
+    fn hold(&self, pattern: &'static [u8]) {
+        *self.state.hold.lock().unwrap() = Some(pattern);
+    }
+
+    fn open(&self) {
+        *self.state.hold.lock().unwrap() = None;
+    }
+
+    fn hits(&self) -> u64 {
+        self.state.hits.load(Ordering::Acquire)
+    }
+
+    fn creates(&self) -> u64 {
+        self.state.creates.load(Ordering::Acquire)
+    }
+
+    /// Closes every relayed session and points the fixture at the server again.
+    fn release(self, fixture: &mut Fixture) {
+        fixture.options.clone.source = self.direct.clone();
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.state.stop.store(true, Ordering::Release);
+        let acceptor = self.acceptor.take().unwrap().join();
+        for pump in std::mem::take(&mut *self.state.pumps.lock().unwrap()) {
+            let _ = pump.join();
+        }
+        let _ = std::fs::remove_dir_all(&self.directory);
+        if let Err(panic) = acceptor {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+fn relay_pump(
+    mut from: std::os::unix::net::UnixStream,
+    mut to: std::os::unix::net::UnixStream,
+    upstream: bool,
+    state: &RelayState,
+) {
+    use std::io::{Read, Write};
+    let contains = |seen: &[u8], pattern: &[u8]| seen.windows(pattern.len()).any(|w| w == pattern);
+    from.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+        .unwrap();
+    let (mut buffer, mut seen) = ([0; 16384], Vec::new());
+    while !state.stop.load(Ordering::Acquire) {
+        let size = match from.read(&mut buffer) {
+            Ok(0) => {
+                if !state.frozen.load(Ordering::Acquire) {
+                    let _ = to.shutdown(std::net::Shutdown::Write);
+                }
+                return;
+            }
+            Ok(size) => size,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return,
+        };
+        if upstream {
+            seen.extend_from_slice(&buffer[..size]);
+            let create = contains(&seen, b"CREATE_REPLICATION_SLOT");
+            let held = (*state.hold.lock().unwrap()).filter(|pattern| contains(&seen, pattern));
+            if create {
+                state.creates.fetch_add(1, Ordering::AcqRel);
+            }
+            if held.is_some() {
+                state.hits.fetch_add(1, Ordering::AcqRel);
+                while state.hold.lock().unwrap().is_some() && !state.stop.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            // A tail shorter than either pattern still finds one split across two reads.
+            let keep = if create || held.is_some() { 0 } else { 31 };
+            seen.drain(..seen.len().saturating_sub(keep));
+        }
+        if !state.frozen.load(Ordering::Acquire) && to.write_all(&buffer[..size]).is_err() {
+            return;
+        }
+    }
+}
+
+/// Binds a first generation and records its copy-phase restart; returns the next generation's
+/// plan and the bound slot's name.
+fn record_restart(fixture: &mut Fixture) -> (ClonePlan, String) {
+    let mut plan = fixture.plan.clone();
+    let mut snapshot = fixture.create();
+    let binding = snapshot.binding().clone();
+    let ticket = snapshot.snapshot_mut().ticket().clone();
+    snapshot.finish(&fixture.io).unwrap();
+    let native = fixture.native.as_mut().unwrap();
+    native.bind_follow(&plan, &ticket, &binding).unwrap();
+    native.begin_pre_data().unwrap();
+    let (objects, tables) = synthetic_handoff(&plan);
+    native.confirm_pre_data(&plan, objects, tables).unwrap();
+    let recorded = native.begin_follow_restart(&binding, &plan).unwrap();
+    plan.generation = recorded.next_generation;
+    (plan, binding.slot.intent.binding.slot_name().to_owned())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Window {
+    /// A slot takes the name after the first collision check, before the publication exists.
+    BeforeRecheck,
+    /// A slot takes the name after the repeated check, before this run's CREATE reaches the server.
+    BeforeCreate,
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_foreign_slot_inside_the_creation_window_is_refused_and_kept() {
+    for restart in [false, true] {
+        for window in [Window::BeforeRecheck, Window::BeforeCreate] {
+            let case = format!("restart={restart} window={window:?}");
+            let mut fixture = Fixture::new(
+                "CREATE TABLE public.items(id integer PRIMARY KEY); INSERT INTO public.items SELECT generate_series(1,50)",
+            );
+            // The operator passes one stable --slot-name across runs and generations.
+            fixture.options.slot_name = format!("{}_slot", fixture.database);
+            let name = fixture.options.slot_name.clone();
+            let literal = fixture.source.quote_literal(&name).unwrap();
+            let identity = format!(
+                "SELECT coalesce((SELECT plugin||' '||datoid||' '||restart_lsn||' '||confirmed_flush_lsn||' '||catalog_xmin FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+            );
+            let next = if restart {
+                record_restart(&mut fixture).0
+            } else {
+                fixture.plan.clone()
+            };
+            let relay = Relay::start(&mut fixture);
+            relay.hold(match window {
+                Window::BeforeRecheck => b"CREATE PUBLICATION",
+                Window::BeforeCreate => b"CREATE_REPLICATION_SLOT",
+            });
+            let options = fixture.options.clone();
+            let io = fixture.io.clone();
+            let native = fixture.native.as_mut().unwrap();
+            let (error, foreign) = std::thread::scope(|scope| {
+                let controller = scope.spawn(|| {
+                    let mut session =
+                        PgConnection::connect(&relay.direct, crate::pg::Role::Copy, &control())
+                            .unwrap();
+                    wait_until("the creation window was never reached", || {
+                        relay.hits() == 1
+                    });
+                    scalar(
+                        &mut session,
+                        &format!(
+                            "SELECT (pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')).slot_name::text"
+                        ),
+                    );
+                    let foreign = scalar(&mut session, &identity);
+                    relay.open();
+                    foreign
+                });
+                let outcome = if restart {
+                    FollowSnapshot::restart(&options, &next, native, &io)
+                } else {
+                    FollowSnapshot::create(&options, &next, native, &io)
+                };
+                let foreign = controller.join().unwrap();
+                (outcome.err().expect(&case), foreign)
+            });
+            let (refusal, creates) = match window {
+                Window::BeforeRecheck => (
+                    "follow-source: existing slot or publication is never adopted".to_owned(),
+                    0,
+                ),
+                Window::BeforeCreate => (
+                    format!(
+                        "follow-source: slot {name} already exists, so this run's CREATE created nothing; it is never adopted or dropped"
+                    ),
+                    1,
+                ),
+            };
+            assert_eq!(error.message, refusal, "{case}");
+            assert_eq!(relay.creates(), creates, "{case}");
+            relay.release(&mut fixture);
+            assert!(
+                fixture
+                    .native
+                    .as_ref()
+                    .unwrap()
+                    .checked_source_slot()
+                    .unwrap()
+                    .is_none(),
+                "{case}"
+            );
+            assert_eq!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+            let retry = |fixture: &mut Fixture| {
+                let native = fixture.native.as_mut().unwrap();
+                if restart {
+                    FollowSnapshot::retire_unbound(&fixture.options, &next, native, &fixture.io)?;
+                    FollowSnapshot::restart(&fixture.options, &next, native, &fixture.io)
+                } else {
+                    FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
+                }
+            };
+            let error = retry(&mut fixture).err().expect(&case);
+            assert_eq!(
+                error.message,
+                if restart {
+                    "follow-restart: a slot reappeared after recorded absence"
+                } else {
+                    "follow-source: existing slot or publication is never adopted"
+                },
+                "{case}"
+            );
+            assert_eq!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+            // Once the other run's slot is gone, the next start creates this run's own.
+            scalar(
+                &mut fixture.source,
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+            );
+            let snapshot =
+                retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+            assert_eq!(
+                snapshot.receipt().intent.binding.slot_name(),
+                name,
+                "{case}"
+            );
+            assert_ne!(scalar(&mut fixture.source, &identity), foreign, "{case}");
+            snapshot.finish(&fixture.io).unwrap();
+            scalar(
+                &mut fixture.source,
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+            );
         }
     }
 }
