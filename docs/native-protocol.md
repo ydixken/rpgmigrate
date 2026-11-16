@@ -227,16 +227,17 @@ PostgreSQL 16 rejects an unknown name in startup options, so `transaction_timeou
 It counts only inside a transaction, so the idle gap before that `SET` does not expose it.
 The engine then reads all of them back and refuses the session unless each is `0`.
 
-> [!note]
-> On PostgreSQL 17 and later the `SET transaction_timeout` itself still runs as a one-statement transaction under the server's value.
-> A server, database or role `transaction_timeout` shorter than that statement's execution ends the session before the read-back.
-> We accept this window as a known limit: it fails closed, because the session ends before any engine work and the connection fails.
-
 > [!important]
 > A connection pooler in front of either server must forward the `options` startup parameter, for SQL and replication sessions.
 > Otherwise every engine session fails closed: a pooler that rejects the parameter fails the connection, and one that strips it leaves any server timeout in force, which the read-back then refuses.
 
 We clear them because a copy, an index build or a comparison legitimately outlasts any production value, and because the engine's own copy workers queue on the owned checkpoint lock, so even `lock_timeout` fails a clone without outside contention.
+
+> [!note]
+> On PostgreSQL 17 and later the `SET transaction_timeout` itself still runs as a one-statement transaction under the server's value.
+> A server, database or role `transaction_timeout` shorter than that statement's execution ends the session before the read-back.
+> We accept this window as a known limit: it fails closed, because the session ends before any engine work and the connection fails.
+
 `pg_dump` and `pg_restore` inherit the connection's options, startup switches included, through `PGOPTIONS`, and also clear the first four and `transaction_timeout` with their own `SET`s.
 The engine adds `-c idle_session_timeout=0` to their `PGOPTIONS` as well, because they never clear that one and an idle parallel restore worker would otherwise be ended between items.
 On PostgreSQL 17 and later it also adds `-c transaction_timeout=0`, because `pg_restore --single-transaction` sends its `SET`s after `BEGIN`, so a short server `transaction_timeout` ended the pre-data restore before they arrived.
