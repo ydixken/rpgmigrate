@@ -218,6 +218,8 @@ A second case stops publication creation, on a first run and on a restart, after
 It also places a foreign publication under the recorded name, and replaces the committed one while the retry's `DROP` waits on its lock.
 A foreign or replacing publication must refuse naming it, with the native state and that publication unchanged.
 Every other start must create a publication of a new OID under a new intent, never adopt the old one, and export a snapshot that holds each source row and large object exactly once.
+A third case ends a first run after its slot receipt and before its binding, then leaves the slot at its recorded point, removes it, or replaces it with a later `pgoutput` or a `test_decoding` slot.
+A replaced slot must refuse with the native state and that slot unchanged; every other start must drop the slot and create a later one under a new intent, whose snapshot holds each source row and large object exactly once.
 Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]

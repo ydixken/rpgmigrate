@@ -587,21 +587,21 @@ impl NativeState {
         self.replace_manifest(next)
     }
 
-    /// A first run's retry may retire only the pending slot intent its exact preliminary plan and
-    /// confirmed publication authorized; the intent has no receipt, so its slot is never adopted.
+    /// A first run's retry may retire only the unbound slot intent or receipt its exact preliminary
+    /// plan and confirmed publication authorized; its export is gone, so the slot is never adopted.
     pub(crate) fn require_pending_source_slot_retirement(
         &self,
-        intent: &SourceSlotIntent,
+        slot: &SourceSlotProvenance,
     ) -> Result<()> {
-        require_pending_source_slot(&self.checked_manifest()?, intent)
+        require_pending_source_slot(&self.checked_manifest()?, slot)
     }
 
     pub(crate) fn confirm_pending_source_slot_absent(
         &mut self,
-        intent: &SourceSlotIntent,
+        slot: &SourceSlotProvenance,
     ) -> Result<()> {
         let mut next = self.checked_manifest()?;
-        require_pending_source_slot(&next, intent)?;
+        require_pending_source_slot(&next, slot)?;
         next.source_slot = None;
         self.replace_manifest(next)
     }
@@ -879,12 +879,12 @@ impl NativeState {
     }
 }
 
-fn require_pending_source_slot(manifest: &Manifest, intent: &SourceSlotIntent) -> Result<()> {
+fn require_pending_source_slot(manifest: &Manifest, slot: &SourceSlotProvenance) -> Result<()> {
     let follow = manifest
         .follow_state
         .as_ref()
         .ok_or_else(|| bad_state("state-follow: native state is not a follow run"))?;
-    let binding = &intent.binding;
+    let binding = &slot.intent().binding;
     let authorized = follow.preliminary.as_ref().is_some_and(|plan| {
         binding.stream().run == manifest.run
             && binding.stream().source == plan.source.identity
@@ -901,10 +901,10 @@ fn require_pending_source_slot(manifest: &Manifest, intent: &SourceSlotIntent) -
             .as_ref()
             .and_then(PublicationProvenance::confirmed)
             .is_none()
-        || manifest.source_slot != Some(SourceSlotProvenance::Provisioning(intent.clone()))
+        || manifest.source_slot.as_ref() != Some(slot)
     {
         return Err(bad_state(
-            "state-follow: pending slot retirement differs from its exact unconfirmed first-run intent",
+            "state-follow: pending slot retirement differs from its exact unbound first-run slot",
         ));
     }
     Ok(())

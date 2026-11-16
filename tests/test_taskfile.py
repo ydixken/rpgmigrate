@@ -367,8 +367,8 @@ if os.environ.get("FAIL_MATCH") and os.environ["FAIL_MATCH"] in " ".join(args):
             from db_harness import load_manifest, module_cases
             manifest = load_manifest()
             expected = set(module_cases(manifest, "FollowSource"))
-            self.assertEqual(len(expected), 17)
-            self.assertEqual(sum(name.startswith("snapshot::follow_tests::") for name in expected), 12)
+            self.assertEqual(len(expected), 18)
+            self.assertEqual(sum(name.startswith("snapshot::follow_tests::") for name in expected), 13)
             self.assertEqual(sum(name.startswith("catalog::follow::tests::live_cleanup_") for name in expected), 5)
             universe = {name for profile in ("Transport", "Prepared", "Authority", "Replication", "Engine",
                                             "Catalog", "SourceCatalog", "Clone", "Schema", "FollowSource",

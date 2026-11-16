@@ -70,6 +70,10 @@ It drops only a logical `pgoutput` slot on the source database that is not tempo
 > While the creating session still waits, the slot is active and the start refuses with exit 3, naming the slot and its backend.
 > End the blocking source transaction or wait for that session to end, then retry.
 
+A first run killed after the slot was created but before it bound the snapshot leaves the slot's receipt.
+The next start drops that slot only at its recorded consistent point and creates it again, so it does not keep retaining WAL.
+A slot under that name at another position or of another plugin refuses with exit 3, `follow-source: slot <name> differs from this run's unbound pgoutput creation`, and stays.
+
 ## Interrupted follow publication creation
 
 `CREATE PUBLICATION` waits for a `SHARE UPDATE EXCLUSIVE` lock on every member table, and its `COMMIT` can wait for a synchronous standby.

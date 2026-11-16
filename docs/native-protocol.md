@@ -332,7 +332,12 @@ A start that finds an intent without its receipt, on a first run's retry or on a
 It drops the slot only when it is a logical `pgoutput` slot on the source database, is not temporary, and has no active backend.
 It never adopts the slot, because the exported snapshot ended with the session that created it.
 An active slot refuses with exit 3, naming the slot and its backend, and a slot of another kind under that name refuses and stays.
-A restart drops an unbound slot that has a receipt the same way, and only at its exact consistent point.
+A start drops an unbound slot that has a receipt the same way, on a first run's retry or on a restart, and only at its exact consistent point, so a slot from a run killed before its binding does not stay behind retaining WAL.
+
+> [!note]
+> A pending intent has no receipt, so the start identifies its slot only by the recorded name and the shape check above.
+> The name is unique per run and copy generation unless `--slot-name` sets it, so a foreign slot under it requires another run to use the same explicit name.
+> We accept that limit: such a slot, created between the collision check and the CREATE, would be dropped on the next start.
 
 ### Publication creation recovery
 

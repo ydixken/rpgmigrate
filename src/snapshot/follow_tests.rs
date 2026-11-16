@@ -469,16 +469,17 @@ fn restart_retires_its_pending_slot_intent_without_a_receipt_but_never_a_changed
         assert_eq!(fixture.manifest(), before);
     }
     // The first-run rule never retires a restart's intent.
+    let provisioning = SourceSlotProvenance::Provisioning(pending.clone());
     assert!(
         fixture
             .native
-            .require_pending_source_slot_retirement(&pending)
+            .require_pending_source_slot_retirement(&provisioning)
             .is_err()
     );
     assert!(
         fixture
             .native
-            .confirm_pending_source_slot_absent(&pending)
+            .confirm_pending_source_slot_absent(&provisioning)
             .is_err()
     );
     assert_eq!(fixture.manifest(), before);
@@ -516,9 +517,11 @@ fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create(
     // A slot intent without a confirmed publication was never authorized by create.
     let (unpublished, mut native) = PendingFixture::open();
     native.prepare_follow_source(&plan).unwrap();
-    let orphan = native
-        .begin_source_slot(&PendingFixture::slot_binding(&native, &plan))
-        .unwrap();
+    let orphan = SourceSlotProvenance::Provisioning(
+        native
+            .begin_source_slot(&PendingFixture::slot_binding(&native, &plan))
+            .unwrap(),
+    );
     let before = std::fs::read(unpublished.join("state/manifest.json")).unwrap();
     assert!(
         native
@@ -545,6 +548,8 @@ fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create(
     let before = manifest();
     let mut changed = pending.clone();
     changed.nonce[0] ^= 1;
+    let (changed, pending_intent) = (SourceSlotProvenance::Provisioning(changed), pending.clone());
+    let pending = SourceSlotProvenance::Provisioning(pending);
     assert!(
         native
             .require_pending_source_slot_retirement(&changed)
@@ -561,7 +566,7 @@ fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create(
     assert!(native.confirm_pending_source_slot_absent(&pending).is_err());
     let binding = PendingFixture::slot_binding(&native, &plan);
     let replacement = native.begin_source_slot(&binding).unwrap();
-    assert_ne!(replacement.nonce, pending.nonce);
+    assert_ne!(replacement.nonce, pending_intent.nonce);
     assert!(native.begin_source_slot(&binding).is_err());
     let receipt = native
         .confirm_source_slot(
@@ -572,12 +577,31 @@ fn first_run_retires_its_pending_slot_intent_once_and_authorizes_one_new_create(
             },
         )
         .unwrap();
-    // A receipt is retired only through a restart, never by the pending-intent rule.
-    assert!(
-        native
-            .require_pending_source_slot_retirement(&receipt.intent)
-            .is_err()
-    );
+    // An unbound receipt is retired only in its exact confirmed form, never as its intent.
+    let before = manifest();
+    for wrong in [
+        SourceSlotProvenance::Provisioning(receipt.intent.clone()),
+        SourceSlotProvenance::Confirmed(crate::state::SourceSlotReceipt {
+            consistent_point: crate::identity::SourceEndLsn(71),
+            ..receipt.clone()
+        }),
+    ] {
+        assert!(
+            native
+                .require_pending_source_slot_retirement(&wrong)
+                .is_err()
+        );
+        assert!(native.confirm_pending_source_slot_absent(&wrong).is_err());
+        assert_eq!(manifest(), before);
+    }
+    let confirmed = SourceSlotProvenance::Confirmed(receipt);
+    native
+        .confirm_pending_source_slot_absent(&confirmed)
+        .unwrap();
+    assert!(native.checked_source_slot().unwrap().is_none());
+    let again = native.begin_source_slot(&binding).unwrap();
+    assert_ne!(again.nonce, replacement.nonce);
+    assert!(native.begin_source_slot(&binding).is_err());
     drop(native);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -2354,5 +2378,149 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
                 )
                 .unwrap();
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReceiptKill {
+    /// The slot persisted at its recorded consistent point after the exporter ended.
+    Persisted,
+    /// Someone removed the slot after the receipt.
+    Absent,
+    /// A pgoutput slot under the name sits at another consistent point.
+    Moved,
+    /// A slot of another plugin took the name.
+    ForeignPlugin,
+}
+
+#[test]
+#[ignore = "requires the disposable M3 PostgreSQL 16/18 harness"]
+fn live_follow_unbound_first_run_slot_receipt_is_dropped_at_its_point_never_adopted() {
+    for kill in [
+        ReceiptKill::Persisted,
+        ReceiptKill::Absent,
+        ReceiptKill::Moved,
+        ReceiptKill::ForeignPlugin,
+    ] {
+        let case = format!("kill={kill:?}");
+        let mut fixture = Fixture::new(
+            "CREATE TABLE public.items(id integer PRIMARY KEY,payload text); INSERT INTO public.items SELECT g,'row-'||g FROM generate_series(1,300) g; SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode(repeat('a5',5000),'hex')); SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('00ff','hex'))",
+        );
+        let expected = scalar(
+            &mut fixture.source,
+            "SELECT (SELECT count(*)||'/'||count(DISTINCT id) FROM public.items)||' '||(SELECT count(*)||'/'||coalesce(md5(string_agg(oid::text||':'||md5(lo_get(oid)),',' ORDER BY oid)),'-') FROM pg_catalog.pg_largeobject_metadata)",
+        );
+        // The first run records its slot receipt and dies before it binds the snapshot.
+        let snapshot = fixture.create();
+        let old = snapshot.receipt().clone();
+        drop(snapshot);
+        let name = old.intent.binding.slot_name().to_owned();
+        let literal = fixture.source.quote_literal(&name).unwrap();
+        let shape = format!(
+            "SELECT coalesce((SELECT slot_type||' '||coalesce(plugin,'-')||' '||coalesce(confirmed_flush_lsn::text,'-')||' '||active FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+        );
+        let point = format!(
+            "{:X}/{:X}",
+            old.consistent_point.0 >> 32,
+            old.consistent_point.0 as u32
+        );
+        wait_until("the exporter kept the recorded slot active", || {
+            scalar(&mut fixture.source, &shape) == format!("logical pgoutput {point} false")
+        });
+        match kill {
+            ReceiptKill::Persisted => {}
+            ReceiptKill::Absent | ReceiptKill::Moved | ReceiptKill::ForeignPlugin => {
+                scalar(
+                    &mut fixture.source,
+                    &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+                );
+                if kill != ReceiptKill::Absent {
+                    // WAL moves on, so a recreated slot cannot sit at the recorded point.
+                    fixture
+                        .source
+                        .query("INSERT INTO public.items VALUES(0,'moved')", &fixture.io)
+                        .unwrap();
+                    fixture
+                        .source
+                        .query("DELETE FROM public.items WHERE id=0", &fixture.io)
+                        .unwrap();
+                    let plugin = if kill == ReceiptKill::Moved {
+                        "pgoutput"
+                    } else {
+                        "test_decoding"
+                    };
+                    scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT (pg_catalog.pg_create_logical_replication_slot({literal},'{plugin}')).slot_name::text"
+                        ),
+                    );
+                }
+            }
+        }
+        reopen_native(&mut fixture);
+        let manifest_path = fixture.options.clone.state.path.join("manifest.json");
+        let manifest = || std::fs::read(&manifest_path).unwrap();
+        let retry = |fixture: &mut Fixture| {
+            FollowSnapshot::create(
+                &fixture.options,
+                &fixture.plan,
+                fixture.native.as_mut().unwrap(),
+                &fixture.io,
+            )
+        };
+        if matches!(kill, ReceiptKill::Moved | ReceiptKill::ForeignPlugin) {
+            let (bytes, slot) = (manifest(), scalar(&mut fixture.source, &shape));
+            let error = retry(&mut fixture).err().expect(&case);
+            assert!(
+                error.message.starts_with(&format!(
+                    "follow-source: slot {name} differs from this run's unbound pgoutput creation"
+                )),
+                "{case}: {}",
+                error.message
+            );
+            assert_eq!(manifest(), bytes, "{case}");
+            assert_eq!(scalar(&mut fixture.source, &shape), slot, "{case}");
+            scalar(
+                &mut fixture.source,
+                &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+            );
+            reopen_native(&mut fixture);
+        }
+        let mut snapshot =
+            retry(&mut fixture).unwrap_or_else(|error| panic!("{case}: {}", error.message));
+        let receipt = snapshot.receipt().clone();
+        assert_eq!(receipt.intent.binding.slot_name(), name, "{case}");
+        assert_ne!(receipt.intent.nonce, old.intent.nonce, "{case}");
+        assert!(
+            receipt.consistent_point.0 > old.consistent_point.0,
+            "{case}: adopted"
+        );
+        assert_ne!(receipt.snapshot_token, old.snapshot_token, "{case}");
+        for sql in [
+            "INSERT INTO public.items VALUES(301,'after')",
+            "SELECT pg_catalog.lo_from_bytea(0,pg_catalog.decode('01','hex'))",
+        ] {
+            fixture.source.query(sql, &fixture.io).unwrap();
+        }
+        assert_eq!(snapshot_rows_and_objects(&mut snapshot), expected, "{case}");
+        let point = format!(
+            "{:X}/{:X}",
+            receipt.consistent_point.0 >> 32,
+            receipt.consistent_point.0 as u32
+        );
+        assert_eq!(
+            scalar(
+                &mut fixture.source,
+                "SELECT string_agg(slot_name||' '||plugin||' '||confirmed_flush_lsn,',') FROM pg_catalog.pg_replication_slots WHERE datoid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database())"
+            ),
+            format!("{name} pgoutput {point}"),
+            "{case}"
+        );
+        snapshot.finish(&fixture.io).unwrap();
+        scalar(
+            &mut fixture.source,
+            &format!("SELECT pg_catalog.pg_drop_replication_slot({literal})::text"),
+        );
     }
 }

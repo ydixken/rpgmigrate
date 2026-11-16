@@ -389,11 +389,11 @@ impl FollowSnapshot {
             plan.generation.0,
         )?;
         native.prepare_follow_source(plan)?;
-        // A restart retires its pending slot in retire_unbound, so this is a first run's retry.
-        if let Some(slot @ SourceSlotProvenance::Provisioning(_)) = native.checked_source_slot()? {
-            native.require_pending_source_slot_retirement(slot.intent())?;
+        // A restart retires its unbound slot in retire_unbound, so this is a first run's retry.
+        if let Some(slot) = native.checked_source_slot()? {
+            native.require_pending_source_slot_retirement(&slot)?;
             drop_unbound_slot(&mut source, &slot, plan, io)?;
-            native.confirm_pending_source_slot_absent(slot.intent())?;
+            native.confirm_pending_source_slot_absent(&slot)?;
         }
         if let Some(pending) = native
             .checked_publication()?
