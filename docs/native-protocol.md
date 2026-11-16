@@ -311,6 +311,9 @@ It still refuses:
 2. a replica identity index that contains a generated column, because 16 then sends an empty key and 18 refuses UPDATE and DELETE on the source;
 3. a `REPLICA IDENTITY FULL` table with any generated column on an 18 source, because 18 refuses UPDATE and DELETE on it once the publication omits that column.
 
+Follow refuses the third case before it creates any slot or publication, and keeps `publish_generated_columns=none`.
+To follow such a table from an 18 source, give it a primary key with `REPLICA IDENTITY DEFAULT`, or `REPLICA IDENTITY USING INDEX`, on columns that are not generated.
+
 The target table must hold the same columns in the same order, with a generated column wherever the plan has one, and each target generation expression must meet the same rules.
 
 Each publication member must match the plan exactly on both majors:
