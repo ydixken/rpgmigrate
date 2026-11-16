@@ -118,6 +118,7 @@ The harness reads each owned container's effective cgroup CPU and memory limits 
 A container can exit between the inspect and the `exec` that reads its limits; when a fresh inspect then shows it stopped, the read counts as not observed and polling continues, while any other `exec` failure fails the run.
 On the hosted runner every Podman call waits while another owned container's exit cleanup unmounts its overlay root, which has taken seconds.
 So a read-only call (an `inspect`, a `ps`, a host capacity read, or that `exec`) that gives no answer within its bound is repeated for up to 30 s, and the runtime ledger keeps each stalled attempt's diagnostic id: the `exec`'s on its container entry, the others under `podman_query_stalls`.
+Every timed-out attempt writes its diagnostic and is recorded, including the last one past the 30 s bound, so the ledger's stall ids and the retained diagnostic files always agree.
 A call that changes something, such as `rm`, is never repeated, because one that timed out may still have acted.
 Only an answered `exec` can verify the limits.
 Cleanup removes a container with a 2 s stop grace inside its 10 s bound, because the runner's Python PID 1 ignores SIGTERM and Podman's default 10 s grace would use the whole bound.
@@ -266,6 +267,10 @@ The matrix task forwards the selected profile through 16 to 16, 18 to 18, and 16
 
 Use a clean committed candidate checkout and complete runtime admission before running these commands.
 The M8 outer harness builds a debug executable from that source, measures its image and utility identities, and uses fresh owned resources.
+Before the workflow, its build smoke reads the installed `libpq5`, `postgresql-client-16` and `postgresql-client-18` package versions in the development image with `dpkg-query`.
+It requires those packages to be majors 18, 16 and 18, the target major's `psql`, `pg_dump` and `pg_restore` to report their package's upstream version, and the executable's linked libpq to equal the `libpq5` version.
+We check against the installed packages rather than a fixed minor, because `tools/e2e/Containerfile` installs the current PGDG clients; the receipt records the versions observed.
+A missing package, an unparsable version or any mismatch fails the run.
 It rejects the old Go report probe, so unset `RPGMIGRATE_E2E_REPORT_PROBE` explicitly.
 
 1. Run the first pair in its admitted runtime window.

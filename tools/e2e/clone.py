@@ -905,10 +905,13 @@ class RuntimeGuard:
             try:
                 return self.raw(arguments, timeout=timeout, runtime=runtime)
             except SubprocessFailure as failure:
-                if not failure.timed_out or time.monotonic() >= stalled_until:
+                if not failure.timed_out:
                     raise
+                # The last timeout is recorded too, so the ledger and the retained diagnostics always agree.
                 record, key = stalls or (self.ledger, "podman_query_stalls")
                 record.setdefault(key, []).append(failure.metadata["diagnostic_id"])
+                if time.monotonic() >= stalled_until:
+                    raise
 
     def host(self, arguments, timeout=5):
         return self.query(["machine", "ssh", *arguments], timeout=timeout) if self.machine else self.query(arguments, timeout=timeout, runtime=False)
@@ -1254,10 +1257,10 @@ class RuntimeGuard:
                 result = subprocess.run([self.runtime, kind, "exists", identity], capture_output=True, timeout=min(5, remaining))
                 break
             except subprocess.TimeoutExpired as error:
-                if time.monotonic() >= stalled_until:
-                    raise
                 stall = private_failure("subprocess", None, error.stderr or str(error).encode(), None, sys._getframe())
                 self.ledger.setdefault("podman_query_stalls", []).append(stall["diagnostic_id"])
+                if time.monotonic() >= stalled_until:
+                    raise
         if result.returncode not in (0, 1):
             raise RuntimeError("resource absence probe is unavailable")
         return result.returncode == 0
