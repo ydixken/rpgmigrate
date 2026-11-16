@@ -15,5 +15,6 @@
   "apply::checkpoint::live_tests::follow_drain_completion_syncs_final_sequences_and_is_immutable",
   "apply::checkpoint::live_tests::follow_drain_recovery_reproves_original_witness",
   "apply::checkpoint::live_tests::follow_observation_unknown_commit_needs_new_barrier",
-  "apply::checkpoint::live_tests::follow_cancelled_sync_wait_never_proves_drain_completion_or_observation"
+  "apply::checkpoint::live_tests::follow_cancelled_sync_wait_never_proves_drain_completion_or_observation",
+  "apply::checkpoint::live_tests::follow_final_large_object_resync_kill_reconciles_or_refuses_and_never_completes_early"
 ]

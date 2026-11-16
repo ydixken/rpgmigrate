@@ -201,7 +201,9 @@ The split case kills mid-part, after the split reset commit and after the last p
 The lost-marker case requires the coordinator to wait behind the withheld COMMIT, then either count the durable marker or refuse with `commit-outcome-unknown` and restart under a new generation.
 The relay case terminates the source session mid binary COPY and requires no rows, no marker and a refused copy report.
 The large-object cases kill mid-object and between objects, unlink only receipted objects on restart, keep a foreign object at another OID and refuse a foreign replacement of an owned OID.
-Final re-sync faults, metadata policies, comparison, and cleanup require separate runtime receipts.
+`task test-follow-authority` adds one case that kills the final large-object re-sync mid-way and again after its durable receipt.
+The next drain must reconcile, refuse after source drift, and report completion only once the target matches the source.
+Metadata policies, comparison, and cleanup require separate runtime receipts.
 
 > [!IMPORTANT]
 > Wiring component tests does not qualify the M8 workflow or activate `copy.binary_fallback`, `copy.split`, or `copy.large_objects`.
@@ -268,7 +270,7 @@ The [case manifest](../tests/fixtures/clone/m8-cases.json), [fixtures](../tests/
 The three large-object cases require durable completion at the exact final follow boundary and an injected target mismatch that comparison must reject before restoration.
 All cases require stable physical inventories and matching independent table fingerprints.
 These profiles do not exercise interrupted binary relay, split restart, interrupted large-object copy, large-object reset/restart, or failure during final re-sync.
-The component cases above cover all but final re-sync failure in-process; no profile kills the real executable at those points.
+The component and follow authority cases above cover those faults in-process; no profile kills the real executable at those points.
 The [roadmap](roadmap.md) retains those recovery and operator closing gates separately.
 
 ### Plain clone admission and recovery

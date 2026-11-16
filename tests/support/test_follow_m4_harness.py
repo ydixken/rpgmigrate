@@ -52,6 +52,7 @@ AUTHORITY_ADDITIONS = tuple("apply::checkpoint::live_tests::" + name for name in
     "follow_observation_unknown_commit_needs_new_barrier",
     "follow_cancelled_sync_wait_never_proves_drain_completion_or_observation",
 ))
+AUTHORITY_M8 = ("apply::checkpoint::live_tests::follow_final_large_object_resync_kill_reconciles_or_refuses_and_never_completes_early",)
 
 SOURCE_BASELINE = (
     "snapshot::follow_tests::live_follow_slot_snapshot_preserves_initial_boundary_and_exporter_lifetime",
@@ -128,8 +129,8 @@ class FollowM4HarnessTests(unittest.TestCase):
                 with self.subTest(case=case), self.assertRaises(AssertionError):
                     validate("FollowAuthority", cases, output.replace(f"test {case} ... ok\n", ""), context)
 
-    def test_authority_inventory_preserves_eleven_and_requires_six_cutover_cases(self):
-        self.assertEqual(module_cases({}, "FollowAuthority"), [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS])
+    def test_authority_inventory_preserves_eleven_and_requires_six_cutover_and_one_m8_case(self):
+        self.assertEqual(module_cases({}, "FollowAuthority"), [*AUTHORITY_BASELINE, *AUTHORITY_ADDITIONS, *AUTHORITY_M8])
 
     def test_source_inventory_preserves_seven_and_requires_five_cleanup_cases(self):
         self.assertEqual(module_cases({}, "FollowSource"), [*SOURCE_BASELINE, *SOURCE_ADDITIONS])
