@@ -644,7 +644,7 @@ def copy_restart(source, target, driver, root, bindir, manifest, receipt, case):
     receipt["cases"]["copy_restart"] = {"observed": True, "previous_generation": previous, "current_generation": current, "prior_committed_tables": required_markers, "predata_drift_refused": True, "blocked_backend_pid": blocked_pid, "target_receipt": target.completion(dstname, state, manifest)}
 
 
-# A sibling owned container's start or exit cleanup stalls every podman call for seconds on hosted runners.
+# On the hosted runner every Podman call waits seconds while a sibling owned container's exit cleanup unmounts its overlay root.
 CAP_EXEC_STALL_SECONDS = 30
 LOGICAL_SERVER_ARGUMENTS = ("-c", "wal_level=logical", "-c", "max_replication_slots=32", "-c", "max_wal_senders=32", "-c", "wal_sender_timeout=10s")
 GIB = 1024 ** 3
