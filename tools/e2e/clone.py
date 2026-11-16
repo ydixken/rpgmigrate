@@ -236,6 +236,9 @@ OPERATOR_URI_QUERY = {"source": "keepalives=1&keepalives_idle=10&keepalives_inte
 
 
 class Database:
+    # Appended only to the harness's own psql sessions, never to a conninfo an engine command gets.
+    harness_options = ""
+
     def __init__(self, host, bindir, environment):
         self.host, self.bindir, self.environment = host, bindir, environment
         self.application = "rpgmigrate_m2_" + uuid.uuid4().hex
@@ -248,7 +251,7 @@ class Database:
                 f"&application_name={self.application}&{OPERATOR_URI_QUERY[side]}")
 
     def sql(self, name, sql):
-        return run([str(self.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--dbname", self.connection(name)],
+        return run([str(self.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--dbname", self.connection(name) + self.harness_options],
                    environment=self.environment, input=(SETTINGS + sql).encode())
 
     def create(self, name, fixture=False):

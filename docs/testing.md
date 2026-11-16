@@ -494,6 +494,7 @@ The timeout run sets one setting at a time on both case databases with `ALTER DA
 Each value is a few milliseconds, far below any engine phase, and a fresh session must report it before the run starts.
 Under each setting it runs clone, follow, a two-second idle hold, an endpos drain, `compare data`, `compare schema` and `stream cleanup`, and every step must succeed.
 `pg_stat_database.sessions_fatal` must not grow on either database, so a timeout that ends a `pg_restore` worker the utility shrugs off still fails the run.
+Once a fresh session has confirmed the setting, the harness's own `psql` sessions clear it in their startup options, so every counted FATAL is an engine session's; engine commands never get those options.
 The receipt records, per setting, the server majors and the sides it applied to; on 16 to 16 `transaction_timeout` applies to neither side.
 
 ```sh

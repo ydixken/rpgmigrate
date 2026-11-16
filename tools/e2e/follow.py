@@ -581,7 +581,7 @@ class Database(clone.Database):
         if remaining <= 0:
             raise RuntimeError("follow observation read budget expired")
         try:
-            result = subprocess.run([str(self.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--dbname", self.connection(name)],
+            result = subprocess.run([str(self.bindir / "psql"), "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--dbname", self.connection(name) + self.harness_options],
                                     env=self.environment, input=(clone.SETTINGS + "SET statement_timeout='1000ms'; SET lock_timeout='1000ms';" + sql).encode(),
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=remaining)
         except (OSError, subprocess.TimeoutExpired):
