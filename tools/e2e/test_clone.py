@@ -1335,6 +1335,92 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 # Every stall is retained as its own diagnostic, so a slow runner stays visible in a passing ledger.
                 self.assertEqual(len(list(Path(temporary).glob("*.json"))), attempts - (expected == "verified") - (execs[-1] == "wrong"))
 
+    def sampling_guard(self, clock, outcomes, calls):
+        # A fake local Podman for sample(): each call answers unless the next scripted outcome for its kind says otherwise.
+        cid, nid = "a"*64, "c"*64
+        entry = {"id": cid, "name": "fresh-source", "role": "source", "image": "sha256:"+"b"*64, "memory": harness.GIB, "cpus": 2, "mounts": [],
+                 "network": {"name": "fresh", "id": nid}, "cleanup_status": "pending", "ready": True}
+        container = {"Id": cid, "Name": entry["name"], "Image": entry["image"], "State": {"Running": True}, "Config": {"Labels": {"io.rpgmigrate.e2e": "fresh"}},
+                     "Mounts": [], "HostConfig": {"Memory": harness.GIB, "NanoCpus": 2000000000, "Privileged": False, "NetworkMode": "fresh", "PortBindings": {}},
+                     "NetworkSettings": {"Ports": {}, "Networks": {"fresh": {"NetworkID": nid}}}}
+        network = {"id": nid, "name": "fresh", "internal": True, "labels": {"io.rpgmigrate.e2e": "fresh"}, "containers": {cid: {"name": entry["name"]}}}
+        answers = {"meminfo": b"MemAvailable: 1 kB\n", "df": b"h\nd 1 2 3 4\n", "getconf": b"4\n", "inspect": json.dumps([container]).encode(),
+                   "caps": b"200000 100000\n1073741824\n", "psql": b"1000|1000\n", "network-inspect": json.dumps([network]).encode(),
+                   "ps-filter": cid.encode() + b"\n", "ps-external": b"", "rm": b"", "network-rm": b""}
+        def kind(argv):
+            if argv[0] != "podman":
+                return {"cat": "meminfo", "df": "df", "getconf": "getconf"}[argv[0]]
+            if argv[1] == "exec":
+                return {"cat": "caps", "psql": "psql"}[argv[3]]
+            if argv[1:3] in (["network", "inspect"], ["network", "rm"]):
+                return "network-" + argv[2]
+            if argv[1] == "ps":
+                return "ps-external" if "--external" in argv else "ps-filter"
+            return {"inspect": "inspect", "rm": "rm"}[argv[1]]
+        def podman(argv, *, timeout, **_):
+            name = kind(argv)
+            calls.append((name, argv))
+            outcome = outcomes.get(name, []).pop(0) if outcomes.get(name) else "ok"
+            if outcome == "stall":
+                clock.now += timeout
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if outcome == "error":
+                return subprocess.CompletedProcess(argv, 125, stdout=b"", stderr=b"Error: no such object")
+            return subprocess.CompletedProcess(argv, 0, stdout=answers[name], stderr=b"")
+        guard = harness.RuntimeGuard.__new__(harness.RuntimeGuard)
+        guard.runtime, guard.token, guard.machine, guard.storage = "podman", "fresh", False, "/storage"
+        guard.baseline = {"containers": {}, "external": [], "networks": {}}
+        guard.last_sample, guard.work_deadline, guard.deadline = clock.now, clock.now + 600, clock.now + 900
+        guard.ledger = {"processes": [], "containers": [entry], "samples": [], "network": {**network, "cleanup_status": "pending"}}
+        return guard, entry, podman
+
+    def test_read_only_podman_query_stalled_behind_a_sibling_is_repeated_until_answered_or_its_deadline(self):
+        # Every read-only call in sample() shares the cap exec's repeat; the cap exec keeps its stalls on its own entry.
+        read_only = ("meminfo", "df", "getconf", "inspect", "caps", "psql", "network-inspect", "ps-filter", "ps-external")
+        cases = [(name, ["stall"], "sampled", 2, 1) for name in read_only]
+        cases += [(name, ["stall", "stall", "stall"], "sampled", 4, 3) for name in ("inspect", "network-inspect", "ps-external")]
+        cases += [(name, ["stall"] * 7, harness.SubprocessFailure, 6, 5) for name in ("inspect", "network-inspect", "ps-filter", "ps-external", "psql")]
+        cases += [(name, ["error"], harness.SubprocessFailure, 1, 0) for name in ("inspect", "network-inspect", "ps-external", "psql")]
+        cases += [("inspect", ["stall", "error"], harness.SubprocessFailure, 2, 1)]
+        for name, script, expected, attempts, stalls in cases:
+            clock, calls = CreationClock(), []
+            guard, entry, podman = self.sampling_guard(clock, {name: list(script)}, calls)
+            with self.subTest(call=name, script=script), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), patch.object(harness.time, "monotonic", side_effect=clock.monotonic), \
+                    patch.object(harness.subprocess, "run", side_effect=podman):
+                if isinstance(expected, type):
+                    with self.assertRaises(expected): guard.sample()
+                    self.assertEqual(guard.ledger["samples"], [])
+                else:
+                    guard.sample()
+                    self.assertEqual(len(guard.ledger["samples"]), 1)
+                    self.assertIs(entry.get("cgroup_verified"), True)
+                recorded = entry.get("cgroup_exec_stalls", []) if name == "caps" else guard.ledger.get("podman_query_stalls", [])
+                other = guard.ledger.get("podman_query_stalls", []) if name == "caps" else entry.get("cgroup_exec_stalls", [])
+                self.assertEqual((sum(call == name for call, _ in calls), len(recorded), other), (attempts, stalls, []))
+                # Each stall keeps its own retained diagnostic, so a slow runner stays visible in a passing ledger.
+                retained = {path.stem for path in Path(temporary).glob("*.json")}
+                self.assertEqual((len(set(recorded)), set(recorded) <= retained, len(retained)), (stalls, True, stalls + isinstance(expected, type)))
+                self.assertLessEqual(clock.now - 100, harness.PODMAN_STALL_SECONDS)
+
+    def test_a_stalled_mutating_podman_call_is_never_repeated(self):
+        for name in ("rm", "network-rm"):
+            clock, calls = CreationClock(), []
+            guard, entry, podman = self.sampling_guard(clock, {name: ["stall"]}, calls)
+            guard.ledger["network"]["containers"] = {}
+            with self.subTest(call=name), tempfile.TemporaryDirectory() as temporary, patch.object(harness, "DIAGNOSTIC_ROOT", Path(temporary)), \
+                    patch.object(harness.time, "monotonic", side_effect=clock.monotonic), patch.object(harness.subprocess, "run", side_effect=podman), \
+                    patch.object(guard, "persist"), patch.object(guard, "exists", return_value=False):
+                if name == "rm":
+                    guard.cleanup_container(entry)
+                    status = entry["cleanup_status"]
+                else:
+                    with patch.object(guard, "query", side_effect=lambda arguments, **_: b"" if arguments[0] == "ps" else json.dumps([guard.ledger["network"]]).encode()):
+                        guard.cleanup_network()
+                    status = guard.ledger["network"]["cleanup_status"]
+                self.assertEqual((sum(call == name for call, _ in calls), status), (1, "unresolved"))
+                self.assertNotIn("podman_query_stalls", guard.ledger)
+
     def test_network_cleanup_refuses_foreign_attachment_wrong_identity_and_unavailable_absence(self):
         for fault in ("id", "label", "inspect", "foreign_map", "foreign_filter", "remove", "absence", "ok"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
