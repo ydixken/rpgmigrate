@@ -1288,8 +1288,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
             ("caps", ["stall", "ok"], True, "verified", 2, 1),
             ("caps", ["stall", "stall", "ok"], True, "verified", 3, 2),
             ("sample", ["stall", "ok"], True, "verified", 2, 1),
-            ("caps", ["stall"] * 6, True, harness.SubprocessFailure, 6, 5),
-            ("caps", ["stall"] * 6, False, "unobserved", 6, 5),
+            ("caps", ["stall"] * 6, True, harness.SubprocessFailure, 6, 6),
+            ("caps", ["stall"] * 6, False, "unobserved", 6, 6),
             ("caps", ["stall", "exited"], False, "unobserved", 2, 1),
             ("caps", ["stall", "exited"], True, harness.SubprocessFailure, 2, 1),
             ("caps", ["missing"], True, harness.SubprocessFailure, 1, 0),
@@ -1342,6 +1342,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 self.assertLessEqual(clock.now - 100, 30)
                 # Every stall is retained as its own diagnostic, so a slow runner stays visible in a passing ledger.
                 self.assertEqual(len(list(Path(temporary).glob("*.json"))), attempts - (expected == "verified") - (execs[-1] == "wrong"))
+                if set(execs) <= {"stall", "ok"}:
+                    self.assertEqual(set(entry.get("cgroup_exec_stalls", [])), {path.stem for path in Path(temporary).glob("*.json")})
 
     def sampling_guard(self, clock, outcomes, calls):
         # A fake local Podman for sample(): each call answers unless the next scripted outcome for its kind says otherwise.
@@ -1387,7 +1389,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
         read_only = ("meminfo", "df", "getconf", "inspect", "caps", "psql", "network-inspect", "ps-filter", "ps-external")
         cases = [(name, ["stall"], "sampled", 2, 1) for name in read_only]
         cases += [(name, ["stall", "stall", "stall"], "sampled", 4, 3) for name in ("inspect", "network-inspect", "ps-external")]
-        cases += [(name, ["stall"] * 7, harness.SubprocessFailure, 6, 5) for name in ("inspect", "network-inspect", "ps-filter", "ps-external", "psql")]
+        cases += [(name, ["stall"] * 7, harness.SubprocessFailure, 6, 6) for name in ("inspect", "network-inspect", "ps-filter", "ps-external", "psql")]
         cases += [(name, ["error"], harness.SubprocessFailure, 1, 0) for name in ("inspect", "network-inspect", "ps-external", "psql")]
         cases += [("inspect", ["stall", "error"], harness.SubprocessFailure, 2, 1)]
         for name, script, expected, attempts, stalls in cases:
@@ -1406,9 +1408,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
                 recorded = entry.get("cgroup_exec_stalls", []) if name == "caps" else guard.ledger.get("podman_query_stalls", [])
                 other = guard.ledger.get("podman_query_stalls", []) if name == "caps" else entry.get("cgroup_exec_stalls", [])
                 self.assertEqual((sum(call == name for call, _ in calls), len(recorded), other), (attempts, stalls, []))
-                # Each stall keeps its own retained diagnostic, so a slow runner stays visible in a passing ledger.
+                # Each timed-out try, the last one included, keeps its own retained diagnostic; only an answered error adds one outside the ledger.
                 retained = {path.stem for path in Path(temporary).glob("*.json")}
-                self.assertEqual((len(set(recorded)), set(recorded) <= retained, len(retained)), (stalls, True, stalls + isinstance(expected, type)))
+                self.assertEqual((len(set(recorded)), set(recorded) <= retained, len(retained)), (stalls, True, stalls + (script[-1] == "error")))
                 self.assertLessEqual(clock.now - 100, harness.PODMAN_STALL_SECONDS)
 
     def test_a_stalled_mutating_podman_call_is_never_repeated(self):
@@ -1432,7 +1434,7 @@ class RuntimeOwnershipTests(unittest.TestCase):
     def test_a_stalled_absence_probe_is_repeated_until_answered_or_its_deadline(self):
         # (script, expected, attempts, stalls recorded); exists answers by return code, so a clean answer retains no diagnostic.
         cases = [(["stall", 0], True, 2, 1), (["stall", 1], False, 2, 1), (["stall", "stall", 1], False, 3, 2),
-                 (["stall"] * 6, subprocess.TimeoutExpired, 6, 5), ([125], RuntimeError, 1, 0), ([FileNotFoundError], FileNotFoundError, 1, 0),
+                 (["stall"] * 6, subprocess.TimeoutExpired, 6, 6), ([125], RuntimeError, 1, 0), ([FileNotFoundError], FileNotFoundError, 1, 0),
                  (["stall", 125], RuntimeError, 2, 1), ([0], True, 1, 0), ([1], False, 1, 0)]
         for script, expected, attempts, stalls in cases:
             clock, calls, remaining = CreationClock(), [], list(script)

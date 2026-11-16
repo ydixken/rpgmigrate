@@ -118,6 +118,7 @@ The harness reads each owned container's effective cgroup CPU and memory limits 
 A container can exit between the inspect and the `exec` that reads its limits; when a fresh inspect then shows it stopped, the read counts as not observed and polling continues, while any other `exec` failure fails the run.
 On the hosted runner every Podman call waits while another owned container's exit cleanup unmounts its overlay root, which has taken seconds.
 So a read-only call (an `inspect`, a `ps`, a host capacity read, or that `exec`) that gives no answer within its bound is repeated for up to 30 s, and the runtime ledger keeps each stalled attempt's diagnostic id: the `exec`'s on its container entry, the others under `podman_query_stalls`.
+Every timed-out attempt writes its diagnostic and is recorded, including the last one past the 30 s bound, so the ledger's stall ids and the retained diagnostic files always agree.
 A call that changes something, such as `rm`, is never repeated, because one that timed out may still have acted.
 Only an answered `exec` can verify the limits.
 Cleanup removes a container with a 2 s stop grace inside its 10 s bound, because the runner's Python PID 1 ignores SIGTERM and Podman's default 10 s grace would use the whole bound.
