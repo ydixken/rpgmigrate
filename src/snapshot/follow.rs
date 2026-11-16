@@ -728,17 +728,19 @@ fn drop_unconfirmed_publication(
         if present.rows() == 0 {
             return Ok(false);
         }
-        let oid = String::from_utf8_lossy(present.cell(0, 0)?.unwrap_or_default()).into_owned();
+        let cell = |column| -> Result<String> {
+            Ok(String::from_utf8_lossy(present.cell(0, column)?.unwrap_or_default()).into_owned())
+        };
+        let (oid, owner) = (cell(0)?, cell(1)?);
         match pending {
             PublicationProvenance::Created { receipt, .. }
-                if oid == receipt.oid.to_string()
-                    && present.cell(0, 1)? == Some(receipt.owner_oid.to_string().as_bytes()) =>
+                if oid == receipt.oid.to_string() && owner == receipt.owner_oid.to_string() =>
             {
                 Ok(true)
             }
             PublicationProvenance::Created { receipt, .. } => Err(follow_refusal(&format!(
-                "follow-source: publication {name} (OID {oid}) is not this run's unconfirmed creation (OID {}); it is never adopted or dropped",
-                receipt.oid
+                "follow-source: publication {name} (OID {oid}, owner {owner}) is not this run's unconfirmed creation (OID {}, owner {}); it is never adopted or dropped",
+                receipt.oid, receipt.owner_oid
             ))),
             _ => Err(follow_refusal(&format!(
                 "follow-source: publication {name} (OID {oid}) exists, but this run's CREATE under that name never committed; it is not this run's and is never adopted or dropped"

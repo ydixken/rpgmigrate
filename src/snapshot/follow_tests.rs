@@ -2735,6 +2735,8 @@ enum PublicationKill {
     ReceiptCommitted,
     /// The receipt was recorded and a publication of another OID took its name.
     ReceiptForeign,
+    /// As `ReceiptCommitted`, but the publication's owner changed afterwards.
+    ReceiptOwner,
     /// As `ReceiptCommitted`, but another session replaces it while the retry's DROP waits.
     ReplacedDuringRemoval,
 }
@@ -2783,7 +2785,9 @@ fn interrupt_publication_create(
         seen.push(receipt.oid.to_string());
         if matches!(
             kill,
-            PublicationKill::ReceiptCommitted | PublicationKill::ReplacedDuringRemoval
+            PublicationKill::ReceiptCommitted
+                | PublicationKill::ReplacedDuringRemoval
+                | PublicationKill::ReceiptOwner
         ) {
             assert!(matches!(
                 fixture.source.commit_observed(&fixture.io).unwrap(),
@@ -2792,6 +2796,15 @@ fn interrupt_publication_create(
         } else {
             catalog::command(&mut fixture.source, "ROLLBACK", "ROLLBACK", &fixture.io).unwrap();
         }
+    }
+    if kill == PublicationKill::ReceiptOwner {
+        fixture
+            .source
+            .query(
+                &format!("ALTER PUBLICATION {name} OWNER TO e1_source"),
+                &fixture.io,
+            )
+            .unwrap();
     }
     if matches!(
         kill,
@@ -2853,6 +2866,7 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
         PublicationKill::ReceiptRolledBack,
         PublicationKill::ReceiptCommitted,
         PublicationKill::ReceiptForeign,
+        PublicationKill::ReceiptOwner,
         PublicationKill::ReplacedDuringRemoval,
     ];
     for restart in [false, true] {
@@ -2955,7 +2969,9 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
             }
             if matches!(
                 kill,
-                PublicationKill::IntentForeign | PublicationKill::ReceiptForeign
+                PublicationKill::IntentForeign
+                    | PublicationKill::ReceiptForeign
+                    | PublicationKill::ReceiptOwner
             ) {
                 let foreign = publications(&mut fixture);
                 let bytes = manifest();
@@ -2966,9 +2982,17 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
                         seen[0]
                     )
                 } else {
+                    let owner = scalar(
+                        &mut fixture.source,
+                        &format!(
+                            "SELECT pubowner::text FROM pg_catalog.pg_publication WHERE pubname='{name}'"
+                        ),
+                    );
                     format!(
-                        "follow-source: publication {name} (OID {}) is not this run's unconfirmed creation (OID {})",
-                        seen[1], seen[0]
+                        "follow-source: publication {name} (OID {}, owner {owner}) is not this run's unconfirmed creation (OID {}, owner {})",
+                        seen.last().unwrap(),
+                        seen[0],
+                        pending["receipt"]["owner_oid"]
                     )
                 };
                 assert!(

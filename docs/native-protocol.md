@@ -364,7 +364,7 @@ A start that finds an unconfirmed publication, on a first run's retry or on an u
 2. With a receipt, no publication under the name means its `COMMIT` failed, and the start does the same.
 3. A publication with exactly the recorded OID and owner committed without its reply reaching the engine.
    The start drops it and creates it again; it never adopts it.
-4. Any other publication under the name is not this run's: the start refuses with exit 3, naming the publication and its OID, and leaves it and the native state unchanged.
+4. Any other publication under the name is not this run's: the start refuses with exit 3, naming the publication with its OID and owner, and leaves it and the native state unchanged.
 
 Every publication drop works the same way: this one, a restart's drop of the bound publication or of its next generation's unbound one, and `stream cleanup`.
 The dropping transaction reads the publication's OID and owner again and requires the recorded ones.

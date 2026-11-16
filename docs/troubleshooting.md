@@ -100,7 +100,7 @@ The next start, a first-run retry or a restart, resolves it before it creates a 
 It retires the intent when no publication has the recorded name, and drops the publication with exactly the recorded OID and owner, so it creates the publication again under a new intent and never adopts the old one.
 
 > [!caution]
-> A publication of any other identity under the recorded name refuses with exit 3: `follow-source: publication <name> (OID <oid>) exists, but this run's CREATE under that name never committed`, or `... is not this run's unconfirmed creation (OID <recorded>)`.
+> A publication of any other identity under the recorded name refuses with exit 3: `follow-source: publication <name> (OID <oid>) exists, but this run's CREATE under that name never committed`, or `follow-source: publication <name> (OID <oid>, owner <owner>) is not this run's unconfirmed creation (OID <recorded>, owner <recorded>)` when its OID or its owner differs from the receipt.
 > The engine never drops it; remove it only after you confirm nothing else uses it, then retry.
 
 ## Unknown COMMIT or target fence conflict
