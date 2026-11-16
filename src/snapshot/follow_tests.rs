@@ -1885,6 +1885,10 @@ impl Relay {
         *self.state.hold.lock().unwrap() = None;
     }
 
+    fn freeze(&self) {
+        self.state.frozen.store(true, Ordering::Release);
+    }
+
     fn hits(&self) -> u64 {
         self.state.hits.load(Ordering::Acquire)
     }
@@ -2123,8 +2127,10 @@ enum SlotKill {
     Absent,
     /// The creating walsender still waits, so the slot is active.
     Active,
-    /// The slot was persisted after the reply was lost.
+    /// This run's own CREATE persisted the slot while a frozen relay lost its reply.
     Persisted,
+    /// This run's own CREATE persisted the slot, then failed in SaveSlotToPath with SQLSTATE 58P02.
+    PersistFailed,
     ForeignPlugin,
     Physical,
     /// Foreign pgoutput slots with an option, or in a database, that this run's CREATE never uses.
@@ -2343,6 +2349,94 @@ fn live_follow_this_runs_slot_is_retired_before_a_refusal_that_does_not_concern_
     );
 }
 
+/// The owned cluster's data directory, required to be the harness's own.
+fn owned_data_directory(source: &mut PgConnection) -> PathBuf {
+    let context = harness_context();
+    let root = PathBuf::from(context["root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".e1-owner")).unwrap(),
+        context["token"].as_str().unwrap()
+    );
+    let expected = root.join("data").canonicalize().unwrap();
+    let actual = PathBuf::from(scalar(
+        source,
+        "SELECT pg_catalog.current_setting('data_directory')",
+    ))
+    .canonicalize()
+    .unwrap();
+    assert_eq!(
+        actual, expected,
+        "the slot file belongs to the exact owned cluster"
+    );
+    expected
+}
+
+/// Lets this run's own CREATE_REPLICATION_SLOT persist its slot while the engine loses the outcome:
+/// through a frozen relay, as a stopped process would, or by a server error after the persist.
+/// Returns the persisted slot's confirmed_flush_lsn.
+fn lose_own_create(
+    fixture: &mut Fixture,
+    kill: SlotKill,
+    engine: impl FnOnce(&FollowOptions, &mut NativeState, &IoControl) -> Result<FollowSnapshot>,
+) -> String {
+    let relay = (kill == SlotKill::Persisted).then(|| Relay::start(fixture));
+    let data = owned_data_directory(&mut fixture.source);
+    let path = fixture.options.clone.state.path.join("manifest.json");
+    let info = relay.as_ref().map_or_else(
+        || fixture.options.clone.source.clone(),
+        |r| r.direct.clone(),
+    );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let io = IoControl::unbounded(Arc::clone(&cancelled));
+    let options = fixture.options.clone();
+    let native = fixture.native.as_mut().unwrap();
+    let outcome = during_slot_creation(
+        &info,
+        |_| match &relay {
+            Some(relay) => {
+                relay.freeze();
+                cancelled.store(true, Ordering::Release);
+            }
+            None => {
+                let manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let name = manifest["source_slot"]["record"]["binding"]["slot_name"]
+                    .as_str()
+                    .unwrap();
+                // SaveSlotToPath opens state.tmp with O_EXCL after the slot became persistent.
+                std::fs::File::create(data.join("pg_replslot").join(name).join("state.tmp"))
+                    .unwrap();
+            }
+        },
+        || engine(&options, native, &io),
+    );
+    let error = outcome
+        .err()
+        .expect("a lost CREATE outcome returned a snapshot");
+    assert!(
+        error.message.starts_with("source-slot-create-unknown:"),
+        "{}",
+        error.message
+    );
+    let (name, _) = pending_slot(fixture);
+    let literal = fixture.source.quote_literal(&name).unwrap();
+    let state = format!(
+        "SELECT coalesce((SELECT temporary||' '||active FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}),'absent')"
+    );
+    wait_until("this run's CREATE never persisted its slot", || {
+        scalar(&mut fixture.source, &state) == "false false"
+    });
+    if let Some(relay) = relay {
+        relay.release(fixture);
+    }
+    scalar(
+        &mut fixture.source,
+        &format!(
+            "SELECT confirmed_flush_lsn::text FROM pg_catalog.pg_replication_slots WHERE slot_name={literal}"
+        ),
+    )
+}
+
 /// Leaves the recorded slot in the state `kill` names and returns the hold, if still open.
 fn shape_pending_slot(
     fixture: &mut Fixture,
@@ -2370,8 +2464,8 @@ fn shape_pending_slot(
     });
     drop(hold);
     let create = match kill {
-        SlotKill::Persisted => {
-            format!("pg_catalog.pg_create_logical_replication_slot({literal},'pgoutput')")
+        SlotKill::Persisted | SlotKill::PersistFailed => {
+            unreachable!("lose_own_create persists this run's own slot")
         }
         SlotKill::ForeignPlugin => {
             format!("pg_catalog.pg_create_logical_replication_slot({literal},'test_decoding')")
@@ -2448,6 +2542,7 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
         SlotKill::Absent,
         SlotKill::Active,
         SlotKill::Persisted,
+        SlotKill::PersistFailed,
         SlotKill::ForeignPlugin,
         SlotKill::Physical,
         SlotKill::TwoPhase,
@@ -2487,17 +2582,24 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
                 plan.generation = recorded.next_generation;
             }
             let next = plan.clone();
-            let hold = kill_inside_slot_creation(&mut fixture, |options, native, io| {
+            let engine = |options: &FollowOptions, native: &mut NativeState, io: &IoControl| {
                 if restart {
                     FollowSnapshot::restart(options, &next, native, io)
                 } else {
                     FollowSnapshot::create(options, &next, native, io)
                 }
-            });
+            };
+            let own = matches!(kill, SlotKill::Persisted | SlotKill::PersistFailed);
+            let (persisted, mut hold) = if own {
+                (Some(lose_own_create(&mut fixture, kill, engine)), None)
+            } else {
+                let hold = kill_inside_slot_creation(&mut fixture, engine);
+                let (name, _) = pending_slot(&fixture);
+                (None, shape_pending_slot(&mut fixture, &name, kill, hold))
+            };
             let (name, nonce) = pending_slot(&fixture);
             let manifest_path = fixture.options.clone.state.path.join("manifest.json");
             let manifest = || std::fs::read(&manifest_path).unwrap();
-            let mut hold = shape_pending_slot(&mut fixture, &name, kill, hold);
             let literal = fixture.source.quote_literal(&name).unwrap();
             let retry = |fixture: &mut Fixture| {
                 let native = fixture.native.as_mut().unwrap();
@@ -2508,7 +2610,7 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
                     FollowSnapshot::create(&fixture.options, &next, native, &fixture.io)
                 }
             };
-            if kill != SlotKill::Absent && kill != SlotKill::Persisted {
+            if kill != SlotKill::Absent && !own {
                 let before = manifest();
                 let slot = scalar(
                     &mut fixture.source,
@@ -2595,6 +2697,13 @@ fn live_follow_pending_slot_intent_is_dropped_never_adopted_then_created_again()
             );
             for old in &retired {
                 assert_ne!(old, &name, "{case}");
+            }
+            // The slot this run's CREATE persisted is dropped, never adopted: the new one starts later.
+            if let Some(persisted) = &persisted {
+                let (high, low) = persisted.split_once('/').unwrap();
+                let old = (u64::from_str_radix(high, 16).unwrap() << 32)
+                    | u64::from_str_radix(low, 16).unwrap();
+                assert!(receipt.consistent_point.0 > old, "{case}: {persisted}");
             }
             let manifest: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
             assert_eq!(manifest["source_slot"]["phase"], "confirmed", "{case}");

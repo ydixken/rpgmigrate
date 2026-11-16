@@ -211,7 +211,9 @@ The next drain must reconcile, refuse after source drift, and report completion 
 A second case stops a follow restart after its new binding and before the publish that resets the previous generation, then adds a foreign large object.
 The restart must refuse naming only that object and leave the target row and objects unchanged, then publish and unlink only owned objects once it is gone.
 `task test-follow-source` adds one case that stops slot creation while a source transaction holds a transaction ID, on a first run and on a restart.
-It then leaves the recorded slot absent, active, persisted, or replaced under that name by a `test_decoding` or physical slot, a two-phase or (on 18) failover `pgoutput` slot, or a `pgoutput` slot in another database.
+It then leaves the recorded slot absent, active, or persisted by the engine's own CREATE, or replaced under that name by a `test_decoding` or physical slot, a two-phase or (on 18) failover `pgoutput` slot, or a `pgoutput` slot in another database.
+The persisted slot comes from the engine's CREATE in two ways: a relay freezes every engine session as a stopped process would, so the server completes the CREATE and its reply is lost, or a file under the slot's directory makes `SaveSlotToPath` fail with 58P02 after the slot became persistent.
+The second shows that a complete error reply other than 42710 still takes the shape-checked drop.
 An active or foreign slot must refuse with the native state and the slot unchanged.
 Every other start must drop the slot and create it again under a new intent, whose snapshot holds each source row and large object exactly once.
 A second case stops publication creation, on a first run and on a restart, after its intent alone or after its receipt with the `COMMIT` rolled back or committed.
