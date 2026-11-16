@@ -1244,10 +1244,20 @@ class RuntimeGuard:
                     raise
 
     def exists(self, kind, identity):
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise RuntimeError("owned cleanup deadline expired")
-        result = subprocess.run([self.runtime, kind, "exists", identity], capture_output=True, timeout=min(5, remaining))
+        # Read-only, so a stall repeats like query(); it answers by return code, so a clean absent must not go through run().
+        stalled_until = time.monotonic() + PODMAN_STALL_SECONDS
+        while True:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("owned cleanup deadline expired")
+            try:
+                result = subprocess.run([self.runtime, kind, "exists", identity], capture_output=True, timeout=min(5, remaining))
+                break
+            except subprocess.TimeoutExpired as error:
+                if time.monotonic() >= stalled_until:
+                    raise
+                stall = private_failure("subprocess", None, error.stderr or str(error).encode(), None, sys._getframe())
+                self.ledger.setdefault("podman_query_stalls", []).append(stall["diagnostic_id"])
         if result.returncode not in (0, 1):
             raise RuntimeError("resource absence probe is unavailable")
         return result.returncode == 0
