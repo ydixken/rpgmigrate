@@ -2978,7 +2978,7 @@ fn live_follow_unconfirmed_publication_is_retired_or_dropped_by_exact_oid_never_
                 let error = retry(&mut fixture).err().expect(&case);
                 let refusal = if kill == PublicationKill::IntentForeign {
                     format!(
-                        "follow-source: publication {name} (OID {}) exists, but this run's CREATE under that name never committed",
+                        "follow-source: publication {name} (OID {}) exists, but this run's CREATE under that name never committed; it is not proven this run's and is never adopted or dropped",
                         seen[0]
                     )
                 } else {

@@ -103,6 +103,10 @@ It retires the intent when no publication has the recorded name, and drops the p
 > A publication of any other identity under the recorded name refuses with exit 3: `follow-source: publication <name> (OID <oid>) exists, but this run's CREATE under that name never committed`, or `follow-source: publication <name> (OID <oid>, owner <owner>) is not this run's unconfirmed creation (OID <recorded>, owner <recorded>)` when its OID or its owner differs from the receipt.
 > The engine never drops it; remove it only after you confirm nothing else uses it, then retry.
 
+A start while the killed run's `COMMIT` still waits on a synchronous standby cannot see that publication.
+It waits behind that `COMMIT` and fails with SQLSTATE 23505 once it completes, and later starts refuse with the first text above.
+That publication is the killed run's, but nothing recorded proves it, so remove it the same way.
+
 ## Unknown COMMIT or target fence conflict
 
 A lost COMMIT reply or synchronous-wait warning leaves the outcome unknown.

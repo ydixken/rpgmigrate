@@ -743,7 +743,7 @@ fn drop_unconfirmed_publication(
                 receipt.oid, receipt.owner_oid
             ))),
             _ => Err(follow_refusal(&format!(
-                "follow-source: publication {name} (OID {oid}) exists, but this run's CREATE under that name never committed; it is not this run's and is never adopted or dropped"
+                "follow-source: publication {name} (OID {oid}) exists, but this run's CREATE under that name never committed; it is not proven this run's and is never adopted or dropped"
             ))),
         }
     };

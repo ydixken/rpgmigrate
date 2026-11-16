@@ -361,10 +361,16 @@ The receipt reaches the native manifest through a file fsync, a rename and a dir
 A start that finds an unconfirmed publication, on a first run's retry or on an unbound restart, resolves it before any slot intent:
 
 1. With only an intent, no publication under the recorded name means the CREATE rolled back; the start retires the intent and creates the publication again under a new one.
-2. With a receipt, no publication under the name means its `COMMIT` failed, and the start does the same.
+2. With a receipt, no publication under the name means its `COMMIT` failed or is still waiting, and the start does the same.
 3. A publication with exactly the recorded OID and owner committed without its reply reaching the engine.
    The start drops it and creates it again; it never adopts it.
-4. Any other publication under the name is not this run's: the start refuses with exit 3, naming the publication with its OID and owner, and leaves it and the native state unchanged.
+4. Any other publication under the name is not proven this run's: the start refuses with exit 3, naming the publication with its OID and owner, and leaves it and the native state unchanged.
+
+> [!caution]
+> A `COMMIT` still waiting on an unanswering synchronous standby stays invisible to other sessions, so a start in that window finds no publication and retires the receipt.
+> Its new `CREATE PUBLICATION` waits on that transaction for as long as the standby does not answer, then fails with SQLSTATE 23505 once the old `COMMIT` completes.
+> Each later start finds that publication with only the new intent recorded and refuses, because no receipt proves it is this run's.
+> We record no transaction ID that could prove it, so remove that publication by hand once you confirm nothing else uses it.
 
 Every publication drop works the same way: this one, a restart's drop of the bound publication or of its next generation's unbound one, and `stream cleanup`.
 The dropping transaction reads the publication's OID and owner again and requires the recorded ones.
